@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::sync::OnceLock;
 
 use ratatui::Frame;
@@ -12,8 +13,9 @@ use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
-use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel, SearchOrder};
+use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder};
 use crate::model::{SortField, Ticket};
+use crate::search::QueryHighlighter;
 
 const WIDE_BREAKPOINT: u16 = 110;
 const NARROW_BREAKPOINT: u16 = 70;
@@ -29,6 +31,7 @@ struct Theme {
     info: Color,
     error: Color,
     scrollbar: Color,
+    search_match: Color,
     state_new: Color,
     state_active: Color,
     state_resolved: Color,
@@ -51,6 +54,7 @@ impl Theme {
                 info: Color::Reset,
                 error: Color::Reset,
                 scrollbar: Color::Reset,
+                search_match: Color::Reset,
                 state_new: Color::Reset,
                 state_active: Color::Reset,
                 state_resolved: Color::Reset,
@@ -70,6 +74,7 @@ impl Theme {
                 info: Color::Yellow,
                 error: Color::Red,
                 scrollbar: Color::DarkGray,
+                search_match: Color::Yellow,
                 state_new: Color::Blue,
                 state_active: Color::Yellow,
                 state_resolved: Color::Magenta,
@@ -224,11 +229,13 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             _ => column.field.label(),
         };
         let line = Line::from(format!("{label}{direction}"));
-        Cell::from(if is_numeric(column.field) {
-            line.right_aligned()
-        } else {
-            line
-        })
+        Cell::from(
+            if matches!(column.field, SortField::Id | SortField::Priority) {
+                line.right_aligned()
+            } else {
+                line
+            },
+        )
     }))
     .style(
         Style::default()
@@ -239,16 +246,15 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     .bottom_margin(1);
 
     let now = OffsetDateTime::now_utc();
+    let density = app.row_density;
+    let mut highlighter = QueryHighlighter::new(&app.query);
     let rows = app.visible_tickets().map(|ticket| {
-        Row::new(columns.iter().map(|column| {
-            let line = Line::from(cell_value(ticket, column.field, now));
-            let cell = Cell::from(if is_numeric(column.field) {
-                line.right_aligned()
-            } else {
-                line
-            });
-            cell.style(cell_style(ticket, column.field))
-        }))
+        Row::new(
+            columns
+                .iter()
+                .map(|column| table_cell(ticket, column.field, now, density, &mut highlighter)),
+        )
+        .height(density.row_height())
     });
     let table = Table::new(rows, constraints.clone())
         .header(header)
@@ -257,7 +263,6 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .row_highlight_style(
             Style::default()
                 .bg(theme().selected_background)
-                .fg(theme().text)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("› ")
@@ -291,10 +296,11 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.hit_regions.id_column =
                 Some(Rect::new(id_area.x, body.y, id_area.width, body.height));
         }
-        if count > usize::from(body.height) {
+        let visible_rows = usize::from(body.height / density.row_height()).max(1);
+        if count > visible_rows {
             let mut scrollbar_state = ScrollbarState::new(count)
                 .position(app.table_state.offset())
-                .viewport_content_length(usize::from(body.height));
+                .viewport_content_length(visible_rows);
             frame.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(None)
@@ -360,15 +366,19 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Constraint::Fill(1),
     ])
     .split(inner);
+    let mut highlighter = QueryHighlighter::new(&app.query);
+    let title_style = Style::default()
+        .fg(theme().text)
+        .add_modifier(Modifier::BOLD);
     let metadata = Text::from(vec![
-        Line::styled(
-            ticket.title.as_str(),
-            Style::default()
-                .fg(theme().text)
-                .add_modifier(Modifier::BOLD),
+        highlight_line(
+            ticket.title.clone(),
+            &highlighter.indices(&ticket.title),
+            title_style,
+            search_match_style(title_style),
         ),
-        ticket_identity_line(&ticket),
-        ticket_assignment_line(&ticket),
+        ticket_identity_line(&ticket, &mut highlighter),
+        ticket_assignment_line(&ticket, &mut highlighter),
         field_line(
             "Project / Revision",
             format!(
@@ -394,9 +404,9 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if chunks[2].height > 0 {
         let mut detail_lines = vec![
             section_line("Planning"),
-            field_line("Area", ticket.area_path.as_str()),
-            field_line("Iteration", ticket.iteration_path.as_str()),
-            field_line("Tags", ticket.tags.join(", ")),
+            highlighted_field_line("Area", &ticket.area_path, &mut highlighter),
+            highlighted_field_line("Iteration", &ticket.iteration_path, &mut highlighter),
+            tags_field_line(&ticket.tags, &mut highlighter),
             field_line("Created", exact_timestamp(&ticket.created_at)),
             field_line("Changed", exact_timestamp(&ticket.changed_at)),
             Line::default(),
@@ -462,7 +472,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 "↑↓/jk move  / edit search  v order  s sort  Enter/o open  Esc clear  ? help  q quit"
             }
             AppMode::Browse => {
-                "↑↓/jk move  / search  s sort  Enter/o open  r reload  Tab details  ? help  q quit"
+                "↑↓/jk move  / search  s sort  c density  Enter/o open  r reload  Tab details  ? help  q quit"
             }
         };
         (text, Style::default().fg(theme().muted))
@@ -526,6 +536,7 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  Home/End        First/last ticket or detail line"),
         Line::from("  Tab             Focus tickets/details"),
         Line::from("  d               Toggle details below 70 columns"),
+        Line::from("  c               Toggle compact / comfortable rows"),
         Line::from(""),
         Line::styled("Search", Style::default().add_modifier(Modifier::BOLD)),
         Line::from("  ←/→, Home/End   Move the query cursor"),
@@ -593,7 +604,7 @@ fn columns_for(width: u16) -> Vec<ColumnDef> {
     if width >= 52 {
         columns.push(ColumnDef {
             field: SortField::Type,
-            constraint: Constraint::Length(11),
+            constraint: Constraint::Length(13),
         });
     }
     if width >= 65 {
@@ -617,36 +628,164 @@ fn columns_for(width: u16) -> Vec<ColumnDef> {
     columns
 }
 
-fn cell_value(ticket: &Ticket, field: SortField, now: OffsetDateTime) -> String {
-    match field {
-        SortField::Changed => relative_changed_at(&ticket.changed_at, now),
-        SortField::Priority => ticket
-            .priority
-            .map_or_else(|| "—".into(), |p| p.to_string()),
-        SortField::Id => ticket.key.id.to_string(),
-        SortField::Title => ticket.title.clone(),
-        SortField::State => ticket.state.clone(),
-        SortField::Type => ticket.work_item_type.clone(),
-        SortField::Assignee => ticket
-            .assigned_to
-            .clone()
-            .unwrap_or_else(|| "Unassigned".into()),
+fn table_cell(
+    ticket: &Ticket,
+    field: SortField,
+    now: OffsetDateTime,
+    density: RowDensity,
+    highlighter: &mut QueryHighlighter,
+) -> Cell<'static> {
+    let line = match field {
+        SortField::Type => Line::from(type_badge_spans(&ticket.work_item_type, highlighter)),
+        SortField::Title => highlight_searchable(&ticket.title, Style::default(), highlighter),
+        SortField::Id => {
+            let style = Style::default()
+                .fg(theme().link)
+                .add_modifier(Modifier::UNDERLINED);
+            highlight_searchable(&ticket.key.id.to_string(), style, highlighter)
+        }
+        SortField::State => {
+            highlight_searchable(&ticket.state, state_style(&ticket.state), highlighter)
+        }
+        SortField::Assignee => {
+            let (text, searchable) = ticket.assigned_to.as_deref().map_or_else(
+                || ("Unassigned".to_owned(), false),
+                |name| (name.to_owned(), true),
+            );
+            if searchable {
+                highlight_searchable(&text, Style::default(), highlighter)
+            } else {
+                Line::styled(text, Style::default().fg(theme().muted))
+            }
+        }
+        SortField::Priority => Line::from(
+            ticket
+                .priority
+                .map_or_else(|| "—".into(), |priority| priority.to_string()),
+        )
+        .right_aligned()
+        .style(priority_style(ticket.priority)),
+        SortField::Changed => {
+            Line::from(relative_changed_at(&ticket.changed_at, now)).right_aligned()
+        }
+    };
+    let line = if field == SortField::Id {
+        line.right_aligned()
+    } else {
+        line
+    };
+
+    if density == RowDensity::Comfortable && field == SortField::Title {
+        Cell::from(Text::from(vec![
+            line,
+            Line::from(tag_badge_spans(&ticket.tags, highlighter)),
+        ]))
+    } else {
+        Cell::from(line)
     }
 }
 
-fn is_numeric(field: SortField) -> bool {
-    matches!(field, SortField::Id | SortField::Priority)
+fn highlight_searchable(
+    text: &str,
+    style: Style,
+    highlighter: &mut QueryHighlighter,
+) -> Line<'static> {
+    highlight_line(
+        text.to_owned(),
+        &highlighter.indices(text),
+        style,
+        search_match_style(style),
+    )
 }
 
-fn cell_style(ticket: &Ticket, field: SortField) -> Style {
-    match field {
-        SortField::Id => Style::default()
-            .fg(theme().link)
-            .add_modifier(Modifier::UNDERLINED),
-        SortField::State => state_style(&ticket.state),
-        SortField::Priority => priority_style(ticket.priority),
-        _ => Style::default(),
+fn search_match_style(base: Style) -> Style {
+    let style = base.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    if base.fg == Some(Color::Reset) || base.fg.is_none() {
+        style.fg(theme().search_match)
+    } else {
+        style
     }
+}
+
+fn highlight_line(text: String, indices: &[u32], base: Style, matched: Style) -> Line<'static> {
+    if indices.is_empty() {
+        return Line::styled(text, base);
+    }
+
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut current_matched = false;
+    let mut next_index = 0;
+    for (index, character) in text.chars().enumerate() {
+        let is_match = loop {
+            if next_index >= indices.len() {
+                break false;
+            }
+            match indices[next_index].cmp(&(index as u32)) {
+                Ordering::Less => next_index += 1,
+                Ordering::Equal => break true,
+                Ordering::Greater => break false,
+            }
+        };
+        if !current.is_empty() && is_match != current_matched {
+            let style = if current_matched { matched } else { base };
+            spans.push(Span::styled(std::mem::take(&mut current), style));
+        }
+        current.push(character);
+        current_matched = is_match;
+    }
+    if !current.is_empty() {
+        let style = if current_matched { matched } else { base };
+        spans.push(Span::styled(current, style));
+    }
+    Line::from(spans)
+}
+
+fn type_style(work_item_type: &str) -> Style {
+    let color = match work_item_type.to_ascii_lowercase().as_str() {
+        "bug" => theme().priority_critical,
+        "task" => theme().accent,
+        "user story" | "story" => theme().state_new,
+        "feature" => theme().state_resolved,
+        "epic" => theme().state_active,
+        _ => theme().muted,
+    };
+    Style::default().fg(color)
+}
+
+fn type_badge_spans(
+    work_item_type: &str,
+    highlighter: &mut QueryHighlighter,
+) -> Vec<Span<'static>> {
+    badge_spans(work_item_type, type_style(work_item_type), highlighter)
+}
+
+fn tag_badge_spans(tags: &[String], highlighter: &mut QueryHighlighter) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (index, tag) in tags.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.extend(badge_spans(
+            tag,
+            Style::default().fg(theme().muted),
+            highlighter,
+        ));
+    }
+    spans
+}
+
+fn badge_spans(
+    label: &str,
+    style: Style,
+    highlighter: &mut QueryHighlighter,
+) -> Vec<Span<'static>> {
+    let inner = highlight_searchable(label, style.add_modifier(Modifier::BOLD), highlighter);
+    let mut spans = Vec::with_capacity(inner.spans.len() + 2);
+    spans.push(Span::styled("[", style));
+    spans.extend(inner.spans);
+    spans.push(Span::styled("]", style));
+    spans
 }
 
 fn state_style(state: &str) -> Style {
@@ -716,41 +855,68 @@ fn short_date(timestamp: &str) -> &str {
     timestamp.get(..10).unwrap_or(timestamp)
 }
 
-fn ticket_identity_line(ticket: &Ticket) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            "ID / Type / State: ",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(ticket.key.id.to_string()),
-        Span::raw(" · "),
-        Span::styled(
-            ticket.work_item_type.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" · "),
-        Span::styled(ticket.state.clone(), state_style(&ticket.state)),
-    ])
+fn ticket_identity_line(ticket: &Ticket, highlighter: &mut QueryHighlighter) -> Line<'static> {
+    let id = ticket.key.id.to_string();
+    let state = state_style(&ticket.state);
+    let mut spans = vec![Span::styled(
+        "ID / Type / State: ",
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    spans.extend(highlight_searchable(&id, Style::default(), highlighter).spans);
+    spans.push(Span::raw(" · "));
+    spans.extend(type_badge_spans(&ticket.work_item_type, highlighter));
+    spans.push(Span::raw(" · "));
+    spans.extend(highlight_searchable(&ticket.state, state, highlighter).spans);
+    Line::from(spans)
 }
 
-fn ticket_assignment_line(ticket: &Ticket) -> Line<'static> {
+fn ticket_assignment_line(ticket: &Ticket, highlighter: &mut QueryHighlighter) -> Line<'static> {
     let priority = ticket
         .priority
         .map_or_else(|| "—".into(), |priority| priority.to_string());
-    Line::from(vec![
-        Span::styled(
-            "Assignee / Priority: ",
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(
-            ticket
-                .assigned_to
-                .clone()
-                .unwrap_or_else(|| "Unassigned".into()),
-        ),
-        Span::raw(" · "),
-        Span::styled(priority, priority_style(ticket.priority)),
-    ])
+    let assignee = ticket
+        .assigned_to
+        .clone()
+        .unwrap_or_else(|| "Unassigned".into());
+    let assignee_line = if ticket.assigned_to.is_some() {
+        highlight_searchable(&assignee, Style::default(), highlighter)
+    } else {
+        Line::styled(assignee, Style::default().fg(theme().muted))
+    };
+    let mut spans = vec![Span::styled(
+        "Assignee / Priority: ",
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    spans.extend(assignee_line.spans);
+    spans.push(Span::raw(" · "));
+    spans.push(Span::styled(priority, priority_style(ticket.priority)));
+    Line::from(spans)
+}
+
+fn highlighted_field_line(
+    label: &'static str,
+    value: &str,
+    highlighter: &mut QueryHighlighter,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{label}: "),
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    spans.extend(highlight_searchable(value, Style::default(), highlighter).spans);
+    Line::from(spans)
+}
+
+fn tags_field_line(tags: &[String], highlighter: &mut QueryHighlighter) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        "Tags: ",
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    if tags.is_empty() {
+        spans.push(Span::styled("—", Style::default().fg(theme().muted)));
+    } else {
+        spans.extend(tag_badge_spans(tags, highlighter));
+    }
+    Line::from(spans)
 }
 
 fn field_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
@@ -1047,6 +1213,98 @@ mod tests {
         assert_eq!(monochrome.accent, Color::Reset);
         assert_eq!(monochrome.state_active, Color::Reset);
         assert_eq!(monochrome.priority_critical, Color::Reset);
+        assert_eq!(monochrome.search_match, Color::Reset);
         assert_eq!(monochrome.error, Color::Reset);
+    }
+
+    fn await_search(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.search_pending {
+            app.poll_search();
+            assert!(Instant::now() < deadline, "search worker timed out");
+            thread::yield_now();
+        }
+    }
+
+    fn find_buffer_text(
+        buffer: &ratatui::buffer::Buffer,
+        width: u16,
+        height: u16,
+        needle: &str,
+    ) -> Option<(u16, u16)> {
+        let chars: Vec<char> = needle.chars().collect();
+        for y in 0..height {
+            let row: Vec<char> = (0..width)
+                .map(|x| buffer[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect();
+            if let Some(start) = row.windows(chars.len()).position(|window| window == chars) {
+                return Some((u16::try_from(start).unwrap(), y));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn search_results_underline_matched_title_characters() {
+        let mut app = App::new(vec![ticket()]);
+        app.set_query("search".into());
+        await_search(&mut app);
+
+        let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) = find_buffer_text(buffer, 110, 24, "Fix ticket search")
+            .expect("title should be visible");
+        let unmatched = buffer[(x, y)].modifier;
+        assert!(
+            !unmatched.contains(Modifier::UNDERLINED),
+            "unmatched prefix should not be underlined"
+        );
+        let match_start = x + u16::try_from("Fix ticket ".len()).unwrap();
+        for offset in 0..u16::try_from("search".len()).unwrap() {
+            let modifier = buffer[(match_start + offset, y)].modifier;
+            assert!(
+                modifier.contains(Modifier::UNDERLINED),
+                "expected underline on matched title character {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn types_and_tags_render_as_compact_badges() {
+        let mut app = App::new(vec![ticket()]);
+        let text = render_text(110, 24, &mut app);
+
+        assert!(text.contains("[Bug]"));
+        assert!(text.contains("[rust]"));
+        assert!(text.contains("[search]"));
+        assert!(!text.contains("Tags: rust, search"));
+    }
+
+    #[test]
+    fn comfortable_rows_show_tags_in_the_table_and_change_click_mapping() {
+        let mut second = ticket();
+        second.key.id = 10_002;
+        second.title = "Second ticket".into();
+        second.tags = vec!["backend".into()];
+        let mut app = App::new(vec![ticket(), second]);
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.row_density, RowDensity::Comfortable);
+
+        let text = render_text(110, 24, &mut app);
+        assert!(text.contains("[backend]"));
+        assert!(text.contains("[rust]"));
+
+        let body = app.hit_regions.table_body.unwrap();
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: body.x + 4,
+            row: body.y + 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.selected_row(), Some(1));
     }
 }

@@ -55,6 +55,7 @@ to a database prepared by another tool.
 | `Esc` | Leave search, or clear an active filter from browse mode |
 | `s` | Open the sort menu; use arrows and `Enter` to apply |
 | `v` | Toggle relevance-first or strict field ordering during search |
+| `c` | Toggle compact or comfortable table rows |
 | `Tab` | Switch focus between tickets and details |
 | `d` | Toggle the details screen when the terminal is under 70 columns |
 | `Enter`, `o` | Open the selected ticket in the system browser |
@@ -65,9 +66,12 @@ to a database prepared by another tool.
 Mouse input can select rows, scroll either pane, sort by visible headers, and
 open an underlined ticket ID or detail URL.
 
-Ticket states and priorities use restrained semantic colors, changed dates use
-compact relative labels, and exact UTC timestamps remain available in details.
-Set the standard `NO_COLOR` environment variable to use the monochrome theme.
+Ticket states and priorities use restrained semantic colors, work-item types
+and tags render as compact badges, and matched search characters are
+underlined in visible results. Changed dates use compact relative labels, and
+exact UTC timestamps remain available in details. Press `c` to switch between
+compact and comfortable row density. Set the standard `NO_COLOR` environment
+variable to use the monochrome theme.
 
 ## Database reference
 

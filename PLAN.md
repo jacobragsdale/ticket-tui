@@ -65,8 +65,8 @@ connect to a remote ticket service.
 - [x] Introduce a centralized theme with default, monochrome, and `NO_COLOR`
   behavior.
 - [x] Apply restrained semantic styling to ticket state and priority.
-- [ ] Highlight matched portions of visible search results.
-- [ ] Render work-item types and tags as compact badges.
+- [x] Highlight matched portions of visible search results.
+- [x] Render work-item types and tags as compact badges.
 - [x] Right-align numeric columns and improve date formatting.
 - [x] Show relative changed times in the table and exact timestamps in details.
 - [x] Reorganize current details into clear overview, planning, and description
@@ -77,7 +77,7 @@ connect to a remote ticket service.
 - [x] Replace the narrow-layout `d` convention with a visible Tickets/Details
   tab treatment while retaining a fast shortcut.
 - [x] Make the footer contextual to the current mode and focused pane.
-- [ ] Add compact and comfortable row-density options.
+- [x] Add compact and comfortable row-density options.
 
 ## Phase 3: power browsing
 

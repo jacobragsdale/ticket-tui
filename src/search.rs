@@ -3,7 +3,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::{self, JoinHandle};
 
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher, Utf32String};
+use nucleo_matcher::{Config, Matcher, Utf32Str, Utf32String};
 
 use crate::model::Ticket;
 
@@ -128,6 +128,57 @@ impl Drop for SearchEngine {
     }
 }
 
+/// Highlights characters in a visible field that contribute to the current
+/// fuzzy query. Each query atom is matched independently so a multi-word
+/// search can light up different columns of the same row.
+pub struct QueryHighlighter {
+    pattern: Pattern,
+    matcher: Matcher,
+    buf: Vec<char>,
+}
+
+impl QueryHighlighter {
+    #[must_use]
+    pub fn new(query: &str) -> Self {
+        Self {
+            pattern: Pattern::new(
+                query,
+                CaseMatching::Ignore,
+                Normalization::Smart,
+                AtomKind::Fuzzy,
+            ),
+            matcher: Matcher::new(Config::DEFAULT),
+            buf: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.pattern.atoms.is_empty()
+    }
+
+    #[must_use]
+    pub fn indices(&mut self, haystack: &str) -> Vec<u32> {
+        if self.is_empty() || haystack.is_empty() {
+            return Vec::new();
+        }
+
+        let mut indices = Vec::new();
+        let haystack = Utf32Str::new(haystack, &mut self.buf);
+        for atom in &self.pattern.atoms {
+            let _ = atom.indices(haystack, &mut self.matcher, &mut indices);
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
+}
+
+#[must_use]
+pub fn match_char_indices(query: &str, haystack: &str) -> Vec<u32> {
+    QueryHighlighter::new(query).indices(haystack)
+}
+
 fn search_worker(receiver: Receiver<Command>, sender: Sender<SearchResult>) {
     let mut matcher = Matcher::new(Config::DEFAULT);
     while let Ok(command) = receiver.recv() {
@@ -234,6 +285,35 @@ mod tests {
 
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].ticket_index, 0);
+    }
+
+    fn matched_chars(query: &str, haystack: &str) -> String {
+        let chars: Vec<char> = haystack.chars().collect();
+        match_char_indices(query, haystack)
+            .into_iter()
+            .map(|index| chars[index as usize])
+            .collect()
+    }
+
+    #[test]
+    fn match_char_indices_marks_fuzzy_hits_in_a_single_field() {
+        assert_eq!(
+            matched_chars("search", "Fix ticket search").to_ascii_lowercase(),
+            "search"
+        );
+        assert!(match_char_indices("bug", "Fix ticket search").is_empty());
+    }
+
+    #[test]
+    fn match_char_indices_can_highlight_one_atom_of_a_multi_word_query() {
+        assert_eq!(
+            matched_chars("bug search", "Fix ticket search").to_ascii_lowercase(),
+            "search"
+        );
+        assert_eq!(
+            matched_chars("bug search", "Bug").to_ascii_lowercase(),
+            "bug"
+        );
     }
 
     #[test]

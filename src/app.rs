@@ -50,6 +50,39 @@ impl SearchOrder {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RowDensity {
+    #[default]
+    Compact,
+    Comfortable,
+}
+
+impl RowDensity {
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Compact => Self::Comfortable,
+            Self::Comfortable => Self::Compact,
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Compact => "Compact",
+            Self::Comfortable => "Comfortable",
+        }
+    }
+
+    #[must_use]
+    pub const fn row_height(self) -> u16 {
+        match self {
+            Self::Compact => 1,
+            Self::Comfortable => 2,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppAction {
     None,
@@ -126,6 +159,7 @@ pub struct App {
     search_history_index: Option<usize>,
     search_history_draft: String,
     pub search_order: SearchOrder,
+    pub row_density: RowDensity,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
     pub mode: AppMode,
@@ -161,6 +195,7 @@ impl App {
             search_history_index: None,
             search_history_draft: String::new(),
             search_order: SearchOrder::Relevance,
+            row_density: RowDensity::Compact,
             sort_field: SortField::Changed,
             sort_direction: SortDirection::Descending,
             mode: AppMode::Browse,
@@ -355,6 +390,11 @@ impl App {
         self.restore_selection(selected.as_ref());
     }
 
+    pub fn toggle_row_density(&mut self) {
+        self.row_density = self.row_density.toggled();
+        self.set_status(format!("Row density: {}", self.row_density.label()));
+    }
+
     pub fn toggle_search_order(&mut self) {
         if self.query.is_empty() {
             return;
@@ -464,6 +504,7 @@ impl App {
             }
             KeyCode::Char('r') => return AppAction::Reload,
             KeyCode::Char('v') if !self.query.is_empty() => self.toggle_search_order(),
+            KeyCode::Char('c') => self.toggle_row_density(),
             KeyCode::Char('d') => self.toggle_narrow_details(),
             KeyCode::Tab => self.toggle_focus(),
             KeyCode::Down | KeyCode::Char('j') => self.move_focused(1),
@@ -612,7 +653,8 @@ impl App {
         {
             self.focus = Focus::Tickets;
             self.narrow_details = false;
-            let row_index = self.table_state.offset() + usize::from(row - body.y);
+            let row_index = self.table_state.offset()
+                + usize::from((row - body.y) / self.row_density.row_height());
             if row_index < self.visible.len() {
                 self.select_row(row_index);
                 if self.contains(self.hit_regions.id_column, column, row) {
@@ -1097,6 +1139,17 @@ mod tests {
         assert_eq!(app.selected_ticket().unwrap().key.id, 3);
         assert_eq!(app.details_scroll, 0);
         assert_eq!(app.table_state.offset(), 0);
+    }
+
+    #[test]
+    fn row_density_toggles_between_compact_and_comfortable() {
+        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+
+        assert_eq!(app.row_density, RowDensity::Compact);
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert_eq!(app.row_density, RowDensity::Comfortable);
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert_eq!(app.row_density, RowDensity::Compact);
     }
 
     #[test]
