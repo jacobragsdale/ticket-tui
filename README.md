@@ -57,9 +57,8 @@ to a database prepared by another tool.
 | `?` | Show the in-app help |
 | `q`, `Ctrl-C` | Quit |
 
-Mouse input can select rows, scroll the ticket list by visible pages, scroll the
-details pane, sort by visible headers, and open an underlined ticket ID or
-detail URL.
+Mouse input can select rows, scroll either pane, sort by visible headers, and
+open an underlined ticket ID or detail URL.
 
 ## Database reference
 

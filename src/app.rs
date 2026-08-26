@@ -227,14 +227,14 @@ impl App {
                 if self.contains(self.hit_regions.details, mouse.column, mouse.row) {
                     self.details_scroll = self.details_scroll.saturating_sub(3);
                 } else {
-                    self.scroll_ticket_page(false);
+                    self.move_selection(-3);
                 }
             }
             MouseEventKind::ScrollDown => {
                 if self.contains(self.hit_regions.details, mouse.column, mouse.row) {
                     self.details_scroll = self.details_scroll.saturating_add(3);
                 } else {
-                    self.scroll_ticket_page(true);
+                    self.move_selection(3);
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -408,39 +408,6 @@ impl App {
         self.select_row(next);
     }
 
-    fn scroll_ticket_page(&mut self, forward: bool) {
-        if self.visible.is_empty() {
-            return;
-        }
-        let Some(body) = self.hit_regions.table_body else {
-            return;
-        };
-
-        let page_size = usize::from(body.height).max(1);
-        let max_offset = self.visible.len().saturating_sub(page_size);
-        let current_offset = self.table_state.offset().min(max_offset);
-        let next_offset = if forward {
-            current_offset.saturating_add(page_size).min(max_offset)
-        } else {
-            current_offset.saturating_sub(page_size)
-        };
-        if next_offset == current_offset {
-            return;
-        }
-
-        let selected = self.table_state.selected().unwrap_or(current_offset);
-        let position_in_page = selected
-            .saturating_sub(current_offset)
-            .min(page_size.saturating_sub(1));
-        let next_selected = next_offset
-            .saturating_add(position_in_page)
-            .min(self.visible.len() - 1);
-
-        self.table_state.select(Some(next_selected));
-        *self.table_state.offset_mut() = next_offset;
-        self.details_scroll = 0;
-    }
-
     fn select_row(&mut self, row: usize) {
         if self.visible.is_empty() {
             self.table_state.select(None);
@@ -610,34 +577,5 @@ mod tests {
         await_search(&mut app);
         assert_eq!(app.visible_count(), 1);
         assert_eq!(app.selected_ticket().unwrap().key.id, 1);
-    }
-
-    #[test]
-    fn mouse_wheel_scrolls_the_ticket_table_by_its_visible_page_size() {
-        let tickets = (1..=25)
-            .map(|id| ticket(id, &format!("Ticket {id}"), "2026-01-01T00:00:00Z"))
-            .collect();
-        let mut app = App::new(tickets);
-        app.hit_regions.table_body = Some(Rect::new(0, 0, 80, 8));
-
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::ScrollDown,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        });
-
-        assert_eq!(app.table_state.offset(), 8);
-        assert_eq!(app.selected_row(), Some(8));
-
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::ScrollUp,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        });
-
-        assert_eq!(app.table_state.offset(), 0);
-        assert_eq!(app.selected_row(), Some(0));
     }
 }
