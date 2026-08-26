@@ -54,6 +54,7 @@ pub struct App {
     visible: Vec<SearchMatch>,
     search: SearchEngine,
     search_generation: u64,
+    pending_selection: Option<TicketKey>,
     pub search_pending: bool,
     pub query: String,
     pub sort_field: SortField,
@@ -78,6 +79,7 @@ impl App {
             visible: Vec::new(),
             search,
             search_generation: 0,
+            pending_selection: None,
             search_pending: false,
             query: String::new(),
             sort_field: SortField::Changed,
@@ -134,6 +136,9 @@ impl App {
         if self.query.is_empty() {
             self.show_all(selected.as_ref());
         } else {
+            self.pending_selection = selected;
+            self.visible.clear();
+            self.table_state.select(None);
             self.submit_search();
         }
     }
@@ -150,7 +155,10 @@ impl App {
             return false;
         }
 
-        let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
+        let selected = self
+            .pending_selection
+            .take()
+            .or_else(|| self.selected_ticket().map(|ticket| ticket.key.clone()));
         self.visible = result.matches;
         self.sort_visible(true);
         self.restore_selection(selected.as_ref());
@@ -167,8 +175,10 @@ impl App {
         if self.query.is_empty() {
             self.search_generation = self.search_generation.wrapping_add(1);
             self.search_pending = false;
+            self.pending_selection = None;
             self.show_all(selected.as_ref());
         } else {
+            self.pending_selection = selected;
             self.submit_search();
         }
     }
@@ -550,5 +560,22 @@ mod tests {
 
         assert!(app.query.is_empty());
         assert_eq!(app.visible_count(), 1);
+    }
+
+    #[test]
+    fn reload_during_search_does_not_keep_stale_indices() {
+        let mut app = App::new(vec![
+            ticket(1, "Search alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Search beta", "2026-02-01T00:00:00Z"),
+        ]);
+        app.set_query("search".into());
+        await_search(&mut app);
+
+        app.replace_tickets(vec![ticket(1, "Search alpha", "2026-01-01T00:00:00Z")]);
+
+        assert_eq!(app.visible_count(), 0);
+        await_search(&mut app);
+        assert_eq!(app.visible_count(), 1);
+        assert_eq!(app.selected_ticket().unwrap().key.id, 1);
     }
 }

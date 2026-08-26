@@ -25,4 +25,3 @@ tempfile = "3.23.0"
 [profile.release]
 lto = "thin"
 strip = "symbols"
-

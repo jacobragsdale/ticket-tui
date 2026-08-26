@@ -43,6 +43,7 @@ fn run() -> Result<()> {
 fn run_terminal(app: &mut App, repository: &SqliteTicketRepository) -> Result<()> {
     let mut terminal = ratatui::init();
     let _restore = TerminalRestore;
+    let opener = SystemUrlOpener;
     execute!(io::stdout(), EnableMouseCapture).context("failed to enable mouse capture")?;
 
     while !app.should_quit {
@@ -61,12 +62,17 @@ fn run_terminal(app: &mut App, repository: &SqliteTicketRepository) -> Result<()
             | Event::Paste(_)
             | Event::Key(_) => AppAction::None,
         };
-        handle_action(action, app, repository);
+        handle_action(action, app, repository, &opener);
     }
     Ok(())
 }
 
-fn handle_action(action: AppAction, app: &mut App, repository: &SqliteTicketRepository) {
+fn handle_action(
+    action: AppAction,
+    app: &mut App,
+    repository: &SqliteTicketRepository,
+    opener: &dyn UrlOpener,
+) {
     match action {
         AppAction::None => {}
         AppAction::Reload => match repository.load_all() {
@@ -77,19 +83,31 @@ fn handle_action(action: AppAction, app: &mut App, repository: &SqliteTicketRepo
             }
             Err(error) => app.set_status(format!("Reload failed: {error:#}")),
         },
-        AppAction::OpenUrl(raw_url) => match open_https_url(&raw_url) {
+        AppAction::OpenUrl(raw_url) => match open_https_url(&raw_url, opener) {
             Ok(()) => app.set_status(format!("Opened {raw_url}")),
             Err(error) => app.set_status(format!("Could not open ticket: {error:#}")),
         },
     }
 }
 
-fn open_https_url(raw_url: &str) -> Result<()> {
+fn open_https_url(raw_url: &str, opener: &dyn UrlOpener) -> Result<()> {
     let url = Url::parse(raw_url).context("ticket URL is invalid")?;
     if url.scheme() != "https" {
         bail!("only HTTPS ticket URLs can be opened");
     }
-    open::that(url.as_str()).context("system URL launcher failed")
+    opener.open(&url).context("system URL launcher failed")
+}
+
+trait UrlOpener {
+    fn open(&self, url: &Url) -> Result<()>;
+}
+
+struct SystemUrlOpener;
+
+impl UrlOpener for SystemUrlOpener {
+    fn open(&self, url: &Url) -> Result<()> {
+        open::that(url.as_str()).map_err(Into::into)
+    }
 }
 
 struct TerminalRestore;
@@ -105,15 +123,29 @@ impl Drop for TerminalRestore {
 mod tests {
     use super::*;
 
+    struct FailingOpener;
+
+    impl UrlOpener for FailingOpener {
+        fn open(&self, _url: &Url) -> Result<()> {
+            bail!("launcher unavailable")
+        }
+    }
+
     #[test]
     fn rejects_non_https_ticket_urls() {
-        let error = open_https_url("file:///tmp/not-a-ticket").unwrap_err();
+        let error = open_https_url("file:///tmp/not-a-ticket", &FailingOpener).unwrap_err();
         assert!(error.to_string().contains("only HTTPS"));
     }
 
     #[test]
     fn rejects_malformed_ticket_urls() {
-        let error = open_https_url("not a url").unwrap_err();
+        let error = open_https_url("not a url", &FailingOpener).unwrap_err();
         assert!(error.to_string().contains("invalid"));
+    }
+
+    #[test]
+    fn reports_launcher_failures_without_opening_a_browser() {
+        let error = open_https_url("https://dev.azure.com/demo", &FailingOpener).unwrap_err();
+        assert!(error.to_string().contains("system URL launcher failed"));
     }
 }

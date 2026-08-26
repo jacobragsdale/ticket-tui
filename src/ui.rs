@@ -2,7 +2,9 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, Wrap,
+};
 
 use crate::app::{App, AppMode, Focus, HitRegions};
 use crate::model::{SortField, Ticket};
@@ -125,11 +127,18 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     .bottom_margin(1);
 
     let rows = app.visible_tickets().map(|ticket| {
-        Row::new(
-            columns
-                .iter()
-                .map(|column| Cell::from(cell_value(ticket, column.field))),
-        )
+        Row::new(columns.iter().map(|column| {
+            let cell = Cell::from(cell_value(ticket, column.field));
+            if column.field == SortField::Id {
+                cell.style(
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::UNDERLINED),
+                )
+            } else {
+                cell
+            }
+        }))
     });
     let table = Table::new(rows, constraints.clone())
         .header(header)
@@ -141,12 +150,18 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("› ");
+        .highlight_symbol("› ")
+        .highlight_spacing(HighlightSpacing::Always);
     frame.render_stateful_widget(table, area, &mut app.table_state);
 
     app.hit_regions.table = Some(area);
     if inner.height >= 2 {
-        let header_area = Rect::new(inner.x, inner.y, inner.width, 1);
+        let header_area = Rect::new(
+            inner.x.saturating_add(2),
+            inner.y,
+            inner.width.saturating_sub(2),
+            1,
+        );
         let header_columns = Layout::horizontal(constraints)
             .spacing(1)
             .split(header_area);
@@ -482,6 +497,10 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -560,5 +579,61 @@ mod tests {
         let help = render_text(90, 24, &mut app);
         assert!(help.contains("Navigation"));
         assert!(help.contains("Open selected ticket"));
+    }
+
+    #[test]
+    fn stacked_layout_exposes_working_mouse_regions() {
+        let mut second = ticket();
+        second.key.id = 10_002;
+        second.title = "Second ticket".into();
+        second.web_url = "https://dev.azure.com/demo/atlas/_workitems/edit/10002".into();
+        let mut app = App::new(vec![ticket(), second]);
+        render_text(90, 24, &mut app);
+
+        let id = app.hit_regions.id_column.unwrap();
+        let body = app.hit_regions.table_body.unwrap();
+        let action = app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: id.x,
+            row: body.y + 1,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(matches!(action, crate::app::AppAction::OpenUrl(_)));
+        assert_eq!(app.selected_row(), Some(1));
+
+        let id_header = app
+            .hit_regions
+            .headers
+            .iter()
+            .find(|(_, field)| *field == SortField::Id)
+            .unwrap()
+            .0;
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: id_header.x,
+            row: id_header.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.sort_field, SortField::Id);
+    }
+
+    #[test]
+    fn no_results_and_sort_menu_are_rendered() {
+        let mut app = App::new(vec![ticket()]);
+        app.set_query("qqqqqqqqqq".into());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while app.search_pending {
+            app.poll_search();
+            assert!(Instant::now() < deadline, "search worker timed out");
+            thread::yield_now();
+        }
+        let no_results = render_text(90, 24, &mut app);
+        assert!(no_results.contains("No tickets match this search"));
+
+        app.mode = AppMode::Sort;
+        let sort = render_text(90, 24, &mut app);
+        assert!(sort.contains("Sort tickets"));
+        assert!(sort.contains("Priority"));
     }
 }
