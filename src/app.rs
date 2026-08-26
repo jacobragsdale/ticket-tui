@@ -25,6 +25,31 @@ pub enum Focus {
     Details,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SearchOrder {
+    #[default]
+    Relevance,
+    Field,
+}
+
+impl SearchOrder {
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Relevance => Self::Field,
+            Self::Field => Self::Relevance,
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Relevance => "Relevance",
+            Self::Field => "Field",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppAction {
     None,
@@ -75,6 +100,10 @@ pub struct App {
     pub search_pending: bool,
     pub query: String,
     pub query_cursor: usize,
+    search_history: Vec<String>,
+    search_history_index: Option<usize>,
+    search_history_draft: String,
+    pub search_order: SearchOrder,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
     pub mode: AppMode,
@@ -104,6 +133,10 @@ impl App {
             search_pending: false,
             query: String::new(),
             query_cursor: 0,
+            search_history: Vec::new(),
+            search_history_index: None,
+            search_history_draft: String::new(),
+            search_order: SearchOrder::Relevance,
             sort_field: SortField::Changed,
             sort_direction: SortDirection::Descending,
             mode: AppMode::Browse,
@@ -221,7 +254,7 @@ impl App {
             .take()
             .or_else(|| self.selected_ticket().map(|ticket| ticket.key.clone()));
         self.visible = result.matches;
-        self.sort_visible(true);
+        self.sort_visible();
         self.restore_selection(selected.as_ref());
         self.search_pending = false;
         true
@@ -272,6 +305,8 @@ impl App {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.query = query;
         self.query_cursor = cursor.min(self.query.chars().count());
+        self.search_history_index = None;
+        self.search_history_draft.clone_from(&self.query);
         if self.query.is_empty() {
             self.search_generation = self.search_generation.wrapping_add(1);
             self.search_pending = false;
@@ -287,8 +322,19 @@ impl App {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.sort_field = field;
         self.sort_direction = direction;
-        self.sort_visible(!self.query.is_empty());
+        self.sort_visible();
         self.restore_selection(selected.as_ref());
+    }
+
+    pub fn toggle_search_order(&mut self) {
+        if self.query.is_empty() {
+            return;
+        }
+        let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
+        self.search_order = self.search_order.toggled();
+        self.sort_visible();
+        self.restore_selection(selected.as_ref());
+        self.set_status(format!("Search order: {}", self.search_order.label()));
     }
 
     pub fn toggle_sort(&mut self, field: SortField) {
@@ -372,10 +418,7 @@ impl App {
     fn handle_browse_key(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('/') => {
-                self.query_cursor = self.query.chars().count();
-                self.mode = AppMode::Search;
-            }
+            KeyCode::Char('/') => self.begin_search(),
             KeyCode::Char('s') => {
                 self.sort_draft = SortDraft {
                     field_index: SortField::ALL
@@ -391,6 +434,7 @@ impl App {
                 self.mode = AppMode::Help;
             }
             KeyCode::Char('r') => return AppAction::Reload,
+            KeyCode::Char('v') if !self.query.is_empty() => self.toggle_search_order(),
             KeyCode::Char('d') => self.toggle_narrow_details(),
             KeyCode::Tab => self.toggle_focus(),
             KeyCode::Down | KeyCode::Char('j') => self.move_focused(1),
@@ -414,7 +458,7 @@ impl App {
 
     fn handle_search_key(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
-            KeyCode::Esc | KeyCode::Enter => self.mode = AppMode::Browse,
+            KeyCode::Esc | KeyCode::Enter => self.finish_search(),
             KeyCode::Left => self.query_cursor = self.query_cursor.saturating_sub(1),
             KeyCode::Right => {
                 self.query_cursor = (self.query_cursor + 1).min(self.query.chars().count());
@@ -428,6 +472,12 @@ impl App {
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.set_query(String::new());
+            }
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.recall_previous_search();
+            }
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.recall_next_search();
             }
             KeyCode::Down => self.move_selection(1),
             KeyCode::Up => self.move_selection(-1),
@@ -510,8 +560,7 @@ impl App {
             return AppAction::None;
         }
         if self.contains(self.hit_regions.search, column, row) {
-            self.query_cursor = self.query.chars().count();
-            self.mode = AppMode::Search;
+            self.begin_search();
             return AppAction::None;
         }
         if self.contains(self.hit_regions.detail_url, column, row) {
@@ -626,6 +675,66 @@ impl App {
         self.set_query_at(query, start);
     }
 
+    fn begin_search(&mut self) {
+        self.query_cursor = self.query.chars().count();
+        self.search_history_index = None;
+        self.search_history_draft.clone_from(&self.query);
+        self.mode = AppMode::Search;
+    }
+
+    fn finish_search(&mut self) {
+        if !self.query.is_empty()
+            && self
+                .search_history
+                .last()
+                .is_none_or(|previous| previous != &self.query)
+        {
+            const HISTORY_LIMIT: usize = 50;
+            if self.search_history.len() == HISTORY_LIMIT {
+                self.search_history.remove(0);
+            }
+            self.search_history.push(self.query.clone());
+        }
+        self.search_history_index = None;
+        self.search_history_draft.clear();
+        self.mode = AppMode::Browse;
+    }
+
+    fn recall_previous_search(&mut self) {
+        if self.search_history.is_empty() {
+            return;
+        }
+        let target = self.search_history_index.map_or_else(
+            || self.search_history.len() - 1,
+            |index| index.saturating_sub(1),
+        );
+        if self.search_history_index.is_none() {
+            self.search_history_draft.clone_from(&self.query);
+        }
+        let draft = self.search_history_draft.clone();
+        let query = self.search_history[target].clone();
+        self.set_query(query);
+        self.search_history_draft = draft;
+        self.search_history_index = Some(target);
+    }
+
+    fn recall_next_search(&mut self) {
+        let Some(index) = self.search_history_index else {
+            return;
+        };
+        let draft = self.search_history_draft.clone();
+        if index + 1 < self.search_history.len() {
+            let target = index + 1;
+            let query = self.search_history[target].clone();
+            self.set_query(query);
+            self.search_history_draft = draft;
+            self.search_history_index = Some(target);
+        } else {
+            self.set_query(draft);
+            self.search_history_index = None;
+        }
+    }
+
     fn set_notification(
         &mut self,
         message: impl Into<String>,
@@ -678,14 +787,15 @@ impl App {
                 score: 0,
             })
             .collect();
-        self.sort_visible(false);
+        self.sort_visible();
         self.restore_selection(selected);
     }
 
-    fn sort_visible(&mut self, relevance_first: bool) {
+    fn sort_visible(&mut self) {
         let tickets = Arc::clone(&self.tickets);
         let field = self.sort_field;
         let direction = self.sort_direction;
+        let relevance_first = !self.query.is_empty() && self.search_order == SearchOrder::Relevance;
         self.visible.sort_by(|left, right| {
             let relevance = if relevance_first {
                 right.score.cmp(&left.score)
@@ -711,7 +821,10 @@ impl App {
         });
         self.table_state
             .select((!self.visible.is_empty()).then_some(row.unwrap_or_default()));
-        self.details_scroll = 0;
+        if selected.is_none() || row.is_none() {
+            *self.table_state.offset_mut() = 0;
+            self.details_scroll = 0;
+        }
     }
 
     fn contains(&self, area: Option<Rect>, column: u16, row: u16) -> bool {
@@ -799,6 +912,34 @@ mod tests {
     }
 
     #[test]
+    fn search_order_can_switch_from_relevance_to_strict_field_sorting() {
+        let mut app = App::new(vec![
+            ticket(1, "alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "prefix alpha suffix", "2026-02-01T00:00:00Z"),
+        ]);
+        app.query = "alpha".into();
+        app.visible = vec![
+            SearchMatch {
+                ticket_index: 0,
+                score: 100,
+            },
+            SearchMatch {
+                ticket_index: 1,
+                score: 1,
+            },
+        ];
+        app.sort_visible();
+
+        assert_eq!(app.search_order, SearchOrder::Relevance);
+        assert_eq!(app.visible_tickets().next().unwrap().key.id, 1);
+
+        app.toggle_search_order();
+
+        assert_eq!(app.search_order, SearchOrder::Field);
+        assert_eq!(app.visible_tickets().next().unwrap().key.id, 2);
+    }
+
+    #[test]
     fn escape_clears_query_from_browse_mode() {
         let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
         app.set_query("search".into());
@@ -860,6 +1001,73 @@ mod tests {
         app.handle_paste("tea\nshop\u{7}");
         assert_eq!(app.query, "alpha tea shop");
         assert_eq!(app.query_cursor, 14);
+    }
+
+    #[test]
+    fn completed_searches_can_be_recalled_and_return_to_the_draft() {
+        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.set_query("alpha".into());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.set_query("beta".into());
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(app.query, "beta");
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(app.query, "alpha");
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(app.query, "beta");
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert!(app.query.is_empty());
+    }
+
+    #[test]
+    fn sorting_and_reload_preserve_selected_ticket_view_context() {
+        let original = vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+            ticket(3, "Gamma", "2026-03-01T00:00:00Z"),
+        ];
+        let mut app = App::new(original.clone());
+        app.select_row(1);
+        let selected = app.selected_ticket().unwrap().key.clone();
+        app.details_scroll = 3;
+        app.details_max_scroll = 5;
+        *app.table_state.offset_mut() = 1;
+
+        app.set_sort(SortField::Title, SortDirection::Descending);
+        assert_eq!(app.selected_ticket().unwrap().key, selected);
+        assert_eq!(app.details_scroll, 3);
+        assert_eq!(app.table_state.offset(), 1);
+
+        app.replace_tickets(original);
+        assert_eq!(app.selected_ticket().unwrap().key, selected);
+        assert_eq!(app.details_scroll, 3);
+        assert_eq!(app.table_state.offset(), 1);
+    }
+
+    #[test]
+    fn missing_selection_resets_view_context_after_reload() {
+        let mut app = App::new(vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+        ]);
+        app.select_row(1);
+        app.details_scroll = 3;
+        *app.table_state.offset_mut() = 1;
+
+        app.replace_tickets(vec![ticket(3, "Gamma", "2026-03-01T00:00:00Z")]);
+
+        assert_eq!(app.selected_ticket().unwrap().key.id, 3);
+        assert_eq!(app.details_scroll, 0);
+        assert_eq!(app.table_state.offset(), 0);
     }
 
     #[test]

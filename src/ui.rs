@@ -7,7 +7,7 @@ use ratatui::widgets::{
     ScrollbarState, Table, Wrap,
 };
 
-use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel};
+use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel, SearchOrder};
 use crate::model::{SortField, Ticket};
 
 const WIDE_BREAKPOINT: u16 = 110;
@@ -107,14 +107,27 @@ fn render_content(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let count = app.visible_count();
     let total = app.tickets().len();
-    let title = if area.width < NARROW_BREAKPOINT {
-        format!(" Tickets {count}/{total} · Tab: Details → ")
+    let ordering = if app.query.is_empty() || app.search_order == SearchOrder::Field {
+        format!("{} {}", app.sort_field, app.sort_direction.symbol())
     } else {
         format!(
-            " Tickets {count}/{total} · {} {} ",
+            "Relevance → {} {}",
             app.sort_field,
             app.sort_direction.symbol()
         )
+    };
+    let title = if area.width < NARROW_BREAKPOINT {
+        let short_order = if app.query.is_empty() {
+            app.sort_direction.symbol()
+        } else {
+            match app.search_order {
+                SearchOrder::Relevance => "Rel",
+                SearchOrder::Field => "Field",
+            }
+        };
+        format!(" Tickets {count}/{total} · {short_order} · Tab: Details → ")
+    } else {
+        format!(" Tickets {count}/{total} · {ordering} ")
     };
     let block = focused_block(title, app.focus == Focus::Tickets);
     let inner = block.inner(area);
@@ -343,12 +356,15 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         let text = match app.mode {
             AppMode::Search => {
-                "←→ move cursor  Ctrl-W delete word  Ctrl-U clear  ↑↓ select  Enter/Esc finish"
+                "←→ cursor  Ctrl-P/N history  Ctrl-W delete word  Ctrl-U clear  Enter/Esc finish"
             }
             AppMode::Sort => "↑↓ choose field  ←→ direction  Enter apply  Esc cancel",
             AppMode::Help => "↑↓/jk scroll  PgUp/PgDn page  Home/End jump  ?/Esc close",
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
+            }
+            AppMode::Browse if !app.query.is_empty() => {
+                "↑↓/jk move  / edit search  v order  s sort  Enter/o open  Esc clear  ? help  q quit"
             }
             AppMode::Browse => {
                 "↑↓/jk move  / search  s sort  Enter/o open  r reload  Tab details  ? help  q quit"
@@ -420,11 +436,13 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  ←/→, Home/End   Move the query cursor"),
         Line::from("  Backspace/Del   Delete around the cursor"),
         Line::from("  Ctrl-W/Ctrl-U   Delete word / clear query"),
+        Line::from("  Ctrl-P/Ctrl-N   Previous / next completed query"),
         Line::from("  Paste           Insert sanitized text"),
         Line::from(""),
         Line::styled("Actions", Style::default().add_modifier(Modifier::BOLD)),
         Line::from("  /               Search core ticket fields"),
         Line::from("  s               Choose field and direction"),
+        Line::from("  v               Toggle relevance / field order"),
         Line::from("  Enter/o         Open selected ticket in browser"),
         Line::from("  r               Reload tickets from SQLite"),
         Line::from("  Esc             Clear active search"),

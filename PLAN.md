@@ -42,7 +42,7 @@ connect to a remote ticket service.
 - [x] Keep focus and the visible screen synchronized in narrow layouts.
 - [x] Add full search-field editing: cursor movement, Home/End, Delete,
   word deletion, paste, and long-query horizontal scrolling.
-- [ ] Add search history with previous/next recall.
+- [x] Add search history with previous/next recall.
 - [x] Bound detail scrolling to the rendered content and expose scroll position.
 - [x] Add first/last and page navigation to long detail content.
 - [x] Make help and future overlays scrollable in short terminals.
@@ -51,9 +51,9 @@ connect to a remote ticket service.
 
 ### Behavior clarity
 
-- [ ] Make the relationship between relevance ranking and field sorting
+- [x] Make the relationship between relevance ranking and field sorting
   explicit, and allow strict field sorting while a search is active.
-- [ ] Preserve ticket selection, table offset, detail position, and active pane
+- [x] Preserve ticket selection, table offset, detail position, and active pane
   whenever the underlying operation permits it.
 - [ ] Make empty, loading, stale, and error states visually distinct.
 - [ ] Add explicit confirmation or feedback for every mouse-only affordance.

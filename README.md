@@ -50,9 +50,11 @@ to a database prepared by another tool.
 | `←`/`→`, `Home`/`End` | Move the search cursor while searching |
 | `Backspace`/`Delete`, `Ctrl-W` | Edit the query while searching |
 | `Ctrl-U` | Clear the query while searching |
+| `Ctrl-P`/`Ctrl-N` | Recall previous/next completed searches |
 | Paste | Insert sanitized pasted text into the search query |
 | `Esc` | Leave search, or clear an active filter from browse mode |
 | `s` | Open the sort menu; use arrows and `Enter` to apply |
+| `v` | Toggle relevance-first or strict field ordering during search |
 | `Tab` | Switch focus between tickets and details |
 | `d` | Toggle the details screen when the terminal is under 70 columns |
 | `Enter`, `o` | Open the selected ticket in the system browser |
