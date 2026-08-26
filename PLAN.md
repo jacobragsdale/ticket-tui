@@ -37,16 +37,16 @@ connect to a remote ticket service.
 
 ### Input and navigation
 
-- [~] Replace permanent status text with transient, severity-aware
+- [x] Replace permanent status text with transient, severity-aware
   notifications and restore contextual shortcuts after notifications expire.
-- [~] Keep focus and the visible screen synchronized in narrow layouts.
-- [~] Add full search-field editing: cursor movement, Home/End, Delete,
+- [x] Keep focus and the visible screen synchronized in narrow layouts.
+- [x] Add full search-field editing: cursor movement, Home/End, Delete,
   word deletion, paste, and long-query horizontal scrolling.
 - [ ] Add search history with previous/next recall.
-- [ ] Bound detail scrolling to the rendered content and expose scroll position.
-- [ ] Add first/last and page navigation to long detail content.
-- [ ] Make help and future overlays scrollable in short terminals.
-- [ ] Replace continuous idle redraws with event-driven rendering.
+- [x] Bound detail scrolling to the rendered content and expose scroll position.
+- [x] Add first/last and page navigation to long detail content.
+- [x] Make help and future overlays scrollable in short terminals.
+- [x] Replace continuous idle redraws with event-driven rendering.
 - [ ] Move database reload and search-document rebuilding off the UI thread.
 
 ### Behavior clarity
@@ -69,10 +69,11 @@ connect to a remote ticket service.
 - [ ] Show relative changed times in the table and exact timestamps in details.
 - [ ] Reorganize details into clear overview, description, relationships, and
   history sections when those data are available.
-- [ ] Add table and detail scrollbars or equivalent position indicators.
-- [ ] Replace the narrow-layout `d` convention with a visible Tickets/Details
+- [x] Add a detail scrollbar and bounded position indicator.
+- [ ] Add a table scrollbar or equivalent position indicator.
+- [x] Replace the narrow-layout `d` convention with a visible Tickets/Details
   tab treatment while retaining a fast shortcut.
-- [ ] Make the footer contextual to the current mode and focused pane.
+- [x] Make the footer contextual to the current mode and focused pane.
 - [ ] Add compact and comfortable row-density options.
 
 ## Phase 3: power browsing
@@ -139,4 +140,3 @@ Work through the phases in order, but ship coherent checkpoints within each
 phase. A checkpoint must leave formatting, Clippy, tests, and the release build
 passing. Update this document as items move from planned to in progress or
 complete; do not mark an item complete based only on a partial UI stub.
-

@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
@@ -32,6 +33,22 @@ pub enum AppAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NotificationLevel {
+    Info,
+    Error,
+}
+
+#[derive(Debug)]
+struct Notification {
+    message: String,
+    level: NotificationLevel,
+    expires_at: Instant,
+}
+
+const INFO_NOTIFICATION_DURATION: Duration = Duration::from_secs(4);
+const ERROR_NOTIFICATION_DURATION: Duration = Duration::from_secs(8);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SortDraft {
     pub field_index: usize,
     pub direction: SortDirection,
@@ -57,15 +74,19 @@ pub struct App {
     pending_selection: Option<TicketKey>,
     pub search_pending: bool,
     pub query: String,
+    pub query_cursor: usize,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
     pub mode: AppMode,
     pub focus: Focus,
     pub table_state: TableState,
     pub details_scroll: u16,
+    pub details_max_scroll: u16,
+    pub help_scroll: u16,
+    pub help_max_scroll: u16,
     pub narrow_details: bool,
     pub should_quit: bool,
-    pub status: Option<String>,
+    notification: Option<Notification>,
     pub sort_draft: SortDraft,
     pub hit_regions: HitRegions,
 }
@@ -82,15 +103,19 @@ impl App {
             pending_selection: None,
             search_pending: false,
             query: String::new(),
+            query_cursor: 0,
             sort_field: SortField::Changed,
             sort_direction: SortDirection::Descending,
             mode: AppMode::Browse,
             focus: Focus::Tickets,
             table_state: TableState::default(),
             details_scroll: 0,
+            details_max_scroll: 0,
+            help_scroll: 0,
+            help_max_scroll: 0,
             narrow_details: false,
             should_quit: false,
-            status: None,
+            notification: None,
             sort_draft: SortDraft {
                 field_index: 0,
                 direction: SortDirection::Descending,
@@ -144,7 +169,43 @@ impl App {
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {
-        self.status = Some(message.into());
+        self.set_notification(message, NotificationLevel::Info, INFO_NOTIFICATION_DURATION);
+    }
+
+    pub fn set_error(&mut self, message: impl Into<String>) {
+        self.set_notification(
+            message,
+            NotificationLevel::Error,
+            ERROR_NOTIFICATION_DURATION,
+        );
+    }
+
+    #[must_use]
+    pub fn notification(&self) -> Option<(&str, NotificationLevel)> {
+        self.notification
+            .as_ref()
+            .map(|notification| (notification.message.as_str(), notification.level))
+    }
+
+    pub fn tick(&mut self) -> bool {
+        if self
+            .notification
+            .as_ref()
+            .is_some_and(|notification| Instant::now() >= notification.expires_at)
+        {
+            self.notification = None;
+            return true;
+        }
+        false
+    }
+
+    #[must_use]
+    pub fn next_wakeup(&self) -> Option<Duration> {
+        self.notification.as_ref().map(|notification| {
+            notification
+                .expires_at
+                .saturating_duration_since(Instant::now())
+        })
     }
 
     pub fn poll_search(&mut self) -> bool {
@@ -167,11 +228,50 @@ impl App {
     }
 
     pub fn set_query(&mut self, query: String) {
+        let cursor = query.chars().count();
+        self.set_query_at(query, cursor);
+    }
+
+    pub fn handle_paste(&mut self, pasted: &str) {
+        if self.mode != AppMode::Search {
+            return;
+        }
+        let pasted: String = pasted
+            .chars()
+            .filter_map(|character| match character {
+                '\r' | '\n' | '\t' => Some(' '),
+                character if character.is_control() => None,
+                character => Some(character),
+            })
+            .collect();
+        if pasted.is_empty() {
+            return;
+        }
+        let byte = byte_index(&self.query, self.query_cursor);
+        let mut query = self.query.clone();
+        query.insert_str(byte, &pasted);
+        let cursor = self.query_cursor + pasted.chars().count();
+        self.set_query_at(query, cursor);
+    }
+
+    pub fn set_details_max_scroll(&mut self, maximum: u16) {
+        self.details_max_scroll = maximum;
+        self.details_scroll = self.details_scroll.min(maximum);
+    }
+
+    pub fn set_help_max_scroll(&mut self, maximum: u16) {
+        self.help_max_scroll = maximum;
+        self.help_scroll = self.help_scroll.min(maximum);
+    }
+
+    fn set_query_at(&mut self, query: String, cursor: usize) {
         if self.query == query {
+            self.query_cursor = cursor.min(query.chars().count());
             return;
         }
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.query = query;
+        self.query_cursor = cursor.min(self.query.chars().count());
         if self.query.is_empty() {
             self.search_generation = self.search_generation.wrapping_add(1);
             self.search_pending = false;
@@ -213,27 +313,51 @@ impl App {
             AppMode::Search => self.handle_search_key(key),
             AppMode::Sort => self.handle_sort_key(key),
             AppMode::Help => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('?')) {
-                    self.mode = AppMode::Browse;
-                }
+                self.handle_help_key(key);
                 AppAction::None
             }
         }
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> AppAction {
+        if self.mode == AppMode::Help {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.help_scroll = self.help_scroll.saturating_add(3).min(self.help_max_scroll);
+                }
+                _ => {}
+            }
+            return AppAction::None;
+        }
+        if self.mode == AppMode::Sort {
+            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                return self.handle_click(mouse.column, mouse.row);
+            }
+            return AppAction::None;
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 if self.contains(self.hit_regions.details, mouse.column, mouse.row) {
-                    self.details_scroll = self.details_scroll.saturating_sub(3);
+                    self.focus = Focus::Details;
+                    self.narrow_details = true;
+                    self.scroll_details(-3);
                 } else {
+                    self.focus = Focus::Tickets;
+                    self.narrow_details = false;
                     self.move_selection(-3);
                 }
             }
             MouseEventKind::ScrollDown => {
                 if self.contains(self.hit_regions.details, mouse.column, mouse.row) {
-                    self.details_scroll = self.details_scroll.saturating_add(3);
+                    self.focus = Focus::Details;
+                    self.narrow_details = true;
+                    self.scroll_details(3);
                 } else {
+                    self.focus = Focus::Tickets;
+                    self.narrow_details = false;
                     self.move_selection(3);
                 }
             }
@@ -248,7 +372,10 @@ impl App {
     fn handle_browse_key(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('/') => self.mode = AppMode::Search,
+            KeyCode::Char('/') => {
+                self.query_cursor = self.query.chars().count();
+                self.mode = AppMode::Search;
+            }
             KeyCode::Char('s') => {
                 self.sort_draft = SortDraft {
                     field_index: SortField::ALL
@@ -259,21 +386,25 @@ impl App {
                 };
                 self.mode = AppMode::Sort;
             }
-            KeyCode::Char('?') => self.mode = AppMode::Help,
-            KeyCode::Char('r') => return AppAction::Reload,
-            KeyCode::Char('d') => self.narrow_details = !self.narrow_details,
-            KeyCode::Tab => {
-                self.focus = match self.focus {
-                    Focus::Tickets => Focus::Details,
-                    Focus::Details => Focus::Tickets,
-                }
+            KeyCode::Char('?') => {
+                self.help_scroll = 0;
+                self.mode = AppMode::Help;
             }
+            KeyCode::Char('r') => return AppAction::Reload,
+            KeyCode::Char('d') => self.toggle_narrow_details(),
+            KeyCode::Tab => self.toggle_focus(),
             KeyCode::Down | KeyCode::Char('j') => self.move_focused(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_focused(-1),
             KeyCode::PageDown => self.move_focused(10),
             KeyCode::PageUp => self.move_focused(-10),
-            KeyCode::Home => self.select_row(0),
-            KeyCode::End => self.select_row(self.visible.len().saturating_sub(1)),
+            KeyCode::Home => match self.focus {
+                Focus::Tickets => self.select_row(0),
+                Focus::Details => self.details_scroll = 0,
+            },
+            KeyCode::End => match self.focus {
+                Focus::Tickets => self.select_row(self.visible.len().saturating_sub(1)),
+                Focus::Details => self.details_scroll = self.details_max_scroll,
+            },
             KeyCode::Enter | KeyCode::Char('o') => return self.open_selected(),
             KeyCode::Esc if !self.query.is_empty() => self.set_query(String::new()),
             _ => {}
@@ -284,10 +415,16 @@ impl App {
     fn handle_search_key(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
             KeyCode::Esc | KeyCode::Enter => self.mode = AppMode::Browse,
-            KeyCode::Backspace => {
-                let mut query = self.query.clone();
-                query.pop();
-                self.set_query(query);
+            KeyCode::Left => self.query_cursor = self.query_cursor.saturating_sub(1),
+            KeyCode::Right => {
+                self.query_cursor = (self.query_cursor + 1).min(self.query.chars().count());
+            }
+            KeyCode::Home => self.query_cursor = 0,
+            KeyCode::End => self.query_cursor = self.query.chars().count(),
+            KeyCode::Backspace => self.delete_query_character(true),
+            KeyCode::Delete => self.delete_query_character(false),
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.delete_query_word();
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.set_query(String::new());
@@ -300,8 +437,9 @@ impl App {
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 let mut query = self.query.clone();
-                query.push(character);
-                self.set_query(query);
+                let byte = byte_index(&query, self.query_cursor);
+                query.insert(byte, character);
+                self.set_query_at(query, self.query_cursor + 1);
             }
             _ => {}
         }
@@ -336,6 +474,25 @@ impl App {
         AppAction::None
     }
 
+    fn handle_help_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('?') => self.mode = AppMode::Browse,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.help_scroll = self.help_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.help_scroll = self.help_scroll.saturating_add(1).min(self.help_max_scroll);
+            }
+            KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(5),
+            KeyCode::PageDown => {
+                self.help_scroll = self.help_scroll.saturating_add(5).min(self.help_max_scroll);
+            }
+            KeyCode::Home => self.help_scroll = 0,
+            KeyCode::End => self.help_scroll = self.help_max_scroll,
+            _ => {}
+        }
+    }
+
     fn handle_click(&mut self, column: u16, row: u16) -> AppAction {
         if self.mode == AppMode::Sort {
             if let Some((_, field)) = self
@@ -353,10 +510,13 @@ impl App {
             return AppAction::None;
         }
         if self.contains(self.hit_regions.search, column, row) {
+            self.query_cursor = self.query.chars().count();
             self.mode = AppMode::Search;
             return AppAction::None;
         }
         if self.contains(self.hit_regions.detail_url, column, row) {
+            self.focus = Focus::Details;
+            self.narrow_details = true;
             return self.open_selected();
         }
         if let Some((_, field)) = self
@@ -372,6 +532,8 @@ impl App {
         if let Some(body) = self.hit_regions.table_body
             && contains(body, column, row)
         {
+            self.focus = Focus::Tickets;
+            self.narrow_details = false;
             let row_index = self.table_state.offset() + usize::from(row - body.y);
             if row_index < self.visible.len() {
                 self.select_row(row_index);
@@ -386,15 +548,95 @@ impl App {
     fn move_focused(&mut self, delta: isize) {
         match self.focus {
             Focus::Tickets => self.move_selection(delta),
-            Focus::Details => {
-                self.details_scroll = if delta.is_negative() {
-                    self.details_scroll
-                        .saturating_sub(delta.unsigned_abs() as u16)
-                } else {
-                    self.details_scroll.saturating_add(delta as u16)
-                };
-            }
+            Focus::Details => self.scroll_details(delta),
         }
+    }
+
+    fn scroll_details(&mut self, delta: isize) {
+        self.details_scroll = if delta.is_negative() {
+            self.details_scroll
+                .saturating_sub(delta.unsigned_abs() as u16)
+        } else {
+            self.details_scroll
+                .saturating_add(delta as u16)
+                .min(self.details_max_scroll)
+        };
+    }
+
+    fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Tickets => Focus::Details,
+            Focus::Details => Focus::Tickets,
+        };
+        self.narrow_details = self.focus == Focus::Details;
+    }
+
+    fn toggle_narrow_details(&mut self) {
+        self.narrow_details = !self.narrow_details;
+        self.focus = if self.narrow_details {
+            Focus::Details
+        } else {
+            Focus::Tickets
+        };
+    }
+
+    fn delete_query_character(&mut self, backwards: bool) {
+        let character_count = self.query.chars().count();
+        let remove_at = if backwards {
+            let Some(index) = self.query_cursor.checked_sub(1) else {
+                return;
+            };
+            index
+        } else {
+            if self.query_cursor >= character_count {
+                return;
+            }
+            self.query_cursor
+        };
+        let start = byte_index(&self.query, remove_at);
+        let end = byte_index(&self.query, remove_at + 1);
+        let mut query = self.query.clone();
+        query.replace_range(start..end, "");
+        self.set_query_at(
+            query,
+            if backwards {
+                remove_at
+            } else {
+                self.query_cursor
+            },
+        );
+    }
+
+    fn delete_query_word(&mut self) {
+        if self.query_cursor == 0 {
+            return;
+        }
+        let characters: Vec<_> = self.query.chars().collect();
+        let mut start = self.query_cursor;
+        while start > 0 && characters[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && !characters[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        let start_byte = byte_index(&self.query, start);
+        let end_byte = byte_index(&self.query, self.query_cursor);
+        let mut query = self.query.clone();
+        query.replace_range(start_byte..end_byte, "");
+        self.set_query_at(query, start);
+    }
+
+    fn set_notification(
+        &mut self,
+        message: impl Into<String>,
+        level: NotificationLevel,
+        duration: Duration,
+    ) {
+        self.notification = Some(Notification {
+            message: message.into(),
+            level,
+            expires_at: Instant::now() + duration,
+        });
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -482,6 +724,12 @@ fn contains(area: Rect, column: u16, row: u16) -> bool {
         && column < area.x.saturating_add(area.width)
         && row >= area.y
         && row < area.y.saturating_add(area.height)
+}
+
+fn byte_index(text: &str, character_index: usize) -> usize {
+    text.char_indices()
+        .nth(character_index)
+        .map_or(text.len(), |(index, _)| index)
 }
 
 #[cfg(test)]
@@ -577,5 +825,99 @@ mod tests {
         await_search(&mut app);
         assert_eq!(app.visible_count(), 1);
         assert_eq!(app.selected_ticket().unwrap().key.id, 1);
+    }
+
+    #[test]
+    fn search_editor_inserts_and_deletes_at_the_cursor() {
+        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+        app.mode = AppMode::Search;
+        app.set_query("ac".into());
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert_eq!(app.query, "abc");
+        assert_eq!(app.query_cursor, 2);
+
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.query, "ac");
+        assert_eq!(app.query_cursor, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(app.query, "a");
+        assert_eq!(app.query_cursor, 1);
+    }
+
+    #[test]
+    fn search_editor_handles_unicode_word_deletion_and_paste() {
+        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+        app.mode = AppMode::Search;
+        app.set_query("alpha café".into());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+        assert_eq!(app.query, "alpha ");
+        assert_eq!(app.query_cursor, 6);
+
+        app.handle_paste("tea\nshop\u{7}");
+        assert_eq!(app.query, "alpha tea shop");
+        assert_eq!(app.query_cursor, 14);
+    }
+
+    #[test]
+    fn pane_shortcuts_keep_narrow_view_and_focus_together() {
+        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Details);
+        assert!(app.narrow_details);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Tickets);
+        assert!(!app.narrow_details);
+    }
+
+    #[test]
+    fn scrolling_is_bounded_to_rendered_content() {
+        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+        app.focus = Focus::Details;
+        app.set_details_max_scroll(4);
+
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.details_scroll, 4);
+
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.details_scroll, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(app.details_scroll, 4);
+    }
+
+    #[test]
+    fn notifications_retain_level_and_schedule_expiration() {
+        let mut app = App::new(Vec::new());
+
+        app.set_status("Reloaded");
+        assert_eq!(
+            app.notification(),
+            Some(("Reloaded", NotificationLevel::Info))
+        );
+        assert!(app.next_wakeup().is_some());
+
+        app.set_error("Reload failed");
+        assert_eq!(
+            app.notification(),
+            Some(("Reload failed", NotificationLevel::Error))
+        );
+    }
+
+    #[test]
+    fn help_navigation_clamps_to_rendered_content() {
+        let mut app = App::new(Vec::new());
+        app.mode = AppMode::Help;
+        app.set_help_max_scroll(3);
+
+        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.help_scroll, 3);
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.help_scroll, 0);
     }
 }

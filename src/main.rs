@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueHint};
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyEventKind,
+};
 use crossterm::execute;
 use ticket_tui::app::{App, AppAction};
 use ticket_tui::db::{SqliteTicketRepository, default_database_path};
@@ -44,23 +47,39 @@ fn run_terminal(app: &mut App, repository: &SqliteTicketRepository) -> Result<()
     let mut terminal = ratatui::init();
     let _restore = TerminalRestore;
     let opener = SystemUrlOpener;
-    execute!(io::stdout(), EnableMouseCapture).context("failed to enable mouse capture")?;
+    execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)
+        .context("failed to enable terminal input features")?;
 
+    let mut redraw = true;
     while !app.should_quit {
-        app.poll_search();
-        terminal.draw(|frame| ticket_tui::ui::render(frame, app))?;
+        redraw |= app.poll_search();
+        redraw |= app.tick();
+        if redraw {
+            terminal.draw(|frame| ticket_tui::ui::render(frame, app))?;
+            redraw = false;
+        }
 
-        if !event::poll(Duration::from_millis(33))? {
+        let timeout = if app.search_pending {
+            Duration::from_millis(33)
+        } else {
+            app.next_wakeup()
+                .unwrap_or(Duration::from_secs(1))
+                .min(Duration::from_secs(1))
+        };
+        if !event::poll(timeout)? {
             continue;
         }
+        redraw = true;
         let action = match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
             Event::Mouse(mouse) => app.handle_mouse(mouse),
-            Event::Resize(_, _)
-            | Event::FocusGained
-            | Event::FocusLost
-            | Event::Paste(_)
-            | Event::Key(_) => AppAction::None,
+            Event::Paste(text) => {
+                app.handle_paste(&text);
+                AppAction::None
+            }
+            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Key(_) => {
+                AppAction::None
+            }
         };
         handle_action(action, app, repository, &opener);
     }
@@ -81,11 +100,11 @@ fn handle_action(
                 app.replace_tickets(tickets);
                 app.set_status(format!("Reloaded {count} tickets"));
             }
-            Err(error) => app.set_status(format!("Reload failed: {error:#}")),
+            Err(error) => app.set_error(format!("Reload failed: {error:#}")),
         },
         AppAction::OpenUrl(raw_url) => match open_https_url(&raw_url, opener) {
             Ok(()) => app.set_status(format!("Opened {raw_url}")),
-            Err(error) => app.set_status(format!("Could not open ticket: {error:#}")),
+            Err(error) => app.set_error(format!("Could not open ticket: {error:#}")),
         },
     }
 }
@@ -114,7 +133,7 @@ struct TerminalRestore;
 
 impl Drop for TerminalRestore {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), DisableMouseCapture);
+        let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
         ratatui::restore();
     }
 }

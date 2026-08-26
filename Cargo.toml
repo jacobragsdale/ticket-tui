@@ -13,7 +13,7 @@ crossterm = "0.29.0"
 directories = "6.0.0"
 nucleo-matcher = "0.3.1"
 open = "5.4.2"
-ratatui = "0.30.2"
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 time = { version = "0.3.47", features = ["formatting", "macros", "parsing"] }
 url = "2.5.7"

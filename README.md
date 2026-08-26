@@ -45,16 +45,19 @@ to a database prepared by another tool.
 |---|---|
 | `↑`/`↓`, `j`/`k` | Move through tickets or scroll the focused details pane |
 | `Page Up`/`Page Down` | Move ten tickets |
-| `Home`/`End` | Select the first or last ticket |
+| `Home`/`End` | Select the first/last ticket or jump through focused details |
 | `/` | Focus live fuzzy search |
+| `←`/`→`, `Home`/`End` | Move the search cursor while searching |
+| `Backspace`/`Delete`, `Ctrl-W` | Edit the query while searching |
 | `Ctrl-U` | Clear the query while searching |
+| Paste | Insert sanitized pasted text into the search query |
 | `Esc` | Leave search, or clear an active filter from browse mode |
 | `s` | Open the sort menu; use arrows and `Enter` to apply |
 | `Tab` | Switch focus between tickets and details |
 | `d` | Toggle the details screen when the terminal is under 70 columns |
 | `Enter`, `o` | Open the selected ticket in the system browser |
 | `r` | Reload the SQLite database |
-| `?` | Show the in-app help |
+| `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
 
 Mouse input can select rows, scroll either pane, sort by visible headers, and

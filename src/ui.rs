@@ -3,10 +3,11 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, Wrap,
+    Block, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Table, Wrap,
 };
 
-use crate::app::{App, AppMode, Focus, HitRegions};
+use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel};
 use crate::model::{SortField, Ticket};
 
 const WIDE_BREAKPOINT: u16 = 110;
@@ -43,7 +44,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     match app.mode {
         AppMode::Sort => render_sort_popup(frame, app),
-        AppMode::Help => render_help_popup(frame),
+        AppMode::Help => render_help_popup(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
 }
@@ -65,14 +66,20 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         Line::from(app.query.as_str())
     };
-    frame.render_widget(Paragraph::new(text).block(block), area);
+    let cursor_offset = u16::try_from(app.query_cursor).unwrap_or(u16::MAX);
+    let horizontal_scroll = cursor_offset.saturating_sub(inner.width.saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(block)
+            .scroll((0, horizontal_scroll)),
+        area,
+    );
     app.hit_regions.search = Some(area);
 
     if active {
-        let cursor_offset = u16::try_from(app.query.chars().count()).unwrap_or(u16::MAX);
         let cursor_x = inner
             .x
-            .saturating_add(cursor_offset.min(inner.width.saturating_sub(1)));
+            .saturating_add(cursor_offset.saturating_sub(horizontal_scroll));
         frame.set_cursor_position((cursor_x, inner.y));
     }
 }
@@ -100,11 +107,15 @@ fn render_content(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let count = app.visible_count();
     let total = app.tickets().len();
-    let title = format!(
-        " Tickets {count}/{total} · {} {} ",
-        app.sort_field,
-        app.sort_direction.symbol()
-    );
+    let title = if area.width < NARROW_BREAKPOINT {
+        format!(" Tickets {count}/{total} · Tab: Details → ")
+    } else {
+        format!(
+            " Tickets {count}/{total} · {} {} ",
+            app.sort_field,
+            app.sort_direction.symbol()
+        )
+    };
     let block = focused_block(title, app.focus == Focus::Tickets);
     let inner = block.inner(area);
     let columns = columns_for(inner.width);
@@ -206,12 +217,18 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let block = focused_block(" Details ", app.focus == Focus::Details);
+    let title = if area.width < NARROW_BREAKPOINT {
+        " ← Tab: Tickets · Details "
+    } else {
+        " Details "
+    };
+    let block = focused_block(title, app.focus == Focus::Details);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     app.hit_regions.details = Some(area);
 
     let Some(ticket) = app.selected_ticket().cloned() else {
+        app.set_details_max_scroll(0);
         frame.render_widget(
             Paragraph::new("Select a ticket to view details")
                 .style(Style::default().fg(Color::DarkGray)),
@@ -289,24 +306,60 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .reason
             .as_deref()
             .map_or_else(String::new, |reason| format!("Reason: {reason}\n\n"));
-        frame.render_widget(
-            Paragraph::new(format!("{reason}{}", ticket.description))
-                .wrap(Wrap { trim: false })
-                .scroll((app.details_scroll, 0))
-                .style(Style::default().fg(Color::Gray)),
-            chunks[2],
-        );
+        let paragraph = Paragraph::new(format!("{reason}{}", ticket.description))
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(Color::Gray));
+        let line_count = paragraph.line_count(chunks[2].width);
+        let maximum = line_count.saturating_sub(usize::from(chunks[2].height));
+        app.set_details_max_scroll(u16::try_from(maximum).unwrap_or(u16::MAX));
+        frame.render_widget(paragraph.scroll((app.details_scroll, 0)), chunks[2]);
+        if maximum > 0 {
+            let mut scrollbar_state = ScrollbarState::new(line_count)
+                .position(usize::from(app.details_scroll))
+                .viewport_content_length(usize::from(chunks[2].height));
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .track_symbol(Some("│"))
+                    .thumb_symbol("┃")
+                    .style(Style::default().fg(Color::DarkGray)),
+                chunks[2],
+                &mut scrollbar_state,
+            );
+        }
+    } else {
+        app.set_details_max_scroll(0);
     }
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let text = app.status.as_deref().unwrap_or(
-        "↑↓/jk move  / search  s sort  Enter/o open  r reload  Tab focus  d details  ? help  q quit",
-    );
+    let (text, style) = if let Some((message, level)) = app.notification() {
+        let color = match level {
+            NotificationLevel::Info => Color::Yellow,
+            NotificationLevel::Error => Color::Red,
+        };
+        (message, Style::default().fg(color))
+    } else {
+        let text = match app.mode {
+            AppMode::Search => {
+                "←→ move cursor  Ctrl-W delete word  Ctrl-U clear  ↑↓ select  Enter/Esc finish"
+            }
+            AppMode::Sort => "↑↓ choose field  ←→ direction  Enter apply  Esc cancel",
+            AppMode::Help => "↑↓/jk scroll  PgUp/PgDn page  Home/End jump  ?/Esc close",
+            AppMode::Browse if app.focus == Focus::Details => {
+                "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
+            }
+            AppMode::Browse => {
+                "↑↓/jk move  / search  s sort  Enter/o open  r reload  Tab details  ? help  q quit"
+            }
+        };
+        (text, Style::default().fg(Color::DarkGray))
+    };
     frame.render_widget(
         Paragraph::new(text)
             .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::DarkGray)),
+            .style(style),
         area,
     );
 }
@@ -351,16 +404,23 @@ fn render_sort_popup(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(Paragraph::new(Text::from_iter(lines)), inner);
 }
 
-fn render_help_popup(frame: &mut Frame<'_>) {
-    let area = centered_rect(frame.area(), 62, 18);
+fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
+    let height = frame.area().height.saturating_sub(2).min(18);
+    let area = centered_rect(frame.area(), 62, height);
     frame.render_widget(Clear, area);
     let help = Text::from(vec![
         Line::styled("Navigation", Style::default().add_modifier(Modifier::BOLD)),
         Line::from("  ↑/↓, j/k       Move ticket or scroll focused pane"),
         Line::from("  PgUp/PgDn       Move ten rows"),
-        Line::from("  Home/End        First or last ticket"),
+        Line::from("  Home/End        First/last ticket or detail line"),
         Line::from("  Tab             Focus tickets/details"),
         Line::from("  d               Toggle details below 70 columns"),
+        Line::from(""),
+        Line::styled("Search", Style::default().add_modifier(Modifier::BOLD)),
+        Line::from("  ←/→, Home/End   Move the query cursor"),
+        Line::from("  Backspace/Del   Delete around the cursor"),
+        Line::from("  Ctrl-W/Ctrl-U   Delete word / clear query"),
+        Line::from("  Paste           Insert sanitized text"),
         Line::from(""),
         Line::styled("Actions", Style::default().add_modifier(Modifier::BOLD)),
         Line::from("  /               Search core ticket fields"),
@@ -375,17 +435,29 @@ fn render_help_popup(frame: &mut Frame<'_>) {
             Style::default().fg(Color::DarkGray),
         ),
     ]);
-    frame.render_widget(
-        Paragraph::new(help)
-            .block(
-                Block::default()
-                    .title(" Help ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan)),
-            )
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    let block = Block::default()
+        .title(" Help ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    let paragraph = Paragraph::new(help).block(block).wrap(Wrap { trim: false });
+    let line_count = paragraph.line_count(area.width);
+    let maximum = line_count.saturating_sub(usize::from(inner.height));
+    app.set_help_max_scroll(u16::try_from(maximum).unwrap_or(u16::MAX));
+    frame.render_widget(paragraph.scroll((app.help_scroll, 0)), area);
+    if maximum > 0 {
+        let mut scrollbar_state = ScrollbarState::new(line_count)
+            .position(usize::from(app.help_scroll))
+            .viewport_content_length(usize::from(inner.height));
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .style(Style::default().fg(Color::DarkGray)),
+            area,
+            &mut scrollbar_state,
+        );
+    }
 }
 
 fn columns_for(width: u16) -> Vec<ColumnDef> {
@@ -561,11 +633,13 @@ mod tests {
         let mut app = App::new(vec![ticket()]);
         let table = render_text(60, 20, &mut app);
         assert!(table.contains("Tickets 1/1"));
-        assert!(!table.contains("Details"));
+        assert!(table.contains("Tab: Details"));
+        assert!(!table.contains("ID / Type / State"));
 
         app.narrow_details = true;
         let details = render_text(60, 20, &mut app);
         assert!(details.contains("Details"));
+        assert!(details.contains("Tab: Tickets"));
         assert!(details.contains("Fix ticket search"));
     }
 
@@ -578,7 +652,10 @@ mod tests {
         app.mode = AppMode::Help;
         let help = render_text(90, 24, &mut app);
         assert!(help.contains("Navigation"));
-        assert!(help.contains("Open selected ticket"));
+        assert!(app.help_max_scroll > 0);
+        app.help_scroll = app.help_max_scroll;
+        let scrolled_help = render_text(90, 24, &mut app);
+        assert!(scrolled_help.contains("Open selected ticket"));
     }
 
     #[test]
@@ -635,5 +712,47 @@ mod tests {
         let sort = render_text(90, 24, &mut app);
         assert!(sort.contains("Sort tickets"));
         assert!(sort.contains("Priority"));
+    }
+
+    #[test]
+    fn long_details_are_bounded_and_render_a_scrollbar() {
+        let mut long_ticket = ticket();
+        long_ticket.description = "A long wrapped detail line. ".repeat(30);
+        let mut app = App::new(vec![long_ticket]);
+        app.narrow_details = true;
+        app.focus = Focus::Details;
+
+        let text = render_text(60, 20, &mut app);
+
+        assert!(app.details_max_scroll > 0);
+        assert!(text.contains('┃'));
+        app.details_scroll = u16::MAX;
+        render_text(60, 20, &mut app);
+        assert_eq!(app.details_scroll, app.details_max_scroll);
+    }
+
+    #[test]
+    fn help_can_scroll_in_a_short_terminal() {
+        let mut app = App::new(Vec::new());
+        app.mode = AppMode::Help;
+        let initial = render_text(50, 10, &mut app);
+        assert!(initial.contains("Navigation"));
+        assert!(app.help_max_scroll > 0);
+
+        app.help_scroll = app.help_max_scroll;
+        let scrolled = render_text(50, 10, &mut app);
+        assert_ne!(initial, scrolled);
+        assert!(scrolled.contains("Press ? or Esc to close"));
+    }
+
+    #[test]
+    fn long_search_keeps_the_cursor_end_visible() {
+        let mut app = App::new(Vec::new());
+        app.mode = AppMode::Search;
+        app.set_query("a very long query whose visible tail is unique".into());
+
+        let text = render_text(40, 12, &mut app);
+
+        assert!(text.contains("visible tail is unique"));
     }
 }
