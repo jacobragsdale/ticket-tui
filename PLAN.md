@@ -62,17 +62,18 @@ connect to a remote ticket service.
 
 ## Phase 2: visual system and responsive layout
 
-- [ ] Introduce a centralized theme with default, monochrome, and `NO_COLOR`
+- [x] Introduce a centralized theme with default, monochrome, and `NO_COLOR`
   behavior.
-- [ ] Apply restrained semantic styling to ticket state and priority.
+- [x] Apply restrained semantic styling to ticket state and priority.
 - [ ] Highlight matched portions of visible search results.
 - [ ] Render work-item types and tags as compact badges.
-- [ ] Right-align numeric columns and improve date formatting.
-- [ ] Show relative changed times in the table and exact timestamps in details.
-- [ ] Reorganize details into clear overview, description, relationships, and
-  history sections when those data are available.
+- [x] Right-align numeric columns and improve date formatting.
+- [x] Show relative changed times in the table and exact timestamps in details.
+- [x] Reorganize current details into clear overview, planning, and description
+  sections with all metadata reachable by scrolling.
+- [ ] Add relationships and history sections when those data are available.
 - [x] Add a detail scrollbar and bounded position indicator.
-- [ ] Add a table scrollbar or equivalent position indicator.
+- [x] Add a table scrollbar or equivalent position indicator.
 - [x] Replace the narrow-layout `d` convention with a visible Tickets/Details
   tab treatment while retaining a fast shortcut.
 - [x] Make the footer contextual to the current mode and focused pane.

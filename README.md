@@ -65,6 +65,10 @@ to a database prepared by another tool.
 Mouse input can select rows, scroll either pane, sort by visible headers, and
 open an underlined ticket ID or detail URL.
 
+Ticket states and priorities use restrained semantic colors, changed dates use
+compact relative labels, and exact UTC timestamps remain available in details.
+Set the standard `NO_COLOR` environment variable to use the monochrome theme.
+
 ## Database reference
 
 The default database is `ticket-tui/tickets.sqlite3` under the platform data

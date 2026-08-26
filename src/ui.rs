@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -6,12 +8,84 @@ use ratatui::widgets::{
     Block, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Table, Wrap,
 };
+use time::format_description::well_known::Rfc3339;
+use time::macros::format_description;
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel, SearchOrder};
 use crate::model::{SortField, Ticket};
 
 const WIDE_BREAKPOINT: u16 = 110;
 const NARROW_BREAKPOINT: u16 = 70;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Theme {
+    accent: Color,
+    muted: Color,
+    text: Color,
+    body: Color,
+    link: Color,
+    selected_background: Color,
+    info: Color,
+    error: Color,
+    scrollbar: Color,
+    state_new: Color,
+    state_active: Color,
+    state_resolved: Color,
+    state_closed: Color,
+    priority_critical: Color,
+    priority_high: Color,
+    priority_normal: Color,
+}
+
+impl Theme {
+    const fn new(monochrome: bool) -> Self {
+        if monochrome {
+            Self {
+                accent: Color::Reset,
+                muted: Color::Reset,
+                text: Color::Reset,
+                body: Color::Reset,
+                link: Color::Reset,
+                selected_background: Color::Reset,
+                info: Color::Reset,
+                error: Color::Reset,
+                scrollbar: Color::Reset,
+                state_new: Color::Reset,
+                state_active: Color::Reset,
+                state_resolved: Color::Reset,
+                state_closed: Color::Reset,
+                priority_critical: Color::Reset,
+                priority_high: Color::Reset,
+                priority_normal: Color::Reset,
+            }
+        } else {
+            Self {
+                accent: Color::Cyan,
+                muted: Color::DarkGray,
+                text: Color::White,
+                body: Color::Gray,
+                link: Color::Blue,
+                selected_background: Color::DarkGray,
+                info: Color::Yellow,
+                error: Color::Red,
+                scrollbar: Color::DarkGray,
+                state_new: Color::Blue,
+                state_active: Color::Yellow,
+                state_resolved: Color::Magenta,
+                state_closed: Color::Green,
+                priority_critical: Color::Red,
+                priority_high: Color::Yellow,
+                priority_normal: Color::Blue,
+            }
+        }
+    }
+}
+
+fn theme() -> &'static Theme {
+    static THEME: OnceLock<Theme> = OnceLock::new();
+    THEME.get_or_init(|| Theme::new(std::env::var_os("NO_COLOR").is_some()))
+}
 
 #[derive(Clone, Copy)]
 struct ColumnDef {
@@ -61,7 +135,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let text = if app.query.is_empty() && !active {
         Line::styled(
             "Type / to search ID, title, assignee, state, type, area, iteration, or tags",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme().muted),
         )
     } else {
         Line::from(app.query.as_str())
@@ -145,28 +219,35 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         } else {
             ""
         };
-        Cell::from(format!("{}{}", column.field.label(), direction))
+        let label = match column.field {
+            SortField::Priority => "Pri",
+            _ => column.field.label(),
+        };
+        let line = Line::from(format!("{label}{direction}"));
+        Cell::from(if is_numeric(column.field) {
+            line.right_aligned()
+        } else {
+            line
+        })
     }))
     .style(
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme().accent)
             .add_modifier(Modifier::BOLD),
     )
     .height(1)
     .bottom_margin(1);
 
+    let now = OffsetDateTime::now_utc();
     let rows = app.visible_tickets().map(|ticket| {
         Row::new(columns.iter().map(|column| {
-            let cell = Cell::from(cell_value(ticket, column.field));
-            if column.field == SortField::Id {
-                cell.style(
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::UNDERLINED),
-                )
+            let line = Line::from(cell_value(ticket, column.field, now));
+            let cell = Cell::from(if is_numeric(column.field) {
+                line.right_aligned()
             } else {
-                cell
-            }
+                line
+            });
+            cell.style(cell_style(ticket, column.field))
         }))
     });
     let table = Table::new(rows, constraints.clone())
@@ -175,8 +256,8 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .column_spacing(1)
         .row_highlight_style(
             Style::default()
-                .bg(Color::DarkGray)
-                .fg(Color::White)
+                .bg(theme().selected_background)
+                .fg(theme().text)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("› ")
@@ -210,6 +291,21 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.hit_regions.id_column =
                 Some(Rect::new(id_area.x, body.y, id_area.width, body.height));
         }
+        if count > usize::from(body.height) {
+            let mut scrollbar_state = ScrollbarState::new(count)
+                .position(app.table_state.offset())
+                .viewport_content_length(usize::from(body.height));
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .track_symbol(Some("│"))
+                    .thumb_symbol("┃")
+                    .style(Style::default().fg(theme().scrollbar)),
+                body,
+                &mut scrollbar_state,
+            );
+        }
     }
 
     if count == 0 && inner.height > 2 {
@@ -225,7 +321,7 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         frame.render_widget(
             Paragraph::new(message)
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(theme().muted)),
             Rect::new(
                 inner.x,
                 inner.y.saturating_add(inner.height / 2),
@@ -251,13 +347,13 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         app.set_details_max_scroll(0);
         frame.render_widget(
             Paragraph::new("Select a ticket to view details")
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(theme().muted)),
             inner,
         );
         return;
     };
 
-    let metadata_height = inner.height.saturating_sub(2).min(8);
+    let metadata_height = inner.height.saturating_sub(2).min(4);
     let chunks = Layout::vertical([
         Constraint::Length(metadata_height),
         Constraint::Length((inner.height > metadata_height).into()),
@@ -268,42 +364,16 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Line::styled(
             ticket.title.as_str(),
             Style::default()
-                .fg(Color::White)
+                .fg(theme().text)
                 .add_modifier(Modifier::BOLD),
         ),
-        field_line(
-            "ID / Type / State",
-            format!(
-                "{} · {} · {}",
-                ticket.key.id, ticket.work_item_type, ticket.state
-            ),
-        ),
-        field_line(
-            "Assignee / Priority",
-            format!(
-                "{} · {}",
-                ticket.assigned_to.as_deref().unwrap_or("Unassigned"),
-                ticket
-                    .priority
-                    .map_or_else(|| "—".into(), |priority| priority.to_string())
-            ),
-        ),
+        ticket_identity_line(&ticket),
+        ticket_assignment_line(&ticket),
         field_line(
             "Project / Revision",
             format!(
                 "{} / {} · r{}",
                 ticket.key.organization, ticket.project, ticket.revision
-            ),
-        ),
-        field_line("Area", ticket.area_path.as_str()),
-        field_line("Iteration", ticket.iteration_path.as_str()),
-        field_line("Tags", ticket.tags.join(", ")),
-        field_line(
-            "Created / Changed",
-            format!(
-                "{} · {}",
-                short_date(&ticket.created_at),
-                short_date(&ticket.changed_at)
             ),
         ),
     ]);
@@ -314,7 +384,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Paragraph::new(Line::styled(
                 ticket.web_url.as_str(),
                 Style::default()
-                    .fg(Color::Blue)
+                    .fg(theme().link)
                     .add_modifier(Modifier::UNDERLINED),
             )),
             chunks[1],
@@ -322,13 +392,31 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         app.hit_regions.detail_url = Some(chunks[1]);
     }
     if chunks[2].height > 0 {
-        let reason = ticket
-            .reason
-            .as_deref()
-            .map_or_else(String::new, |reason| format!("Reason: {reason}\n\n"));
-        let paragraph = Paragraph::new(format!("{reason}{}", ticket.description))
+        let mut detail_lines = vec![
+            section_line("Planning"),
+            field_line("Area", ticket.area_path.as_str()),
+            field_line("Iteration", ticket.iteration_path.as_str()),
+            field_line("Tags", ticket.tags.join(", ")),
+            field_line("Created", exact_timestamp(&ticket.created_at)),
+            field_line("Changed", exact_timestamp(&ticket.changed_at)),
+            Line::default(),
+            section_line("Description"),
+        ];
+        if let Some(reason) = ticket.reason.as_deref() {
+            detail_lines.push(field_line("Reason", reason));
+            detail_lines.push(Line::default());
+        }
+        if ticket.description.is_empty() {
+            detail_lines.push(Line::styled(
+                "No description",
+                Style::default().fg(theme().muted),
+            ));
+        } else {
+            detail_lines.extend(ticket.description.lines().map(Line::from));
+        }
+        let paragraph = Paragraph::new(Text::from(detail_lines))
             .wrap(Wrap { trim: false })
-            .style(Style::default().fg(Color::Gray));
+            .style(Style::default().fg(theme().body));
         let line_count = paragraph.line_count(chunks[2].width);
         let maximum = line_count.saturating_sub(usize::from(chunks[2].height));
         app.set_details_max_scroll(u16::try_from(maximum).unwrap_or(u16::MAX));
@@ -343,7 +431,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     .end_symbol(None)
                     .track_symbol(Some("│"))
                     .thumb_symbol("┃")
-                    .style(Style::default().fg(Color::DarkGray)),
+                    .style(Style::default().fg(theme().scrollbar)),
                 chunks[2],
                 &mut scrollbar_state,
             );
@@ -356,8 +444,8 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let (text, style) = if let Some((message, level)) = app.notification() {
         let color = match level {
-            NotificationLevel::Info => Color::Yellow,
-            NotificationLevel::Error => Color::Red,
+            NotificationLevel::Info => theme().info,
+            NotificationLevel::Error => theme().error,
         };
         (message, Style::default().fg(color))
     } else {
@@ -377,7 +465,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 "↑↓/jk move  / search  s sort  Enter/o open  r reload  Tab details  ? help  q quit"
             }
         };
-        (text, Style::default().fg(Color::DarkGray))
+        (text, Style::default().fg(theme().muted))
     };
     frame.render_widget(
         Paragraph::new(text)
@@ -393,7 +481,7 @@ fn render_sort_popup(frame: &mut Frame<'_>, app: &mut App) {
     let block = Block::default()
         .title(" Sort tickets ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme().accent));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -417,7 +505,7 @@ fn render_sort_popup(frame: &mut Frame<'_>, app: &mut App) {
             format!("{marker} {:<14} {direction}", field.label()),
             if selected {
                 Style::default()
-                    .bg(Color::DarkGray)
+                    .bg(theme().selected_background)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
@@ -457,13 +545,13 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from(""),
         Line::styled(
             "Press ? or Esc to close",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme().muted),
         ),
     ]);
     let block = Block::default()
         .title(" Help ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(theme().accent));
     let inner = block.inner(area);
     let paragraph = Paragraph::new(help).block(block).wrap(Wrap { trim: false });
     let line_count = paragraph.line_count(area.width);
@@ -478,7 +566,7 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .style(Style::default().fg(Color::DarkGray)),
+                .style(Style::default().fg(theme().scrollbar)),
             area,
             &mut scrollbar_state,
         );
@@ -529,9 +617,9 @@ fn columns_for(width: u16) -> Vec<ColumnDef> {
     columns
 }
 
-fn cell_value(ticket: &Ticket, field: SortField) -> String {
+fn cell_value(ticket: &Ticket, field: SortField, now: OffsetDateTime) -> String {
     match field {
-        SortField::Changed => short_date(&ticket.changed_at).to_owned(),
+        SortField::Changed => relative_changed_at(&ticket.changed_at, now),
         SortField::Priority => ticket
             .priority
             .map_or_else(|| "—".into(), |p| p.to_string()),
@@ -546,8 +634,123 @@ fn cell_value(ticket: &Ticket, field: SortField) -> String {
     }
 }
 
+fn is_numeric(field: SortField) -> bool {
+    matches!(field, SortField::Id | SortField::Priority)
+}
+
+fn cell_style(ticket: &Ticket, field: SortField) -> Style {
+    match field {
+        SortField::Id => Style::default()
+            .fg(theme().link)
+            .add_modifier(Modifier::UNDERLINED),
+        SortField::State => state_style(&ticket.state),
+        SortField::Priority => priority_style(ticket.priority),
+        _ => Style::default(),
+    }
+}
+
+fn state_style(state: &str) -> Style {
+    let color = match state.to_ascii_lowercase().as_str() {
+        "new" => theme().state_new,
+        "active" => theme().state_active,
+        "resolved" => theme().state_resolved,
+        "closed" => theme().state_closed,
+        _ => theme().muted,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn priority_style(priority: Option<i64>) -> Style {
+    let color = match priority {
+        Some(1) => theme().priority_critical,
+        Some(2) => theme().priority_high,
+        Some(3 | 4) => theme().priority_normal,
+        _ => theme().muted,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn relative_changed_at(timestamp: &str, now: OffsetDateTime) -> String {
+    let Ok(changed) = OffsetDateTime::parse(timestamp, &Rfc3339) else {
+        return short_date(timestamp).to_owned();
+    };
+    let age = now - changed;
+    if age.is_negative() {
+        return short_date(timestamp).to_owned();
+    }
+    if age.whole_minutes() < 1 {
+        return "now".into();
+    }
+    if age.whole_hours() < 1 {
+        return format!("{}m", age.whole_minutes());
+    }
+    if age.whole_days() < 1 {
+        return format!("{}h", age.whole_hours());
+    }
+    if age.whole_days() < 7 {
+        return format!("{}d", age.whole_days());
+    }
+    if changed.year() == now.year() {
+        return changed
+            .format(format_description!("[month repr:short] [day padding:none]"))
+            .unwrap_or_else(|_| short_date(timestamp).to_owned());
+    }
+    short_date(timestamp).to_owned()
+}
+
+fn exact_timestamp(timestamp: &str) -> String {
+    OffsetDateTime::parse(timestamp, &Rfc3339)
+        .ok()
+        .and_then(|value| {
+            value
+                .to_offset(UtcOffset::UTC)
+                .format(format_description!(
+                    "[year]-[month]-[day] [hour]:[minute]:[second] UTC"
+                ))
+                .ok()
+        })
+        .unwrap_or_else(|| timestamp.to_owned())
+}
+
 fn short_date(timestamp: &str) -> &str {
     timestamp.get(..10).unwrap_or(timestamp)
+}
+
+fn ticket_identity_line(ticket: &Ticket) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            "ID / Type / State: ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(ticket.key.id.to_string()),
+        Span::raw(" · "),
+        Span::styled(
+            ticket.work_item_type.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" · "),
+        Span::styled(ticket.state.clone(), state_style(&ticket.state)),
+    ])
+}
+
+fn ticket_assignment_line(ticket: &Ticket) -> Line<'static> {
+    let priority = ticket
+        .priority
+        .map_or_else(|| "—".into(), |priority| priority.to_string());
+    Line::from(vec![
+        Span::styled(
+            "Assignee / Priority: ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(
+            ticket
+                .assigned_to
+                .clone()
+                .unwrap_or_else(|| "Unassigned".into()),
+        ),
+        Span::raw(" · "),
+        Span::styled(priority, priority_style(ticket.priority)),
+    ])
 }
 
 fn field_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
@@ -560,14 +763,23 @@ fn field_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
     ])
 }
 
+fn section_line(title: &'static str) -> Line<'static> {
+    Line::styled(
+        title,
+        Style::default()
+            .fg(theme().accent)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
 fn focused_block<'a>(title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
     Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(if focused {
-            Color::Cyan
+            theme().accent
         } else {
-            Color::DarkGray
+            theme().muted
         }))
 }
 
@@ -600,6 +812,7 @@ mod tests {
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use time::macros::datetime;
 
     use super::*;
     use crate::model::TicketKey;
@@ -650,6 +863,8 @@ mod tests {
         assert!(text.contains("Tickets 1/1"));
         assert!(text.contains("Details"));
         assert!(text.contains("Fix ticket search"));
+        assert!(text.contains("Pri"));
+        assert!(text.contains("2026-01-01 00:00:00 UTC"));
         assert!(app.hit_regions.detail_url.is_some());
     }
 
@@ -784,5 +999,54 @@ mod tests {
         let text = render_text(40, 12, &mut app);
 
         assert!(text.contains("visible tail is unique"));
+    }
+
+    #[test]
+    fn long_ticket_table_renders_a_position_scrollbar() {
+        let tickets = (0..30)
+            .map(|index| {
+                let mut item = ticket();
+                item.key.id += index;
+                item.title = format!("Ticket {index}");
+                item
+            })
+            .collect();
+        let mut app = App::new(tickets);
+
+        let text = render_text(60, 15, &mut app);
+
+        assert!(text.contains('┃'));
+    }
+
+    #[test]
+    fn changed_dates_use_compact_relative_labels() {
+        let now = datetime!(2026-08-26 18:00 UTC);
+
+        assert_eq!(relative_changed_at("2026-08-26T17:30:00Z", now), "30m");
+        assert_eq!(relative_changed_at("2026-08-26T12:00:00Z", now), "6h");
+        assert_eq!(relative_changed_at("2026-08-23T18:00:00Z", now), "3d");
+        assert_eq!(relative_changed_at("2026-07-01T00:00:00Z", now), "Jul 1");
+        assert_eq!(
+            relative_changed_at("2025-07-01T00:00:00Z", now),
+            "2025-07-01"
+        );
+    }
+
+    #[test]
+    fn details_normalize_exact_timestamps_to_utc() {
+        assert_eq!(
+            exact_timestamp("2026-08-26T13:00:00-05:00"),
+            "2026-08-26 18:00:00 UTC"
+        );
+    }
+
+    #[test]
+    fn monochrome_theme_resets_every_semantic_color() {
+        let monochrome = Theme::new(true);
+
+        assert_eq!(monochrome.accent, Color::Reset);
+        assert_eq!(monochrome.state_active, Color::Reset);
+        assert_eq!(monochrome.priority_critical, Color::Reset);
+        assert_eq!(monochrome.error, Color::Reset);
     }
 }
