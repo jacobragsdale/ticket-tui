@@ -7,7 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 
 use crate::model::{SortDirection, SortField, Ticket, TicketKey, compare_tickets};
-use crate::search::{SearchEngine, SearchMatch};
+use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AppMode {
@@ -91,6 +91,28 @@ pub struct HitRegions {
     pub sort_rows: Vec<(Rect, SortField)>,
 }
 
+#[derive(Debug)]
+pub struct PreparedTickets {
+    tickets: Vec<Ticket>,
+    search_documents: SearchDocuments,
+}
+
+impl PreparedTickets {
+    #[must_use]
+    pub fn new(tickets: Vec<Ticket>) -> Self {
+        let search_documents = SearchDocuments::prepare(&tickets);
+        Self {
+            tickets,
+            search_documents,
+        }
+    }
+
+    #[must_use]
+    pub fn ticket_count(&self) -> usize {
+        self.tickets.len()
+    }
+}
+
 pub struct App {
     tickets: Arc<Vec<Ticket>>,
     visible: Vec<SearchMatch>,
@@ -114,6 +136,7 @@ pub struct App {
     pub help_scroll: u16,
     pub help_max_scroll: u16,
     pub narrow_details: bool,
+    pub reload_pending: bool,
     pub should_quit: bool,
     notification: Option<Notification>,
     pub sort_draft: SortDraft,
@@ -123,9 +146,10 @@ pub struct App {
 impl App {
     #[must_use]
     pub fn new(tickets: Vec<Ticket>) -> Self {
-        let search = SearchEngine::new(&tickets);
+        let prepared = PreparedTickets::new(tickets);
+        let search = SearchEngine::from_documents(prepared.search_documents);
         let mut app = Self {
-            tickets: Arc::new(tickets),
+            tickets: Arc::new(prepared.tickets),
             visible: Vec::new(),
             search,
             search_generation: 0,
@@ -147,6 +171,7 @@ impl App {
             help_scroll: 0,
             help_max_scroll: 0,
             narrow_details: false,
+            reload_pending: false,
             should_quit: false,
             notification: None,
             sort_draft: SortDraft {
@@ -188,9 +213,13 @@ impl App {
     }
 
     pub fn replace_tickets(&mut self, tickets: Vec<Ticket>) {
+        self.replace_prepared_tickets(PreparedTickets::new(tickets));
+    }
+
+    pub fn replace_prepared_tickets(&mut self, prepared: PreparedTickets) {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
-        self.tickets = Arc::new(tickets);
-        self.search.replace_tickets(&self.tickets);
+        self.tickets = Arc::new(prepared.tickets);
+        self.search.replace_documents(prepared.search_documents);
         if self.query.is_empty() {
             self.show_all(selected.as_ref());
         } else {

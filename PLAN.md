@@ -47,7 +47,7 @@ connect to a remote ticket service.
 - [x] Add first/last and page navigation to long detail content.
 - [x] Make help and future overlays scrollable in short terminals.
 - [x] Replace continuous idle redraws with event-driven rendering.
-- [ ] Move database reload and search-document rebuilding off the UI thread.
+- [x] Move database reload and search-document rebuilding off the UI thread.
 
 ### Behavior clarity
 
@@ -55,8 +55,10 @@ connect to a remote ticket service.
   explicit, and allow strict field sorting while a search is active.
 - [x] Preserve ticket selection, table offset, detail position, and active pane
   whenever the underlying operation permits it.
-- [ ] Make empty, loading, stale, and error states visually distinct.
-- [ ] Add explicit confirmation or feedback for every mouse-only affordance.
+- [x] Make empty, loading, and error states visually distinct.
+- [ ] Add a stale-data state after automatic watching and freshness metadata
+  are available.
+- [x] Provide immediate visual feedback for every mouse affordance.
 
 ## Phase 2: visual system and responsive layout
 

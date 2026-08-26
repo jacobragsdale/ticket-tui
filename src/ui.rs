@@ -116,6 +116,11 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.sort_direction.symbol()
         )
     };
+    let activity = if app.reload_pending {
+        " · Reloading…"
+    } else {
+        ""
+    };
     let title = if area.width < NARROW_BREAKPOINT {
         let short_order = if app.query.is_empty() {
             app.sort_direction.symbol()
@@ -125,9 +130,9 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 SearchOrder::Field => "Field",
             }
         };
-        format!(" Tickets {count}/{total} · {short_order} · Tab: Details → ")
+        format!(" Tickets {count}/{total} · {short_order}{activity} · Tab: Details → ")
     } else {
-        format!(" Tickets {count}/{total} · {ordering} ")
+        format!(" Tickets {count}/{total} · {ordering}{activity} ")
     };
     let block = focused_block(title, app.focus == Focus::Tickets);
     let inner = block.inner(area);
@@ -208,7 +213,9 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     if count == 0 && inner.height > 2 {
-        let message = if app.query.is_empty() {
+        let message = if app.reload_pending {
+            "Reloading tickets…"
+        } else if app.query.is_empty() {
             "No tickets in this database"
         } else if app.search_pending {
             "Searching…"
@@ -666,6 +673,11 @@ mod tests {
         let mut app = App::new(Vec::new());
         let empty = render_text(90, 24, &mut app);
         assert!(empty.contains("No tickets in this database"));
+
+        app.reload_pending = true;
+        let loading = render_text(90, 24, &mut app);
+        assert!(loading.contains("Reloading tickets"));
+        app.reload_pending = false;
 
         app.mode = AppMode::Help;
         let help = render_text(90, 24, &mut app);

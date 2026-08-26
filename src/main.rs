@@ -1,5 +1,7 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -9,7 +11,7 @@ use crossterm::event::{
     Event, KeyEventKind,
 };
 use crossterm::execute;
-use ticket_tui::app::{App, AppAction};
+use ticket_tui::app::{App, AppAction, PreparedTickets};
 use ticket_tui::db::{SqliteTicketRepository, default_database_path};
 use url::Url;
 
@@ -19,6 +21,46 @@ struct Cli {
     /// SQLite database to open instead of the platform data-directory default
     #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
     database: Option<PathBuf>,
+}
+
+#[derive(Default)]
+struct ReloadEngine {
+    receiver: Option<Receiver<std::result::Result<PreparedTickets, String>>>,
+}
+
+impl ReloadEngine {
+    fn start(&mut self, path: &Path) -> Result<bool> {
+        if self.receiver.is_some() {
+            return Ok(false);
+        }
+
+        let path = path.to_path_buf();
+        let (sender, receiver) = mpsc::channel();
+        thread::Builder::new()
+            .name("ticket-reload".into())
+            .spawn(move || {
+                let result = (|| -> Result<PreparedTickets> {
+                    let opened = SqliteTicketRepository::open(&path)?;
+                    let tickets = opened.repository.load_all()?;
+                    Ok(PreparedTickets::new(tickets))
+                })()
+                .map_err(|error| format!("{error:#}"));
+                let _ = sender.send(result);
+            })
+            .context("failed to start database reload worker")?;
+        self.receiver = Some(receiver);
+        Ok(true)
+    }
+
+    fn try_result(&mut self) -> Option<std::result::Result<PreparedTickets, String>> {
+        let result = match self.receiver.as_ref()?.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Disconnected) => Err("database reload worker stopped".into()),
+        };
+        self.receiver = None;
+        Some(result)
+    }
 }
 
 fn main() {
@@ -47,19 +89,21 @@ fn run_terminal(app: &mut App, repository: &SqliteTicketRepository) -> Result<()
     let mut terminal = ratatui::init();
     let _restore = TerminalRestore;
     let opener = SystemUrlOpener;
+    let mut reloader = ReloadEngine::default();
     execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)
         .context("failed to enable terminal input features")?;
 
     let mut redraw = true;
     while !app.should_quit {
         redraw |= app.poll_search();
+        redraw |= poll_reload(app, &mut reloader);
         redraw |= app.tick();
         if redraw {
             terminal.draw(|frame| ticket_tui::ui::render(frame, app))?;
             redraw = false;
         }
 
-        let timeout = if app.search_pending {
+        let timeout = if app.search_pending || app.reload_pending {
             Duration::from_millis(33)
         } else {
             app.next_wakeup()
@@ -81,7 +125,7 @@ fn run_terminal(app: &mut App, repository: &SqliteTicketRepository) -> Result<()
                 AppAction::None
             }
         };
-        handle_action(action, app, repository, &opener);
+        handle_action(action, app, repository, &opener, &mut reloader);
     }
     Ok(())
 }
@@ -91,22 +135,39 @@ fn handle_action(
     app: &mut App,
     repository: &SqliteTicketRepository,
     opener: &dyn UrlOpener,
+    reloader: &mut ReloadEngine,
 ) {
     match action {
         AppAction::None => {}
-        AppAction::Reload => match repository.load_all() {
-            Ok(tickets) => {
-                let count = tickets.len();
-                app.replace_tickets(tickets);
-                app.set_status(format!("Reloaded {count} tickets"));
+        AppAction::Reload => match reloader.start(repository.path()) {
+            Ok(true) => {
+                app.reload_pending = true;
+                app.set_status("Reloading tickets…");
             }
-            Err(error) => app.set_error(format!("Reload failed: {error:#}")),
+            Ok(false) => app.set_status("Reload already in progress"),
+            Err(error) => app.set_error(format!("Could not start reload: {error:#}")),
         },
         AppAction::OpenUrl(raw_url) => match open_https_url(&raw_url, opener) {
             Ok(()) => app.set_status(format!("Opened {raw_url}")),
             Err(error) => app.set_error(format!("Could not open ticket: {error:#}")),
         },
     }
+}
+
+fn poll_reload(app: &mut App, reloader: &mut ReloadEngine) -> bool {
+    let Some(result) = reloader.try_result() else {
+        return false;
+    };
+    app.reload_pending = false;
+    match result {
+        Ok(prepared) => {
+            let count = prepared.ticket_count();
+            app.replace_prepared_tickets(prepared);
+            app.set_status(format!("Reloaded {count} tickets"));
+        }
+        Err(error) => app.set_error(format!("Reload failed: {error}")),
+    }
+    true
 }
 
 fn open_https_url(raw_url: &str, opener: &dyn UrlOpener) -> Result<()> {
@@ -140,7 +201,10 @@ impl Drop for TerminalRestore {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
+    use tempfile::tempdir;
 
     struct FailingOpener;
 
@@ -166,5 +230,27 @@ mod tests {
     fn reports_launcher_failures_without_opening_a_browser() {
         let error = open_https_url("https://dev.azure.com/demo", &FailingOpener).unwrap_err();
         assert!(error.to_string().contains("system URL launcher failed"));
+    }
+
+    #[test]
+    fn reload_engine_loads_and_prepares_tickets_in_the_background() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let opened = SqliteTicketRepository::open(&path).unwrap();
+        drop(opened);
+        let mut reloader = ReloadEngine::default();
+
+        assert!(reloader.start(&path).unwrap());
+        assert!(!reloader.start(&path).unwrap());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let prepared = loop {
+            if let Some(result) = reloader.try_result() {
+                break result.unwrap();
+            }
+            assert!(Instant::now() < deadline, "reload worker timed out");
+            thread::yield_now();
+        };
+        assert_eq!(prepared.ticket_count(), 500);
     }
 }

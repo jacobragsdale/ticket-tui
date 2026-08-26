@@ -58,7 +58,7 @@ to a database prepared by another tool.
 | `Tab` | Switch focus between tickets and details |
 | `d` | Toggle the details screen when the terminal is under 70 columns |
 | `Enter`, `o` | Open the selected ticket in the system browser |
-| `r` | Reload the SQLite database |
+| `r` | Reload and rebuild the search index in the background |
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
 

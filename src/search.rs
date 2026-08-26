@@ -25,6 +25,29 @@ struct SearchDocument {
     text: Utf32String,
 }
 
+#[derive(Debug)]
+pub struct SearchDocuments {
+    documents: Arc<Vec<SearchDocument>>,
+}
+
+impl SearchDocuments {
+    #[must_use]
+    pub fn prepare(tickets: &[Ticket]) -> Self {
+        Self {
+            documents: Arc::new(
+                tickets
+                    .iter()
+                    .enumerate()
+                    .map(|(ticket_index, ticket)| SearchDocument {
+                        ticket_index,
+                        text: ticket.searchable_text().into(),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
 enum Command {
     Search {
         generation: u64,
@@ -45,6 +68,11 @@ pub struct SearchEngine {
 impl SearchEngine {
     #[must_use]
     pub fn new(tickets: &[Ticket]) -> Self {
+        Self::from_documents(SearchDocuments::prepare(tickets))
+    }
+
+    #[must_use]
+    pub fn from_documents(documents: SearchDocuments) -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (result_sender, result_receiver) = mpsc::channel();
         let worker = thread::Builder::new()
@@ -57,12 +85,16 @@ impl SearchEngine {
             receiver: result_receiver,
             worker: Some(worker),
             generation: 0,
-            documents: documents_for(tickets),
+            documents: documents.documents,
         }
     }
 
     pub fn replace_tickets(&mut self, tickets: &[Ticket]) {
-        self.documents = documents_for(tickets);
+        self.replace_documents(SearchDocuments::prepare(tickets));
+    }
+
+    pub fn replace_documents(&mut self, documents: SearchDocuments) {
+        self.documents = documents.documents;
     }
 
     pub fn submit(&mut self, query: &str) -> u64 {
@@ -94,19 +126,6 @@ impl Drop for SearchEngine {
             let _ = worker.join();
         }
     }
-}
-
-fn documents_for(tickets: &[Ticket]) -> Arc<Vec<SearchDocument>> {
-    Arc::new(
-        tickets
-            .iter()
-            .enumerate()
-            .map(|(ticket_index, ticket)| SearchDocument {
-                ticket_index,
-                text: ticket.searchable_text().into(),
-            })
-            .collect(),
-    )
 }
 
 fn search_worker(receiver: Receiver<Command>, sender: Sender<SearchResult>) {
