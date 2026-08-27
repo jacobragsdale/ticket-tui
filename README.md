@@ -87,9 +87,8 @@ to a database prepared by another tool.
 | `q`, `Ctrl-C` | Quit |
 
 Mouse input can select rows, scroll either pane, sort by visible headers, click
-filter-bar pills and table/detail badges (state, type, tags, assignee) to
-toggle filters, click extra-field chips to remove them, and open an underlined
-ticket ID or detail URL.
+filter-bar pills to choose values, click extra-field chips to remove them, and
+open an underlined ticket ID or detail URL.
 
 Search accepts a compact grammar such as `state:active type:bug
 assignee:"Avery Chen" priority:1 tag:rust`. Values in the same field are

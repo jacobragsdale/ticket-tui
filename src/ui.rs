@@ -150,7 +150,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     let text = if app.query.is_empty() && !active {
         Line::styled(
-            "Type / to search, click a tag, or use the filter bar below",
+            "Type / to search, or pick State, Type, Tags, or Assignee below",
             Style::default().fg(theme().muted),
         )
     } else {
@@ -321,7 +321,6 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.hit_regions.id_column =
                 Some(Rect::new(id_area.x, body.y, id_area.width, body.height));
         }
-        record_table_filter_hits(app, &header_columns, &columns, body, density);
         let visible_rows = usize::from(body.height / density.row_height()).max(1);
         if count > visible_rows {
             let mut scrollbar_state = ScrollbarState::new(count)
@@ -415,7 +414,6 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ),
     ]);
     frame.render_widget(Paragraph::new(metadata), chunks[0]);
-    record_detail_filter_hits(app, chunks[0], &ticket);
 
     if chunks[1].height > 0 {
         frame.render_widget(Paragraph::new(link_line(ticket.web_url.clone())), chunks[1]);
@@ -547,10 +545,10 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
             }
             AppMode::Browse if !app.query.is_empty() => {
-                "↑↓/jk move  f filters  click tag/type  Esc clear  ? help  q quit"
+                "↑↓/jk move  f filters  Esc clear  ? help  q quit"
             }
             AppMode::Browse => {
-                "↑↓/jk move  / search  f filters  click a tag  s sort  Enter/o open  ? help  q quit"
+                "↑↓/jk move  / search  f filters  s sort  Enter/o open  ? help  q quit"
             }
         };
         (text, Style::default().fg(theme().muted))
@@ -627,7 +625,6 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  Ctrl-P/Ctrl-N   Previous / next completed query"),
         Line::from("  state:active    Structured filters in the query"),
         Line::from("  f               Focus the filter bar; Space toggles values"),
-        Line::from("  click tag/type  Toggle that value as a filter"),
         Line::from("  +               More filters (priority, project, area…)"),
         Line::from("  Paste           Insert sanitized text"),
         Line::from(""),
@@ -1147,160 +1144,6 @@ fn overlay_line(text: String, selected: bool) -> Line<'static> {
             Style::default()
         },
     )
-}
-
-fn record_table_filter_hits(
-    app: &mut App,
-    header_columns: &[Rect],
-    columns: &[crate::columns::ColumnConfig],
-    body: Rect,
-    density: RowDensity,
-) {
-    let offset = app.table_state.offset();
-    let row_height = density.row_height();
-    let visible = usize::from(body.height / row_height).max(1);
-    let rows: Vec<_> = app
-        .visible_tickets()
-        .skip(offset)
-        .take(visible)
-        .map(|ticket| {
-            (
-                ticket.state.clone(),
-                ticket.work_item_type.clone(),
-                ticket.tags.clone(),
-                ticket
-                    .assigned_to
-                    .clone()
-                    .unwrap_or_else(|| "Unassigned".into()),
-            )
-        })
-        .collect();
-    for (index, (state, work_item_type, tags, assignee)) in rows.into_iter().enumerate() {
-        let y = body
-            .y
-            .saturating_add(u16::try_from(index).unwrap_or(u16::MAX) * row_height);
-        if y >= body.y.saturating_add(body.height) {
-            break;
-        }
-        for (column_area, column) in header_columns.iter().zip(columns.iter()) {
-            let cell = Rect::new(column_area.x, y, column_area.width, 1);
-            match column.id {
-                SortField::State => {
-                    app.hit_regions
-                        .filter_hits
-                        .push((cell, FilterField::State, state.clone()))
-                }
-                SortField::Type => app.hit_regions.filter_hits.push((
-                    cell,
-                    FilterField::Type,
-                    work_item_type.clone(),
-                )),
-                SortField::Assignee => app.hit_regions.filter_hits.push((
-                    cell,
-                    FilterField::Assignee,
-                    assignee.clone(),
-                )),
-                SortField::Tags => record_tag_hits(
-                    &mut app.hit_regions.filter_hits,
-                    column_area.x,
-                    y,
-                    column_area.width,
-                    &tags,
-                ),
-                SortField::Title if density == RowDensity::Comfortable => {
-                    let tag_y = y.saturating_add(1);
-                    if tag_y < body.y.saturating_add(body.height) {
-                        record_tag_hits(
-                            &mut app.hit_regions.filter_hits,
-                            column_area.x,
-                            tag_y,
-                            column_area.width,
-                            &tags,
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-fn record_detail_filter_hits(app: &mut App, area: Rect, ticket: &Ticket) {
-    if area.height < 2 {
-        return;
-    }
-    let identity_y = area.y.saturating_add(1);
-    let mut x = area.x.saturating_add(19); // "ID / Type / State: "
-    x = x.saturating_add(u16::try_from(ticket.key.id.to_string().chars().count()).unwrap_or(0));
-    x = x.saturating_add(3); // " · "
-    let type_width = u16::try_from(ticket.work_item_type.chars().count())
-        .unwrap_or(0)
-        .saturating_add(2);
-    app.hit_regions.filter_hits.push((
-        Rect::new(x, identity_y, type_width.max(1), 1),
-        FilterField::Type,
-        ticket.work_item_type.clone(),
-    ));
-    x = x.saturating_add(type_width.saturating_add(3));
-    let state_width = u16::try_from(ticket.state.chars().count())
-        .unwrap_or(1)
-        .max(1);
-    app.hit_regions.filter_hits.push((
-        Rect::new(x, identity_y, state_width, 1),
-        FilterField::State,
-        ticket.state.clone(),
-    ));
-
-    if area.height >= 3 {
-        let assignee = ticket
-            .assigned_to
-            .clone()
-            .unwrap_or_else(|| "Unassigned".into());
-        let assignee_width = u16::try_from(assignee.chars().count()).unwrap_or(1).max(1);
-        app.hit_regions.filter_hits.push((
-            Rect::new(
-                area.x.saturating_add(21),
-                area.y.saturating_add(2),
-                assignee_width,
-                1,
-            ),
-            FilterField::Assignee,
-            assignee,
-        ));
-    }
-    if area.height >= 4 && !ticket.tags.is_empty() {
-        record_tag_hits(
-            &mut app.hit_regions.filter_hits,
-            area.x.saturating_add(6),
-            area.y.saturating_add(3),
-            area.width.saturating_sub(6),
-            &ticket.tags,
-        );
-    }
-}
-
-fn record_tag_hits(
-    hits: &mut Vec<(Rect, FilterField, String)>,
-    mut x: u16,
-    y: u16,
-    width: u16,
-    tags: &[String],
-) {
-    let end = x.saturating_add(width);
-    for tag in tags {
-        let tag_width = u16::try_from(tag.chars().count())
-            .unwrap_or(1)
-            .saturating_add(2);
-        if x.saturating_add(tag_width) > end {
-            break;
-        }
-        hits.push((
-            Rect::new(x, y, tag_width, 1),
-            FilterField::Tags,
-            tag.clone(),
-        ));
-        x = x.saturating_add(tag_width.saturating_add(1));
-    }
 }
 
 fn table_cell(
@@ -2064,32 +1907,30 @@ mod tests {
     }
 
     #[test]
-    fn facet_bar_is_visible_and_clicking_a_type_filters() {
+    fn facet_bar_is_visible_and_clicking_a_pill_opens_its_menu() {
         let mut app = App::new(vec![ticket()]);
         let text = render_text(110, 24, &mut app);
         assert!(text.contains("State"));
         assert!(text.contains("Type"));
         assert!(text.contains("▾"));
 
-        let hit = app
+        let pill = app
             .hit_regions
-            .filter_hits
+            .facet_pills
             .iter()
-            .find(|(_, field, value)| *field == FilterField::Type && value == "Bug")
-            .cloned()
-            .expect("type badge should be clickable");
+            .find(|(_, target)| matches!(target, FacetTarget::Field(FilterField::Type)))
+            .map(|(area, _)| *area)
+            .expect("type pill should be clickable");
         app.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: hit.0.x,
-            row: hit.0.y,
+            column: pill.x,
+            row: pill.y,
             modifiers: KeyModifiers::NONE,
         });
-        assert!(app.query.to_ascii_lowercase().contains("type:bug"));
-        assert!(
-            app.hit_regions
-                .facet_pills
-                .iter()
-                .any(|(_, target)| matches!(target, FacetTarget::Field(FilterField::Type)))
+        assert_eq!(app.mode, AppMode::Facets);
+        assert_eq!(
+            FilterField::BAR.get(app.facet_bar.field_index).copied(),
+            Some(FilterField::Type)
         );
     }
 

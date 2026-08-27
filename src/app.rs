@@ -84,7 +84,6 @@ pub struct HitRegions {
     pub chips: Vec<(Rect, FilterToken)>,
     pub facet_pills: Vec<(Rect, FacetTarget)>,
     pub facet_values: Vec<(Rect, usize)>,
-    pub filter_hits: Vec<(Rect, FilterField, String)>,
     pub table: Option<Rect>,
     pub table_body: Option<Rect>,
     pub id_column: Option<Rect>,
@@ -957,16 +956,6 @@ impl App {
                         self.open_facets(index);
                     }
                 }
-                return AppAction::None;
-            }
-            if let Some((_, field, value)) = self
-                .hit_regions
-                .filter_hits
-                .iter()
-                .find(|(area, _, _)| contains(*area, column, row))
-                .cloned()
-            {
-                self.toggle_filter(field, &value);
                 return AppAction::None;
             }
             if self.mode == AppMode::Facets {
