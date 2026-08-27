@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 
 use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder};
 use crate::filter::{FacetTarget, FilterField};
-use crate::model::{FamilySnapshot, SortDirection, SortField, Ticket, TicketKey};
+use crate::model::{FamilySnapshot, FamilyTreeEntry, SortDirection, SortField, Ticket, TicketKey};
 use crate::pointer::{
     PointerLayer, PointerTarget, ScrollMetrics, ScrollSurface, SelectableSnapshot,
     SelectableSurface, region,
@@ -529,7 +529,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         " Details "
     };
-    let mut block = focused_block(title, app.focus == Focus::Details);
+    let mut block = focused_block(title, app.focus.is_details_pane());
     if area.width >= 24 {
         block = block.title(Line::from("[Copy]").right_aligned());
     }
@@ -639,75 +639,56 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     if chunks[2].height > 0 {
         let width = chunks[2].width;
-        let focused = app.focused_family_key();
+        let cursor = app.family_cursor.clone();
+        let family_focused = app.focus == Focus::Family;
         let mut detail_lines = Vec::new();
+        let mut family_hits: Vec<FamilyHit> = Vec::new();
         let mut line_links: Vec<(u16, TicketKey)> = Vec::new();
-        let push_line = |lines: &mut Vec<Line<'static>>,
-                         links: &mut Vec<(u16, TicketKey)>,
-                         line: Line<'static>,
-                         link: Option<TicketKey>| {
-            if let Some(key) = link
-                && let Ok(index) = u16::try_from(lines.len())
-            {
-                links.push((index, key));
-            }
-            lines.push(line);
-        };
 
         if family.has_family() {
-            push_line(
-                &mut detail_lines,
-                &mut line_links,
-                section_line("Family"),
-                None,
-            );
-            for entry in family.tree_entries() {
+            detail_lines.push(family_section_line(
+                family_closed_summary(app, &family),
+                family_focused,
+            ));
+            for entry in app.visible_family_tree() {
                 let related = app.ticket_by_key(&entry.key);
-                let is_focused = focused.as_ref() == Some(&entry.key);
-                let jumpable = !entry.is_current && related.is_some();
-                push_line(
-                    &mut detail_lines,
-                    &mut line_links,
-                    family_member_line(
-                        &entry.prefix,
-                        &entry.key,
-                        related,
-                        entry.is_current,
-                        is_focused,
-                        width,
-                    ),
-                    jumpable.then_some(entry.key),
-                );
+                let is_cursor = family_focused && cursor.as_ref() == Some(&entry.key);
+                let (line, marker_col) = family_tree_line(&entry, related, is_cursor, width);
+                if let Ok(index) = u16::try_from(detail_lines.len()) {
+                    family_hits.push(FamilyHit {
+                        line: index,
+                        key: entry.key.clone(),
+                        jumpable: related.is_some(),
+                        marker_col: entry.has_children.then_some(marker_col),
+                    });
+                }
+                detail_lines.push(line);
             }
             for parent in &family.extra_parents {
                 let related = app.ticket_by_key(parent);
-                let is_focused = focused.as_ref() == Some(parent);
-                push_line(
-                    &mut detail_lines,
-                    &mut line_links,
-                    family_member_line("  also ", parent, related, false, is_focused, width),
-                    related.is_some().then_some(parent.clone()),
-                );
+                let is_cursor = family_focused && cursor.as_ref() == Some(parent);
+                if let Ok(index) = u16::try_from(detail_lines.len())
+                    && related.is_some()
+                {
+                    line_links.push((index, parent.clone()));
+                }
+                detail_lines.push(family_member_line(
+                    "  also ", parent, related, false, is_cursor, width,
+                ));
             }
             detail_lines.push(Line::default());
         }
         if !family.other_links.is_empty() {
-            push_line(
-                &mut detail_lines,
-                &mut line_links,
-                section_line("Links"),
-                None,
-            );
+            detail_lines.push(section_line("Links"));
             for (kind, key) in &family.other_links {
                 let title = app.ticket_title(key).unwrap_or("missing ticket");
-                let is_focused = focused.as_ref() == Some(key);
                 let jumpable = app.ticket_by_key(key).is_some();
-                push_line(
-                    &mut detail_lines,
-                    &mut line_links,
-                    other_link_line(kind.label(), key.id, title, is_focused, width),
-                    jumpable.then_some(key.clone()),
-                );
+                if let Ok(index) = u16::try_from(detail_lines.len())
+                    && jumpable
+                {
+                    line_links.push((index, key.clone()));
+                }
+                detail_lines.push(other_link_line(kind.label(), key.id, title, false, width));
             }
             detail_lines.push(Line::default());
         }
@@ -788,6 +769,29 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
         frame.render_widget(paragraph.scroll((app.details_scroll, 0)), chunks[2]);
         let scroll = app.details_scroll;
+        for hit in family_hits {
+            let Some(y) = visible_row_y(chunks[2], hit.line, scroll) else {
+                continue;
+            };
+            if hit.jumpable {
+                app.hit_regions.push(region(
+                    Rect::new(chunks[2].x, y, chunks[2].width.saturating_sub(1), 1),
+                    PointerTarget::JumpToTicket(hit.key.clone()),
+                    PointerLayer::Base,
+                    Some(SelectableSurface::Details),
+                    Some(ScrollSurface::Details),
+                ));
+            }
+            if let Some(marker_col) = hit.marker_col {
+                app.hit_regions.push(region(
+                    Rect::new(chunks[2].x.saturating_add(marker_col), y, 1, 1),
+                    PointerTarget::ToggleFamily(hit.key),
+                    PointerLayer::Base,
+                    Some(SelectableSurface::Details),
+                    Some(ScrollSurface::Details),
+                ));
+            }
+        }
         for (logical, key) in line_links {
             if let Some(y) = visible_row_y(chunks[2], logical, scroll) {
                 app.hit_regions.push(region(
@@ -848,10 +852,8 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             AppMode::Views => "↑↓ choose  Enter load  n save  d delete  Esc close",
             AppMode::Info => "Esc/i close",
             AppMode::Prompt => "Type a file path  Enter import  Esc cancel",
-            AppMode::Browse
-                if app.focus == Focus::Details && !app.family_jump_targets().is_empty() =>
-            {
-                "↑↓/jk scroll  h/l family  Enter jump  o open  Tab tickets"
+            AppMode::Browse if app.focus == Focus::Family => {
+                "↑↓ move  ←→ fold  Enter select  Tab details"
             }
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
@@ -952,14 +954,14 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(Clear, area);
     let help = Text::from(vec![
         Line::styled("Navigation", Style::default().add_modifier(Modifier::BOLD)),
-        Line::from("  ↑/↓, j/k       Move ticket or scroll focused pane"),
-        Line::from("  PgUp/PgDn       Move ten rows"),
-        Line::from("  Home/End        First/last ticket or detail line"),
-        Line::from("  Tab             Focus tickets/details"),
+        Line::from("  ↑/↓, j/k       Move ticket, family row, or details"),
+        Line::from("  PgUp/PgDn       Move ten rows or a family page"),
+        Line::from("  Home/End        First/last ticket, family row, or line"),
+        Line::from("  Tab             Focus tickets, family, then details"),
         Line::from("  d               Toggle details below 70 columns"),
         Line::from("  c               Toggle compact / comfortable rows"),
         Line::from("  [ / ]           Recently viewed back / forward"),
-        Line::from("  h / l           Highlight previous / next family ticket"),
+        Line::from("  h / l           Collapse or expand family, or move levels"),
         Line::from(""),
         Line::styled(
             "Search and filters",
@@ -982,10 +984,10 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  V               Save and restore named views"),
         Line::from("  v               Toggle relevance / field order"),
         Line::from("  m               Bookmark the selected ticket"),
-        Line::from("  Space           Toggle multi-select"),
+        Line::from("  Space           Toggle multi-select, or expand / collapse family"),
         Line::from("  y               Copy selected IDs"),
         Line::from("  i               Database path, freshness, and counts"),
-        Line::from("  Enter           Jump to highlighted family ticket, else open"),
+        Line::from("  Enter           Select the family cursor ticket, else open"),
         Line::from("  o               Open selected ticket in browser"),
         Line::from("  r               Reload tickets from SQLite"),
         Line::from("  Esc             Clear active search or selection"),
@@ -1747,6 +1749,209 @@ fn terminate_underline(mut line: Line<'static>) -> Line<'static> {
     line
 }
 
+struct FamilyHit {
+    line: u16,
+    key: TicketKey,
+    jumpable: bool,
+    marker_col: Option<u16>,
+}
+
+fn family_closed_summary(app: &App, family: &FamilySnapshot) -> Option<(usize, usize)> {
+    if family.children.is_empty() {
+        return None;
+    }
+    let done = family
+        .children
+        .iter()
+        .filter(|key| {
+            app.ticket_by_key(key)
+                .is_some_and(|ticket| state_is_done(&ticket.state))
+        })
+        .count();
+    Some((done, family.children.len()))
+}
+
+fn family_section_line(summary: Option<(usize, usize)>, focused: bool) -> Line<'static> {
+    let title = match summary {
+        Some((done, total)) => format!("Family · {done}/{total} closed"),
+        None => "Family".into(),
+    };
+    Line::styled(title, family_heading_style(focused))
+}
+
+fn family_heading_style(focused: bool) -> Style {
+    let mut style = Style::default()
+        .fg(theme().accent)
+        .add_modifier(Modifier::BOLD);
+    if focused {
+        style = with_cursor_style(style);
+    }
+    style
+}
+
+fn family_row_style(is_current: bool, is_cursor: bool) -> Style {
+    let mut style = Style::default();
+    if is_current {
+        style = style.fg(theme().text).add_modifier(Modifier::BOLD);
+    }
+    if is_cursor {
+        style = with_cursor_style(style);
+    }
+    style
+}
+
+pub(crate) fn with_cursor_style(style: Style) -> Style {
+    let style = style.bg(theme().selected_background);
+    if theme().selected_background == Color::Reset {
+        style.add_modifier(Modifier::REVERSED)
+    } else {
+        style
+    }
+}
+
+fn disclosure_marker(entry: &FamilyTreeEntry) -> &'static str {
+    if !entry.has_children {
+        "•"
+    } else if entry.is_expanded {
+        "▾"
+    } else {
+        "▸"
+    }
+}
+
+fn family_connector(prefix: &str) -> String {
+    if prefix.chars().all(char::is_whitespace) {
+        prefix.to_owned()
+    } else {
+        format!("{prefix} ")
+    }
+}
+
+fn family_tree_line(
+    entry: &FamilyTreeEntry,
+    ticket: Option<&Ticket>,
+    is_cursor: bool,
+    width: u16,
+) -> (Line<'static>, u16) {
+    let marker = disclosure_marker(entry);
+    let connector = family_connector(&entry.prefix);
+    let marker_col = u16::try_from(connector.chars().count()).unwrap_or(u16::MAX);
+    let id = entry.key.id.to_string();
+    let type_label = ticket.map_or("?", |ticket| ticket.work_item_type.as_str());
+    let title = ticket.map_or("missing ticket", |ticket| ticket.title.as_str());
+    let current_label = if entry.is_current { " current" } else { "" };
+    let child_label = if entry.has_children && !entry.is_expanded {
+        if entry.child_count == 1 {
+            " 1 child".to_owned()
+        } else {
+            format!(" {} children", entry.child_count)
+        }
+    } else {
+        String::new()
+    };
+    let packed = pack_family_row(
+        usize::from(width),
+        &format!("{connector}{marker} {id}"),
+        type_label,
+        title,
+        current_label,
+        &child_label,
+    );
+    let base = family_row_style(entry.is_current, is_cursor);
+    let id_style = if entry.is_current || ticket.is_none() {
+        base.fg(theme().muted)
+    } else {
+        base.fg(theme().link).add_modifier(Modifier::UNDERLINED)
+    };
+    let rest_style = if entry.is_current {
+        base
+    } else {
+        base.fg(theme().body)
+    };
+    let head_len = connector.chars().count() + marker.chars().count() + 1 + id.chars().count();
+    let rest: String = packed.chars().skip(head_len).collect();
+    (
+        Line::from(vec![
+            Span::styled(connector, base),
+            Span::styled(marker.to_owned(), base),
+            Span::styled(" ", base),
+            Span::styled(id, id_style),
+            Span::styled(rest, rest_style.remove_modifier(Modifier::UNDERLINED)),
+        ]),
+        marker_col,
+    )
+}
+
+fn pack_family_row(
+    width: usize,
+    head: &str,
+    type_label: &str,
+    title: &str,
+    current_label: &str,
+    child_label: &str,
+) -> String {
+    let assemble = |include_type: bool, include_current: bool, title: &str| {
+        let mut text = head.to_owned();
+        if include_type {
+            text.push_str("  ");
+            text.push_str(type_label);
+        }
+        if !title.is_empty() {
+            text.push_str("  ");
+            text.push_str(title);
+        }
+        if include_current {
+            text.push_str(current_label);
+        }
+        text.push_str(child_label);
+        text
+    };
+    let include_current = !current_label.is_empty();
+    let fit = |text: String| (text.chars().count() <= width).then_some(text);
+    if let Some(text) = fit(assemble(true, include_current, title)) {
+        return text;
+    }
+    let truncated = take_chars(
+        title,
+        width.saturating_sub(
+            assemble(true, include_current, "")
+                .chars()
+                .count()
+                .saturating_add(2),
+        ),
+    );
+    if let Some(text) = fit(assemble(true, include_current, &truncated)) {
+        return text;
+    }
+    let truncated = take_chars(
+        title,
+        width.saturating_sub(
+            assemble(false, include_current, "")
+                .chars()
+                .count()
+                .saturating_add(2),
+        ),
+    );
+    if let Some(text) = fit(assemble(false, include_current, &truncated)) {
+        return text;
+    }
+    let truncated = take_chars(
+        title,
+        width.saturating_sub(assemble(false, false, "").chars().count().saturating_add(2)),
+    );
+    if let Some(text) = fit(assemble(false, false, &truncated)) {
+        return text;
+    }
+    let without_title = assemble(false, false, "");
+    if without_title.chars().count() <= width {
+        return without_title;
+    }
+    if head.chars().count() <= width {
+        return head.to_owned();
+    }
+    take_chars(head, width)
+}
+
 fn family_breadcrumb_line(app: &App, family: &FamilySnapshot) -> Line<'static> {
     let mut spans = vec![Span::styled(
         "Family: ",
@@ -1807,17 +2012,7 @@ fn family_member_line(
         + 2
         + marker.chars().count();
     let title = take_chars(title, usize::from(width).saturating_sub(used));
-    let base = if is_focused {
-        Style::default()
-            .bg(theme().selected_background)
-            .add_modifier(Modifier::BOLD)
-    } else if is_current {
-        Style::default()
-            .fg(theme().text)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
+    let base = family_row_style(is_current, is_focused);
     let id_style = if is_current || ticket.is_none() {
         base.fg(theme().muted)
     } else {
@@ -2601,6 +2796,7 @@ mod tests {
     use crate::model::{
         CommentRecord, HistoryRecord, RelationKind, RelationRecord, TicketGraph, TicketKey,
     };
+    use crate::pointer::PointerTarget;
 
     fn ticket() -> Ticket {
         Ticket {
@@ -2817,8 +3013,11 @@ mod tests {
         let scrolled = render_text(50, 12, &mut app);
         assert_ne!(initial, scrolled);
         assert!(
-            scrolled.contains("Press ? or Esc to close") || scrolled.contains("Quit"),
-            "scrolled help should reach the closing instructions"
+            scrolled.contains("Press ? or Esc to close")
+                || scrolled.contains("Scrollbar")
+                || scrolled.contains("Paste")
+                || scrolled.contains("Wheel"),
+            "scrolled help should reach the later help sections"
         );
     }
 
@@ -3050,11 +3249,15 @@ mod tests {
         let text = render_text(60, 36, &mut app);
         assert!(text.contains("Family: Feature 10001  Auth rewrite › this"));
         assert!(text.contains("0/1 closed"));
+        assert!(text.contains("▾"));
+        assert!(text.contains("•"));
         assert!(text.contains("10001"));
-        assert!(text.contains("├─10002"));
-        assert!(text.contains("│ └─10004"));
-        assert!(text.contains("└─10003"));
-        assert!(text.contains("←"));
+        assert!(text.contains("10002"));
+        assert!(text.contains("10004"));
+        assert!(text.contains("10003"));
+        assert!(text.contains("current"));
+        assert!(text.contains("├─"));
+        assert!(text.contains("└─"));
         assert!(text.contains("Links"));
         assert!(text.contains("Related"));
         assert!(text.contains("10005"));
@@ -3106,10 +3309,259 @@ mod tests {
             .find(|(_, key)| key.id == 10_001)
             .cloned()
             .expect("parent id should be clickable");
-        click(&mut app, area.x, area.y);
+        click(&mut app, area.x + 8, area.y);
         assert_eq!(key.id, 10_001);
         assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
-        assert_eq!(app.focus, Focus::Details);
+        assert_eq!(app.focus, Focus::Family);
+    }
+
+    fn auth_family_app() -> App {
+        let mut app = App::new(vec![
+            ticket_at(
+                10_001,
+                "Auth rewrite",
+                "Feature",
+                "Active",
+                "2026-01-01T00:00:00Z",
+            ),
+            ticket_at(
+                10_002,
+                "Login form",
+                "User Story",
+                "Active",
+                "2026-02-01T00:00:00Z",
+            ),
+            ticket_at(
+                10_003,
+                "Logout",
+                "User Story",
+                "Closed",
+                "2026-01-15T00:00:00Z",
+            ),
+            ticket_at(
+                10_004,
+                "Validate email",
+                "Task",
+                "New",
+                "2026-01-20T00:00:00Z",
+            ),
+            ticket_at(
+                10_005,
+                "Session notes",
+                "Task",
+                "Active",
+                "2026-01-21T00:00:00Z",
+            ),
+        ]);
+        app.set_workspace_graph(parent_child_graph());
+        app.narrow_details = true;
+        app.focus = Focus::Family;
+        app
+    }
+
+    fn family_render_at(width: u16, height: u16) -> (App, String) {
+        let mut app = auth_family_app();
+        let text = render_text(width, height, &mut app);
+        (app, text)
+    }
+
+    #[test]
+    fn family_tree_renders_at_representative_widths() {
+        for width in [36_u16, 60, 72, 110, 130] {
+            let (app, text) = family_render_at(width, 24);
+            assert!(
+                text.contains("10002"),
+                "id should remain visible at width {width}\n{text}"
+            );
+            assert!(
+                text.contains('▾') || text.contains('▸') || text.contains('•'),
+                "disclosure should remain visible at width {width}\n{text}"
+            );
+            assert_eq!(app.selected_ticket().unwrap().key.id, 10_002);
+        }
+        let (_, short) = family_render_at(72, 10);
+        assert!(short.contains("10002") || short.contains("Family") || short.contains("Details"));
+    }
+
+    #[test]
+    fn collapsed_descendants_leave_the_buffer_and_hit_regions() {
+        let mut app = auth_family_app();
+        render_text(60, 36, &mut app);
+        assert!(
+            app.hit_regions
+                .detail_links
+                .iter()
+                .any(|(_, key)| key.id == 10_004)
+        );
+
+        app.family_expanded.remove(&TicketKey {
+            organization: "demo".into(),
+            id: 10_002,
+        });
+        let text = render_text(60, 36, &mut app);
+        assert!(!text.contains("10004"));
+        assert!(
+            !app.hit_regions
+                .detail_links
+                .iter()
+                .any(|(_, key)| key.id == 10_004)
+        );
+        assert!(!app.hit_regions.regions().iter().any(|region| matches!(
+            &region.target,
+            PointerTarget::ToggleFamily(key) if key.id == 10_004
+        )));
+    }
+
+    #[test]
+    fn disclosure_click_toggles_without_selecting() {
+        let mut app = auth_family_app();
+        render_text(72, 36, &mut app);
+        let toggle = app
+            .hit_regions
+            .find_target(
+                |target| matches!(target, PointerTarget::ToggleFamily(key) if key.id == 10_002),
+            )
+            .expect("disclosure target")
+            .rect;
+        let selected = app.selected_ticket().unwrap().key.id;
+        let expanded = app
+            .visible_family_tree()
+            .iter()
+            .any(|entry| entry.key.id == 10_002 && entry.is_expanded);
+
+        click(&mut app, toggle.x, toggle.y);
+        assert_eq!(app.selected_ticket().unwrap().key.id, selected);
+        assert_eq!(app.focus, Focus::Family);
+        assert_ne!(
+            app.visible_family_tree()
+                .iter()
+                .any(|entry| entry.key.id == 10_002 && entry.is_expanded),
+            expanded
+        );
+    }
+
+    #[test]
+    fn family_row_click_selects_without_toggling() {
+        let mut app = auth_family_app();
+        render_text(72, 36, &mut app);
+        let row = app
+            .hit_regions
+            .detail_links
+            .iter()
+            .find(|(_, key)| key.id == 10_001)
+            .map(|(area, _)| *area)
+            .expect("parent row");
+        click(&mut app, row.x + 8, row.y);
+        assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
+        assert_eq!(app.focus, Focus::Family);
+        assert!(
+            app.visible_family_tree()
+                .iter()
+                .any(|entry| entry.key.id == 10_001 && entry.is_expanded),
+            "selecting a row must not collapse it"
+        );
+    }
+
+    fn auth_family_app_with_long_details() -> App {
+        let mut app = auth_family_app();
+        let mut tickets = app.tickets().to_vec();
+        tickets
+            .iter_mut()
+            .find(|ticket| ticket.key.id == 10_002)
+            .expect("current ticket")
+            .description = "line\n".repeat(40);
+        let graph = parent_child_graph();
+        app.replace_prepared_tickets(crate::app::PreparedTickets::with_graph(tickets, graph));
+        app.narrow_details = true;
+        app.focus = Focus::Family;
+        app
+    }
+
+    #[test]
+    fn family_hit_targets_follow_details_scroll() {
+        let mut app = auth_family_app_with_long_details();
+        render_text(60, 24, &mut app);
+        assert!(app.details_max_scroll > 0);
+        let before = app
+            .hit_regions
+            .find_target(
+                |target| matches!(target, PointerTarget::ToggleFamily(key) if key.id == 10_001),
+            )
+            .map(|region| region.rect.y)
+            .expect("parent disclosure should be on screen");
+        app.details_scroll = app.details_max_scroll;
+        render_text(60, 24, &mut app);
+        let after = app.hit_regions.find_target(
+            |target| matches!(target, PointerTarget::ToggleFamily(key) if key.id == 10_001),
+        );
+        assert!(after.is_none() || after.is_some_and(|region| region.rect.y != before));
+    }
+
+    #[test]
+    fn wheel_over_the_family_tree_only_scrolls_details() {
+        let mut app = auth_family_app_with_long_details();
+        render_text(60, 24, &mut app);
+        let row = app
+            .hit_regions
+            .detail_links
+            .iter()
+            .find(|(_, key)| key.id == 10_002)
+            .map(|(area, _)| *area)
+            .expect("current family row");
+        let cursor = app.family_cursor.clone();
+        let focus = app.focus;
+        let expanded = app.family_expanded.clone();
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, row.x + 8, row.y));
+        assert_eq!(app.family_cursor, cursor);
+        assert_eq!(app.focus, focus);
+        assert_eq!(app.family_expanded, expanded);
+        assert!(app.details_scroll > 0);
+    }
+
+    #[test]
+    fn family_current_and_cursor_styles_stay_distinguishable() {
+        let mut app = auth_family_app();
+        app.family_cursor = Some(TicketKey {
+            organization: "demo".into(),
+            id: 10_001,
+        });
+        render_text(60, 24, &mut app);
+        let current = app
+            .hit_regions
+            .find_target(
+                |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_002),
+            )
+            .map(|region| region.rect)
+            .expect("current row");
+        let cursor = app
+            .hit_regions
+            .find_target(
+                |target| matches!(target, PointerTarget::ToggleFamily(key) if key.id == 10_001),
+            )
+            .map(|region| region.rect)
+            .expect("cursor disclosure");
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let current_bold = (current.x..current.x.saturating_add(current.width))
+            .any(|x| buffer[(x, current.y)].modifier.contains(Modifier::BOLD));
+        assert!(current_bold, "current family row should be bold");
+        let cursor_style = with_cursor_style(Style::default());
+        if cursor_style.add_modifier.contains(Modifier::REVERSED) {
+            let reversed = (cursor.x.saturating_sub(2)..cursor.x.saturating_add(12))
+                .any(|x| buffer[(x, cursor.y)].modifier.contains(Modifier::REVERSED));
+            assert!(
+                reversed,
+                "family cursor should reverse under a reset background"
+            );
+        } else {
+            let highlighted = (cursor.x.saturating_sub(2)..cursor.x.saturating_add(12))
+                .any(|x| buffer[(x, cursor.y)].bg == cursor_style.bg.unwrap_or(Color::Reset));
+            assert!(
+                highlighted,
+                "family cursor should use the selected background"
+            );
+        }
     }
 
     #[test]

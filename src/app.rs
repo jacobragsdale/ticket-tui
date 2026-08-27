@@ -16,8 +16,8 @@ use crate::filter::{
 };
 use crate::import::ImportFormat;
 use crate::model::{
-    CommentRecord, FamilySnapshot, HistoryRecord, RelationRecord, SortDirection, SortField, Ticket,
-    TicketGraph, TicketKey, compare_tickets,
+    CommentRecord, FamilySnapshot, FamilyTreeEntry, HistoryRecord, RelationRecord, SortDirection,
+    SortField, Ticket, TicketGraph, TicketKey, compare_tickets,
 };
 pub use crate::model::{RowDensity, SearchOrder};
 use crate::pointer::{
@@ -48,7 +48,15 @@ pub enum AppMode {
 pub enum Focus {
     #[default]
     Tickets,
+    Family,
     Details,
+}
+
+impl Focus {
+    #[must_use]
+    pub const fn is_details_pane(self) -> bool {
+        matches!(self, Self::Family | Self::Details)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -219,7 +227,8 @@ pub struct App {
     pub details_scroll: u16,
     pub details_max_scroll: u16,
     pub details_viewport: u16,
-    pub link_cursor: usize,
+    pub family_cursor: Option<TicketKey>,
+    pub family_expanded: HashSet<TicketKey>,
     pub help_scroll: u16,
     pub help_max_scroll: u16,
     pub help_viewport: u16,
@@ -283,7 +292,8 @@ impl App {
             details_scroll: 0,
             details_max_scroll: 0,
             details_viewport: 0,
-            link_cursor: 0,
+            family_cursor: None,
+            family_expanded: HashSet::new(),
             help_scroll: 0,
             help_max_scroll: 0,
             help_viewport: 0,
@@ -442,6 +452,7 @@ impl App {
 
     pub fn set_workspace_graph(&mut self, graph: crate::model::TicketGraph) {
         self.graph = graph;
+        self.sync_family_state();
     }
 
     pub fn mark_stale(&mut self) {
@@ -488,27 +499,19 @@ impl App {
     }
 
     #[must_use]
-    pub fn family_jump_targets(&self) -> Vec<TicketKey> {
+    pub fn selected_has_family(&self) -> bool {
         self.selected_family()
-            .map(|family| {
-                family
-                    .jump_keys()
-                    .into_iter()
-                    .filter(|key| self.ticket_by_key(key).is_some())
-                    .collect()
-            })
-            .unwrap_or_default()
+            .is_some_and(|family| family.has_family())
     }
 
     #[must_use]
-    pub fn focused_family_key(&self) -> Option<TicketKey> {
-        let targets = self.family_jump_targets();
-        if targets.is_empty() {
-            return None;
-        }
-        targets
-            .get(self.link_cursor.min(targets.len() - 1))
-            .cloned()
+    pub fn visible_family_tree(&self) -> Vec<FamilyTreeEntry> {
+        self.selected_ticket()
+            .map(|ticket| {
+                self.graph
+                    .visible_family_tree(&ticket.key, &self.family_expanded)
+            })
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -532,6 +535,7 @@ impl App {
         self.search.replace_documents(prepared.search_documents);
         self.loaded_at = Instant::now();
         self.stale = false;
+        self.retain_live_family_expansion();
         if self.fuzzy_query().is_empty() {
             self.show_all(selected.as_ref());
         } else {
@@ -901,26 +905,44 @@ impl App {
             }
             KeyCode::Char('m') => self.toggle_bookmark(),
             KeyCode::Char('y') => return self.copy_with(export::copy_ids),
-            KeyCode::Char(' ') => self.toggle_row_selection(),
+            KeyCode::Char(' ') => match self.focus {
+                Focus::Family => self.toggle_cursor_family_expansion(),
+                Focus::Tickets | Focus::Details => self.toggle_row_selection(),
+            },
             KeyCode::Char('[') => self.history_back(),
             KeyCode::Char(']') => self.history_forward(),
             KeyCode::Tab => self.toggle_focus(),
-            KeyCode::Char('h') if self.focus == Focus::Details => self.cycle_family_link(-1),
-            KeyCode::Char('l') if self.focus == Focus::Details => self.cycle_family_link(1),
+            KeyCode::Left | KeyCode::Char('h') if self.focus == Focus::Family => {
+                self.collapse_or_parent();
+            }
+            KeyCode::Right | KeyCode::Char('l') if self.focus == Focus::Family => {
+                self.expand_or_child();
+            }
             KeyCode::Down | KeyCode::Char('j') => self.move_focused(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_focused(-1),
-            KeyCode::PageDown => self.move_focused(10),
-            KeyCode::PageUp => self.move_focused(-10),
+            KeyCode::PageDown => match self.focus {
+                Focus::Family => self.move_family_cursor(self.family_page_size()),
+                Focus::Tickets | Focus::Details => self.move_focused(10),
+            },
+            KeyCode::PageUp => match self.focus {
+                Focus::Family => self.move_family_cursor(-self.family_page_size()),
+                Focus::Tickets | Focus::Details => self.move_focused(-10),
+            },
             KeyCode::Home => match self.focus {
                 Focus::Tickets => self.select_row(0),
+                Focus::Family => self.move_family_cursor_to_edge(false),
                 Focus::Details => self.details_scroll = 0,
             },
             KeyCode::End => match self.focus {
                 Focus::Tickets => self.select_row(self.visible.len().saturating_sub(1)),
+                Focus::Family => self.move_family_cursor_to_edge(true),
                 Focus::Details => self.details_scroll = self.details_max_scroll,
             },
             KeyCode::Enter => {
-                if self.focus == Focus::Details && self.jump_focused_family_link() {
+                if self.focus == Focus::Family {
+                    if let Some(key) = self.family_cursor.clone() {
+                        self.jump_to_ticket(&key);
+                    }
                     return AppAction::None;
                 }
                 self.record_history();
@@ -1160,7 +1182,9 @@ impl App {
             }
             PointerTarget::NarrowDetails => {
                 self.narrow_details = true;
-                self.focus = Focus::Details;
+                if !self.focus.is_details_pane() {
+                    self.focus = Focus::Details;
+                }
             }
             PointerTarget::FocusTickets => {
                 self.focus = Focus::Tickets;
@@ -1205,8 +1229,29 @@ impl App {
                 return self.open_selected();
             }
             PointerTarget::JumpToTicket(key) => {
-                self.focus = Focus::Details;
+                if self
+                    .visible_family_tree()
+                    .iter()
+                    .any(|entry| entry.key == key)
+                {
+                    self.focus = Focus::Family;
+                    self.family_cursor = Some(key.clone());
+                    self.ensure_family_cursor_visible();
+                } else if self
+                    .selected_family()
+                    .is_some_and(|family| family.extra_parents.iter().any(|parent| parent == &key))
+                {
+                    self.focus = Focus::Family;
+                } else {
+                    self.focus = Focus::Details;
+                }
                 self.jump_to_ticket(&key);
+            }
+            PointerTarget::ToggleFamily(key) => {
+                self.focus = Focus::Family;
+                self.family_cursor = Some(key.clone());
+                self.toggle_family_expansion(&key);
+                self.ensure_family_cursor_visible();
             }
             PointerTarget::FacetPill(target) => match target {
                 FacetTarget::More => self.open_filters(),
@@ -1578,6 +1623,7 @@ impl App {
     fn move_focused(&mut self, delta: isize) {
         match self.focus {
             Focus::Tickets => self.move_selection(delta),
+            Focus::Family => self.move_family_cursor(delta),
             Focus::Details => self.scroll_details(delta),
         }
     }
@@ -1595,19 +1641,23 @@ impl App {
 
     fn toggle_focus(&mut self) {
         self.focus = match self.focus {
+            Focus::Tickets if self.selected_has_family() => Focus::Family,
             Focus::Tickets => Focus::Details,
+            Focus::Family => Focus::Details,
             Focus::Details => Focus::Tickets,
         };
-        self.narrow_details = self.focus == Focus::Details;
+        self.narrow_details = self.focus.is_details_pane();
     }
 
     fn toggle_narrow_details(&mut self) {
         self.narrow_details = !self.narrow_details;
-        self.focus = if self.narrow_details {
-            Focus::Details
+        if self.narrow_details {
+            if !self.focus.is_details_pane() {
+                self.focus = Focus::Details;
+            }
         } else {
-            Focus::Tickets
-        };
+            self.focus = Focus::Tickets;
+        }
     }
 
     fn delete_query_character(&mut self, backwards: bool) {
@@ -1755,31 +1805,13 @@ impl App {
             );
         }
         self.details_scroll = 0;
-        self.link_cursor = 0;
+        self.sync_family_state();
     }
 
     fn visible_row(&self, key: &TicketKey) -> Option<usize> {
         self.visible
             .iter()
             .position(|entry| self.tickets[entry.ticket_index].key == *key)
-    }
-
-    fn cycle_family_link(&mut self, delta: isize) {
-        let count = self.family_jump_targets().len();
-        if count == 0 {
-            return;
-        }
-        let next = (self.link_cursor as isize + delta).rem_euclid(count as isize);
-        self.link_cursor = usize::try_from(next).unwrap_or_default();
-        self.details_scroll = 0;
-    }
-
-    fn jump_focused_family_link(&mut self) -> bool {
-        let Some(key) = self.focused_family_key() else {
-            return false;
-        };
-        self.jump_to_ticket(&key);
-        true
     }
 
     fn jump_to_ticket(&mut self, key: &TicketKey) {
@@ -1868,11 +1900,195 @@ impl App {
         });
         self.table_state
             .select((!self.visible.is_empty()).then_some(row.unwrap_or_default()));
-        self.link_cursor = 0;
+        self.sync_family_state();
         if selected.is_none() || row.is_none() {
             self.table_offset = 0;
             *self.table_state.offset_mut() = 0;
             self.details_scroll = 0;
+        }
+    }
+
+    fn sync_family_state(&mut self) {
+        self.retain_live_family_expansion();
+        self.reveal_selected_family_path();
+        self.reset_family_cursor();
+        if self.focus == Focus::Family && !self.selected_has_family() {
+            self.focus = Focus::Details;
+        }
+    }
+
+    fn retain_live_family_expansion(&mut self) {
+        let tickets = Arc::clone(&self.tickets);
+        let graph = &self.graph;
+        self.family_expanded.retain(|key| {
+            tickets.iter().any(|ticket| ticket.key == *key)
+                || graph
+                    .relations
+                    .iter()
+                    .any(|relation| relation.from == *key || relation.to == *key)
+        });
+    }
+
+    fn reveal_selected_family_path(&mut self) {
+        let Some(ticket) = self.selected_ticket() else {
+            return;
+        };
+        let key = ticket.key.clone();
+        let family = self.graph.family(&key);
+        for ancestor in family.ancestors {
+            self.family_expanded.insert(ancestor);
+        }
+        self.family_expanded.insert(key);
+    }
+
+    fn reset_family_cursor(&mut self) {
+        self.family_cursor = self.selected_ticket().map(|ticket| ticket.key.clone());
+        self.clamp_family_cursor();
+    }
+
+    fn family_page_size(&self) -> isize {
+        let visible = self.visible_family_tree().len().max(1);
+        let viewport = usize::from(self.details_viewport.max(1));
+        isize::try_from(viewport.min(visible)).unwrap_or(1)
+    }
+
+    fn move_family_cursor(&mut self, delta: isize) {
+        let tree = self.visible_family_tree();
+        if tree.is_empty() {
+            return;
+        }
+        let current = self
+            .family_cursor
+            .as_ref()
+            .and_then(|key| tree.iter().position(|entry| entry.key == *key))
+            .unwrap_or(0);
+        let next = current
+            .saturating_add_signed(delta)
+            .min(tree.len().saturating_sub(1));
+        self.family_cursor = Some(tree[next].key.clone());
+        self.ensure_family_cursor_visible();
+    }
+
+    fn move_family_cursor_to_edge(&mut self, last: bool) {
+        let tree = self.visible_family_tree();
+        let Some(entry) = (if last { tree.last() } else { tree.first() }) else {
+            return;
+        };
+        self.family_cursor = Some(entry.key.clone());
+        self.ensure_family_cursor_visible();
+    }
+
+    fn toggle_cursor_family_expansion(&mut self) {
+        let Some(key) = self.family_cursor.clone() else {
+            return;
+        };
+        self.toggle_family_expansion(&key);
+        self.ensure_family_cursor_visible();
+    }
+
+    fn toggle_family_expansion(&mut self, key: &TicketKey) {
+        if self.graph.children_of(key).is_empty() {
+            return;
+        }
+        if !self.family_expanded.remove(key) {
+            self.family_expanded.insert(key.clone());
+        }
+        self.clamp_family_cursor();
+    }
+
+    fn collapse_or_parent(&mut self) {
+        let Some(key) = self.family_cursor.clone() else {
+            return;
+        };
+        let tree = self.visible_family_tree();
+        let Some(entry) = tree.iter().find(|entry| entry.key == key) else {
+            return;
+        };
+        if entry.is_expanded {
+            self.family_expanded.remove(&key);
+            self.clamp_family_cursor();
+            self.ensure_family_cursor_visible();
+            return;
+        }
+        if let Some(parent) = self.graph.parents_of(&key).into_iter().next()
+            && tree.iter().any(|entry| entry.key == parent)
+        {
+            self.family_cursor = Some(parent);
+        }
+        self.ensure_family_cursor_visible();
+    }
+
+    fn expand_or_child(&mut self) {
+        let Some(key) = self.family_cursor.clone() else {
+            return;
+        };
+        let tree = self.visible_family_tree();
+        let Some(entry) = tree.iter().find(|entry| entry.key == key).cloned() else {
+            return;
+        };
+        if entry.has_children && !entry.is_expanded {
+            self.family_expanded.insert(key);
+            self.ensure_family_cursor_visible();
+            return;
+        }
+        if let Some(child) = self.graph.children_of(&key).into_iter().next() {
+            let tree = self.visible_family_tree();
+            if tree.iter().any(|entry| entry.key == child) {
+                self.family_cursor = Some(child);
+            }
+        }
+        self.ensure_family_cursor_visible();
+    }
+
+    fn clamp_family_cursor(&mut self) {
+        let tree = self.visible_family_tree();
+        if tree.is_empty() {
+            if self.selected_ticket().is_none() {
+                self.family_cursor = None;
+            }
+            return;
+        }
+        if self
+            .family_cursor
+            .as_ref()
+            .is_some_and(|key| tree.iter().any(|entry| entry.key == *key))
+        {
+            return;
+        }
+        let mut walk = self.family_cursor.clone();
+        while let Some(key) = walk {
+            if let Some(parent) = self.graph.parents_of(&key).into_iter().next() {
+                if tree.iter().any(|entry| entry.key == parent) {
+                    self.family_cursor = Some(parent);
+                    return;
+                }
+                walk = Some(parent);
+            } else {
+                break;
+            }
+        }
+        self.family_cursor = tree.first().map(|entry| entry.key.clone());
+    }
+
+    fn ensure_family_cursor_visible(&mut self) {
+        let Some(cursor) = self.family_cursor.clone() else {
+            return;
+        };
+        let tree = self.visible_family_tree();
+        let Some(index) = tree.iter().position(|entry| entry.key == cursor) else {
+            return;
+        };
+        let line = u16::try_from(index.saturating_add(1)).unwrap_or(u16::MAX);
+        let viewport = self.details_viewport.max(1);
+        if index == 0 {
+            self.details_scroll = 0;
+        } else if line < self.details_scroll {
+            self.details_scroll = line;
+        } else if line >= self.details_scroll.saturating_add(viewport) {
+            self.details_scroll = line
+                .saturating_add(1)
+                .saturating_sub(viewport)
+                .min(self.details_max_scroll);
         }
     }
 
@@ -3137,44 +3353,253 @@ mod tests {
         app
     }
 
-    #[test]
-    fn details_enter_jumps_to_the_highlighted_family_ticket() {
-        let mut app = family_app();
-        assert_eq!(app.selected_ticket().unwrap().key.id, 2);
-        app.focus = Focus::Details;
-
-        let opened = app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
-        assert!(matches!(opened, AppAction::OpenUrl(_)));
-        assert_eq!(app.selected_ticket().unwrap().key.id, 2);
-
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.selected_ticket().unwrap().key.id, 1);
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
-        assert_eq!(app.selected_ticket().unwrap().key.id, 2);
+    fn press(app: &mut App, code: KeyCode) -> AppAction {
+        app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     #[test]
-    fn details_can_cycle_family_links() {
+    fn selected_family_branch_is_expanded_by_default() {
+        let app = family_app();
+        let tree = app.visible_family_tree();
+        assert!(
+            tree.iter()
+                .any(|entry| entry.key.id == 1 && entry.is_expanded)
+        );
+        assert!(
+            tree.iter()
+                .any(|entry| { entry.key.id == 2 && entry.is_current && entry.is_expanded })
+        );
+        assert!(
+            tree.iter()
+                .any(|entry| entry.key.id == 3 && !entry.has_children)
+        );
+        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(2));
+    }
+
+    #[test]
+    fn tab_cycles_through_family_only_when_a_hierarchy_exists() {
         let mut app = family_app();
-        app.focus = Focus::Details;
-        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Tickets);
+
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Family);
+        assert!(app.narrow_details);
+
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Details);
+        assert!(app.narrow_details);
+
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Tickets);
+        assert!(!app.narrow_details);
+
+        let mut lonely = App::new(vec![ticket(1, "Solo", "2026-01-01T00:00:00Z")]);
+        press(&mut lonely, KeyCode::Tab);
+        assert_eq!(lonely.focus, Focus::Details);
+        press(&mut lonely, KeyCode::Tab);
+        assert_eq!(lonely.focus, Focus::Tickets);
+    }
+
+    #[test]
+    fn family_cursor_movement_clamps_at_both_ends() {
+        let mut app = family_app();
+        app.focus = Focus::Family;
+        press(&mut app, KeyCode::Home);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(1));
+
+        press(&mut app, KeyCode::End);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(3));
+    }
+
+    #[test]
+    fn collapsing_a_sibling_keeps_the_key_based_cursor() {
+        let mut app = branched_family_app();
+        app.focus = Focus::Family;
+        app.family_expanded.insert(family_key(4));
+        app.family_cursor = Some(family_key(3));
+        app.family_expanded.remove(&family_key(4));
+
+        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(3));
+        assert!(
+            app.visible_family_tree()
+                .iter()
+                .any(|entry| entry.key.id == 3)
+        );
+        assert!(
+            !app.visible_family_tree()
+                .iter()
+                .any(|entry| entry.key.id == 5)
+        );
+    }
+
+    #[test]
+    fn family_left_right_and_space_follow_tree_semantics() {
+        let mut app = family_app();
+        app.focus = Focus::Family;
+        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(2));
+
+        press(&mut app, KeyCode::Char('h'));
+        assert!(
+            app.visible_family_tree()
+                .iter()
+                .any(|entry| entry.key.id == 2 && !entry.is_expanded)
+        );
+        assert!(
+            !app.visible_family_tree()
+                .iter()
+                .any(|entry| entry.key.id == 3)
+        );
+
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(1));
+
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(2));
+
+        press(&mut app, KeyCode::Char(' '));
+        assert!(
+            app.visible_family_tree()
+                .iter()
+                .any(|entry| entry.key.id == 2 && !entry.is_expanded)
+        );
+        press(&mut app, KeyCode::Char(' '));
+        assert!(
+            app.visible_family_tree()
+                .iter()
+                .any(|entry| entry.key.id == 2 && entry.is_expanded)
+        );
+
+        app.family_cursor = Some(family_key(3));
+        press(&mut app, KeyCode::Char(' '));
+        assert!(
+            app.visible_family_tree()
+                .iter()
+                .any(|entry| entry.key.id == 3 && !entry.has_children)
+        );
+    }
+
+    #[test]
+    fn family_enter_selects_a_visible_ticket_and_records_history_once() {
+        let mut app = family_app();
+        assert_eq!(app.selected_ticket().unwrap().key.id, 2);
+        app.focus = Focus::Family;
+
+        let opened = press(&mut app, KeyCode::Char('o'));
+        assert!(matches!(opened, AppAction::OpenUrl(_)));
+        assert_eq!(app.selected_ticket().unwrap().key.id, 2);
+
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
         assert_eq!(app.selected_ticket().unwrap().key.id, 3);
+        assert_eq!(app.focus, Focus::Family);
+        assert_eq!(
+            app.recent.iter().map(|key| key.id).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+
+        press(&mut app, KeyCode::Char('['));
+        assert_eq!(app.selected_ticket().unwrap().key.id, 2);
     }
 
     #[test]
     fn jumping_to_a_hidden_family_ticket_explains_why() {
         let mut app = family_app();
-        app.focus = Focus::Details;
+        app.focus = Focus::Family;
         app.visible
             .retain(|entry| app.tickets[entry.ticket_index].key.id != 3);
-        app.link_cursor = 1;
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.family_cursor = Some(family_key(3));
+        let query = app.query.clone();
+        press(&mut app, KeyCode::Enter);
         assert_eq!(app.selected_ticket().unwrap().key.id, 2);
+        assert_eq!(app.query, query);
         assert_eq!(
             app.notification(),
             Some(("3 is hidden by the current search", NotificationLevel::Info))
         );
+    }
+
+    #[test]
+    fn family_selection_and_cursor_restore_after_reload() {
+        let mut app = family_app();
+        app.focus = Focus::Family;
+        app.family_expanded.insert(family_key(99));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(3));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.selected_ticket().unwrap().key.id, 3);
+
+        let graph = app.graph.clone();
+        let tickets = app.tickets().to_vec();
+        app.replace_prepared_tickets(PreparedTickets::with_graph(tickets, graph));
+
+        assert_eq!(app.selected_ticket().unwrap().key.id, 3);
+        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(3));
+        assert!(!app.family_expanded.contains(&family_key(99)));
+        assert!(app.family_expanded.contains(&family_key(2)));
+        assert!(app.family_expanded.contains(&family_key(3)));
+    }
+
+    #[test]
+    fn family_cursor_movement_scrolls_the_details_viewport() {
+        let mut app = family_app();
+        app.focus = Focus::Family;
+        app.set_details_viewport(2, 20);
+
+        press(&mut app, KeyCode::End);
+        assert!(app.details_scroll > 0);
+        press(&mut app, KeyCode::Home);
+        assert_eq!(app.details_scroll, 0);
+    }
+
+    #[test]
+    fn family_expansion_does_not_mark_the_session_dirty() {
+        let mut app = family_app();
+        app.session_dirty = false;
+        app.focus = Focus::Family;
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char('h'));
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Down);
+        assert!(!app.session_dirty);
+    }
+
+    fn branched_family_app() -> App {
+        let mut app = family_app();
+        let mut sibling = ticket(4, "Sibling", "2026-01-10T00:00:00Z");
+        sibling.work_item_type = "User Story".into();
+        let nephew = ticket(5, "Nephew", "2026-01-11T00:00:00Z");
+        let mut tickets = app.tickets().to_vec();
+        tickets.push(sibling);
+        tickets.push(nephew);
+        let graph = TicketGraph {
+            relations: vec![
+                RelationRecord {
+                    from: family_key(2),
+                    to: family_key(1),
+                    kind: crate::model::RelationKind::Parent,
+                },
+                RelationRecord {
+                    from: family_key(3),
+                    to: family_key(2),
+                    kind: crate::model::RelationKind::Parent,
+                },
+                RelationRecord {
+                    from: family_key(4),
+                    to: family_key(1),
+                    kind: crate::model::RelationKind::Parent,
+                },
+                RelationRecord {
+                    from: family_key(5),
+                    to: family_key(4),
+                    kind: crate::model::RelationKind::Parent,
+                },
+            ],
+            ..TicketGraph::default()
+        };
+        app.replace_prepared_tickets(PreparedTickets::with_graph(tickets, graph));
+        app
     }
 }

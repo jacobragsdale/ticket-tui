@@ -215,6 +215,9 @@ pub struct FamilySnapshot {
 pub struct FamilyTreeEntry {
     pub key: TicketKey,
     pub prefix: String,
+    pub child_count: usize,
+    pub has_children: bool,
+    pub is_expanded: bool,
     pub is_current: bool,
 }
 
@@ -240,6 +243,33 @@ impl TicketGraph {
     #[must_use]
     pub fn children_of(&self, key: &TicketKey) -> Vec<TicketKey> {
         related_keys(self, key, FamilyDirection::Child)
+    }
+
+    #[must_use]
+    pub fn visible_family_tree(
+        &self,
+        current: &TicketKey,
+        expanded: &HashSet<TicketKey>,
+    ) -> Vec<FamilyTreeEntry> {
+        let (ancestors, _) = ancestor_chain(self, current);
+        let root = ancestors
+            .first()
+            .cloned()
+            .unwrap_or_else(|| current.clone());
+        let mut entries = Vec::new();
+        let mut path = HashSet::new();
+        emit_visible_family(
+            self,
+            current,
+            expanded,
+            &root,
+            String::from("  "),
+            &[],
+            &mut path,
+            0,
+            &mut entries,
+        );
+        entries
     }
 
     #[must_use]
@@ -344,6 +374,9 @@ impl FamilySnapshot {
             entries.push(FamilyTreeEntry {
                 key: self.current.clone(),
                 prefix: "  ".into(),
+                child_count: self.children.len(),
+                has_children: !self.children.is_empty(),
+                is_expanded: !self.children.is_empty(),
                 is_current: true,
             });
             push_child_entries(&mut entries, &self.children, &[]);
@@ -356,12 +389,18 @@ impl FamilySnapshot {
                 entries.push(FamilyTreeEntry {
                     key: ancestor.clone(),
                     prefix: "  ".into(),
+                    child_count: 0,
+                    has_children: true,
+                    is_expanded: true,
                     is_current: false,
                 });
             } else {
                 entries.push(FamilyTreeEntry {
                     key: ancestor.clone(),
                     prefix: tree_prefix(&guides, true),
+                    child_count: 0,
+                    has_children: true,
+                    is_expanded: true,
                     is_current: false,
                 });
                 guides.push(false);
@@ -374,6 +413,9 @@ impl FamilySnapshot {
             entries.push(FamilyTreeEntry {
                 key: sibling.clone(),
                 prefix: tree_prefix(&guides, is_last),
+                child_count: if is_current { self.children.len() } else { 0 },
+                has_children: is_current && !self.children.is_empty(),
+                is_expanded: is_current && !self.children.is_empty(),
                 is_current,
             });
             if is_current {
@@ -497,12 +539,72 @@ fn sort_keys(keys: &mut [TicketKey]) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_visible_family(
+    graph: &TicketGraph,
+    current: &TicketKey,
+    expanded: &HashSet<TicketKey>,
+    key: &TicketKey,
+    prefix: String,
+    guides: &[bool],
+    path: &mut HashSet<TicketKey>,
+    depth: usize,
+    entries: &mut Vec<FamilyTreeEntry>,
+) {
+    if depth > MAX_ANCESTOR_DEPTH || path.contains(key) {
+        return;
+    }
+
+    let children = graph.children_of(key);
+    let child_count = children.len();
+    let has_children = child_count > 0;
+    let can_descend = depth < MAX_ANCESTOR_DEPTH;
+    let is_expanded = has_children && can_descend && expanded.contains(key);
+    entries.push(FamilyTreeEntry {
+        key: key.clone(),
+        prefix,
+        child_count,
+        has_children,
+        is_expanded,
+        is_current: key == current,
+    });
+    if !is_expanded {
+        return;
+    }
+
+    path.insert(key.clone());
+    let visible_children: Vec<_> = children
+        .into_iter()
+        .filter(|child| !path.contains(child))
+        .collect();
+    for (index, child) in visible_children.iter().enumerate() {
+        let is_last = index + 1 == visible_children.len();
+        let mut child_guides = guides.to_vec();
+        child_guides.push(!is_last);
+        emit_visible_family(
+            graph,
+            current,
+            expanded,
+            child,
+            tree_prefix(guides, is_last),
+            &child_guides,
+            path,
+            depth + 1,
+            entries,
+        );
+    }
+    path.remove(key);
+}
+
 fn push_child_entries(entries: &mut Vec<FamilyTreeEntry>, children: &[TicketKey], guides: &[bool]) {
     for (index, child) in children.iter().enumerate() {
         let is_last = index + 1 == children.len();
         entries.push(FamilyTreeEntry {
             key: child.clone(),
             prefix: tree_prefix(guides, is_last),
+            child_count: 0,
+            has_children: false,
+            is_expanded: false,
             is_current: false,
         });
     }
@@ -819,6 +921,26 @@ mod tests {
         }
     }
 
+    fn ids_of(entries: &[FamilyTreeEntry]) -> Vec<i64> {
+        entries.iter().map(|entry| entry.key.id).collect()
+    }
+
+    fn tree_view(entries: &[FamilyTreeEntry]) -> Vec<(i64, &str, bool, bool, bool, usize)> {
+        entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.key.id,
+                    entry.prefix.as_str(),
+                    entry.is_current,
+                    entry.has_children,
+                    entry.is_expanded,
+                    entry.child_count,
+                )
+            })
+            .collect()
+    }
+
     #[test]
     fn family_tree_nests_current_children_among_siblings() {
         let graph = TicketGraph {
@@ -852,6 +974,172 @@ mod tests {
             family.jump_keys(),
             vec![key(1), key(10), key(12), key(111), key(112)]
         );
+    }
+
+    #[test]
+    fn collapsed_parents_hide_all_descendants() {
+        let graph = TicketGraph {
+            relations: vec![
+                relation(10, 1, RelationKind::Parent),
+                relation(11, 1, RelationKind::Parent),
+                relation(111, 11, RelationKind::Parent),
+                relation(112, 11, RelationKind::Parent),
+            ],
+            ..TicketGraph::default()
+        };
+
+        let entries = graph.visible_family_tree(&key(11), &HashSet::new());
+        assert_eq!(tree_view(&entries), vec![(1, "  ", false, true, false, 2)]);
+    }
+
+    #[test]
+    fn nested_expansion_produces_stable_connectors_and_key_order() {
+        let graph = TicketGraph {
+            relations: vec![
+                relation(10, 1, RelationKind::Parent),
+                relation(11, 1, RelationKind::Parent),
+                relation(12, 1, RelationKind::Parent),
+                relation(111, 11, RelationKind::Parent),
+                relation(112, 11, RelationKind::Parent),
+            ],
+            ..TicketGraph::default()
+        };
+        let expanded = HashSet::from([key(1), key(11)]);
+        let first = graph.visible_family_tree(&key(11), &expanded);
+        let second = graph.visible_family_tree(&key(11), &expanded);
+
+        assert_eq!(
+            tree_view(&first),
+            vec![
+                (1, "  ", false, true, true, 3),
+                (10, "  ├─", false, false, false, 0),
+                (11, "  ├─", true, true, true, 2),
+                (111, "  │ ├─", false, false, false, 0),
+                (112, "  │ └─", false, false, false, 0),
+                (12, "  └─", false, false, false, 0),
+            ]
+        );
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn primary_parent_stays_in_the_tree_and_extra_parents_stay_out() {
+        let graph = TicketGraph {
+            relations: vec![
+                relation(2, 1, RelationKind::Parent),
+                relation(2, 8, RelationKind::Parent),
+                relation(3, 2, RelationKind::Parent),
+            ],
+            ..TicketGraph::default()
+        };
+        let family = graph.family(&key(2));
+        assert_eq!(family.ancestors, vec![key(1)]);
+        assert_eq!(family.extra_parents, vec![key(8)]);
+
+        let expanded = HashSet::from([key(1), key(2)]);
+        let entries = graph.visible_family_tree(&key(2), &expanded);
+        assert_eq!(ids_of(&entries), vec![1, 2, 3]);
+        assert!(!ids_of(&entries).contains(&8));
+    }
+
+    #[test]
+    fn missing_tickets_remain_visible_and_can_still_expand() {
+        let graph = TicketGraph {
+            relations: vec![
+                relation(2, 1, RelationKind::Parent),
+                relation(3, 1, RelationKind::Parent),
+            ],
+            ..TicketGraph::default()
+        };
+        let expanded = HashSet::from([key(1)]);
+        let entries = graph.visible_family_tree(&key(2), &expanded);
+
+        assert_eq!(
+            tree_view(&entries),
+            vec![
+                (1, "  ", false, true, true, 2),
+                (2, "  ├─", true, false, false, 0),
+                (3, "  └─", false, false, false, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn cyclic_relations_omit_the_repeating_edge() {
+        let graph = TicketGraph {
+            relations: vec![
+                relation(1, 2, RelationKind::Parent),
+                relation(2, 1, RelationKind::Parent),
+                relation(1, 9, RelationKind::Related),
+            ],
+            ..TicketGraph::default()
+        };
+        let family = graph.family(&key(1));
+        let expanded = HashSet::from([key(1), key(2)]);
+        let entries = graph.visible_family_tree(&key(1), &expanded);
+
+        assert_eq!(family.ancestors, vec![key(2)]);
+        assert_eq!(ids_of(&entries), vec![2, 1]);
+        assert!(!ids_of(&entries).contains(&9));
+        assert_eq!(family.other_links, vec![(RelationKind::Related, key(9))]);
+        assert_eq!(family.jump_keys().last(), Some(&key(9)));
+    }
+
+    #[test]
+    fn family_tree_stops_at_the_depth_limit() {
+        let relations: Vec<_> = (1..20)
+            .map(|id| relation(id + 1, id, RelationKind::Parent))
+            .collect();
+        let graph = TicketGraph {
+            relations,
+            ..TicketGraph::default()
+        };
+        let current = key(20);
+        let (ancestors, _) = super::ancestor_chain(&graph, &current);
+        let mut expanded: HashSet<_> = ancestors.iter().cloned().collect();
+        expanded.insert(current.clone());
+        let entries = graph.visible_family_tree(&current, &expanded);
+
+        assert!(entries.len() <= MAX_ANCESTOR_DEPTH + 1);
+        assert_eq!(entries.last().map(|entry| entry.key.id), Some(20));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.prefix.chars().count() < 40)
+        );
+    }
+
+    #[test]
+    fn parent_child_and_mirrored_relations_project_the_same_tree() {
+        let parent_only = TicketGraph {
+            relations: vec![
+                relation(2, 1, RelationKind::Parent),
+                relation(3, 2, RelationKind::Parent),
+            ],
+            ..TicketGraph::default()
+        };
+        let child_only = TicketGraph {
+            relations: vec![
+                relation(1, 2, RelationKind::Child),
+                relation(2, 3, RelationKind::Child),
+            ],
+            ..TicketGraph::default()
+        };
+        let both = TicketGraph {
+            relations: vec![
+                relation(2, 1, RelationKind::Parent),
+                relation(1, 2, RelationKind::Child),
+                relation(3, 2, RelationKind::Parent),
+                relation(2, 3, RelationKind::Child),
+            ],
+            ..TicketGraph::default()
+        };
+        let expanded = HashSet::from([key(1), key(2)]);
+
+        let expected = parent_only.visible_family_tree(&key(2), &expanded);
+        assert_eq!(expected, child_only.visible_family_tree(&key(2), &expanded));
+        assert_eq!(expected, both.visible_family_tree(&key(2), &expanded));
+        assert_eq!(ids_of(&expected), vec![1, 2, 3]);
     }
 
     #[test]
