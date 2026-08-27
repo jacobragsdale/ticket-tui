@@ -9,9 +9,7 @@ use ratatui::widgets::{
     Block, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Table, Wrap,
 };
-use time::format_description::well_known::Rfc3339;
-use time::macros::format_description;
-use time::{OffsetDateTime, UtcOffset};
+use time::OffsetDateTime;
 
 use crate::app::{
     App, AppMode, FacetTarget, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder,
@@ -424,8 +422,8 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             section_line("Planning"),
             highlighted_field_line("Area", &ticket.area_path, &mut highlighter),
             highlighted_field_line("Iteration", &ticket.iteration_path, &mut highlighter),
-            field_line("Created", exact_timestamp(&ticket.created_at)),
-            field_line("Changed", exact_timestamp(&ticket.changed_at)),
+            field_line("Created", ticket.created_at.exact_utc()),
+            field_line("Changed", ticket.changed_at.exact_utc()),
         ];
         let relations = app.relations_from(&ticket.key);
         if !relations.is_empty() {
@@ -447,7 +445,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 detail_lines.push(Line::from(format!(
                     "  r{} · {} · {who}",
                     entry.revision,
-                    exact_timestamp(&entry.changed_at)
+                    entry.changed_at.exact_utc()
                 )));
                 detail_lines.push(Line::styled(
                     format!("    {}: {old} → {new}", entry.field_name),
@@ -463,7 +461,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 let who = comment.author.as_deref().unwrap_or("unknown");
                 detail_lines.push(Line::from(format!(
                     "  {who} · {}",
-                    exact_timestamp(&comment.created_at)
+                    comment.created_at.exact_utc()
                 )));
                 detail_lines.extend(comment.text.lines().map(|line| {
                     Line::styled(format!("    {line}"), Style::default().fg(theme().body))
@@ -1202,12 +1200,8 @@ fn table_cell(
         )
         .right_aligned()
         .style(priority_style(ticket.priority)),
-        SortField::Changed => {
-            Line::from(relative_changed_at(&ticket.changed_at, now)).right_aligned()
-        }
-        SortField::Created => {
-            Line::from(relative_changed_at(&ticket.created_at, now)).right_aligned()
-        }
+        SortField::Changed => Line::from(ticket.changed_at.relative_to(now)).right_aligned(),
+        SortField::Created => Line::from(ticket.created_at.relative_to(now)).right_aligned(),
         SortField::Organization => {
             highlight_searchable(&ticket.key.organization, Style::default(), highlighter)
         }
@@ -1353,52 +1347,6 @@ fn priority_style(priority: Option<i64>) -> Style {
     Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
-fn relative_changed_at(timestamp: &str, now: OffsetDateTime) -> String {
-    let Ok(changed) = OffsetDateTime::parse(timestamp, &Rfc3339) else {
-        return short_date(timestamp).to_owned();
-    };
-    let age = now - changed;
-    if age.is_negative() {
-        return short_date(timestamp).to_owned();
-    }
-    if age.whole_minutes() < 1 {
-        return "now".into();
-    }
-    if age.whole_hours() < 1 {
-        return format!("{}m", age.whole_minutes());
-    }
-    if age.whole_days() < 1 {
-        return format!("{}h", age.whole_hours());
-    }
-    if age.whole_days() < 7 {
-        return format!("{}d", age.whole_days());
-    }
-    if changed.year() == now.year() {
-        return changed
-            .format(format_description!("[month repr:short] [day padding:none]"))
-            .unwrap_or_else(|_| short_date(timestamp).to_owned());
-    }
-    short_date(timestamp).to_owned()
-}
-
-fn exact_timestamp(timestamp: &str) -> String {
-    OffsetDateTime::parse(timestamp, &Rfc3339)
-        .ok()
-        .and_then(|value| {
-            value
-                .to_offset(UtcOffset::UTC)
-                .format(format_description!(
-                    "[year]-[month]-[day] [hour]:[minute]:[second] UTC"
-                ))
-                .ok()
-        })
-        .unwrap_or_else(|| timestamp.to_owned())
-}
-
-fn short_date(timestamp: &str) -> &str {
-    timestamp.get(..10).unwrap_or(timestamp)
-}
-
 fn ticket_identity_line(ticket: &Ticket, highlighter: &mut QueryHighlighter) -> Line<'static> {
     let id = ticket.key.id.to_string();
     let state = state_style(&ticket.state);
@@ -1522,7 +1470,6 @@ mod tests {
     use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use time::macros::datetime;
 
     use super::*;
     use crate::model::{
@@ -1547,8 +1494,8 @@ mod tests {
             iteration_path: "Atlas\\Sprint 1".into(),
             tags: vec!["rust".into(), "search".into()],
             description: "A ticket description".into(),
-            created_at: "2026-01-01T00:00:00Z".into(),
-            changed_at: "2026-01-02T00:00:00Z".into(),
+            created_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
+            changed_at: crate::timestamp::ts("2026-01-02T00:00:00Z"),
             web_url: "https://dev.azure.com/demo/atlas/_workitems/edit/10001".into(),
         }
     }
@@ -1734,28 +1681,6 @@ mod tests {
     }
 
     #[test]
-    fn changed_dates_use_compact_relative_labels() {
-        let now = datetime!(2026-08-26 18:00 UTC);
-
-        assert_eq!(relative_changed_at("2026-08-26T17:30:00Z", now), "30m");
-        assert_eq!(relative_changed_at("2026-08-26T12:00:00Z", now), "6h");
-        assert_eq!(relative_changed_at("2026-08-23T18:00:00Z", now), "3d");
-        assert_eq!(relative_changed_at("2026-07-01T00:00:00Z", now), "Jul 1");
-        assert_eq!(
-            relative_changed_at("2025-07-01T00:00:00Z", now),
-            "2025-07-01"
-        );
-    }
-
-    #[test]
-    fn details_normalize_exact_timestamps_to_utc() {
-        assert_eq!(
-            exact_timestamp("2026-08-26T13:00:00-05:00"),
-            "2026-08-26 18:00:00 UTC"
-        );
-    }
-
-    #[test]
     fn monochrome_theme_resets_every_semantic_color() {
         let monochrome = Theme::new(true);
 
@@ -1883,14 +1808,14 @@ mod tests {
             comments: vec![CommentRecord {
                 ticket: item.key.clone(),
                 comment_id: 1,
-                created_at: "2026-01-03T00:00:00Z".into(),
+                created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
                 author: Some("Avery Chen".into()),
                 text: "Looks good".into(),
             }],
             history: vec![HistoryRecord {
                 ticket: item.key,
                 revision: 2,
-                changed_at: "2026-01-02T00:00:00Z".into(),
+                changed_at: crate::timestamp::ts("2026-01-02T00:00:00Z"),
                 changed_by: Some("Jordan Patel".into()),
                 field_name: "State".into(),
                 old_value: Some("New".into()),

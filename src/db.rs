@@ -12,6 +12,7 @@ use crate::import::ImportBatch;
 use crate::model::{
     CommentRecord, HistoryRecord, RelationKind, RelationRecord, Ticket, TicketGraph, TicketKey,
 };
+use crate::timestamp::Timestamp;
 
 const SCHEMA_VERSION: i64 = 2;
 pub const DEMO_TICKET_COUNT: usize = 500;
@@ -142,11 +143,15 @@ impl SqliteTicketRepository {
              FROM work_items",
         )?;
         let rows = statement.query_map([], |row| {
+            let organization: String = row.get(0)?;
+            let id: i64 = row.get(2)?;
             let raw_tags: String = row.get(12)?;
+            let created_raw: String = row.get(14)?;
+            let changed_raw: String = row.get(15)?;
             Ok(Ticket {
                 key: TicketKey {
-                    organization: row.get(0)?,
-                    id: row.get(2)?,
+                    organization: organization.clone(),
+                    id,
                 },
                 project: row.get(1)?,
                 revision: row.get(3)?,
@@ -165,8 +170,8 @@ impl SqliteTicketRepository {
                     .map(str::to_owned)
                     .collect(),
                 description: row.get(13)?,
-                created_at: row.get(14)?,
-                changed_at: row.get(15)?,
+                created_at: parse_row_timestamp(created_raw, "created_at", &organization, id)?,
+                changed_at: parse_row_timestamp(changed_raw, "changed_at", &organization, id)?,
                 web_url: row.get(16)?,
             })
         })?;
@@ -209,7 +214,7 @@ impl SqliteTicketRepository {
                     comment.ticket.organization,
                     comment.ticket.id,
                     comment.comment_id,
-                    comment.created_at,
+                    comment.created_at.to_rfc3339(),
                     comment.author,
                     comment.text
                 ],
@@ -225,7 +230,7 @@ impl SqliteTicketRepository {
                     entry.ticket.organization,
                     entry.ticket.id,
                     entry.revision,
-                    entry.changed_at,
+                    entry.changed_at.to_rfc3339(),
                     entry.changed_by,
                     entry.field_name,
                     entry.old_value,
@@ -272,13 +277,16 @@ impl SqliteTicketRepository {
              FROM work_item_comments",
         )?;
         let rows = statement.query_map([], |row| {
+            let organization: String = row.get(0)?;
+            let id: i64 = row.get(1)?;
+            let created_raw: String = row.get(3)?;
             Ok(CommentRecord {
                 ticket: TicketKey {
-                    organization: row.get(0)?,
-                    id: row.get(1)?,
+                    organization: organization.clone(),
+                    id,
                 },
                 comment_id: row.get(2)?,
-                created_at: row.get(3)?,
+                created_at: parse_row_timestamp(created_raw, "created_at", &organization, id)?,
                 author: row.get(4)?,
                 text: row.get(5)?,
             })
@@ -297,13 +305,16 @@ impl SqliteTicketRepository {
              FROM work_item_history",
         )?;
         let rows = statement.query_map([], |row| {
+            let organization: String = row.get(0)?;
+            let id: i64 = row.get(1)?;
+            let changed_raw: String = row.get(3)?;
             Ok(HistoryRecord {
                 ticket: TicketKey {
-                    organization: row.get(0)?,
-                    id: row.get(1)?,
+                    organization: organization.clone(),
+                    id,
                 },
                 revision: row.get(2)?,
-                changed_at: row.get(3)?,
+                changed_at: parse_row_timestamp(changed_raw, "changed_at", &organization, id)?,
                 changed_by: row.get(4)?,
                 field_name: row.get(5)?,
                 old_value: row.get(6)?,
@@ -396,6 +407,53 @@ fn validate_readable_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn parse_row_timestamp(
+    raw: String,
+    field: &'static str,
+    organization: &str,
+    id: i64,
+) -> rusqlite::Result<Timestamp> {
+    Timestamp::parse(&raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(InvalidTimestamp {
+                organization: organization.to_owned(),
+                id,
+                field,
+                source: error,
+            }),
+        )
+    })
+}
+
+#[derive(Debug)]
+struct InvalidTimestamp {
+    organization: String,
+    id: i64,
+    field: &'static str,
+    source: crate::timestamp::TimestampError,
+}
+
+impl std::fmt::Display for InvalidTimestamp {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "work item {}/{} has an invalid {field} value: {source}",
+            self.organization,
+            self.id,
+            field = self.field,
+            source = self.source
+        )
+    }
+}
+
+impl std::error::Error for InvalidTimestamp {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 fn table_exists(connection: &Connection, name: &str) -> Result<bool> {
     let found: Option<String> = connection
         .query_row(
@@ -445,8 +503,8 @@ fn upsert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
             ticket.iteration_path,
             ticket.tags.join(";"),
             ticket.description,
-            ticket.created_at,
-            ticket.changed_at,
+            ticket.created_at.to_rfc3339(),
+            ticket.changed_at.to_rfc3339(),
             ticket.web_url,
         ],
     )?;
@@ -756,5 +814,42 @@ mod tests {
                 .iter()
                 .any(|relation| relation.from.id == 42 && relation.to.id == 10_001)
         );
+    }
+
+    #[test]
+    fn load_parses_offset_timestamps_and_rejects_invalid_ones() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("timestamps.sqlite3");
+        let opened = SqliteTicketRepository::open(&path).unwrap();
+        opened
+            .repository
+            .connection
+            .execute(
+                "UPDATE work_items SET changed_at = '2026-08-26T13:00:00-05:00'
+                 WHERE work_item_id = 10001",
+                [],
+            )
+            .unwrap();
+        let tickets = opened.repository.load_all().unwrap();
+        let ticket = tickets
+            .iter()
+            .find(|ticket| ticket.key.id == 10_001)
+            .unwrap();
+        assert_eq!(
+            ticket.changed_at,
+            crate::timestamp::ts("2026-08-26T18:00:00Z")
+        );
+
+        opened
+            .repository
+            .connection
+            .execute(
+                "UPDATE work_items SET created_at = 'not-a-date' WHERE work_item_id = 10001",
+                [],
+            )
+            .unwrap();
+        let error = format!("{:#}", opened.repository.load_all().unwrap_err());
+        assert!(error.contains("10001"), "{error}");
+        assert!(error.contains("created_at"), "{error}");
     }
 }

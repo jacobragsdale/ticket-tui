@@ -1,0 +1,205 @@
+use std::fmt;
+
+use time::format_description::well_known::Rfc3339;
+use time::macros::format_description;
+use time::{Date, OffsetDateTime, UtcOffset};
+
+const DATE_ONLY: &[time::format_description::FormatItem<'static>] =
+    format_description!("[year]-[month]-[day]");
+const CALENDAR_DAY: &[time::format_description::FormatItem<'static>] =
+    format_description!("[month repr:short] [day padding:none]");
+const EXACT_UTC: &[time::format_description::FormatItem<'static>] =
+    format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
+
+/// A UTC instant parsed from ticket data.
+///
+/// Stored values are normalized to UTC so sorting and display do not depend on
+/// lexical RFC 3339 order or a leading `YYYY-MM-DD` slice.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct Timestamp {
+    instant: OffsetDateTime,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimestampError {
+    raw: String,
+}
+
+impl Timestamp {
+    pub const UNIX_EPOCH: Self = Self {
+        instant: OffsetDateTime::UNIX_EPOCH,
+    };
+
+    #[must_use]
+    pub fn from_offset_date_time(instant: OffsetDateTime) -> Self {
+        Self {
+            instant: instant.to_offset(UtcOffset::UTC),
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Self, TimestampError> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(TimestampError {
+                raw: raw.to_owned(),
+            });
+        }
+        if let Ok(parsed) = OffsetDateTime::parse(trimmed, &Rfc3339) {
+            return Ok(Self::from_offset_date_time(parsed));
+        }
+
+        let mut candidate = trimmed.replace(' ', "T");
+        if !has_zone_suffix(&candidate) {
+            candidate.push('Z');
+        }
+        if let Ok(parsed) = OffsetDateTime::parse(&candidate, &Rfc3339) {
+            return Ok(Self::from_offset_date_time(parsed));
+        }
+
+        if let Ok(date) = Date::parse(trimmed, DATE_ONLY) {
+            return Ok(Self::from_offset_date_time(date.midnight().assume_utc()));
+        }
+
+        Err(TimestampError {
+            raw: trimmed.to_owned(),
+        })
+    }
+
+    #[must_use]
+    pub fn to_rfc3339(self) -> String {
+        self.instant
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| self.calendar_date())
+    }
+
+    #[must_use]
+    pub fn calendar_date(self) -> String {
+        self.instant
+            .format(DATE_ONLY)
+            .unwrap_or_else(|_| self.instant.to_string())
+    }
+
+    #[must_use]
+    pub fn exact_utc(self) -> String {
+        self.instant
+            .format(EXACT_UTC)
+            .unwrap_or_else(|_| self.to_rfc3339())
+    }
+
+    #[must_use]
+    pub fn relative_to(self, now: OffsetDateTime) -> String {
+        let changed = self.instant;
+        let age = now - changed;
+        if age.is_negative() {
+            return self.calendar_date();
+        }
+        if age.whole_minutes() < 1 {
+            return "now".into();
+        }
+        if age.whole_hours() < 1 {
+            return format!("{}m", age.whole_minutes());
+        }
+        if age.whole_days() < 1 {
+            return format!("{}h", age.whole_hours());
+        }
+        if age.whole_days() < 7 {
+            return format!("{}d", age.whole_days());
+        }
+        if changed.year() == now.year() {
+            return changed
+                .format(CALENDAR_DAY)
+                .unwrap_or_else(|_| self.calendar_date());
+        }
+        self.calendar_date()
+    }
+}
+
+impl fmt::Display for Timestamp {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.to_rfc3339())
+    }
+}
+
+impl fmt::Display for TimestampError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "invalid timestamp {:?}; expected RFC 3339, 'YYYY-MM-DD HH:MM:SS', or 'YYYY-MM-DD'",
+            self.raw
+        )
+    }
+}
+
+impl std::error::Error for TimestampError {}
+
+fn has_zone_suffix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes
+        .last()
+        .is_some_and(|byte| *byte == b'Z' || *byte == b'z')
+    {
+        return true;
+    }
+    if bytes.len() >= 6 {
+        let suffix = &bytes[bytes.len() - 6..];
+        if (suffix[0] == b'+' || suffix[0] == b'-') && suffix[3] == b':' {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+pub(crate) fn ts(raw: &str) -> Timestamp {
+    Timestamp::parse(raw).unwrap_or_else(|error| panic!("{error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::macros::datetime;
+
+    #[test]
+    fn parse_normalizes_offsets_to_utc() {
+        let timestamp = ts("2026-08-26T13:00:00-05:00");
+
+        assert_eq!(timestamp.exact_utc(), "2026-08-26 18:00:00 UTC");
+        assert_eq!(timestamp, ts("2026-08-26T18:00:00Z"));
+    }
+
+    #[test]
+    fn parse_accepts_space_separated_and_date_only_values() {
+        assert_eq!(ts("2026-08-26 18:00:00"), ts("2026-08-26T18:00:00Z"));
+        assert_eq!(ts("2026-08-26"), ts("2026-08-26T00:00:00Z"));
+    }
+
+    #[test]
+    fn parse_rejects_empty_and_unrecognized_values() {
+        assert!(Timestamp::parse("").is_err());
+        assert!(Timestamp::parse("yesterday").is_err());
+        assert!(Timestamp::parse("26/08/2026").is_err());
+    }
+
+    #[test]
+    fn ordering_uses_the_instant_not_the_lexical_string() {
+        let offset = "2026-08-26T13:00:00-05:00";
+        let utc = "2026-08-26T16:00:00Z";
+
+        assert!(offset < utc);
+        assert!(ts(offset) > ts(utc));
+    }
+
+    #[test]
+    fn relative_labels_use_the_normalized_calendar_date() {
+        let now = datetime!(2026-08-26 18:00 UTC);
+
+        assert_eq!(ts("2026-08-26T17:30:00Z").relative_to(now), "30m");
+        assert_eq!(ts("2026-08-26T12:00:00Z").relative_to(now), "6h");
+        assert_eq!(ts("2026-08-23T18:00:00Z").relative_to(now), "3d");
+        assert_eq!(ts("2026-07-01T00:00:00Z").relative_to(now), "Jul 1");
+        assert_eq!(
+            ts("2025-07-01T22:00:00-05:00").relative_to(now),
+            "2025-07-02"
+        );
+    }
+}

@@ -1,6 +1,8 @@
 use std::cmp::Ordering;
 use std::fmt;
 
+use crate::timestamp::Timestamp;
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TicketKey {
     pub organization: String,
@@ -22,8 +24,8 @@ pub struct Ticket {
     pub iteration_path: String,
     pub tags: Vec<String>,
     pub description: String,
-    pub created_at: String,
-    pub changed_at: String,
+    pub created_at: Timestamp,
+    pub changed_at: Timestamp,
     pub web_url: String,
 }
 
@@ -173,7 +175,7 @@ pub struct RelationRecord {
 pub struct CommentRecord {
     pub ticket: TicketKey,
     pub comment_id: i64,
-    pub created_at: String,
+    pub created_at: Timestamp,
     pub author: Option<String>,
     pub text: String,
 }
@@ -182,7 +184,7 @@ pub struct CommentRecord {
 pub struct HistoryRecord {
     pub ticket: TicketKey,
     pub revision: i64,
-    pub changed_at: String,
+    pub changed_at: Timestamp,
     pub changed_by: Option<String>,
     pub field_name: String,
     pub old_value: Option<String>,
@@ -212,7 +214,7 @@ impl TicketGraph {
             .iter()
             .filter(|comment| comment.ticket == *key)
             .collect();
-        comments.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+        comments.sort_by_key(|left| left.created_at);
         comments
     }
 
@@ -400,6 +402,7 @@ fn apply_direction(ordering: Ordering, direction: SortDirection) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timestamp::ts;
 
     fn ticket(id: i64, title: &str, priority: Option<i64>) -> Ticket {
         Ticket {
@@ -419,8 +422,10 @@ mod tests {
             iteration_path: "demo\\Sprint 1".into(),
             tags: vec!["rust".into()],
             description: "not searchable sentinel".into(),
-            created_at: "2026-01-01T00:00:00Z".into(),
-            changed_at: format!("2026-01-{id:02}T00:00:00Z"),
+            created_at: ts("2026-01-01T00:00:00Z"),
+            changed_at: Timestamp::from_offset_date_time(
+                time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(id),
+            ),
             web_url: format!("https://dev.azure.com/demo/demo/_workitems/edit/{id}"),
         }
     }
@@ -469,6 +474,24 @@ mod tests {
 
         assert_eq!(
             compare_tickets(&left, &right, SortField::Title, SortDirection::Descending),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn changed_sort_uses_normalized_instants() {
+        let mut earlier = ticket(1, "Earlier", Some(1));
+        let mut later = ticket(2, "Later", Some(1));
+        earlier.changed_at = ts("2026-08-26T16:00:00Z");
+        later.changed_at = ts("2026-08-26T13:00:00-05:00");
+
+        assert_eq!(
+            compare_tickets(
+                &later,
+                &earlier,
+                SortField::Changed,
+                SortDirection::Descending
+            ),
             Ordering::Less
         );
     }

@@ -1,6 +1,7 @@
 use serde_json::Value;
 
 use crate::model::{CommentRecord, HistoryRecord, RelationKind, RelationRecord, Ticket, TicketKey};
+use crate::timestamp::Timestamp;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImportFormat {
@@ -155,6 +156,12 @@ fn draft_from_json(value: &Value, location: &str) -> Result<Draft, ImportDiagnos
     )?;
     let title = required_text(object.get("title"), location, "title")?;
     let organization = text_or(object.get("organization"), "imported");
+    let created_at = timestamp_or(
+        object.get("created_at"),
+        location,
+        "created_at",
+        Timestamp::UNIX_EPOCH,
+    )?;
     let ticket = Ticket {
         key: TicketKey {
             organization: organization.clone(),
@@ -180,11 +187,8 @@ fn draft_from_json(value: &Value, location: &str) -> Result<Draft, ImportDiagnos
         ),
         tags: tags_from_json(object.get("tags")),
         description: text_or(object.get("description"), ""),
-        created_at: text_or(object.get("created_at"), "1970-01-01T00:00:00Z"),
-        changed_at: text_or(
-            object.get("changed_at"),
-            text_or(object.get("created_at"), "1970-01-01T00:00:00Z").as_str(),
-        ),
+        created_at,
+        changed_at: timestamp_or(object.get("changed_at"), location, "changed_at", created_at)?,
         web_url: text_or(object.get("url").or_else(|| object.get("web_url")), ""),
     };
     let relations = relations_from_json(object.get("relations"), &ticket.key, location)?;
@@ -288,6 +292,12 @@ fn draft_from_csv(
             })
         })
         .transpose()?;
+    let created_at = parse_timestamp_text(
+        get("created_at"),
+        location,
+        "created_at",
+        Timestamp::UNIX_EPOCH,
+    )?;
     Ok(Draft {
         ticket: Ticket {
             key: TicketKey {
@@ -317,13 +327,13 @@ fn draft_from_csv(
                 .to_owned(),
             tags,
             description: get("description").unwrap_or("").to_owned(),
-            created_at: get("created_at")
-                .unwrap_or("1970-01-01T00:00:00Z")
-                .to_owned(),
-            changed_at: get("changed_at")
-                .or_else(|| get("created_at"))
-                .unwrap_or("1970-01-01T00:00:00Z")
-                .to_owned(),
+            created_at,
+            changed_at: parse_timestamp_text(
+                get("changed_at"),
+                location,
+                "changed_at",
+                created_at,
+            )?,
             web_url: get("url")
                 .or_else(|| get("web_url"))
                 .unwrap_or("")
@@ -374,6 +384,37 @@ fn parse_csv_rows(raw: &str) -> Vec<Vec<String>> {
         }
     }
     rows
+}
+
+fn timestamp_or(
+    value: Option<&Value>,
+    location: &str,
+    field: &str,
+    default: Timestamp,
+) -> Result<Timestamp, ImportDiagnostic> {
+    match value {
+        None | Some(Value::Null) => Ok(default),
+        Some(Value::String(text)) => parse_timestamp_text(Some(text), location, field, default),
+        Some(_) => Err(ImportDiagnostic {
+            location: location.into(),
+            message: format!("{field} must be a timestamp string"),
+        }),
+    }
+}
+
+fn parse_timestamp_text(
+    value: Option<&str>,
+    location: &str,
+    field: &str,
+    default: Timestamp,
+) -> Result<Timestamp, ImportDiagnostic> {
+    let Some(text) = value.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(default);
+    };
+    Timestamp::parse(text).map_err(|error| ImportDiagnostic {
+        location: location.into(),
+        message: format!("{field}: {error}"),
+    })
 }
 
 fn required_text(
@@ -488,5 +529,19 @@ mod tests {
     fn json_object_wrapper_is_accepted() {
         let batch = parse_json(r#"{"tickets":[{"id":9,"title":"Wrapped"}]}"#);
         assert_eq!(batch.tickets[0].key.id, 9);
+    }
+
+    #[test]
+    fn timestamps_are_normalized_and_invalid_values_are_reported() {
+        let batch = parse_json(
+            r#"[{"id":1,"title":"Offset","created_at":"2026-08-26T13:00:00-05:00"},{"id":2,"title":"Bad","created_at":"tomorrow"}]"#,
+        );
+        assert_eq!(batch.tickets.len(), 1);
+        assert_eq!(
+            batch.tickets[0].created_at,
+            crate::timestamp::ts("2026-08-26T18:00:00Z")
+        );
+        assert_eq!(batch.diagnostics.len(), 1);
+        assert!(batch.diagnostics[0].message.contains("created_at"));
     }
 }
