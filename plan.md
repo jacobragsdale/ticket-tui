@@ -1,432 +1,383 @@
-# Mouse-first polish plan
+# Ticket tree interface plan
 
-## Goal
+## Outcome
 
-Make `ticket-tui` feel predictable and complete when used primarily with a
-mouse, while preserving every existing keyboard binding and keeping the
-application a focused, read-only ticket browser.
+Turn the existing `Family` section in ticket details into a clean, compact,
+collapsible tree for exploring parent and child work items. A user should be
+able to understand where the selected ticket sits, reveal more of its branch,
+and move to another family ticket without losing orientation.
 
-This work is interaction polish, not a product expansion. The finished app
-should let a user point, click, scroll, select, copy, and paste without first
-learning terminal-specific workarounds. Keyboard and mouse routes must invoke
-the same application commands so neither path becomes second class.
+This is a focused interface improvement, not a new product area. Keep the tree
+inside the existing details pane and build on the relationship, scrolling,
+focus, pointer, and navigation code already in the repository.
 
 ## Scope guardrails
 
-- Keep mouse capture enabled. Do not restore the reverted environment-specific
-  `--mouse`/`--no-mouse` behavior or make users choose between in-app mouse
-  controls and copying text.
-- Preserve all current shortcuts, focus behavior available through `Tab`, and
-  command-palette actions. Mouse support is additive.
-- Keep the existing responsive layouts and minimum terminal size of `36 x 10`.
-- Keep macOS and Linux support and avoid terminal-emulator-specific behavior as
-  the primary interaction path.
-- Reuse the current `AppAction`, command palette, clipboard commands, rendering
-  theme, and test backend where practical.
-- Prefer a small typed interaction layer over scattered new coordinate checks.
-- Do not add ticket editing, remote service integration, context menus,
-  tooltips, dashboards, new persistence formats, or other unrelated features.
-- Do not make right-click, double-click timing, or horizontal wheel gestures
-  required. Their terminal support is too inconsistent for core behavior.
-- Do not add page-per-wheel-notch ticket movement. That behavior was previously
-  added and reverted; wheel movement should be fine-grained and predictable.
+- Keep the application read-only and offline.
+- Reuse `TicketGraph`, `FamilySnapshot`, the details pane, `Focus`,
+  `PointerTarget`, `ScrollSurface::Details`, and `jump_to_ticket`.
+- Add no dependency, database migration, session-file field, separate tree
+  screen, modal, horizontal scrolling, or generic widget framework.
+- Keep non-hierarchical relations in the existing `Links` section. Do not try
+  to turn related, predecessor, successor, or duplicate links into tree edges.
+- Treat the hierarchy as a deterministic tree projection. Continue using the
+  existing primary-parent rule for the main branch and show additional parents
+  separately; do not build a general-purpose directed-graph viewer.
+- Keep expansion state in memory for the current run. It is presentation state,
+  so it should not dirty or version the saved session.
+- Preserve ticket filtering. A tree row may describe a loaded ticket hidden by
+  the current query, but navigation must not silently clear the query.
+- Preserve current responsive layouts and the `36 x 10` minimum terminal size.
+- Prefer extending the existing model, app, UI, and pointer types over creating
+  a new module.
 
-## Current-state findings
+## Current foundation
 
-The codebase already has a useful mouse foundation:
+The repository already contains most of the required machinery:
 
-- `src/main.rs` enables crossterm mouse capture and bracketed paste, routes
-  `Event::Mouse` and `Event::Paste`, and restores terminal state on exit.
-- `src/app.rs` handles left clicks and wheel events. It can select ticket rows,
-  open underlined IDs and URLs, sort headers, operate filters, choose overlay
-  rows, and scroll details and help.
-- `src/ui.rs` records hit rectangles during rendering and displays scrollbars,
-  underlined links, filter pills, removable chips, and selected rows.
-- `src/export.rs` and the command palette already copy ticket IDs, URLs, titles,
-  Markdown links, and summaries through platform clipboard commands.
-- Existing `TestBackend` and application tests cover several click regions,
-  scrolling bounds, paste sanitization, copying selected tickets, and responsive
-  layouts. The current baseline is 95 passing tests across the library and
-  binary targets.
+- `src/model.rs` normalizes parent and child edges in either direction, chooses
+  a stable ancestor chain, prevents ancestor cycles, and produces the current
+  static `FamilyTreeEntry` rows.
+- `src/app.rs` stores details focus and scroll state, highlights a family link,
+  jumps to visible related tickets, records recent-ticket history, and explains
+  when a related ticket is hidden by the active filter.
+- `src/ui.rs` renders a `Family` section with tree connectors, selected and
+  focused styling, clickable IDs, a breadcrumb summary, and the normal details
+  scrollbar.
+- `src/pointer.rs` already resolves layered typed hit regions and distinguishes
+  a row action from scrolling or text selection.
 
-The remaining friction comes from incomplete interaction semantics rather than
-missing product capabilities:
+The change should replace the static ancestor/sibling/immediate-child snapshot
+with a flattened view of the currently expanded branch. It should not replace
+these supporting systems.
 
-1. Mouse capture prevents ordinary terminal drag selection, while the app has
-   no internal text-selection model. Copy commands exist, but arbitrary visible
-   text cannot be selected with the mouse.
-2. Paste is accepted only by search and import prompts. The palette query and
-   named-view editor are also text fields but ignore paste events.
-3. Wheel input changes the selected ticket and keyboard focus instead of
-   scrolling the hovered viewport independently, which differs from common GUI
-   list behavior.
-4. Overlay scrolling is inconsistent. Filter hit regions are based on unscrolled
-   row positions, the facet menu can move its selection beyond the clipped
-   viewport without scrolling the content, and several overlays share generic
-   scroll state even when their rows are not rendered with that offset.
-5. Scrollbars are visual indicators only. Their tracks and thumbs look
-   interactive but cannot be clicked or dragged.
-6. Several controls are available only by keyboard even though the underlying
-   command already exists. Examples include opening the command palette,
-   closing most overlays, changing column order or width, saving or deleting a
-   named view, and switching the narrow Tickets/Details view.
-7. A click on a table ID immediately opens the browser on mouse-down, and other
-   row actions also fire before the app can know whether the user intended to
-   drag. This conflicts with introducing text selection safely.
-8. Click rectangles are stored by widget category rather than by action. This
-   duplicates routing rules, makes overlay z-order implicit, and makes clipped
-   or scrolled rows easy to map incorrectly.
+## Target experience
 
-## Target interaction contract
+The tree remains the first section of the scrollable details body. At a useful
+width it should read approximately like this:
 
-### Pointer routing
+```text
+Family · 2/5 closed
+  ▾ 10001  Feature     Authentication rewrite
+    ▾ 10002  User Story  Login form                 current
+      • 10004  Task       Validate email
+    ▸ 10003  User Story  Logout                     2 children
+```
 
-- The topmost visible surface owns the pointer. An open popup or menu receives
-  clicks and wheel events before the obscured application beneath it.
-- Clicking a control focuses or activates it. Scrolling a surface does not move
-  keyboard focus merely because the pointer passed over that surface.
-- A press begins a possible click or drag. A control activates on left-button
-  release only when the pointer has not become a text-selection or scrollbar
-  drag. Dragging across a link must never open it accidentally.
-- Only visible, clipped content receives hit regions. A row scrolled out of a
-  popup must not remain clickable at its old coordinate.
-- Clickable text has a stable visual affordance: links stay underlined; buttons
-  use a consistent bracketed treatment; checkboxes look like checkboxes; column
-  headers retain sort arrows. Do not rely on color alone.
-- Track the hovered target and apply a restrained hover style to rows, links,
-  buttons, and scrollbar parts. Redraw only when the resolved hover target
-  changes, not for every raw pointer-motion event.
+Use the existing connector glyphs where branches need `├─`, `└─`, and `│`.
+The disclosure marker precedes the ID and has one stable meaning:
 
-### Scrolling
+- `▾` has children and is expanded;
+- `▸` has children and is collapsed;
+- `•` is a leaf.
 
-- The wheel scrolls the scrollable region under the pointer:
-  - ticket body: three logical ticket rows per notch;
-  - details body: three rendered lines per notch;
-  - help and list overlays: three visible rows per notch.
-- Wheel movement clamps at both ends and does nothing when the hovered surface
-  has no overflow.
-- Ticket scrolling changes the table viewport, not the selected ticket. The
-  details pane therefore remains stable while browsing past it with the wheel.
-- Keyboard selection continues to move the current ticket and automatically
-  brings that ticket into view. A mouse click selects the clicked ticket and
-  likewise ensures it is visible.
-- Compact and comfortable table density use logical ticket rows, so one wheel
-  notch moves the same number of tickets in either mode.
-- Each scrollable widget owns its offset and maximum. Opening or changing an
-  overlay initializes or clamps that overlay's offset instead of leaking a
-  previous overlay's scroll position.
-- Visible vertical scrollbars support:
-  - wheel scrolling anywhere in their owning surface;
-  - a track click above or below the thumb for one viewport-minus-one step;
-  - left-button thumb dragging with proportional, clamped movement.
-- Scrollbar interaction does not change the selected ticket or active overlay
-  row unless that row must be brought into view by a subsequent keyboard action.
+The globally selected ticket and the keyboard cursor are different concepts.
+Label the selected row with `current` and render it in bold. Render the family
+cursor with the existing selected-background treatment. Do not rely on color
+alone to distinguish either state.
 
-### Text selection, copy, and paste
+Show ID, work-item type, title, and a compact child count when they fit. Protect
+the connector, disclosure marker, and ID first; truncate the title before
+removing structural information. At narrow widths, omit type and state details
+before dropping the child count. Do not wrap a tree row because wrapping makes
+branch connectors and mouse targets ambiguous.
 
-- Left-button dragging over selectable rendered text creates an in-app
-  selection while mouse capture remains enabled.
-- Selection is limited to one visible text surface at a time: search, table,
-  details, help, informational popup, or text-bearing list popup. Crossing into
-  another surface clamps the selection to its origin surface.
-- Render the selection with a theme-aware reverse or selection style. Preserve
-  enough contrast in normal color and `NO_COLOR` modes.
-- Releasing a non-empty drag copies the selected visible plain text through the
-  existing `AppAction::Copy` clipboard path and shows the existing success or
-  error notification.
-- Copy the text the user can see, in reading order. Join selected screen rows
-  with newlines, omit borders and scrollbar glyphs, trim only layout padding,
-  and preserve meaningful internal spaces and Unicode. A selection spanning
-  wrapped details text should produce readable lines rather than ANSI styling
-  or terminal-cell artifacts.
-- A drag never changes table selection, toggles a filter, sorts a column, jumps
-  a relationship, or opens a URL. A simple click retains those behaviors.
-- Keep semantic copy commands for complete underlying values that may be
-  truncated on screen. Add a single visible `Copy` button in the details title
-  area that opens the command palette prefiltered to its existing copy actions.
-  Do not create a separate context-menu system.
-- Keep `y` as the quick copy-ID shortcut and retain all existing copy commands.
-- Route bracketed paste to every active text editor:
-  - search query;
-  - command-palette query;
-  - import path;
-  - named-view name.
-- Sanitize pasted input according to the destination. Search and palette input
-  convert newlines and tabs to spaces; single-line names and paths discard
-  control characters. Paste at the current cursor for editors that expose a
-  cursor, not always at the end.
-- Clicking inside search places the caret at the nearest character after
-  accounting for borders and horizontal scroll. Clicking the palette, import,
-  or view-name field focuses that editor and places the caret when the field has
-  explicit cursor support.
+The breadcrumb above the details body should stay compact: primary parent,
+`this`, and direct-child completion. It remains a summary and is not another
+expansion control.
 
-### Click parity for existing capabilities
+## Interaction contract
 
-- Search:
-  - clicking the field enters search mode and places the caret;
-  - show a clickable clear button only when a query is present;
-  - retain `/`, editing keys, `Enter`, and `Esc` unchanged.
-- Application actions:
-  - add compact `Actions` and `?` buttons in unused search-block title space;
-  - `Actions` opens the existing command palette and `?` opens help;
-  - hide or abbreviate these buttons when width is insufficient rather than
-    shrinking the search input below a usable size.
-- Ticket table:
-  - a plain row click selects the row;
-  - the underlined numeric ID remains the explicit open-in-browser target;
-  - render the bookmark marker separately from the ID underline and make the
-    marker toggle the bookmark rather than open the browser;
-  - provide a small selection checkbox target per row so existing multi-select
-    is usable without the keyboard; keep `Space` unchanged;
-  - retain clickable sort headers and make their full visible cells active.
-- Details:
-  - URL and family-ticket links remain clickable;
-  - the details title-area `Copy` button exposes existing copy formats;
-  - clicking non-control details content focuses the details pane without
-    scrolling or activating a link.
-- Responsive tabs:
-  - replace instructional-looking narrow titles with clear `[Tickets]` and
-    `[Details]` tab targets;
-  - clicking either tab changes the visible narrow pane;
-  - `Tab` and `d` continue to work exactly as they do now.
-- Filters:
-  - pills open their value menus, checkboxes toggle values, and `x` chips remove
-    only the represented token;
-  - a click outside the small facet menu closes it without changing the query;
-  - the full filter overlay gets a visible close button and correct scrolled-row
-    mapping.
-- Sort popup:
-  - clicking a field applies the same default/toggle direction rules already
-    used by clickable table headers;
-  - provide explicit ascending and descending targets for the active row;
-  - add a close button and preserve all arrow/Enter behavior.
-- Column popup:
-  - keep row checkboxes clickable for visibility;
-  - add compact up, down, narrower, and wider targets on each applicable row,
-    invoking the existing `move_column` and `resize` operations;
-  - title remains fixed-width and non-resizable, matching the existing keyboard
-    rules;
-  - add a close button.
-- Command palette:
-  - clicking a command runs it, as today;
-  - make the query portion a recognizable text field with click and paste;
-  - scroll long result lists and keep clicked rows aligned with their visible
-    indices;
-  - add a close button.
-- Named views:
-  - clicking a view loads it, as today;
-  - expose `Save current` and `Delete selected` buttons for the existing actions;
-  - make the name editor clickable and paste-aware;
-  - add close and cancel buttons without removing `V`, `n`, `d`, `Enter`, or
-    `Esc`.
-- Help, database info, and import prompt:
-  - add a visible close button to each;
-  - make help's scrollbar interactive;
-  - add `Import` and `Cancel` buttons to the existing import prompt;
-  - do not close a modal merely because the user clicked selectable text inside
-    it.
+### Focus
 
-## Implementation plan
+Add `Focus::Family` as a small extension to the existing focus enum.
 
-### Phase 1: replace ad hoc hit regions with typed targets
+- `Tab` cycles `Tickets -> Family -> Details -> Tickets` when the selected
+  ticket has a family tree.
+- Skip `Family` when the selected ticket has no parent or child rows.
+- In the under-70-column layout, both `Family` and `Details` show the details
+  screen; returning to `Tickets` shows the ticket table again.
+- Treat the details border as focused for either `Family` or `Details`, and add
+  the stronger focus cue to the `Family` heading only while `Focus::Family` is
+  active.
+- Clicking a tree row or disclosure marker gives focus to `Family`. Clicking
+  ordinary details content gives focus to `Details` as it does now.
 
-1. In `src/app.rs`, replace category-specific vectors in `HitRegions` with a
-   rendered list of `PointerRegion { rect, target, layer, selectable_surface }`
-   or an equivalent typed structure. `PointerTarget` should encode the command
-   to perform rather than require another chain of widget-specific coordinate
-   checks.
-2. Include targets for controls, table rows, links, modal backgrounds,
-   scrollable surfaces, scrollbar tracks/thumbs, text fields, and selectable
-   text surfaces. Keep data payloads such as row index, `TicketKey`,
-   `FilterToken`, `SortField`, or overlay index in the target.
-3. Register regions in `src/ui.rs` only after layout and clipping are known.
-   Resolve overlaps by explicit layer and reverse paint order so popups cannot
-   click through to the table.
-4. Introduce pointer state in `App` for pressed target, hover target, drag kind,
-   and drag origin. Move click activation from `Down(Left)` to `Up(Left)` after
-   confirming no drag occurred.
-5. Change mouse handling to report whether the visible state changed. Update the
-   event loop in `src/main.rs` so repeated pointer movement over the same target
-   does not force needless redraws.
-6. Preserve the current keyboard dispatch untouched except where both inputs
-   are redirected into a shared command method.
+This keeps ordinary details scrolling unchanged while giving the tree standard
+navigation keys. It avoids a new application mode or popup.
 
-Verification for this phase:
+### Keyboard behavior
 
-- Unit-test topmost-region resolution, border coordinates, clipped rows, and
-  press/drag/release cancellation.
-- Assert that dragging from a link does not return `OpenUrl` and that a simple
-  click still does.
-- Render at widths 36, 69, 70, 109, and 110 to catch breakpoint hit-region
-  errors.
+While `Focus::Family` is active:
 
-### Phase 2: make scrolling viewport-based and consistent
+| Input | Behavior |
+|---|---|
+| `Up` / `k` | Move the cursor to the previous visible tree row |
+| `Down` / `j` | Move the cursor to the next visible tree row |
+| `Left` / `h` | Collapse an expanded row; otherwise move to its visible parent |
+| `Right` / `l` | Expand a collapsed row; otherwise move to its first visible child |
+| `Space` | Toggle the cursor row between expanded and collapsed |
+| `Enter` | Select the cursor ticket in the main table and keep family focus |
+| `Home` / `End` | Move to the first or last visible tree row |
+| `Page Up` / `Page Down` | Move by the number of visible family rows, clamped at either end |
+| `Tab` | Continue to ordinary details focus |
+| `o` | Keep the existing behavior of opening the globally selected ticket |
 
-1. Give the ticket list an explicit viewport offset separate from its selected
-   row. If ratatui's `TableState` insists on scrolling the selection back into
-   view, render a viewport slice with a render-local state rather than coupling
-   user selection to widget offset.
-2. Add shared clamped-scroll helpers for line, logical-row, page, and
-   proportional scrollbar movement. Use the same helpers from wheel, keyboard,
-   track-click, and drag paths where their semantics match.
-3. Route wheel events to the scrollable surface under the pointer without
-   changing `Focus`. Preserve current keyboard rules that bring the selected or
-   focused row into view.
-4. Give facet, filter, column, palette, views, help, and details surfaces
-   explicit offsets and viewport sizes. Keep a selected overlay row visible
-   during keyboard movement, but let pure wheel scrolling leave selection
-   unchanged.
-5. Build row hit targets from `logical_index = offset + visible_index`. Do not
-   register rows outside the clipped inner rectangle.
-6. Register scrollbar track and thumb geometry during render, then implement
-   page clicks and proportional thumb dragging. Recalculate drag position after
-   terminal resize.
+Additional rules:
 
-Verification for this phase:
+- A leaf ignores expansion commands.
+- Moving the cursor never changes the globally selected ticket or recent-ticket
+  history. Only `Enter` or a row click performs the existing ticket jump.
+- Keep the cursor row visible by adjusting the existing `details_scroll`; do
+  not introduce a second scrollbar for the tree.
+- Selecting a new ticket reveals its primary ancestor path so the new `current`
+  row cannot disappear under a collapsed ancestor.
+- If the target ticket is hidden by search or filters, keep the current table
+  selection and query unchanged and reuse the existing explanatory
+  notification.
+- `Focus::Details` retains the current arrow, `j`/`k`, page, `Home`, and `End`
+  scrolling behavior. Existing ticket-table keys remain unchanged under
+  `Focus::Tickets`.
+- The existing recent-ticket `[` and `]` history remains independent of tree
+  expansion.
 
-- Wheel-scroll each surface at its start, middle, and end and assert bounds.
-- Assert table wheel movement does not change selected ticket, details content,
-  `Focus`, or narrow-pane choice.
-- Test both row densities and tables shorter and longer than one viewport.
-- Scroll every overlay, click its first and last visible rows, and assert the
-  logical item—not its former screen position—receives the action.
-- Test scrollbar track clicks, thumb drags, zero-overflow widgets, and resize
-  during/after a drag.
+### Mouse behavior
 
-### Phase 3: add in-app selection and complete clipboard input
+- Clicking `▸` or `▾` toggles only that node. It must not select or open the
+  ticket underneath the disclosure target.
+- Clicking the rest of a family row performs the same selection as keyboard
+  `Enter`, records the normal recent-ticket history, and keeps family focus.
+- Clicking the already selected row only moves the family cursor and focus; it
+  does not add a duplicate history entry.
+- Give the entire visible row a hit target so a truncated title remains easy to
+  select. Register the one-cell disclosure target after the row target so the
+  existing reverse-paint hit resolution gives it precedence.
+- Wheel input over the tree continues to scroll `ScrollSurface::Details` by the
+  existing amount without moving the family cursor, changing focus, or
+  expanding a node.
+- Preserve existing hover and text-drag behavior. A drag that begins on a tree
+  row is text selection, not a click or expansion.
+- Do not add double-click, right-click, hover tooltips, drag-to-reparent, or
+  horizontal gestures.
 
-1. During `src/ui.rs` rendering, record a plain-text snapshot for each
-   selectable surface alongside its screen rectangle. Derive it from the final
-   rendered cells or a parallel text layout, never from ANSI output. Mark
-   borders, padding, and scrollbar cells as non-copyable.
-2. Add selection anchor and extent state. On left drag inside one surface,
-   convert terminal cell coordinates into ordered text positions, including
-   wrapped lines and wide Unicode cells.
-3. Render the selection after the base widget but before the terminal frame is
-   presented. Clear it on a new click, surface replacement, resize, or modal
-   transition.
-4. On release, normalize the selected visible text and return
-   `AppAction::Copy`. Reuse `copy_to_clipboard` and its current notification and
-   error handling.
-5. Add an `open_copy_actions` helper that opens the existing palette with
-   `"copy"` as its query. Connect it to a visible details `Copy` target; do not
-   duplicate clipboard format logic.
-6. Generalize `handle_paste` by active text editor. Add cursor-aware insertion
-   to palette, import, and view-name state where needed, while leaving their
-   current keyboard shortcuts intact.
-7. Add click-to-caret mapping for all visible text inputs. Clamp clicks in
-   padding or past the rendered value to the nearest valid character boundary.
+## Technical design
 
-Verification for this phase:
+### 1. Produce visible tree rows from the graph
 
-- Drag-select and copy one cell, a partial line, multiple rows, wrapped details,
-  highlighted search text, and Unicode containing wide characters.
-- Assert copied text contains no ANSI codes, borders, scrollbar characters, or
-  layout-only trailing padding.
-- Assert a click still activates a control, a drag never does, and a zero-width
-  drag produces no clipboard action.
-- Paste multiline and Unicode content into every editor and verify sanitization,
-  insertion point, cursor position, and cancel/submit behavior.
-- Exercise clipboard success, missing-command failure, and nonzero clipboard
-  command exit without logging copied contents.
+Evolve `FamilyTreeEntry` in `src/model.rs` into the complete render contract for
+one flattened row. It should carry only data that the app and UI need:
 
-### Phase 4: expose existing actions through restrained controls
+```rust
+pub struct FamilyTreeEntry {
+    pub key: TicketKey,
+    pub prefix: String,
+    pub child_count: usize,
+    pub has_children: bool,
+    pub is_expanded: bool,
+    pub is_current: bool,
+}
+```
 
-1. Add shared render helpers for buttons, close targets, checkboxes, and tabs so
-   visual and hit rectangles cannot drift apart.
-2. Add `Actions`, help, query-clear, details-copy, narrow tabs, row bookmark and
-   multi-select targets, and modal close buttons.
-3. Add only the overlay-specific controls required for mouse parity: sort
-   direction, column move/resize, view save/delete, and import/cancel.
-4. Route each control into the same method or `CommandId` used by its keyboard
-   equivalent. Do not create parallel mouse-only business logic.
-5. Apply hover styles and disabled styles. Disabled controls must remain visible
-   when their placement is stable but must not register active hit targets.
-6. Update contextual footer/help text and `README.md` to describe mouse
-   scrolling, drag-to-copy, clickable actions, and paste behavior without
-   replacing the keyboard control table.
+Add a graph helper with the equivalent of:
 
-Verification for this phase:
+```rust
+TicketGraph::visible_family_tree(
+    current: &TicketKey,
+    expanded: &HashSet<TicketKey>,
+) -> Vec<FamilyTreeEntry>
+```
 
-- For every visible button, test its action and its disabled state.
-- Compare keyboard and mouse paths for sort, filters, columns, views, copy,
-  import, help, and responsive tab switching.
-- Confirm click targets do not overlap at minimum width and abbreviate or hide
-  in the documented priority order.
-- Confirm all controls remain legible and selected/hovered/disabled states are
-  distinguishable with `NO_COLOR`.
+Its behavior should be:
 
-### Phase 5: end-to-end regression pass
+1. Use the existing ancestor walk to find the highest primary ancestor for the
+   selected ticket. When there is no parent, the current ticket is the root.
+2. Emit the root and recursively emit sorted children only while their parent
+   is present in `expanded`.
+3. Reuse the current deterministic key ordering and connector-prefix builder so
+   renders do not jump between frames or reloads.
+4. Mark `is_current` by key comparison; do not bake cursor styling into the
+   model.
+5. Keep the existing maximum depth of 16 and a path-local visited set. If an
+   imported hierarchy cycles, omit the repeating edge and stop that branch
+   rather than recursing or hanging.
+6. Keep the main tree single-parent. The existing primary parent remains in the
+   tree; `extra_parents` remain short rows after the tree and continue to be
+   jumpable.
+7. Keep missing tickets visible as `missing ticket` and disable navigation to
+   them. If the relation table still contains known children, allow their
+   branch to expand so the stored structure is not hidden.
 
-1. Add a small table-driven mouse workflow suite using crossterm events and the
-   ratatui `TestBackend`. Cover wide, stacked, narrow-table, and narrow-details
-   layouts.
-2. Retain all existing keyboard tests and add explicit assertions for the
-   shortcut paths touched by shared command refactors.
-3. Run the full repository gate:
+Do not add a persistent adjacency cache in this pass. The current in-memory
+dataset and details-only rendering make the existing graph scans acceptable;
+the implementation can remain a small pure projection that is easy to test.
 
-   ```console
-   cargo fmt --all -- --check
-   cargo clippy --all-targets --all-features -- -D warnings
-   cargo test --all-targets
-   cargo build --release
-   ```
+### 2. Store minimal interaction state in `App`
 
-4. Perform manual terminal checks on macOS and Linux. At minimum, use one
-   mainstream terminal on each platform and include Ghostty/Herdr on macOS
-   because the repository history identifies copy-on-select there as a real
-   workflow. Verify actual clipboard contents rather than relying only on an
-   `AppAction::Copy` assertion.
-5. Manually test slow drags, fast drags, wheel bursts, track clicks, terminal
-   resize, modal overlap, and quitting after a drag to confirm terminal mouse
-   and paste modes are always restored.
+In `src/app.rs`, replace the index-based `link_cursor` with:
 
-## Suggested delivery checkpoints
+- `family_cursor: Option<TicketKey>` so expansion cannot make the cursor point
+  at a different row;
+- `family_expanded: HashSet<TicketKey>` for transient disclosure state.
 
-Implement and verify these as independent, reviewable checkpoints:
+Add small helpers rather than distributing index arithmetic through key
+handling and rendering:
 
-1. Typed pointer targets and release-based click dispatch.
-2. Correct hovered-surface wheel scrolling and overlay row mapping.
-3. Clickable and draggable scrollbars.
-4. In-app visible-text selection and clipboard copy.
-5. Paste and click-to-caret parity for all text editors.
-6. Existing-command buttons and overlay mouse parity.
-7. Documentation and end-to-end regression coverage.
+- `visible_family_tree()` delegates to the model projection for the selected
+  ticket.
+- `reset_family_cursor()` places the cursor on the selected ticket.
+- `move_family_cursor(delta)` moves within the flattened visible rows and
+  clamps rather than wrapping.
+- `collapse_or_parent()` and `expand_or_child()` implement standard tree-key
+  semantics.
+- `toggle_family_expansion(key)` ignores leaves and updates only the set.
+- `reveal_selected_family_path()` inserts the selected ticket and its primary
+  ancestors into the expansion set, giving every newly selected ticket an
+  immediately useful view of its direct children.
+- `ensure_family_cursor_visible()` maps the flattened row index to the existing
+  details line offset and adjusts `details_scroll` with the current viewport
+  bounds.
 
-Each checkpoint must leave existing keyboard behavior green. If a shared input
-refactor cannot preserve a shortcut, stop and fix that regression before adding
-the next mouse affordance.
+Call the reveal/reset helpers after table selection, recent-history navigation,
+reload selection restoration, and successful relationship jumps. On reload,
+retain expansion keys that still exist and discard stale keys. Do not mark the
+session dirty for cursor or expansion changes.
+
+The `Family` section is the first section of the scrollable details body, so
+its line position can be calculated as the section heading plus the flattened
+row index. Keep that simple ordering instead of adding render-coordinate state
+to `App`.
+
+### 3. Route keys through the new family focus
+
+Update the focused movement code in `src/app.rs` instead of adding another
+application mode:
+
+- extend `move_focused`, `Home`, `End`, `Page Up`, `Page Down`, `Enter`, and
+  `Space` for `Focus::Family`;
+- move the existing `h`/`l` family behavior into the standard collapse/expand
+  helpers;
+- update `toggle_focus` to skip `Family` when there is no hierarchy;
+- consider `Family` part of the details screen in narrow-layout focus helpers;
+- keep `jump_to_ticket` as the only path that changes the table selection from
+  a relationship row.
+
+Remove the old flat `family_jump_targets`, `cycle_family_link`, and
+`jump_focused_family_link` methods once their callers use the visible tree and
+key-based cursor. Keep other relation rows clickable; this plan does not need a
+second keyboard cursor for the non-hierarchical `Links` section.
+
+### 4. Render disclosure and focus states
+
+In `src/ui.rs`:
+
+1. Render `visible_family_tree()` rather than `FamilySnapshot::tree_entries()`.
+2. Build each row from connector prefix, disclosure marker, underlined ID,
+   optional type, truncated title, selected label, and optional child count.
+3. Apply current-ticket bold styling first, then family-cursor background so a
+   row can visibly be both selected and focused. Add `REVERSED` to the cursor
+   row under `NO_COLOR`, where a reset background alone is not distinguishable.
+4. Give the `Family` section heading an accent/focus marker only when
+   `Focus::Family` is active.
+5. Preserve the existing `Links`, planning, history, comments, and description
+   sections after the variable-height tree.
+6. Continue deriving detail link coordinates after applying
+   `details_scroll`, so hidden or clipped rows never receive mouse targets.
+7. Update the footer and help overlay with short, context-sensitive hints. For
+   example: `↑↓ move  ←→ fold  Enter select  Tab details`.
+
+In `src/pointer.rs`, add only one new action:
+
+```rust
+PointerTarget::ToggleFamily(TicketKey)
+```
+
+Continue using `PointerTarget::JumpToTicket` for the remainder of each tree row
+and `ScrollSurface::Details` for its scroll ownership. The current press,
+release, drag cancellation, hover, and layered-target machinery should not
+change.
+
+### 5. Keep responsive behavior deliberate
+
+- Wide and medium layouts keep the tree inside the current details pane.
+- Narrow details mode gives structural glyphs and IDs priority over metadata.
+- Expanded content may extend below the viewport and uses the existing details
+  scrollbar.
+- A terminal resize rerenders and reclamps details scroll without changing
+  expansion state or the key-based cursor.
+- Very short panes may show only part of the tree; keyboard cursor movement must
+  scroll it into view.
+
+## Verification plan
+
+### Model tests
+
+Add focused tests in `src/model.rs` for:
+
+- collapsed parents hiding all descendants;
+- nested expansion producing stable connectors and key order;
+- primary versus additional parents;
+- missing tickets;
+- cyclic relations and the depth limit;
+- parent-only, child-only, and mirrored relation records continuing to
+  normalize to the same hierarchy.
+
+### Application tests
+
+Add tests in `src/app.rs` for:
+
+- the selected branch being expanded by default;
+- conditional `Tab` focus order with and without a family;
+- cursor movement clamping at the first and last visible row;
+- a key-based cursor remaining on the same ticket after a sibling collapses;
+- left/right collapse, expand, parent, and first-child behavior;
+- `Space` toggling only nodes with children;
+- `Enter` selecting a visible ticket and recording history once;
+- a filtered-out target preserving the query and current selection while
+  showing the existing notification;
+- selection and cursor restoration after reload;
+- family cursor movement bringing the row into the details viewport;
+- expansion changes not setting `session_dirty`.
+
+### Render and pointer tests
+
+Extend `src/ui.rs` tests to cover:
+
+- disclosure, connector, current, cursor, and child-count rendering;
+- collapsed descendants disappearing from the buffer and hit regions;
+- narrow truncation preserving disclosure and ID;
+- a disclosure click toggling without selecting;
+- a row click selecting without toggling;
+- correct hit targets after details scrolling;
+- wheel scrolling leaving cursor, focus, and expansion unchanged;
+- selected and focused styles remaining distinguishable under `NO_COLOR`.
+
+Render representative cases at widths `36`, `60`, `72`, `110`, and `130`, and
+include a short-height case that forces details scrolling.
+
+### Repository checks
+
+After implementation, update the control table and database relationship text
+in `README.md`, then run:
+
+```console
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets
+cargo build --release
+```
 
 ## Completion criteria
 
-The optimization is complete when all of the following are true:
+The work is complete when:
 
-- Every existing keyboard binding still performs its documented action.
-- A mouse-only user can search, paste, select tickets, multi-select, bookmark,
-  filter, sort, configure columns, use named views, copy ticket information,
-  open links, inspect help/info, import a file, switch responsive panes, and
-  close every popup.
-- Dragging visible text copies it without disabling mouse capture and without
-  accidentally activating the text underneath.
-- The wheel scrolls the hovered table, details pane, help, or overlay smoothly,
-  with correct bounds and no unintended focus or ticket-selection changes.
-- Every rendered scrollbar works as an indicator, track, and draggable thumb.
-- Every element styled as a link, button, checkbox, tab, chip, or sortable
-  header is clickable over exactly its visible bounds.
-- Scrolled and clipped overlay rows activate the correct logical item.
-- Copy and paste handle Unicode and never expose clipboard contents in logs or
-  error messages.
-- Wide, stacked, narrow, short, and `NO_COLOR` layouts remain usable.
-- Formatting, Clippy, all tests, and the release build pass on macOS and Linux.
-
-## Explicitly deferred
-
-- Right-click context menus and terminal-specific popup menus.
-- Double-click-to-open behavior.
-- Selecting text that is offscreen or across multiple panes in one drag.
-- Copying rich formatting or ANSI styles.
-- Horizontal table scrolling or trackpad gesture recognition.
-- Drag-and-drop column reordering; the small up/down buttons provide mouse
-  parity with substantially less interaction complexity.
-- Dragging files into the import prompt; ordinary path paste remains supported.
-- Any ticket mutation or new Azure DevOps capability.
+- parent and child structure is legible without opening another screen;
+- branches expand and collapse with standard keyboard and mouse interactions;
+- the cursor, current ticket, expansion state, and details scroll remain stable
+  and visually distinct;
+- navigating a tree row uses the existing table selection, filter protection,
+  and recent-history behavior;
+- non-hierarchical links and ordinary detail scrolling still work;
+- responsive and monochrome renders remain usable;
+- the implementation adds no dependency, persistent state, database change, or
+  generalized tree framework; and
+- formatting, linting, tests, and release build all pass.
