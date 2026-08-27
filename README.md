@@ -80,15 +80,18 @@ to a database prepared by another tool.
 | `[` / `]` | Jump to the previous or next recently viewed ticket |
 | `Tab` | Switch focus between tickets and details |
 | `d` | Toggle the details screen when the terminal is under 70 columns |
-| `Enter`, `o` | Open the selected ticket in the system browser |
+| `h` / `l` | When details is focused, highlight the previous or next family ticket |
+| `Enter` | Jump to the highlighted family ticket, or open it in the browser |
+| `o` | Open the selected ticket in the system browser |
 | `r` | Reload and rebuild the search index in the background |
 | `i` | Show database path, row counts, and data freshness |
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
 
 Mouse input can select rows, scroll either pane, sort by visible headers, click
-filter-bar pills to choose values, click extra-field chips to remove them, and
-open an underlined ticket ID or detail URL.
+filter-bar pills to choose values, click extra-field chips to remove them, jump
+to an underlined family ticket in details, and open a detail URL or table ID in
+the browser.
 
 Search accepts a compact grammar such as `state:active type:bug
 assignee:"Avery Chen" priority:1 tag:rust`. Values in the same field are
@@ -134,7 +137,10 @@ The versioned `work_items` table stores these columns:
 The primary key is `(organization, work_item_id)`. Tags use Azure DevOps-style
 semicolon separation. Schema version 2 adds local `work_item_relations`,
 `work_item_comments`, and `work_item_history` tables. The TUI displays those
-records but never edits them. Fuzzy search covers ID, title, assignee, state,
+records but never edits them. Parent and child links render as a family tree in
+the details pane; other relation kinds stay in a separate Links list. Click a
+family ticket ID, or highlight one with `h`/`l` and press `Enter`, to select it
+in the table. Fuzzy search covers ID, title, assignee, state,
 type, area, iteration, and tags; it intentionally excludes descriptions.
 Structured `field:value` tokens are parsed out of the query before fuzzy
 matching.

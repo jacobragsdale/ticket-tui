@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::timestamp::Timestamp;
@@ -106,7 +107,7 @@ impl SortField {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RelationKind {
     Parent,
     Child,
@@ -198,6 +199,25 @@ pub struct TicketGraph {
     pub history: Vec<HistoryRecord>,
 }
 
+const MAX_ANCESTOR_DEPTH: usize = 16;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FamilySnapshot {
+    pub ancestors: Vec<TicketKey>,
+    pub extra_parents: Vec<TicketKey>,
+    pub current: TicketKey,
+    pub siblings: Vec<TicketKey>,
+    pub children: Vec<TicketKey>,
+    pub other_links: Vec<(RelationKind, TicketKey)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FamilyTreeEntry {
+    pub key: TicketKey,
+    pub prefix: String,
+    pub is_current: bool,
+}
+
 impl TicketGraph {
     #[must_use]
     pub fn relations_from(&self, key: &TicketKey) -> Vec<&RelationRecord> {
@@ -205,6 +225,21 @@ impl TicketGraph {
             .iter()
             .filter(|relation| relation.from == *key)
             .collect()
+    }
+
+    #[must_use]
+    pub fn family(&self, key: &TicketKey) -> FamilySnapshot {
+        FamilySnapshot::from_graph(self, key)
+    }
+
+    #[must_use]
+    pub fn parents_of(&self, key: &TicketKey) -> Vec<TicketKey> {
+        related_keys(self, key, FamilyDirection::Parent)
+    }
+
+    #[must_use]
+    pub fn children_of(&self, key: &TicketKey) -> Vec<TicketKey> {
+        related_keys(self, key, FamilyDirection::Child)
     }
 
     #[must_use]
@@ -233,6 +268,253 @@ impl TicketGraph {
         });
         history
     }
+}
+
+impl FamilySnapshot {
+    #[must_use]
+    pub fn from_graph(graph: &TicketGraph, key: &TicketKey) -> Self {
+        let (ancestors, extra_parents) = ancestor_chain(graph, key);
+        let mut siblings = ancestors
+            .last()
+            .map_or_else(|| vec![key.clone()], |parent| graph.children_of(parent));
+        if !siblings.iter().any(|sibling| sibling == key) {
+            siblings.push(key.clone());
+        }
+        sort_keys(&mut siblings);
+        Self {
+            ancestors,
+            extra_parents,
+            current: key.clone(),
+            siblings,
+            children: graph.children_of(key),
+            other_links: other_links(graph, key),
+        }
+    }
+
+    #[must_use]
+    pub fn has_family(&self) -> bool {
+        !self.ancestors.is_empty()
+            || !self.extra_parents.is_empty()
+            || !self.children.is_empty()
+            || self.siblings.len() > 1
+    }
+
+    #[must_use]
+    pub fn parent(&self) -> Option<&TicketKey> {
+        self.ancestors.last()
+    }
+
+    #[must_use]
+    pub fn jump_keys(&self) -> Vec<TicketKey> {
+        let mut keys = Vec::new();
+        let mut seen = HashSet::new();
+        seen.insert(self.current.clone());
+        let mut push = |key: &TicketKey| {
+            if seen.insert(key.clone()) {
+                keys.push(key.clone());
+            }
+        };
+        for ancestor in self.ancestors.iter().rev() {
+            push(ancestor);
+        }
+        for parent in &self.extra_parents {
+            push(parent);
+        }
+        for sibling in &self.siblings {
+            if sibling != &self.current {
+                push(sibling);
+            }
+        }
+        for child in &self.children {
+            push(child);
+        }
+        for (_, key) in &self.other_links {
+            push(key);
+        }
+        keys
+    }
+
+    #[must_use]
+    pub fn tree_entries(&self) -> Vec<FamilyTreeEntry> {
+        let mut entries = Vec::new();
+        if !self.has_family() {
+            return entries;
+        }
+        if self.ancestors.is_empty() {
+            entries.push(FamilyTreeEntry {
+                key: self.current.clone(),
+                prefix: "  ".into(),
+                is_current: true,
+            });
+            push_child_entries(&mut entries, &self.children, &[]);
+            return entries;
+        }
+
+        let mut guides = Vec::new();
+        for (index, ancestor) in self.ancestors.iter().enumerate() {
+            if index == 0 {
+                entries.push(FamilyTreeEntry {
+                    key: ancestor.clone(),
+                    prefix: "  ".into(),
+                    is_current: false,
+                });
+            } else {
+                entries.push(FamilyTreeEntry {
+                    key: ancestor.clone(),
+                    prefix: tree_prefix(&guides, true),
+                    is_current: false,
+                });
+                guides.push(false);
+            }
+        }
+
+        for (index, sibling) in self.siblings.iter().enumerate() {
+            let is_last = index + 1 == self.siblings.len();
+            let is_current = sibling == &self.current;
+            entries.push(FamilyTreeEntry {
+                key: sibling.clone(),
+                prefix: tree_prefix(&guides, is_last),
+                is_current,
+            });
+            if is_current {
+                let mut child_guides = guides.clone();
+                child_guides.push(!is_last);
+                push_child_entries(&mut entries, &self.children, &child_guides);
+            }
+        }
+        entries
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FamilyDirection {
+    Parent,
+    Child,
+}
+
+fn related_keys(
+    graph: &TicketGraph,
+    key: &TicketKey,
+    direction: FamilyDirection,
+) -> Vec<TicketKey> {
+    let mut keys = Vec::new();
+    let mut seen = HashSet::new();
+    for relation in &graph.relations {
+        let other = match direction {
+            FamilyDirection::Parent => {
+                if relation.from == *key && relation.kind == RelationKind::Parent {
+                    Some(&relation.to)
+                } else if relation.to == *key && relation.kind == RelationKind::Child {
+                    Some(&relation.from)
+                } else {
+                    None
+                }
+            }
+            FamilyDirection::Child => {
+                if relation.from == *key && relation.kind == RelationKind::Child {
+                    Some(&relation.to)
+                } else if relation.to == *key && relation.kind == RelationKind::Parent {
+                    Some(&relation.from)
+                } else {
+                    None
+                }
+            }
+        };
+        let Some(other) = other else {
+            continue;
+        };
+        if other == key {
+            continue;
+        }
+        if seen.insert(other.clone()) {
+            keys.push(other.clone());
+        }
+    }
+    sort_keys(&mut keys);
+    keys
+}
+
+fn ancestor_chain(graph: &TicketGraph, key: &TicketKey) -> (Vec<TicketKey>, Vec<TicketKey>) {
+    let mut walk = key.clone();
+    let mut seen = HashSet::new();
+    seen.insert(key.clone());
+    let mut chain = Vec::new();
+    let mut extra_parents = Vec::new();
+    for depth in 0..MAX_ANCESTOR_DEPTH {
+        let mut parents = graph.parents_of(&walk);
+        if parents.is_empty() {
+            break;
+        }
+        let primary = parents.remove(0);
+        if depth == 0 {
+            extra_parents = parents;
+        }
+        if !seen.insert(primary.clone()) {
+            break;
+        }
+        chain.push(primary.clone());
+        walk = primary;
+    }
+    chain.reverse();
+    (chain, extra_parents)
+}
+
+fn other_links(graph: &TicketGraph, key: &TicketKey) -> Vec<(RelationKind, TicketKey)> {
+    let mut links = Vec::new();
+    let mut seen = HashSet::new();
+    for relation in graph.relations_from(key) {
+        if matches!(relation.kind, RelationKind::Parent | RelationKind::Child) {
+            continue;
+        }
+        if seen.insert((relation.kind, relation.to.clone())) {
+            links.push((relation.kind, relation.to.clone()));
+        }
+    }
+    links.sort_by(|left, right| {
+        other_link_rank(left.0)
+            .cmp(&other_link_rank(right.0))
+            .then_with(|| left.1.id.cmp(&right.1.id))
+            .then_with(|| left.1.organization.cmp(&right.1.organization))
+    });
+    links
+}
+
+fn other_link_rank(kind: RelationKind) -> u8 {
+    match kind {
+        RelationKind::Related => 0,
+        RelationKind::Predecessor => 1,
+        RelationKind::Successor => 2,
+        RelationKind::Duplicate => 3,
+        RelationKind::Parent | RelationKind::Child => 4,
+    }
+}
+
+fn sort_keys(keys: &mut [TicketKey]) {
+    keys.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then_with(|| left.organization.cmp(&right.organization))
+    });
+}
+
+fn push_child_entries(entries: &mut Vec<FamilyTreeEntry>, children: &[TicketKey], guides: &[bool]) {
+    for (index, child) in children.iter().enumerate() {
+        let is_last = index + 1 == children.len();
+        entries.push(FamilyTreeEntry {
+            key: child.clone(),
+            prefix: tree_prefix(guides, is_last),
+            is_current: false,
+        });
+    }
+}
+
+fn tree_prefix(guides: &[bool], is_last: bool) -> String {
+    let mut prefix = String::from("  ");
+    for continues in guides {
+        prefix.push_str(if *continues { "│ " } else { "  " });
+    }
+    prefix.push_str(if is_last { "└─" } else { "├─" });
+    prefix
 }
 
 impl fmt::Display for SortField {
@@ -494,5 +776,99 @@ mod tests {
             ),
             Ordering::Less
         );
+    }
+
+    fn key(id: i64) -> TicketKey {
+        TicketKey {
+            organization: "demo-org".into(),
+            id,
+        }
+    }
+
+    fn relation(from: i64, to: i64, kind: RelationKind) -> RelationRecord {
+        RelationRecord {
+            from: key(from),
+            to: key(to),
+            kind,
+        }
+    }
+
+    #[test]
+    fn family_reads_parent_and_child_edges_in_either_direction() {
+        let parent_only = TicketGraph {
+            relations: vec![relation(2, 1, RelationKind::Parent)],
+            ..TicketGraph::default()
+        };
+        let child_only = TicketGraph {
+            relations: vec![relation(1, 2, RelationKind::Child)],
+            ..TicketGraph::default()
+        };
+        let both = TicketGraph {
+            relations: vec![
+                relation(2, 1, RelationKind::Parent),
+                relation(1, 2, RelationKind::Child),
+            ],
+            ..TicketGraph::default()
+        };
+
+        for graph in [parent_only, child_only, both] {
+            let family = graph.family(&key(2));
+            assert_eq!(family.ancestors, vec![key(1)]);
+            assert_eq!(family.children, Vec::<TicketKey>::new());
+            assert_eq!(graph.family(&key(1)).children, vec![key(2)]);
+        }
+    }
+
+    #[test]
+    fn family_tree_nests_current_children_among_siblings() {
+        let graph = TicketGraph {
+            relations: vec![
+                relation(10, 1, RelationKind::Parent),
+                relation(11, 1, RelationKind::Parent),
+                relation(12, 1, RelationKind::Parent),
+                relation(111, 11, RelationKind::Parent),
+                relation(112, 11, RelationKind::Parent),
+            ],
+            ..TicketGraph::default()
+        };
+        let family = graph.family(&key(11));
+        let entries = family.tree_entries();
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.key.id, entry.prefix.as_str(), entry.is_current))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, "  ", false),
+                (10, "  ├─", false),
+                (11, "  ├─", true),
+                (111, "  │ ├─", false),
+                (112, "  │ └─", false),
+                (12, "  └─", false),
+            ]
+        );
+        assert_eq!(
+            family.jump_keys(),
+            vec![key(1), key(10), key(12), key(111), key(112)]
+        );
+    }
+
+    #[test]
+    fn family_walk_stops_on_cycles_and_keeps_other_links_out_of_the_tree() {
+        let graph = TicketGraph {
+            relations: vec![
+                relation(1, 2, RelationKind::Parent),
+                relation(2, 1, RelationKind::Parent),
+                relation(1, 9, RelationKind::Related),
+            ],
+            ..TicketGraph::default()
+        };
+        let family = graph.family(&key(1));
+
+        assert_eq!(family.ancestors, vec![key(2)]);
+        assert!(!family.tree_entries().iter().any(|entry| entry.key.id == 9));
+        assert_eq!(family.other_links, vec![(RelationKind::Related, key(9))]);
+        assert_eq!(family.jump_keys().last(), Some(&key(9)));
     }
 }

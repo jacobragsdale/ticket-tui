@@ -16,8 +16,8 @@ use crate::filter::{
 };
 use crate::import::ImportFormat;
 use crate::model::{
-    CommentRecord, HistoryRecord, RelationRecord, SortDirection, SortField, Ticket, TicketGraph,
-    TicketKey, compare_tickets,
+    CommentRecord, FamilySnapshot, HistoryRecord, RelationRecord, SortDirection, SortField, Ticket,
+    TicketGraph, TicketKey, compare_tickets,
 };
 pub use crate::model::{RowDensity, SearchOrder};
 use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
@@ -90,6 +90,7 @@ pub struct HitRegions {
     pub headers: Vec<(Rect, SortField)>,
     pub details: Option<Rect>,
     pub detail_url: Option<Rect>,
+    pub detail_links: Vec<(Rect, TicketKey)>,
     pub sort_rows: Vec<(Rect, SortField)>,
     pub overlay_rows: Vec<(Rect, usize)>,
 }
@@ -196,6 +197,7 @@ pub struct App {
     pub table_state: TableState,
     pub details_scroll: u16,
     pub details_max_scroll: u16,
+    pub link_cursor: usize,
     pub help_scroll: u16,
     pub help_max_scroll: u16,
     pub overlay_scroll: u16,
@@ -254,6 +256,7 @@ impl App {
             table_state: TableState::default(),
             details_scroll: 0,
             details_max_scroll: 0,
+            link_cursor: 0,
             help_scroll: 0,
             help_max_scroll: 0,
             overlay_scroll: 0,
@@ -431,16 +434,52 @@ impl App {
     }
 
     #[must_use]
+    pub fn ticket_by_key(&self, key: &TicketKey) -> Option<&Ticket> {
+        self.tickets.iter().find(|ticket| ticket.key == *key)
+    }
+
+    #[must_use]
     pub fn ticket_title(&self, key: &TicketKey) -> Option<&str> {
-        self.tickets
-            .iter()
-            .find(|ticket| ticket.key == *key)
-            .map(|ticket| ticket.title.as_str())
+        self.ticket_by_key(key).map(|ticket| ticket.title.as_str())
     }
 
     #[must_use]
     pub fn relations_from(&self, key: &TicketKey) -> Vec<&RelationRecord> {
         self.graph.relations_from(key)
+    }
+
+    #[must_use]
+    pub fn family_of(&self, key: &TicketKey) -> FamilySnapshot {
+        self.graph.family(key)
+    }
+
+    #[must_use]
+    pub fn selected_family(&self) -> Option<FamilySnapshot> {
+        Some(self.family_of(&self.selected_ticket()?.key))
+    }
+
+    #[must_use]
+    pub fn family_jump_targets(&self) -> Vec<TicketKey> {
+        self.selected_family()
+            .map(|family| {
+                family
+                    .jump_keys()
+                    .into_iter()
+                    .filter(|key| self.ticket_by_key(key).is_some())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn focused_family_key(&self) -> Option<TicketKey> {
+        let targets = self.family_jump_targets();
+        if targets.is_empty() {
+            return None;
+        }
+        targets
+            .get(self.link_cursor.min(targets.len() - 1))
+            .cloned()
     }
 
     #[must_use]
@@ -813,6 +852,8 @@ impl App {
             KeyCode::Char('[') => self.history_back(),
             KeyCode::Char(']') => self.history_forward(),
             KeyCode::Tab => self.toggle_focus(),
+            KeyCode::Char('h') if self.focus == Focus::Details => self.cycle_family_link(-1),
+            KeyCode::Char('l') if self.focus == Focus::Details => self.cycle_family_link(1),
             KeyCode::Down | KeyCode::Char('j') => self.move_focused(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_focused(-1),
             KeyCode::PageDown => self.move_focused(10),
@@ -825,7 +866,14 @@ impl App {
                 Focus::Tickets => self.select_row(self.visible.len().saturating_sub(1)),
                 Focus::Details => self.details_scroll = self.details_max_scroll,
             },
-            KeyCode::Enter | KeyCode::Char('o') => {
+            KeyCode::Enter => {
+                if self.focus == Focus::Details && self.jump_focused_family_link() {
+                    return AppAction::None;
+                }
+                self.record_history();
+                return self.open_selected();
+            }
+            KeyCode::Char('o') => {
                 self.record_history();
                 return self.open_selected();
             }
@@ -1038,6 +1086,17 @@ impl App {
         }
         if self.contains(self.hit_regions.search, column, row) {
             self.begin_search();
+            return AppAction::None;
+        }
+        if let Some((_, key)) = self
+            .hit_regions
+            .detail_links
+            .iter()
+            .find(|(area, _)| contains(*area, column, row))
+        {
+            let key = key.clone();
+            self.focus = Focus::Details;
+            self.jump_to_ticket(&key);
             return AppAction::None;
         }
         if let Some((_, token)) = self
@@ -1256,6 +1315,51 @@ impl App {
                 .select(Some(row.min(self.visible.len() - 1)));
         }
         self.details_scroll = 0;
+        self.link_cursor = 0;
+    }
+
+    fn visible_row(&self, key: &TicketKey) -> Option<usize> {
+        self.visible
+            .iter()
+            .position(|entry| self.tickets[entry.ticket_index].key == *key)
+    }
+
+    fn cycle_family_link(&mut self, delta: isize) {
+        let count = self.family_jump_targets().len();
+        if count == 0 {
+            return;
+        }
+        let next = (self.link_cursor as isize + delta).rem_euclid(count as isize);
+        self.link_cursor = usize::try_from(next).unwrap_or_default();
+        self.details_scroll = 0;
+    }
+
+    fn jump_focused_family_link(&mut self) -> bool {
+        let Some(key) = self.focused_family_key() else {
+            return false;
+        };
+        self.jump_to_ticket(&key);
+        true
+    }
+
+    fn jump_to_ticket(&mut self, key: &TicketKey) {
+        if self
+            .selected_ticket()
+            .is_some_and(|ticket| ticket.key == *key)
+        {
+            return;
+        }
+        let Some(row) = self.visible_row(key) else {
+            if self.ticket_by_key(key).is_some() {
+                self.set_status(format!("{id} is hidden by the current search", id = key.id));
+            } else {
+                self.set_error(format!("{id} is not in this database", id = key.id));
+            }
+            return;
+        };
+        self.record_history();
+        self.select_row(row);
+        self.record_history();
     }
 
     fn open_selected(&self) -> AppAction {
@@ -1324,6 +1428,7 @@ impl App {
         });
         self.table_state
             .select((!self.visible.is_empty()).then_some(row.unwrap_or_default()));
+        self.link_cursor = 0;
         if selected.is_none() || row.is_none() {
             *self.table_state.offset_mut() = 0;
             self.details_scroll = 0;
@@ -2377,5 +2482,78 @@ mod tests {
         assert_eq!(app.help_scroll, 3);
         app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         assert_eq!(app.help_scroll, 0);
+    }
+
+    fn family_key(id: i64) -> TicketKey {
+        TicketKey {
+            organization: "demo".into(),
+            id,
+        }
+    }
+
+    fn family_app() -> App {
+        let mut parent = ticket(1, "Parent", "2026-01-01T00:00:00Z");
+        parent.work_item_type = "Feature".into();
+        let mut child = ticket(2, "Child", "2026-02-01T00:00:00Z");
+        child.work_item_type = "Task".into();
+        let grandchild = ticket(3, "Grandchild", "2026-01-15T00:00:00Z");
+        let mut app = App::new(vec![parent, child, grandchild]);
+        app.set_workspace_graph(TicketGraph {
+            relations: vec![
+                RelationRecord {
+                    from: family_key(2),
+                    to: family_key(1),
+                    kind: crate::model::RelationKind::Parent,
+                },
+                RelationRecord {
+                    from: family_key(3),
+                    to: family_key(2),
+                    kind: crate::model::RelationKind::Parent,
+                },
+            ],
+            ..TicketGraph::default()
+        });
+        app
+    }
+
+    #[test]
+    fn details_enter_jumps_to_the_highlighted_family_ticket() {
+        let mut app = family_app();
+        assert_eq!(app.selected_ticket().unwrap().key.id, 2);
+        app.focus = Focus::Details;
+
+        let opened = app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        assert!(matches!(opened, AppAction::OpenUrl(_)));
+        assert_eq!(app.selected_ticket().unwrap().key.id, 2);
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.selected_ticket().unwrap().key.id, 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
+        assert_eq!(app.selected_ticket().unwrap().key.id, 2);
+    }
+
+    #[test]
+    fn details_can_cycle_family_links() {
+        let mut app = family_app();
+        app.focus = Focus::Details;
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.selected_ticket().unwrap().key.id, 3);
+    }
+
+    #[test]
+    fn jumping_to_a_hidden_family_ticket_explains_why() {
+        let mut app = family_app();
+        app.focus = Focus::Details;
+        app.visible
+            .retain(|entry| app.tickets[entry.ticket_index].key.id != 3);
+        app.link_cursor = 1;
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.selected_ticket().unwrap().key.id, 2);
+        assert_eq!(
+            app.notification(),
+            Some(("3 is hidden by the current search", NotificationLevel::Info))
+        );
     }
 }

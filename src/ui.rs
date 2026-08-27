@@ -15,7 +15,7 @@ use crate::app::{
     App, AppMode, FacetTarget, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder,
 };
 use crate::filter::FilterField;
-use crate::model::{SortField, Ticket};
+use crate::model::{FamilySnapshot, SortField, Ticket, TicketKey};
 use crate::search::QueryHighlighter;
 
 const WIDE_BREAKPOINT: u16 = 110;
@@ -382,18 +382,12 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     };
 
-    let metadata_height = inner.height.saturating_sub(2).min(5);
-    let chunks = Layout::vertical([
-        Constraint::Length(metadata_height),
-        Constraint::Length((inner.height > metadata_height).into()),
-        Constraint::Fill(1),
-    ])
-    .split(inner);
+    let family = app.family_of(&ticket.key);
     let mut highlighter = QueryHighlighter::new(&app.query);
     let title_style = Style::default()
         .fg(theme().text)
         .add_modifier(Modifier::BOLD);
-    let metadata = Text::from(vec![
+    let mut metadata_lines = vec![
         highlight_line(
             ticket.title.clone(),
             &highlighter.indices(&ticket.title),
@@ -401,39 +395,137 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             search_match_style(title_style),
         ),
         ticket_identity_line(&ticket, &mut highlighter),
-        ticket_assignment_line(&ticket, &mut highlighter),
-        tags_field_line(&ticket.tags, &mut highlighter),
-        field_line(
-            "Project / Revision",
-            format!(
-                "{} / {} · r{}",
-                ticket.key.organization, ticket.project, ticket.revision
-            ),
+    ];
+    if family.has_family() {
+        metadata_lines.push(family_breadcrumb_line(app, &family));
+    }
+    metadata_lines.push(ticket_assignment_line(&ticket, &mut highlighter));
+    metadata_lines.push(tags_field_line(&ticket.tags, &mut highlighter));
+    metadata_lines.push(field_line(
+        "Project / Revision",
+        format!(
+            "{} / {} · r{}",
+            ticket.key.organization, ticket.project, ticket.revision
         ),
-    ]);
-    frame.render_widget(Paragraph::new(metadata), chunks[0]);
+    ));
+    let metadata_height = inner
+        .height
+        .saturating_sub(2)
+        .min(u16::try_from(metadata_lines.len()).unwrap_or(6));
+    let chunks = Layout::vertical([
+        Constraint::Length(metadata_height),
+        Constraint::Length((inner.height > metadata_height).into()),
+        Constraint::Fill(1),
+    ])
+    .split(inner);
+    frame.render_widget(Paragraph::new(Text::from(metadata_lines)), chunks[0]);
+    if family.has_family()
+        && metadata_height >= 3
+        && let Some(parent) = family.parent()
+        && app.ticket_by_key(parent).is_some()
+    {
+        app.hit_regions.detail_links.push((
+            Rect::new(
+                chunks[0].x,
+                chunks[0].y.saturating_add(2),
+                chunks[0].width,
+                1,
+            ),
+            parent.clone(),
+        ));
+    }
 
     if chunks[1].height > 0 {
         frame.render_widget(Paragraph::new(link_line(ticket.web_url.clone())), chunks[1]);
         app.hit_regions.detail_url = Some(chunks[1]);
     }
     if chunks[2].height > 0 {
-        let mut detail_lines = vec![
-            section_line("Planning"),
-            highlighted_field_line("Area", &ticket.area_path, &mut highlighter),
-            highlighted_field_line("Iteration", &ticket.iteration_path, &mut highlighter),
-            field_line("Created", ticket.created_at.exact_utc()),
-            field_line("Changed", ticket.changed_at.exact_utc()),
-        ];
-        let relations = app.relations_from(&ticket.key);
-        if !relations.is_empty() {
-            detail_lines.push(Line::default());
-            detail_lines.push(section_line("Relationships"));
-            for relation in relations {
-                let title = app.ticket_title(&relation.to).unwrap_or("missing ticket");
-                detail_lines.push(relation_line(relation.kind.label(), relation.to.id, title));
+        let width = chunks[2].width;
+        let focused = app.focused_family_key();
+        let mut detail_lines = Vec::new();
+        let mut line_links: Vec<(u16, TicketKey)> = Vec::new();
+        let push_line = |lines: &mut Vec<Line<'static>>,
+                         links: &mut Vec<(u16, TicketKey)>,
+                         line: Line<'static>,
+                         link: Option<TicketKey>| {
+            if let Some(key) = link
+                && let Ok(index) = u16::try_from(lines.len())
+            {
+                links.push((index, key));
             }
+            lines.push(line);
+        };
+
+        if family.has_family() {
+            push_line(
+                &mut detail_lines,
+                &mut line_links,
+                section_line("Family"),
+                None,
+            );
+            for entry in family.tree_entries() {
+                let related = app.ticket_by_key(&entry.key);
+                let is_focused = focused.as_ref() == Some(&entry.key);
+                let jumpable = !entry.is_current && related.is_some();
+                push_line(
+                    &mut detail_lines,
+                    &mut line_links,
+                    family_member_line(
+                        &entry.prefix,
+                        &entry.key,
+                        related,
+                        entry.is_current,
+                        is_focused,
+                        width,
+                    ),
+                    jumpable.then_some(entry.key),
+                );
+            }
+            for parent in &family.extra_parents {
+                let related = app.ticket_by_key(parent);
+                let is_focused = focused.as_ref() == Some(parent);
+                push_line(
+                    &mut detail_lines,
+                    &mut line_links,
+                    family_member_line("  also ", parent, related, false, is_focused, width),
+                    related.is_some().then_some(parent.clone()),
+                );
+            }
+            detail_lines.push(Line::default());
         }
+        if !family.other_links.is_empty() {
+            push_line(
+                &mut detail_lines,
+                &mut line_links,
+                section_line("Links"),
+                None,
+            );
+            for (kind, key) in &family.other_links {
+                let title = app.ticket_title(key).unwrap_or("missing ticket");
+                let is_focused = focused.as_ref() == Some(key);
+                let jumpable = app.ticket_by_key(key).is_some();
+                push_line(
+                    &mut detail_lines,
+                    &mut line_links,
+                    other_link_line(kind.label(), key.id, title, is_focused, width),
+                    jumpable.then_some(key.clone()),
+                );
+            }
+            detail_lines.push(Line::default());
+        }
+        detail_lines.push(section_line("Planning"));
+        detail_lines.push(highlighted_field_line(
+            "Area",
+            &ticket.area_path,
+            &mut highlighter,
+        ));
+        detail_lines.push(highlighted_field_line(
+            "Iteration",
+            &ticket.iteration_path,
+            &mut highlighter,
+        ));
+        detail_lines.push(field_line("Created", ticket.created_at.exact_utc()));
+        detail_lines.push(field_line("Changed", ticket.changed_at.exact_utc()));
         let history = app.history_for(&ticket.key);
         if !history.is_empty() {
             detail_lines.push(Line::default());
@@ -480,7 +572,12 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Style::default().fg(theme().muted),
             ));
         } else {
-            detail_lines.extend(ticket.description.lines().map(Line::from));
+            detail_lines.extend(
+                ticket
+                    .description
+                    .lines()
+                    .map(|line| Line::from(line.to_owned())),
+            );
         }
         let paragraph = Paragraph::new(Text::from(detail_lines))
             .wrap(Wrap { trim: false })
@@ -489,6 +586,14 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let maximum = line_count.saturating_sub(usize::from(chunks[2].height));
         app.set_details_max_scroll(u16::try_from(maximum).unwrap_or(u16::MAX));
         frame.render_widget(paragraph.scroll((app.details_scroll, 0)), chunks[2]);
+        let scroll = app.details_scroll;
+        for (logical, key) in line_links {
+            if let Some(y) = visible_row_y(chunks[2], logical, scroll) {
+                app.hit_regions
+                    .detail_links
+                    .push((Rect::new(chunks[2].x, y, chunks[2].width, 1), key));
+            }
+        }
         if maximum > 0 {
             let mut scrollbar_state = ScrollbarState::new(line_count)
                 .position(usize::from(app.details_scroll))
@@ -539,6 +644,11 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             AppMode::Views => "↑↓ choose  Enter load  n save  d delete  Esc close",
             AppMode::Info => "Esc/i close",
             AppMode::Prompt => "Type a file path  Enter import  Esc cancel",
+            AppMode::Browse
+                if app.focus == Focus::Details && !app.family_jump_targets().is_empty() =>
+            {
+                "↑↓/jk scroll  h/l family  Enter jump  o open  Tab tickets"
+            }
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
             }
@@ -612,6 +722,7 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  d               Toggle details below 70 columns"),
         Line::from("  c               Toggle compact / comfortable rows"),
         Line::from("  [ / ]           Recently viewed back / forward"),
+        Line::from("  h / l           Highlight previous / next family ticket"),
         Line::from(""),
         Line::styled(
             "Search and filters",
@@ -637,7 +748,8 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  Space           Toggle multi-select"),
         Line::from("  y               Copy selected IDs"),
         Line::from("  i               Database path, freshness, and counts"),
-        Line::from("  Enter/o         Open selected ticket in browser"),
+        Line::from("  Enter           Jump to highlighted family ticket, else open"),
+        Line::from("  o               Open selected ticket in browser"),
         Line::from("  r               Reload tickets from SQLite"),
         Line::from("  Esc             Clear active search or selection"),
         Line::from("  q / Ctrl-C      Quit"),
@@ -1045,18 +1157,149 @@ fn terminate_underline(mut line: Line<'static>) -> Line<'static> {
     line
 }
 
-fn relation_line(kind: &str, id: i64, title: &str) -> Line<'static> {
-    Line::from(vec![
-        Span::raw(format!("  {kind:<12} ")),
-        Span::styled(
-            id.to_string(),
+fn family_breadcrumb_line(app: &App, family: &FamilySnapshot) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        "Family: ",
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    if let Some(parent) = family.parent() {
+        let ticket = app.ticket_by_key(parent);
+        let type_label = ticket.map_or("?", |ticket| ticket.work_item_type.as_str());
+        let title = ticket.map_or("missing ticket", |ticket| ticket.title.as_str());
+        spans.push(Span::raw(format!("{type_label} ")));
+        spans.push(Span::styled(
+            parent.id.to_string(),
             Style::default()
                 .fg(theme().link)
                 .add_modifier(Modifier::UNDERLINED),
+        ));
+        spans.push(Span::styled(
+            " ",
+            Style::default().remove_modifier(Modifier::UNDERLINED),
+        ));
+        spans.push(Span::raw(format!(" {title} › this")));
+    } else {
+        spans.push(Span::raw("this"));
+    }
+    if !family.children.is_empty() {
+        let done = family
+            .children
+            .iter()
+            .filter(|key| {
+                app.ticket_by_key(key)
+                    .is_some_and(|ticket| state_is_done(&ticket.state))
+            })
+            .count();
+        spans.push(Span::styled(
+            format!(" · {done}/{} closed", family.children.len()),
+            Style::default().fg(theme().muted),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn family_member_line(
+    prefix: &str,
+    key: &TicketKey,
+    ticket: Option<&Ticket>,
+    is_current: bool,
+    is_focused: bool,
+    width: u16,
+) -> Line<'static> {
+    let id = key.id.to_string();
+    let work_item_type = ticket.map_or("?", |ticket| ticket.work_item_type.as_str());
+    let title = ticket.map_or("missing ticket", |ticket| ticket.title.as_str());
+    let marker = if is_current { " ←" } else { "" };
+    let used = prefix.chars().count()
+        + id.chars().count()
+        + 1
+        + work_item_type.chars().count()
+        + 2
+        + marker.chars().count();
+    let title = take_chars(title, usize::from(width).saturating_sub(used));
+    let base = if is_focused {
+        Style::default()
+            .bg(theme().selected_background)
+            .add_modifier(Modifier::BOLD)
+    } else if is_current {
+        Style::default()
+            .fg(theme().text)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let id_style = if is_current || ticket.is_none() {
+        base.fg(theme().muted)
+    } else {
+        base.fg(theme().link).add_modifier(Modifier::UNDERLINED)
+    };
+    Line::from(vec![
+        Span::styled(prefix.to_owned(), base),
+        Span::styled(id, id_style),
+        Span::styled(" ", base.remove_modifier(Modifier::UNDERLINED)),
+        Span::styled(
+            format!("{work_item_type}  {title}{marker}"),
+            if is_current {
+                base
+            } else {
+                base.fg(theme().body)
+            },
         ),
-        Span::styled(" ", Style::default().remove_modifier(Modifier::UNDERLINED)),
-        Span::raw(format!(" {title}")),
     ])
+}
+
+fn other_link_line(kind: &str, id: i64, title: &str, focused: bool, width: u16) -> Line<'static> {
+    let prefix = format!("  {kind:<12} ");
+    let id_text = id.to_string();
+    let used = prefix.chars().count() + id_text.chars().count() + 2;
+    let title = take_chars(title, usize::from(width).saturating_sub(used));
+    let base = if focused {
+        Style::default()
+            .bg(theme().selected_background)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    Line::from(vec![
+        Span::styled(prefix, base),
+        Span::styled(
+            id_text,
+            base.fg(theme().link).add_modifier(Modifier::UNDERLINED),
+        ),
+        Span::styled(" ", base.remove_modifier(Modifier::UNDERLINED)),
+        Span::styled(format!(" {title}"), base.fg(theme().body)),
+    ])
+}
+
+fn take_chars(text: &str, max: usize) -> String {
+    let total = text.chars().count();
+    if total <= max {
+        return text.to_owned();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut truncated: String = text.chars().take(max.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
+}
+
+fn visible_row_y(area: Rect, logical: u16, scroll: u16) -> Option<u16> {
+    if logical < scroll {
+        return None;
+    }
+    let offset = logical - scroll;
+    if offset >= area.height {
+        return None;
+    }
+    Some(area.y.saturating_add(offset))
+}
+
+fn state_is_done(state: &str) -> bool {
+    matches!(
+        state.to_ascii_lowercase().as_str(),
+        "closed" | "resolved" | "done"
+    )
 }
 
 fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
@@ -1500,6 +1743,55 @@ mod tests {
         }
     }
 
+    fn ticket_at(
+        id: i64,
+        title: &str,
+        work_item_type: &str,
+        state: &str,
+        changed_at: &str,
+    ) -> Ticket {
+        let mut item = ticket();
+        item.key.id = id;
+        item.title = title.into();
+        item.work_item_type = work_item_type.into();
+        item.state = state.into();
+        item.changed_at = crate::timestamp::ts(changed_at);
+        item.web_url = format!("https://dev.azure.com/demo/atlas/_workitems/edit/{id}");
+        item
+    }
+
+    fn parent_child_graph() -> TicketGraph {
+        let org = |id| TicketKey {
+            organization: "demo".into(),
+            id,
+        };
+        TicketGraph {
+            relations: vec![
+                RelationRecord {
+                    from: org(10_002),
+                    to: org(10_001),
+                    kind: RelationKind::Parent,
+                },
+                RelationRecord {
+                    from: org(10_003),
+                    to: org(10_001),
+                    kind: RelationKind::Parent,
+                },
+                RelationRecord {
+                    from: org(10_002),
+                    to: org(10_004),
+                    kind: RelationKind::Child,
+                },
+                RelationRecord {
+                    from: org(10_002),
+                    to: org(10_005),
+                    kind: RelationKind::Related,
+                },
+            ],
+            ..TicketGraph::default()
+        }
+    }
+
     fn render_text(width: u16, height: u16, app: &mut App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
@@ -1824,11 +2116,127 @@ mod tests {
         });
 
         let text = render_text(60, 36, &mut app);
-        assert!(text.contains("Relationships"));
-        assert!(text.contains("Parent"));
+        assert!(text.contains("Family"));
+        assert!(text.contains("99"));
+        assert!(text.contains("missing ticket"));
         assert!(text.contains("History"));
         assert!(text.contains("Comments"));
         assert!(text.contains("Looks good"));
+        assert!(!text.contains("Relationships"));
+    }
+
+    #[test]
+    fn details_render_family_tree_and_keep_other_links_separate() {
+        let mut app = App::new(vec![
+            ticket_at(
+                10_001,
+                "Auth rewrite",
+                "Feature",
+                "Active",
+                "2026-01-01T00:00:00Z",
+            ),
+            ticket_at(
+                10_002,
+                "Login form",
+                "User Story",
+                "Active",
+                "2026-02-01T00:00:00Z",
+            ),
+            ticket_at(
+                10_003,
+                "Logout",
+                "User Story",
+                "Closed",
+                "2026-01-15T00:00:00Z",
+            ),
+            ticket_at(
+                10_004,
+                "Validate email",
+                "Task",
+                "New",
+                "2026-01-20T00:00:00Z",
+            ),
+            ticket_at(
+                10_005,
+                "Session notes",
+                "Task",
+                "Active",
+                "2026-01-21T00:00:00Z",
+            ),
+        ]);
+        app.set_workspace_graph(parent_child_graph());
+        app.narrow_details = true;
+        app.focus = Focus::Details;
+        assert_eq!(app.selected_ticket().unwrap().key.id, 10_002);
+
+        let text = render_text(60, 36, &mut app);
+        assert!(text.contains("Family: Feature 10001  Auth rewrite › this"));
+        assert!(text.contains("0/1 closed"));
+        assert!(text.contains("10001"));
+        assert!(text.contains("├─10002"));
+        assert!(text.contains("│ └─10004"));
+        assert!(text.contains("└─10003"));
+        assert!(text.contains("←"));
+        assert!(text.contains("Links"));
+        assert!(text.contains("Related"));
+        assert!(text.contains("10005"));
+        assert!(!text.contains("Relationships"));
+        assert!(!app.hit_regions.detail_links.is_empty());
+    }
+
+    #[test]
+    fn clicking_a_family_ticket_selects_it_in_the_table() {
+        let mut app = App::new(vec![
+            ticket_at(
+                10_001,
+                "Auth rewrite",
+                "Feature",
+                "Active",
+                "2026-01-01T00:00:00Z",
+            ),
+            ticket_at(
+                10_002,
+                "Login form",
+                "User Story",
+                "Active",
+                "2026-02-01T00:00:00Z",
+            ),
+            ticket_at(
+                10_003,
+                "Logout",
+                "User Story",
+                "Closed",
+                "2026-01-15T00:00:00Z",
+            ),
+            ticket_at(
+                10_004,
+                "Validate email",
+                "Task",
+                "New",
+                "2026-01-20T00:00:00Z",
+            ),
+        ]);
+        app.set_workspace_graph(parent_child_graph());
+        app.narrow_details = true;
+        app.focus = Focus::Details;
+        render_text(72, 36, &mut app);
+
+        let (area, key) = app
+            .hit_regions
+            .detail_links
+            .iter()
+            .find(|(_, key)| key.id == 10_001)
+            .cloned()
+            .expect("parent id should be clickable");
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x,
+            row: area.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(key.id, 10_001);
+        assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
+        assert_eq!(app.focus, Focus::Details);
     }
 
     #[test]
