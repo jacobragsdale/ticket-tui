@@ -11,11 +11,13 @@ use ratatui::widgets::{
 };
 use time::OffsetDateTime;
 
-use crate::app::{
-    App, AppMode, FacetTarget, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder,
+use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder};
+use crate::filter::{FacetTarget, FilterField};
+use crate::model::{FamilySnapshot, SortDirection, SortField, Ticket, TicketKey};
+use crate::pointer::{
+    PointerLayer, PointerTarget, ScrollMetrics, ScrollSurface, SelectableSnapshot,
+    SelectableSurface, region,
 };
-use crate::filter::FilterField;
-use crate::model::{FamilySnapshot, SortField, Ticket, TicketKey};
 use crate::search::QueryHighlighter;
 
 const WIDE_BREAKPOINT: u16 = 110;
@@ -135,6 +137,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::Facets => render_facet_menu(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
+    paint_hover(frame, app);
+    paint_selection(frame, app);
 }
 
 fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -144,8 +148,31 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         " Search / "
     };
-    let block = focused_block(title, active);
+    let mut block = focused_block(title, active);
+    let actions_width = 11;
+    let help_width = 4;
+    let mut right_title = String::new();
+    if area.width >= 48 {
+        right_title.push_str("[Actions] ");
+    }
+    if area.width >= 36 {
+        right_title.push_str("[?]");
+    }
+    if !right_title.is_empty() {
+        block = block.title(Line::from(right_title.clone()).right_aligned());
+    }
     let inner = block.inner(area);
+    let clear = if !app.query.is_empty() && inner.width > 4 {
+        3
+    } else {
+        0
+    };
+    let field = Rect::new(
+        inner.x,
+        inner.y,
+        inner.width.saturating_sub(clear),
+        inner.height.max(1),
+    );
     let text = if app.query.is_empty() && !active {
         Line::styled(
             "Type / to search, or pick State, Type, Tags, or Assignee below",
@@ -155,20 +182,78 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Line::from(app.query.as_str())
     };
     let cursor_offset = u16::try_from(app.query_cursor).unwrap_or(u16::MAX);
-    let horizontal_scroll = cursor_offset.saturating_sub(inner.width.saturating_sub(1));
+    let horizontal_scroll = cursor_offset.saturating_sub(field.width.saturating_sub(1));
     frame.render_widget(
         Paragraph::new(text)
             .block(block)
             .scroll((0, horizontal_scroll)),
         area,
     );
-    app.hit_regions.search = Some(area);
+    if clear > 0 {
+        let clear_area = Rect::new(
+            inner.x.saturating_add(inner.width.saturating_sub(3)),
+            inner.y,
+            3,
+            1,
+        );
+        render_control(
+            frame,
+            app,
+            clear_area,
+            "[×]",
+            PointerTarget::ClearQuery,
+            PointerLayer::Base,
+            true,
+        );
+    }
+    app.hit_regions.push(region(
+        field,
+        PointerTarget::SearchField,
+        PointerLayer::Base,
+        Some(SelectableSurface::Search),
+        None,
+    ));
+    if area.width >= 48 {
+        let actions = Rect::new(
+            area.x
+                .saturating_add(area.width.saturating_sub(actions_width + help_width)),
+            area.y,
+            actions_width.saturating_sub(1),
+            1,
+        );
+        app.hit_regions.push(region(
+            actions,
+            PointerTarget::OpenPalette,
+            PointerLayer::Base,
+            None,
+            None,
+        ));
+    }
+    if area.width >= 36 {
+        let help = Rect::new(
+            area.x.saturating_add(area.width.saturating_sub(5)),
+            area.y,
+            3,
+            1,
+        );
+        app.hit_regions.push(region(
+            help,
+            PointerTarget::OpenHelp,
+            PointerLayer::Base,
+            None,
+            None,
+        ));
+    }
+    capture_selectable(frame, app, SelectableSurface::Search, field, false);
 
     if active {
-        let cursor_x = inner
+        let cursor_x = field
             .x
             .saturating_add(cursor_offset.saturating_sub(horizontal_scroll));
-        frame.set_cursor_position((cursor_x, inner.y));
+        frame.set_cursor_position((
+            cursor_x.min(field.x.saturating_add(field.width.saturating_sub(1))),
+            field.y,
+        ));
     }
 }
 
@@ -220,20 +305,23 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 SearchOrder::Field => "Field",
             }
         };
-        format!(" Tickets {count}/{total} · {short_order}{activity} · Tab: Details → ")
+        format!(" [Tickets] [Details] {count}/{total} · {short_order}{activity} ")
     } else {
         format!(" Tickets {count}/{total} · {ordering}{activity} ")
     };
     let block = focused_block(title, app.focus == Focus::Tickets);
     let inner = block.inner(area);
-    let columns = app.layout.visible_columns(inner.width);
-    let constraints: Vec<_> = columns
-        .iter()
-        .copied()
-        .map(crate::columns::TableLayout::constraint)
-        .collect();
+    let columns = app.layout.visible_columns(inner.width.saturating_sub(5));
+    let mut constraints = vec![Constraint::Length(4)];
+    constraints.extend(
+        columns
+            .iter()
+            .copied()
+            .map(crate::columns::TableLayout::constraint),
+    );
 
-    let header = Row::new(columns.iter().map(|column| {
+    let mut header_cells = vec![Cell::from("")];
+    header_cells.extend(columns.iter().map(|column| {
         let direction = if column.id == app.sort_field {
             app.sort_direction.symbol()
         } else {
@@ -250,23 +338,38 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         } else {
             line
         })
-    }))
-    .style(
-        Style::default()
-            .fg(theme().accent)
-            .add_modifier(Modifier::BOLD),
-    )
-    .height(1)
-    .bottom_margin(1);
+    }));
+    let header = Row::new(header_cells)
+        .style(
+            Style::default()
+                .fg(theme().accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .height(1)
+        .bottom_margin(1);
 
     let now = OffsetDateTime::now_utc();
     let density = app.row_density;
+    let row_height = density.row_height();
+    let body_height = inner.height.saturating_sub(2);
+    let visible_rows = usize::from(body_height / row_height).max(1);
+    app.set_table_viewport(visible_rows);
+    let offset = app.table_offset;
+    let selected = app.selected_row();
     let fuzzy = app.fuzzy_query();
     let mut highlighter = QueryHighlighter::new(&fuzzy);
-    let rows = app.visible_tickets().map(|ticket| {
+    let tickets: Vec<&Ticket> = app.visible_tickets().collect();
+    let slice = tickets
+        .get(offset..)
+        .unwrap_or(&[])
+        .iter()
+        .copied()
+        .take(visible_rows);
+    let rows = slice.map(|ticket| {
         let bookmarked = app.is_bookmarked(&ticket.key);
         let checked = app.is_row_selected(&ticket.key);
-        Row::new(columns.iter().map(|column| {
+        let mut cells = vec![Cell::from(row_marker_line(checked, bookmarked))];
+        cells.extend(columns.iter().map(|column| {
             table_cell(
                 ticket,
                 column.id,
@@ -276,8 +379,8 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 bookmarked,
                 checked,
             )
-        }))
-        .height(density.row_height())
+        }));
+        Row::new(cells).height(row_height)
     });
     let table = Table::new(rows, constraints.clone())
         .header(header)
@@ -290,9 +393,17 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         )
         .highlight_symbol("› ")
         .highlight_spacing(HighlightSpacing::Always);
-    frame.render_stateful_widget(table, area, &mut app.table_state);
+    let mut local_state = ratatui::widgets::TableState::default();
+    if let Some(selected) = selected.and_then(|row| row.checked_sub(offset))
+        && selected < visible_rows
+    {
+        local_state.select(Some(selected));
+    }
+    frame.render_stateful_widget(table, area, &mut local_state);
 
-    app.hit_regions.table = Some(area);
+    if area.width < NARROW_BREAKPOINT {
+        register_narrow_tabs(app, area, false);
+    }
     if inner.height >= 2 {
         let header_area = Rect::new(
             inner.x.saturating_add(2),
@@ -303,38 +414,89 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let header_columns = Layout::horizontal(constraints)
             .spacing(1)
             .split(header_area);
-        app.hit_regions.headers = header_columns
-            .iter()
-            .zip(columns.iter())
-            .map(|(area, column)| (*area, column.id))
-            .collect();
-        let body = Rect::new(
-            inner.x,
-            inner.y.saturating_add(2),
-            inner.width,
-            inner.height.saturating_sub(2),
-        );
-        app.hit_regions.table_body = Some(body);
-        if let Some(id_area) = header_columns.first() {
-            app.hit_regions.id_column =
-                Some(Rect::new(id_area.x, body.y, id_area.width, body.height));
+        for (header_rect, column) in header_columns.iter().skip(1).zip(columns.iter()) {
+            app.hit_regions.push(region(
+                *header_rect,
+                PointerTarget::SortHeader(column.id),
+                PointerLayer::Base,
+                None,
+                None,
+            ));
         }
-        let visible_rows = usize::from(body.height / density.row_height()).max(1);
-        if count > visible_rows {
-            let mut scrollbar_state = ScrollbarState::new(count)
-                .position(app.table_state.offset())
-                .viewport_content_length(visible_rows);
-            frame.render_stateful_widget(
-                Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .begin_symbol(None)
-                    .end_symbol(None)
-                    .track_symbol(Some("│"))
-                    .thumb_symbol("┃")
-                    .style(Style::default().fg(theme().scrollbar)),
+        let body = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, body_height);
+        app.hit_regions.set_table_body(body);
+        app.hit_regions.push(region(
+            body,
+            PointerTarget::FocusTickets,
+            PointerLayer::Base,
+            Some(SelectableSurface::Table),
+            Some(ScrollSurface::Table),
+        ));
+        if let Some(id_area) = header_columns.get(1) {
+            let id_column = Rect::new(id_area.x, body.y, id_area.width, body.height);
+            app.hit_regions.set_id_column(id_column);
+        }
+        let rendered = count.saturating_sub(offset).min(visible_rows);
+        for visible_index in 0..rendered {
+            let logical = offset + visible_index;
+            let y = body
+                .y
+                .saturating_add(u16::try_from(visible_index).unwrap_or(u16::MAX) * row_height);
+            if y >= body.y.saturating_add(body.height) {
+                break;
+            }
+            let row_rect = Rect::new(
+                body.x,
+                y,
+                body.width.saturating_sub(1),
+                row_height.min(body.y.saturating_add(body.height).saturating_sub(y)),
+            );
+            app.hit_regions.push(region(
+                row_rect,
+                PointerTarget::TableRow { index: logical },
+                PointerLayer::Base,
+                Some(SelectableSurface::Table),
+                Some(ScrollSurface::Table),
+            ));
+            if let Some(marker) = header_columns.first() {
+                app.hit_regions.push(region(
+                    Rect::new(marker.x, y, 3, 1),
+                    PointerTarget::ToggleRowSelect { index: logical },
+                    PointerLayer::Base,
+                    None,
+                    None,
+                ));
+                app.hit_regions.push(region(
+                    Rect::new(marker.x.saturating_add(3), y, 1, 1),
+                    PointerTarget::ToggleBookmark { index: logical },
+                    PointerLayer::Base,
+                    None,
+                    None,
+                ));
+            }
+            if let Some(id_area) = header_columns.get(1) {
+                app.hit_regions.push(region(
+                    Rect::new(id_area.x, y, id_area.width, 1),
+                    PointerTarget::OpenTicket { index: logical },
+                    PointerLayer::Base,
+                    None,
+                    None,
+                ));
+            }
+        }
+        let overflow = count > visible_rows;
+        if overflow {
+            render_scrollbar(
+                frame,
+                app,
                 body,
-                &mut scrollbar_state,
+                ScrollSurface::Table,
+                count,
+                offset,
+                visible_rows,
             );
         }
+        capture_selectable(frame, app, SelectableSurface::Table, body, overflow);
     }
 
     if count == 0 && inner.height > 2 {
@@ -363,14 +525,41 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
 fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let title = if area.width < NARROW_BREAKPOINT {
-        " ← Tab: Tickets · Details "
+        " [Tickets] [Details] "
     } else {
         " Details "
     };
-    let block = focused_block(title, app.focus == Focus::Details);
+    let mut block = focused_block(title, app.focus == Focus::Details);
+    if area.width >= 24 {
+        block = block.title(Line::from("[Copy]").right_aligned());
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    app.hit_regions.details = Some(area);
+    app.hit_regions.set_details(area);
+    app.hit_regions.push(region(
+        area,
+        PointerTarget::FocusDetails,
+        PointerLayer::Base,
+        Some(SelectableSurface::Details),
+        Some(ScrollSurface::Details),
+    ));
+    if area.width < NARROW_BREAKPOINT {
+        register_narrow_tabs(app, area, true);
+    }
+    if area.width >= 24 {
+        app.hit_regions.push(region(
+            Rect::new(
+                area.x.saturating_add(area.width.saturating_sub(8)),
+                area.y,
+                6,
+                1,
+            ),
+            PointerTarget::CopyActions,
+            PointerLayer::Base,
+            None,
+            None,
+        ));
+    }
 
     let Some(ticket) = app.selected_ticket().cloned() else {
         app.set_details_max_scroll(0);
@@ -424,20 +613,29 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         && let Some(parent) = family.parent()
         && app.ticket_by_key(parent).is_some()
     {
-        app.hit_regions.detail_links.push((
+        app.hit_regions.push(region(
             Rect::new(
                 chunks[0].x,
                 chunks[0].y.saturating_add(2),
                 chunks[0].width,
                 1,
             ),
-            parent.clone(),
+            PointerTarget::JumpToTicket(parent.clone()),
+            PointerLayer::Base,
+            Some(SelectableSurface::Details),
+            Some(ScrollSurface::Details),
         ));
     }
 
     if chunks[1].height > 0 {
         frame.render_widget(Paragraph::new(link_line(ticket.web_url.clone())), chunks[1]);
-        app.hit_regions.detail_url = Some(chunks[1]);
+        app.hit_regions.push(region(
+            chunks[1],
+            PointerTarget::OpenSelectedUrl,
+            PointerLayer::Base,
+            Some(SelectableSurface::Details),
+            Some(ScrollSurface::Details),
+        ));
     }
     if chunks[2].height > 0 {
         let width = chunks[2].width;
@@ -583,34 +781,40 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .wrap(Wrap { trim: false })
             .style(Style::default().fg(theme().body));
         let line_count = paragraph.line_count(chunks[2].width);
-        let maximum = line_count.saturating_sub(usize::from(chunks[2].height));
-        app.set_details_max_scroll(u16::try_from(maximum).unwrap_or(u16::MAX));
+        let viewport = usize::from(chunks[2].height);
+        app.set_details_viewport(
+            chunks[2].height,
+            u16::try_from(line_count).unwrap_or(u16::MAX),
+        );
         frame.render_widget(paragraph.scroll((app.details_scroll, 0)), chunks[2]);
         let scroll = app.details_scroll;
         for (logical, key) in line_links {
             if let Some(y) = visible_row_y(chunks[2], logical, scroll) {
-                app.hit_regions
-                    .detail_links
-                    .push((Rect::new(chunks[2].x, y, chunks[2].width, 1), key));
+                app.hit_regions.push(region(
+                    Rect::new(chunks[2].x, y, chunks[2].width.saturating_sub(1), 1),
+                    PointerTarget::JumpToTicket(key),
+                    PointerLayer::Base,
+                    Some(SelectableSurface::Details),
+                    Some(ScrollSurface::Details),
+                ));
             }
         }
-        if maximum > 0 {
-            let mut scrollbar_state = ScrollbarState::new(line_count)
-                .position(usize::from(app.details_scroll))
-                .viewport_content_length(usize::from(chunks[2].height));
-            frame.render_stateful_widget(
-                Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .begin_symbol(None)
-                    .end_symbol(None)
-                    .track_symbol(Some("│"))
-                    .thumb_symbol("┃")
-                    .style(Style::default().fg(theme().scrollbar)),
+        let overflow = line_count > viewport;
+        if overflow {
+            render_scrollbar(
+                frame,
+                app,
                 chunks[2],
-                &mut scrollbar_state,
+                ScrollSurface::Details,
+                line_count,
+                usize::from(app.details_scroll),
+                viewport,
             );
         }
+        capture_selectable(frame, app, SelectableSurface::Details, inner, overflow);
     } else {
         app.set_details_max_scroll(0);
+        capture_selectable(frame, app, SelectableSurface::Details, inner, false);
     }
 }
 
@@ -656,7 +860,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 "↑↓/jk move  f filters  Esc clear  ? help  q quit"
             }
             AppMode::Browse => {
-                "↑↓/jk move  / search  f filters  s sort  Enter/o open  ? help  q quit"
+                "↑↓/jk move  / search  click/drag copy  wheel scroll  ? help  q quit"
             }
         };
         (text, Style::default().fg(theme().muted))
@@ -670,43 +874,76 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn render_sort_popup(frame: &mut Frame<'_>, app: &mut App) {
-    let area = centered_rect(frame.area(), 42, 16);
+    let area = centered_rect(frame.area(), 48, 16);
     frame.render_widget(Clear, area);
-    let block = Block::default()
-        .title(" Sort tickets ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme().accent));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    app.hit_regions.sort_rows.clear();
-    let lines = SortField::ALL.iter().enumerate().map(|(index, field)| {
-        let selected = index == app.sort_draft.field_index;
-        let marker = if selected { "›" } else { " " };
-        let direction = if selected {
-            app.sort_draft.direction.symbol()
-        } else if *field == app.sort_field {
-            app.sort_direction.symbol()
-        } else {
-            " "
-        };
-        if let Ok(y) = u16::try_from(index) {
-            app.hit_regions
-                .sort_rows
-                .push((Rect::new(inner.x, inner.y + y, inner.width, 1), *field));
-        }
-        Line::styled(
-            format!("{marker} {:<14} {direction}", field.label()),
-            if selected {
-                Style::default()
-                    .bg(theme().selected_background)
-                    .add_modifier(Modifier::BOLD)
+    let inner = render_modal_frame(frame, app, area, " Sort tickets ");
+    let selected_index = app.sort_draft.field_index;
+    let lines: Vec<Line> = SortField::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            let selected = index == selected_index;
+            let marker = if selected { "›" } else { " " };
+            let direction = if selected {
+                app.sort_draft.direction.symbol()
+            } else if *field == app.sort_field {
+                app.sort_direction.symbol()
             } else {
-                Style::default()
-            },
-        )
-    });
-    frame.render_widget(Paragraph::new(Text::from_iter(lines)), inner);
+                " "
+            };
+            overlay_line(
+                format!("{marker} {:<14} {direction}", field.label()),
+                selected,
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    for (index, field) in SortField::ALL.iter().enumerate() {
+        let Ok(y) = u16::try_from(index) else {
+            continue;
+        };
+        if y >= inner.height {
+            continue;
+        }
+        app.hit_regions.push(region(
+            Rect::new(inner.x, inner.y + y, inner.width.saturating_sub(8), 1),
+            PointerTarget::SortChoose(*field),
+            PointerLayer::Modal,
+            Some(SelectableSurface::Overlay),
+            Some(ScrollSurface::Sort),
+        ));
+        if index == selected_index {
+            render_control(
+                frame,
+                app,
+                Rect::new(
+                    inner.x.saturating_add(inner.width.saturating_sub(7)),
+                    inner.y + y,
+                    3,
+                    1,
+                ),
+                "[↑]",
+                PointerTarget::SortSetDirection(SortDirection::Ascending),
+                PointerLayer::Modal,
+                true,
+            );
+            render_control(
+                frame,
+                app,
+                Rect::new(
+                    inner.x.saturating_add(inner.width.saturating_sub(3)),
+                    inner.y + y,
+                    3,
+                    1,
+                ),
+                "[↓]",
+                PointerTarget::SortSetDirection(SortDirection::Descending),
+                PointerLayer::Modal,
+                true,
+            );
+        }
+    }
+    capture_selectable(frame, app, SelectableSurface::Overlay, inner, false);
 }
 
 fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
@@ -754,6 +991,13 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  Esc             Clear active search or selection"),
         Line::from("  q / Ctrl-C      Quit"),
         Line::from(""),
+        Line::styled("Mouse", Style::default().add_modifier(Modifier::BOLD)),
+        Line::from("  Wheel           Scroll the hovered table, details, help, or overlay"),
+        Line::from("  Click           Activate buttons, rows, links, headers, and checkboxes"),
+        Line::from("  Drag            Select visible text and copy it on release"),
+        Line::from("  Scrollbar       Click the track or drag the thumb"),
+        Line::from("  Paste           Insert into search, palette, import, and view-name fields"),
+        Line::from(""),
         Line::styled(
             "Press ? or Esc to close",
             Style::default().fg(theme().muted),
@@ -761,27 +1005,35 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
     ]);
     let block = Block::default()
         .title(" Help ")
+        .title(Line::from("[×]").right_aligned())
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme().accent));
     let inner = block.inner(area);
     let paragraph = Paragraph::new(help).block(block).wrap(Wrap { trim: false });
     let line_count = paragraph.line_count(area.width);
-    let maximum = line_count.saturating_sub(usize::from(inner.height));
-    app.set_help_max_scroll(u16::try_from(maximum).unwrap_or(u16::MAX));
+    app.set_help_viewport(inner.height, u16::try_from(line_count).unwrap_or(u16::MAX));
     frame.render_widget(paragraph.scroll((app.help_scroll, 0)), area);
-    if maximum > 0 {
-        let mut scrollbar_state = ScrollbarState::new(line_count)
-            .position(usize::from(app.help_scroll))
-            .viewport_content_length(usize::from(inner.height));
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .style(Style::default().fg(theme().scrollbar)),
-            area,
-            &mut scrollbar_state,
+    app.hit_regions.push(region(
+        inner,
+        PointerTarget::OverlayBody,
+        PointerLayer::Modal,
+        Some(SelectableSurface::Help),
+        Some(ScrollSurface::Help),
+    ));
+    register_close_button(app, area, PointerLayer::Modal);
+    let overflow = line_count > usize::from(inner.height);
+    if overflow {
+        render_scrollbar(
+            frame,
+            app,
+            inner,
+            ScrollSurface::Help,
+            line_count,
+            usize::from(app.help_scroll),
+            usize::from(inner.height),
         );
     }
+    capture_selectable(frame, app, SelectableSurface::Help, inner, overflow);
 }
 
 fn render_chips(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -793,9 +1045,13 @@ fn render_chips(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         if x.saturating_add(width) > area.x.saturating_add(area.width) {
             break;
         }
-        app.hit_regions
-            .chips
-            .push((Rect::new(x, area.y, width, 1), token.clone()));
+        app.hit_regions.push(region(
+            Rect::new(x, area.y, width, 1),
+            PointerTarget::RemoveChip(token.clone()),
+            PointerLayer::Base,
+            None,
+            None,
+        ));
         spans.push(Span::styled(
             label,
             Style::default()
@@ -821,9 +1077,13 @@ fn render_facet_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             break;
         }
         let rect = Rect::new(x, area.y, width, 1);
-        app.hit_regions
-            .facet_pills
-            .push((rect, FacetTarget::Field(*field)));
+        app.hit_regions.push(region(
+            rect,
+            PointerTarget::FacetPill(FacetTarget::Field(*field)),
+            PointerLayer::Base,
+            None,
+            None,
+        ));
         let selected = focused && app.facet_bar.field_index == index;
         let active = filters.selected_count(*field) > 0;
         spans.push(Span::styled(label, pill_style(selected, active)));
@@ -839,9 +1099,12 @@ fn render_facet_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             format!(" +{more_count} ")
         };
         let width = u16::try_from(more.chars().count()).unwrap_or(u16::MAX);
-        app.hit_regions.facet_pills.push((
+        app.hit_regions.push(region(
             Rect::new(x, area.y, width.min(remaining), 1),
-            FacetTarget::More,
+            PointerTarget::FacetPill(FacetTarget::More),
+            PointerLayer::Base,
+            None,
+            None,
         ));
         let selected = focused && app.facet_bar.field_index >= FilterField::BAR.len();
         spans.push(Span::styled(more, pill_style(selected, more_count > 0)));
@@ -922,30 +1185,64 @@ fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
     if area.y.saturating_add(area.height) > frame.area().height {
         area.y = area.y.saturating_sub(area.height.saturating_add(1));
     }
+    app.hit_regions.push(region(
+        frame.area(),
+        PointerTarget::DismissFacet,
+        PointerLayer::Popup,
+        None,
+        None,
+    ));
     frame.render_widget(Clear, area);
-    let block = Block::default()
-        .title(format!(" {} ", field.label()))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme().accent));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    app.hit_regions.facet_values.clear();
-    let lines = facets.into_iter().enumerate().map(|(index, facet)| {
-        let selected = index == app.facet_bar.value_index;
-        if let Ok(y) = u16::try_from(index) {
-            app.hit_regions.facet_values.push((
-                Rect::new(inner.x, inner.y.saturating_add(y), inner.width, 1),
-                index,
-            ));
-        }
-        let marker = if selected { "›" } else { " " };
-        let check = if facet.selected { "[x]" } else { "[ ]" };
-        overlay_line(
-            format!("{marker} {check} {:<18} {:>4}", facet.value, facet.count),
-            selected,
-        )
-    });
-    frame.render_widget(Paragraph::new(Text::from_iter(lines)), inner);
+    let inner = render_modal_frame(frame, app, area, &format!(" {} ", field.label()));
+    let viewport = usize::from(inner.height);
+    let content = facets.len();
+    app.set_overlay_viewport(
+        ScrollSurface::FacetMenu,
+        inner.height,
+        u16::try_from(content).unwrap_or(u16::MAX),
+    );
+    let scroll = usize::from(app.facet_bar.scroll);
+    let lines: Vec<Line> = facets
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(viewport)
+        .map(|(index, facet)| {
+            let selected = index == app.facet_bar.value_index;
+            let marker = if selected { "›" } else { " " };
+            let check = if facet.selected { "[x]" } else { "[ ]" };
+            overlay_line(
+                format!("{marker} {check} {:<18} {:>4}", facet.value, facet.count),
+                selected,
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    for visible in 0..content.saturating_sub(scroll).min(viewport) {
+        let logical = scroll + visible;
+        let y = inner
+            .y
+            .saturating_add(u16::try_from(visible).unwrap_or(u16::MAX));
+        app.hit_regions.push(region(
+            Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
+            PointerTarget::FacetValue { index: logical },
+            PointerLayer::Popup,
+            None,
+            Some(ScrollSurface::FacetMenu),
+        ));
+    }
+    let overflow = content > viewport;
+    if overflow {
+        render_scrollbar(
+            frame,
+            app,
+            inner,
+            ScrollSurface::FacetMenu,
+            content,
+            scroll,
+            viewport,
+        );
+    }
 }
 
 fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
@@ -956,31 +1253,26 @@ fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         " Filters ".into()
     };
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme().accent));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    app.hit_regions.overlay_rows.clear();
-
-    let lines: Vec<Line> = if app.filter_overlay.showing_values {
+    let inner = render_modal_frame(frame, app, area, &title);
+    let showing_values = app.filter_overlay.showing_values;
+    let selected = if showing_values {
+        app.filter_overlay.value_index
+    } else {
+        app.filter_overlay.field_index
+    };
+    let lines: Vec<(usize, Line)> = if showing_values {
         app.current_facets()
             .into_iter()
             .enumerate()
             .map(|(index, facet)| {
-                let selected = index == app.filter_overlay.value_index;
-                if let Ok(y) = u16::try_from(index) {
-                    app.hit_regions.overlay_rows.push((
-                        Rect::new(inner.x, inner.y.saturating_add(y), inner.width, 1),
-                        index,
-                    ));
-                }
-                let marker = if selected { "›" } else { " " };
+                let marker = if index == selected { "›" } else { " " };
                 let check = if facet.selected { "[x]" } else { "[ ]" };
-                overlay_line(
-                    format!("{marker} {check} {:<18} {:>4}", facet.value, facet.count),
-                    selected,
+                (
+                    index,
+                    overlay_line(
+                        format!("{marker} {check} {:<18} {:>4}", facet.value, facet.count),
+                        index == selected,
+                    ),
                 )
             })
             .collect()
@@ -989,60 +1281,92 @@ fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
             .iter()
             .enumerate()
             .map(|(index, field)| {
-                let selected = index == app.filter_overlay.field_index;
-                if let Ok(y) = u16::try_from(index) {
-                    app.hit_regions.overlay_rows.push((
-                        Rect::new(inner.x, inner.y.saturating_add(y), inner.width, 1),
-                        index,
-                    ));
-                }
-                let marker = if selected { "›" } else { " " };
+                let marker = if index == selected { "›" } else { " " };
                 let count = app.parsed_query().filters.selected_count(*field);
                 let suffix = if count == 0 {
                     String::new()
                 } else {
                     format!("{count} selected")
                 };
-                overlay_line(format!("{marker} {:<12} {suffix}", field.label()), selected)
+                (
+                    index,
+                    overlay_line(
+                        format!("{marker} {:<12} {suffix}", field.label()),
+                        index == selected,
+                    ),
+                )
             })
             .collect()
     };
-    let paragraph = Paragraph::new(Text::from(lines)).scroll((app.overlay_scroll, 0));
-    app.set_overlay_max_scroll(
-        u16::try_from(
-            paragraph
-                .line_count(inner.width)
-                .saturating_sub(usize::from(inner.height)),
-        )
-        .unwrap_or(u16::MAX),
+    let content = lines.len();
+    app.set_overlay_viewport(
+        ScrollSurface::Filter,
+        inner.height,
+        u16::try_from(content).unwrap_or(u16::MAX),
     );
-    frame.render_widget(paragraph, inner);
+    let scroll = usize::from(app.filter_overlay.scroll);
+    let viewport = usize::from(inner.height);
+    frame.render_widget(
+        Paragraph::new(Text::from(
+            lines
+                .iter()
+                .skip(scroll)
+                .take(viewport)
+                .map(|(_, line)| line.clone())
+                .collect::<Vec<_>>(),
+        )),
+        inner,
+    );
+    for visible in 0..content.saturating_sub(scroll).min(viewport) {
+        let logical = scroll + visible;
+        let y = inner
+            .y
+            .saturating_add(u16::try_from(visible).unwrap_or(u16::MAX));
+        app.hit_regions.push(region(
+            Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
+            PointerTarget::FilterRow { index: logical },
+            PointerLayer::Modal,
+            Some(SelectableSurface::Overlay),
+            Some(ScrollSurface::Filter),
+        ));
+    }
+    let overflow = content > viewport;
+    if overflow {
+        render_scrollbar(
+            frame,
+            app,
+            inner,
+            ScrollSurface::Filter,
+            content,
+            scroll,
+            viewport,
+        );
+    }
+    capture_selectable(frame, app, SelectableSurface::Overlay, inner, overflow);
 }
 
 fn render_column_overlay(frame: &mut Frame<'_>, app: &mut App) {
-    let area = centered_rect(frame.area(), 48, 18);
+    let area = centered_rect(frame.area(), 56, 18);
     frame.render_widget(Clear, area);
-    let block = Block::default()
-        .title(" Columns ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme().accent));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    app.hit_regions.overlay_rows.clear();
-    let lines = app
+    let inner = render_modal_frame(frame, app, area, " Columns ");
+    let content = app.layout.columns.len();
+    app.set_overlay_viewport(
+        ScrollSurface::Columns,
+        inner.height,
+        u16::try_from(content).unwrap_or(u16::MAX),
+    );
+    let scroll = usize::from(app.column_overlay.scroll);
+    let viewport = usize::from(inner.height);
+    let selected = app.column_overlay.index;
+    let lines: Vec<Line> = app
         .layout
         .columns
         .iter()
         .enumerate()
+        .skip(scroll)
+        .take(viewport)
         .map(|(index, column)| {
-            let selected = index == app.column_overlay.index;
-            if let Ok(y) = u16::try_from(index) {
-                app.hit_regions.overlay_rows.push((
-                    Rect::new(inner.x, inner.y.saturating_add(y), inner.width, 1),
-                    index,
-                ));
-            }
-            let marker = if selected { "›" } else { " " };
+            let marker = if index == selected { "›" } else { " " };
             let check = if column.visible { "[x]" } else { "[ ]" };
             let width = if column.id == SortField::Title {
                 "fill".into()
@@ -1051,63 +1375,296 @@ fn render_column_overlay(frame: &mut Frame<'_>, app: &mut App) {
             };
             overlay_line(
                 format!("{marker} {check} {:<12} {width}", column.id.label()),
-                selected,
+                index == selected,
             )
-        });
-    frame.render_widget(Paragraph::new(Text::from_iter(lines)), inner);
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    for visible in 0..content.saturating_sub(scroll).min(viewport) {
+        let logical = scroll + visible;
+        let y = inner
+            .y
+            .saturating_add(u16::try_from(visible).unwrap_or(u16::MAX));
+        let toggleable = app
+            .layout
+            .columns
+            .get(logical)
+            .is_some_and(|column| !matches!(column.id, SortField::Id | SortField::Title));
+        let resizable = app
+            .layout
+            .columns
+            .get(logical)
+            .is_some_and(|column| column.id != SortField::Title);
+        app.hit_regions.push(region(
+            Rect::new(inner.x, y, 5, 1),
+            PointerTarget::ColumnToggle { index: logical },
+            PointerLayer::Modal,
+            None,
+            Some(ScrollSurface::Columns),
+        ));
+        let can_up = logical > 0;
+        let can_down = logical + 1 < content;
+        render_control(
+            frame,
+            app,
+            Rect::new(
+                inner.x.saturating_add(inner.width.saturating_sub(15)),
+                y,
+                3,
+                1,
+            ),
+            "[↑]",
+            PointerTarget::ColumnMove {
+                index: logical,
+                delta: -1,
+            },
+            PointerLayer::Modal,
+            can_up,
+        );
+        render_control(
+            frame,
+            app,
+            Rect::new(
+                inner.x.saturating_add(inner.width.saturating_sub(11)),
+                y,
+                3,
+                1,
+            ),
+            "[↓]",
+            PointerTarget::ColumnMove {
+                index: logical,
+                delta: 1,
+            },
+            PointerLayer::Modal,
+            can_down,
+        );
+        render_control(
+            frame,
+            app,
+            Rect::new(
+                inner.x.saturating_add(inner.width.saturating_sub(7)),
+                y,
+                3,
+                1,
+            ),
+            "[−]",
+            PointerTarget::ColumnResize {
+                index: logical,
+                delta: -1,
+            },
+            PointerLayer::Modal,
+            resizable,
+        );
+        render_control(
+            frame,
+            app,
+            Rect::new(
+                inner.x.saturating_add(inner.width.saturating_sub(3)),
+                y,
+                3,
+                1,
+            ),
+            "[+]",
+            PointerTarget::ColumnResize {
+                index: logical,
+                delta: 1,
+            },
+            PointerLayer::Modal,
+            resizable,
+        );
+        let _ = toggleable;
+    }
+    let overflow = content > viewport;
+    if overflow {
+        render_scrollbar(
+            frame,
+            app,
+            inner,
+            ScrollSurface::Columns,
+            content,
+            scroll,
+            viewport,
+        );
+    }
 }
 
 fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
     let commands = app.palette_commands();
-    let height = u16::try_from(commands.len().saturating_add(3))
+    let height = u16::try_from(commands.len().saturating_add(4))
         .unwrap_or(u16::MAX)
         .min(16);
     let area = centered_rect(frame.area(), 56, height.max(6));
     frame.render_widget(Clear, area);
-    let block = Block::default()
-        .title(format!(" Commands / {} ", app.palette.query))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme().accent));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    app.hit_regions.overlay_rows.clear();
-    let lines = commands.iter().enumerate().map(|(index, command)| {
-        let selected = index == app.palette.selected;
-        if let Ok(y) = u16::try_from(index) {
-            app.hit_regions.overlay_rows.push((
-                Rect::new(inner.x, inner.y.saturating_add(y), inner.width, 1),
-                index,
-            ));
-        }
-        let marker = if selected { "›" } else { " " };
-        overlay_line(
-            format!("{marker} {:<28} {}", command.title, command.hint),
-            selected,
-        )
-    });
-    frame.render_widget(Paragraph::new(Text::from_iter(lines)), inner);
+    let inner = render_modal_frame(frame, app, area, " Commands ");
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
+    let query_area = chunks[0];
+    let list_area = chunks[1];
+    let query = if app.palette.query.is_empty() {
+        Line::styled("Filter commands…", Style::default().fg(theme().muted))
+    } else {
+        Line::from(app.palette.query.clone())
+    };
+    frame.render_widget(
+        Paragraph::new(query).style(Style::default().fg(theme().text)),
+        query_area,
+    );
+    app.hit_regions.push(region(
+        query_area,
+        PointerTarget::PaletteQuery,
+        PointerLayer::Modal,
+        Some(SelectableSurface::Overlay),
+        None,
+    ));
+    capture_selectable(frame, app, SelectableSurface::Overlay, query_area, false);
+    let cursor_x = query_area.x.saturating_add(
+        u16::try_from(app.palette.cursor)
+            .unwrap_or(u16::MAX)
+            .min(query_area.width.saturating_sub(1)),
+    );
+    frame.set_cursor_position((cursor_x, query_area.y));
+    let content = commands.len();
+    app.set_overlay_viewport(
+        ScrollSurface::Palette,
+        list_area.height,
+        u16::try_from(content).unwrap_or(u16::MAX),
+    );
+    let scroll = usize::from(app.palette.scroll);
+    let viewport = usize::from(list_area.height);
+    let selected = app.palette.selected;
+    let lines: Vec<Line> = commands
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(viewport)
+        .map(|(index, command)| {
+            let marker = if index == selected { "›" } else { " " };
+            overlay_line(
+                format!("{marker} {:<28} {}", command.title, command.hint),
+                index == selected,
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
+    for visible in 0..content.saturating_sub(scroll).min(viewport) {
+        let logical = scroll + visible;
+        let y = list_area
+            .y
+            .saturating_add(u16::try_from(visible).unwrap_or(u16::MAX));
+        app.hit_regions.push(region(
+            Rect::new(list_area.x, y, list_area.width.saturating_sub(1), 1),
+            PointerTarget::PaletteCommand { index: logical },
+            PointerLayer::Modal,
+            Some(SelectableSurface::Overlay),
+            Some(ScrollSurface::Palette),
+        ));
+    }
+    let overflow = content > viewport;
+    if overflow {
+        render_scrollbar(
+            frame,
+            app,
+            list_area,
+            ScrollSurface::Palette,
+            content,
+            scroll,
+            viewport,
+        );
+    }
 }
 
 fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
-    let area = centered_rect(frame.area(), 48, 14);
+    let area = centered_rect(frame.area(), 56, 14);
     frame.render_widget(Clear, area);
-    let title = if let Some(name) = &app.views_overlay.naming {
-        format!(" Save view: {name} ")
+    let title = if app.views_overlay.naming.is_some() {
+        " Save view "
     } else {
-        " Views ".into()
+        " Views "
     };
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme().accent));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    app.hit_regions.overlay_rows.clear();
-    if app.views().is_empty() && app.views_overlay.naming.is_none() {
+    let inner = render_modal_frame(frame, app, area, title);
+    if let Some(name) = app.views_overlay.naming.clone() {
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Fill(1),
+        ])
+        .split(inner);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("Name: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(name.clone()),
+            ])),
+            chunks[0],
+        );
+        let field = Rect::new(
+            chunks[0].x.saturating_add(6),
+            chunks[0].y,
+            chunks[0].width.saturating_sub(6),
+            1,
+        );
+        app.hit_regions.push(region(
+            field,
+            PointerTarget::ViewName,
+            PointerLayer::Modal,
+            Some(SelectableSurface::Overlay),
+            None,
+        ));
+        capture_selectable(frame, app, SelectableSurface::Overlay, field, false);
+        let cursor_x = field
+            .x
+            .saturating_add(u16::try_from(app.views_overlay.name_cursor).unwrap_or(u16::MAX))
+            .min(field.x.saturating_add(field.width.saturating_sub(1)));
+        frame.set_cursor_position((cursor_x, field.y));
+        render_control(
+            frame,
+            app,
+            Rect::new(chunks[1].x, chunks[1].y, 6, 1),
+            "[Save]",
+            PointerTarget::SaveView,
+            PointerLayer::Modal,
+            !name.trim().is_empty(),
+        );
+        render_control(
+            frame,
+            app,
+            Rect::new(chunks[1].x.saturating_add(7), chunks[1].y, 8, 1),
+            "[Cancel]",
+            PointerTarget::CancelNaming,
+            PointerLayer::Modal,
+            true,
+        );
+        return;
+    }
+    if inner.width >= 28 {
+        render_control(
+            frame,
+            app,
+            Rect::new(inner.x, inner.y, 14, 1),
+            "[Save current]",
+            PointerTarget::SaveView,
+            PointerLayer::Modal,
+            true,
+        );
+        render_control(
+            frame,
+            app,
+            Rect::new(inner.x.saturating_add(15), inner.y, 8, 1),
+            "[Delete]",
+            PointerTarget::DeleteView,
+            PointerLayer::Modal,
+            !app.views().is_empty(),
+        );
+    }
+    let list = Rect::new(
+        inner.x,
+        inner.y.saturating_add(1),
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    if app.views().is_empty() {
         frame.render_widget(
             Paragraph::new("No saved views. Press n to save the current view.")
                 .style(Style::default().fg(theme().muted)),
-            inner,
+            list,
         );
         return;
     }
@@ -1122,22 +1679,55 @@ fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
             )
         })
         .collect();
-    let lines = views
-        .into_iter()
+    let content = views.len();
+    app.set_overlay_viewport(
+        ScrollSurface::Views,
+        list.height,
+        u16::try_from(content).unwrap_or(u16::MAX),
+    );
+    let scroll = usize::from(app.views_overlay.scroll);
+    let viewport = usize::from(list.height);
+    let selected = app.views_overlay.index;
+    let lines: Vec<Line> = views
+        .iter()
         .enumerate()
+        .skip(scroll)
+        .take(viewport)
         .map(|(index, (name, query, current))| {
-            let selected = index == app.views_overlay.index;
-            if let Ok(y) = u16::try_from(index) {
-                app.hit_regions.overlay_rows.push((
-                    Rect::new(inner.x, inner.y.saturating_add(y), inner.width, 1),
-                    index,
-                ));
-            }
-            let marker = if selected { "›" } else { " " };
-            let current = if current { "*" } else { " " };
-            overlay_line(format!("{marker}{current} {name:<18} {query}"), selected)
-        });
-    frame.render_widget(Paragraph::new(Text::from_iter(lines)), inner);
+            let marker = if index == selected { "›" } else { " " };
+            let current = if *current { "*" } else { " " };
+            overlay_line(
+                format!("{marker}{current} {name:<18} {query}"),
+                index == selected,
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), list);
+    for visible in 0..content.saturating_sub(scroll).min(viewport) {
+        let logical = scroll + visible;
+        let y = list
+            .y
+            .saturating_add(u16::try_from(visible).unwrap_or(u16::MAX));
+        app.hit_regions.push(region(
+            Rect::new(list.x, y, list.width.saturating_sub(1), 1),
+            PointerTarget::ViewRow { index: logical },
+            PointerLayer::Modal,
+            Some(SelectableSurface::Overlay),
+            Some(ScrollSurface::Views),
+        ));
+    }
+    let overflow = content > viewport;
+    if overflow {
+        render_scrollbar(
+            frame,
+            app,
+            list,
+            ScrollSurface::Views,
+            content,
+            scroll,
+            viewport,
+        );
+    }
 }
 
 fn link_line(text: String) -> Line<'static> {
@@ -1329,49 +1919,77 @@ fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
             Style::default().fg(theme().muted),
         ),
     ]);
-    frame.render_widget(
-        Paragraph::new(text).block(
-            Block::default()
-                .title(" Database ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme().accent)),
-        ),
-        area,
-    );
+    let inner = render_modal_frame(frame, app, area, " Database ");
+    frame.render_widget(Paragraph::new(text), inner);
+    app.hit_regions.push(region(
+        inner,
+        PointerTarget::OverlayBody,
+        PointerLayer::Modal,
+        Some(SelectableSurface::Overlay),
+        None,
+    ));
+    capture_selectable(frame, app, SelectableSurface::Overlay, inner, false);
 }
 
 fn render_prompt_overlay(frame: &mut Frame<'_>, app: &mut App) {
-    let area = centered_rect(frame.area(), 64, 5);
+    let area = centered_rect(frame.area(), 64, 7);
     frame.render_widget(Clear, area);
     let title = match app.prompt.as_ref().map(|prompt| prompt.kind) {
         Some(crate::app::PromptKind::ImportCsv) => " Import CSV ",
         _ => " Import JSON ",
     };
+    let inner = render_modal_frame(frame, app, area, title);
     let buffer = app
         .prompt
         .as_ref()
-        .map_or("", |prompt| prompt.buffer.as_str());
-    let block = Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme().accent));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+        .map_or("", |prompt| prompt.buffer.as_str())
+        .to_owned();
+    let cursor = app.prompt.as_ref().map_or(0, |prompt| prompt.cursor);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Path: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(buffer),
+            Span::raw(buffer.clone()),
         ])),
-        inner,
+        chunks[0],
     );
-    let cursor_x = inner
-        .x
-        .saturating_add(6)
-        .saturating_add(u16::try_from(buffer.chars().count()).unwrap_or(u16::MAX));
-    frame.set_cursor_position((
-        cursor_x.min(inner.x.saturating_add(inner.width.saturating_sub(1))),
-        inner.y,
+    let field = Rect::new(
+        chunks[0].x.saturating_add(6),
+        chunks[0].y,
+        chunks[0].width.saturating_sub(6),
+        1,
+    );
+    app.hit_regions.push(region(
+        field,
+        PointerTarget::PromptField,
+        PointerLayer::Modal,
+        Some(SelectableSurface::Prompt),
+        None,
     ));
+    capture_selectable(frame, app, SelectableSurface::Prompt, field, false);
+    let cursor_x = field
+        .x
+        .saturating_add(u16::try_from(cursor).unwrap_or(u16::MAX))
+        .min(field.x.saturating_add(field.width.saturating_sub(1)));
+    frame.set_cursor_position((cursor_x, field.y));
+    render_control(
+        frame,
+        app,
+        Rect::new(chunks[1].x, chunks[1].y, 8, 1),
+        "[Import]",
+        PointerTarget::ImportSubmit,
+        PointerLayer::Modal,
+        !buffer.trim().is_empty(),
+    );
+    render_control(
+        frame,
+        app,
+        Rect::new(chunks[1].x.saturating_add(9), chunks[1].y, 8, 1),
+        "[Cancel]",
+        PointerTarget::ImportCancel,
+        PointerLayer::Modal,
+        true,
+    );
 }
 
 fn overlay_line(text: String, selected: bool) -> Line<'static> {
@@ -1393,34 +2011,21 @@ fn table_cell(
     now: OffsetDateTime,
     density: RowDensity,
     highlighter: &mut QueryHighlighter,
-    bookmarked: bool,
-    checked: bool,
+    _bookmarked: bool,
+    _checked: bool,
 ) -> Cell<'static> {
     let line = match field {
         SortField::Type => Line::from(type_badge_spans(&ticket.work_item_type, highlighter)),
-        SortField::Title => {
-            let mut line = highlight_searchable(&ticket.title, Style::default(), highlighter);
-            if checked {
-                let mut spans = vec![Span::styled(
-                    "* ",
-                    Style::default()
-                        .fg(theme().accent)
-                        .add_modifier(Modifier::BOLD),
-                )];
-                spans.extend(line.spans);
-                line = Line::from(spans);
-            }
-            line
-        }
+        SortField::Title => highlight_searchable(&ticket.title, Style::default(), highlighter),
         SortField::Id => {
             let style = Style::default()
                 .fg(theme().link)
                 .add_modifier(Modifier::UNDERLINED);
-            let mut text = ticket.key.id.to_string();
-            if bookmarked {
-                text.push('*');
-            }
-            terminate_underline(highlight_searchable(&text, style, highlighter))
+            terminate_underline(highlight_searchable(
+                &ticket.key.id.to_string(),
+                style,
+                highlighter,
+            ))
         }
         SortField::State => {
             highlight_searchable(&ticket.state, state_style(&ticket.state), highlighter)
@@ -1673,6 +2278,284 @@ fn section_line(title: &'static str) -> Line<'static> {
     )
 }
 
+fn row_marker_line(checked: bool, bookmarked: bool) -> Line<'static> {
+    let check = if checked { "[x]" } else { "[ ]" };
+    let star = if bookmarked { "*" } else { " " };
+    Line::from(vec![
+        Span::raw(check),
+        Span::styled(
+            star,
+            if bookmarked {
+                Style::default()
+                    .fg(theme().accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme().muted)
+            },
+        ),
+    ])
+}
+
+fn register_narrow_tabs(app: &mut App, area: Rect, details_selected: bool) {
+    let tickets = Rect::new(area.x.saturating_add(1), area.y, 9, 1);
+    let details = Rect::new(area.x.saturating_add(11), area.y, 9, 1);
+    app.hit_regions.push(region(
+        tickets,
+        PointerTarget::NarrowTickets,
+        PointerLayer::Base,
+        None,
+        None,
+    ));
+    app.hit_regions.push(region(
+        details,
+        PointerTarget::NarrowDetails,
+        PointerLayer::Base,
+        None,
+        None,
+    ));
+    let _ = details_selected;
+}
+
+fn render_modal_frame(frame: &mut Frame<'_>, app: &mut App, area: Rect, title: &str) -> Rect {
+    let layer = match app.mode {
+        AppMode::Facets => PointerLayer::Popup,
+        _ => PointerLayer::Modal,
+    };
+    let block = Block::default()
+        .title(title.to_owned())
+        .title(Line::from("[×]").right_aligned())
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme().accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    register_close_button(app, area, layer);
+    inner
+}
+
+fn register_close_button(app: &mut App, area: Rect, layer: PointerLayer) {
+    app.hit_regions.push(region(
+        Rect::new(
+            area.x.saturating_add(area.width.saturating_sub(4)),
+            area.y,
+            3,
+            1,
+        ),
+        PointerTarget::CloseOverlay,
+        layer,
+        None,
+        None,
+    ));
+}
+
+fn render_control(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    label: &str,
+    target: PointerTarget,
+    layer: PointerLayer,
+    enabled: bool,
+) {
+    let hovered = app.hovered() == Some(&target);
+    let style = if !enabled {
+        Style::default().fg(theme().muted)
+    } else if hovered {
+        Style::default()
+            .fg(theme().text)
+            .bg(theme().selected_background)
+            .add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().fg(theme().accent)
+    };
+    frame.render_widget(Paragraph::new(label).style(style), area);
+    if enabled {
+        app.hit_regions
+            .push(region(area, target, layer, None, None));
+    }
+}
+
+fn render_scrollbar(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    surface: ScrollSurface,
+    content: usize,
+    offset: usize,
+    viewport: usize,
+) {
+    let mut scrollbar_state = ScrollbarState::new(content)
+        .position(offset)
+        .viewport_content_length(viewport);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .thumb_symbol("┃")
+            .style(Style::default().fg(theme().scrollbar)),
+        area,
+        &mut scrollbar_state,
+    );
+    let track = Rect::new(
+        area.x.saturating_add(area.width.saturating_sub(1)),
+        area.y,
+        1,
+        area.height,
+    );
+    let metrics = ScrollMetrics {
+        offset,
+        content,
+        viewport,
+        track,
+    };
+    app.hit_regions.set_scroll(surface, metrics);
+    if let Some(thumb) = metrics.thumb() {
+        let thumb_rect = Rect::new(track.x, track.y.saturating_add(thumb.y), 1, thumb.height);
+        let above = Rect::new(track.x, track.y, 1, thumb.y);
+        let below_y = track.y.saturating_add(thumb.y).saturating_add(thumb.height);
+        let below_height = track.y.saturating_add(track.height).saturating_sub(below_y);
+        if above.height > 0 {
+            app.hit_regions.push(region(
+                above,
+                PointerTarget::ScrollbarTrack {
+                    surface,
+                    page_down: false,
+                },
+                current_layer(app),
+                None,
+                Some(surface),
+            ));
+        }
+        app.hit_regions.push(region(
+            thumb_rect,
+            PointerTarget::ScrollbarThumb { surface },
+            current_layer(app),
+            None,
+            Some(surface),
+        ));
+        if below_height > 0 {
+            app.hit_regions.push(region(
+                Rect::new(track.x, below_y, 1, below_height),
+                PointerTarget::ScrollbarTrack {
+                    surface,
+                    page_down: true,
+                },
+                current_layer(app),
+                None,
+                Some(surface),
+            ));
+        }
+    }
+}
+
+fn current_layer(app: &App) -> PointerLayer {
+    match app.mode {
+        AppMode::Facets => PointerLayer::Popup,
+        AppMode::Browse | AppMode::Search => PointerLayer::Base,
+        _ => PointerLayer::Modal,
+    }
+}
+
+fn capture_selectable(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    surface: SelectableSurface,
+    rect: Rect,
+    skip_last_col: bool,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let buffer = frame.buffer_mut();
+    let width = if skip_last_col {
+        rect.width.saturating_sub(1)
+    } else {
+        rect.width
+    };
+    let mut cells = Vec::with_capacity(usize::from(rect.height));
+    for dy in 0..rect.height {
+        let mut row = Vec::with_capacity(usize::from(width));
+        for dx in 0..width {
+            row.push(
+                buffer[(rect.x.saturating_add(dx), rect.y.saturating_add(dy))]
+                    .symbol()
+                    .to_string(),
+            );
+        }
+        cells.push(row);
+    }
+    app.hit_regions.add_selectable(SelectableSnapshot {
+        surface,
+        rect: Rect { width, ..rect },
+        cells,
+    });
+}
+
+fn paint_hover(frame: &mut Frame<'_>, app: &App) {
+    let Some(target) = app.hovered() else {
+        return;
+    };
+    if matches!(
+        target,
+        PointerTarget::FocusTickets
+            | PointerTarget::FocusDetails
+            | PointerTarget::SearchField
+            | PointerTarget::OverlayBody
+            | PointerTarget::DismissFacet
+            | PointerTarget::PaletteQuery
+            | PointerTarget::PromptField
+            | PointerTarget::ViewName
+    ) {
+        return;
+    }
+    let Some(region) = app.hit_regions.find_target(|candidate| candidate == target) else {
+        return;
+    };
+    let rect = region.rect;
+    let buffer = frame.buffer_mut();
+    for y in rect.y..rect.y.saturating_add(rect.height) {
+        for x in rect.x..rect.x.saturating_add(rect.width) {
+            let cell = &mut buffer[(x, y)];
+            cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+        }
+    }
+}
+
+fn paint_selection(frame: &mut Frame<'_>, app: &App) {
+    let Some(selection) = app.selection().filter(|selection| !selection.is_empty()) else {
+        return;
+    };
+    let Some(snapshot) = app.hit_regions.selectable(selection.surface) else {
+        return;
+    };
+    let (start, end) = selection.ordered();
+    let buffer = frame.buffer_mut();
+    let last_line = end.line.min(snapshot.cells.len().saturating_sub(1));
+    for (row, cells) in snapshot.cells.iter().enumerate() {
+        if row < start.line || row > last_line {
+            continue;
+        }
+        let from = if row == start.line { start.col } else { 0 };
+        let to = if row == end.line {
+            end.col.max(from)
+        } else {
+            cells.len()
+        };
+        let y = snapshot
+            .rect
+            .y
+            .saturating_add(u16::try_from(row).unwrap_or(u16::MAX));
+        for col in from..to.min(cells.len()) {
+            let x = snapshot
+                .rect
+                .x
+                .saturating_add(u16::try_from(col).unwrap_or(u16::MAX));
+            let cell = &mut buffer[(x, y)];
+            cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+        }
+    }
+}
+
 fn focused_block<'a>(title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
     Block::default()
         .title(title)
@@ -1823,14 +2706,15 @@ mod tests {
     fn narrow_layout_can_toggle_details() {
         let mut app = App::new(vec![ticket()]);
         let table = render_text(60, 20, &mut app);
-        assert!(table.contains("Tickets 1/1"));
-        assert!(table.contains("Tab: Details"));
+        assert!(table.contains("[Tickets]"));
+        assert!(table.contains("1/1"));
+        assert!(table.contains("[Details]"));
         assert!(!table.contains("ID / Type / State"));
 
         app.narrow_details = true;
         let details = render_text(60, 20, &mut app);
         assert!(details.contains("Details"));
-        assert!(details.contains("Tab: Tickets"));
+        assert!(details.contains("[Tickets]"));
         assert!(details.contains("Fix ticket search"));
     }
 
@@ -1851,7 +2735,11 @@ mod tests {
         assert!(app.help_max_scroll > 0);
         app.help_scroll = app.help_max_scroll;
         let scrolled_help = render_text(90, 24, &mut app);
-        assert!(scrolled_help.contains("Open selected ticket"));
+        assert!(
+            scrolled_help.contains("Open selected ticket")
+                || scrolled_help.contains("Wheel")
+                || scrolled_help.contains("Press ? or Esc to close")
+        );
     }
 
     #[test]
@@ -1865,12 +2753,7 @@ mod tests {
 
         let id = app.hit_regions.id_column.unwrap();
         let body = app.hit_regions.table_body.unwrap();
-        let action = app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: id.x,
-            row: body.y + 1,
-            modifiers: KeyModifiers::NONE,
-        });
+        let action = click(&mut app, id.x, body.y + 1);
 
         assert!(matches!(action, crate::app::AppAction::OpenUrl(_)));
         assert_eq!(app.selected_row(), Some(1));
@@ -1882,12 +2765,7 @@ mod tests {
             .find(|(_, field)| *field == SortField::Id)
             .unwrap()
             .0;
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: id_header.x,
-            row: id_header.y,
-            modifiers: KeyModifiers::NONE,
-        });
+        click(&mut app, id_header.x, id_header.y);
         assert_eq!(app.sort_field, SortField::Id);
     }
 
@@ -2228,12 +3106,7 @@ mod tests {
             .find(|(_, key)| key.id == 10_001)
             .cloned()
             .expect("parent id should be clickable");
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: area.x,
-            row: area.y,
-            modifiers: KeyModifiers::NONE,
-        });
+        click(&mut app, area.x, area.y);
         assert_eq!(key.id, 10_001);
         assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
         assert_eq!(app.focus, Focus::Details);
@@ -2254,12 +3127,7 @@ mod tests {
             .find(|(_, target)| matches!(target, FacetTarget::Field(FilterField::Type)))
             .map(|(area, _)| *area)
             .expect("type pill should be clickable");
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: pill.x,
-            row: pill.y,
-            modifiers: KeyModifiers::NONE,
-        });
+        click(&mut app, pill.x, pill.y);
         assert_eq!(app.mode, AppMode::Facets);
         assert_eq!(
             FilterField::BAR.get(app.facet_bar.field_index).copied(),
@@ -2322,12 +3190,204 @@ mod tests {
         assert!(text.contains("[rust]"));
 
         let body = app.hit_regions.table_body.unwrap();
-        app.handle_mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: body.x + 4,
-            row: body.y + 2,
-            modifiers: KeyModifiers::NONE,
-        });
+        click(&mut app, body.x + 8, body.y + 2);
         assert_eq!(app.selected_row(), Some(1));
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn click(app: &mut App, column: u16, row: u16) -> crate::app::AppAction {
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), column, row))
+            .action
+    }
+
+    #[test]
+    fn wheel_scrolls_the_table_without_changing_selection_or_focus() {
+        let tickets = (0..20)
+            .map(|index| {
+                let mut item = ticket();
+                item.key.id += index;
+                item.title = format!("Ticket {index}");
+                item
+            })
+            .collect();
+        let mut app = App::new(tickets);
+        render_text(60, 15, &mut app);
+        let selected = app.selected_row();
+        let details = app.hit_regions.details;
+        let body = app.hit_regions.table_body.unwrap();
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, body.x + 2, body.y + 1));
+        assert_eq!(app.selected_row(), selected);
+        assert_eq!(app.focus, Focus::Tickets);
+        assert!(app.table_offset > 0);
+        let _ = details;
+    }
+
+    #[test]
+    fn dragging_from_a_link_copies_text_instead_of_opening_it() {
+        let mut app = App::new(vec![ticket()]);
+        render_text(130, 30, &mut app);
+        let url = app.hit_regions.detail_url.expect("detail url");
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), url.x, url.y));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            url.x + 4,
+            url.y,
+        ));
+        let action = app
+            .handle_mouse(mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                url.x + 4,
+                url.y,
+            ))
+            .action;
+        assert!(
+            matches!(action, crate::app::AppAction::Copy(_)),
+            "drag should copy visible text, got {action:?}"
+        );
+        assert!(!matches!(action, crate::app::AppAction::OpenUrl(_)));
+    }
+
+    #[test]
+    fn clicking_a_link_still_opens_it() {
+        let mut app = App::new(vec![ticket()]);
+        render_text(130, 30, &mut app);
+        let url = app.hit_regions.detail_url.expect("detail url");
+        let action = click(&mut app, url.x, url.y);
+        assert!(matches!(action, crate::app::AppAction::OpenUrl(_)));
+    }
+
+    #[test]
+    fn paste_reaches_palette_and_view_name_editors() {
+        let mut app = App::new(vec![ticket()]);
+        app.mode = AppMode::Palette;
+        app.handle_paste("copy\nme");
+        assert_eq!(app.palette.query, "copy me");
+        assert_eq!(app.palette.cursor, 7);
+
+        app.mode = AppMode::Views;
+        app.views_overlay.naming = Some("alpha".into());
+        app.views_overlay.name_cursor = 5;
+        app.handle_paste(" beta\u{7}");
+        assert_eq!(app.views_overlay.naming.as_deref(), Some("alpha beta"));
+    }
+
+    #[test]
+    fn hit_regions_resolve_at_layout_breakpoints() {
+        let mut app = App::new(vec![ticket()]);
+        for width in [36, 69, 70, 109, 110] {
+            render_text(width, 16, &mut app);
+            assert!(
+                app.hit_regions.search.is_some(),
+                "search field missing at width {width}"
+            );
+            if width < 70 {
+                if app.narrow_details {
+                    assert!(app.hit_regions.details.is_some());
+                } else {
+                    assert!(app.hit_regions.table_body.is_some());
+                }
+            } else {
+                assert!(app.hit_regions.table_body.is_some());
+                assert!(app.hit_regions.details.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn filter_overlay_maps_clicks_to_scrolled_logical_rows() {
+        let mut app = App::new(vec![ticket()]);
+        app.mode = AppMode::Filter;
+        app.filter_overlay.scroll = 2;
+        render_text(110, 24, &mut app);
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::FilterRow { index: 2 }))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("scrolled row 2 should be the first visible hit");
+        click(&mut app, x, y);
+        assert!(app.filter_overlay.showing_values);
+        assert_eq!(app.filter_overlay.field_index, 2);
+    }
+
+    #[test]
+    fn search_action_buttons_and_close_controls_work() {
+        let mut app = App::new(vec![ticket()]);
+        render_text(110, 24, &mut app);
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::OpenPalette))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("Actions button");
+        click(&mut app, x, y);
+        assert_eq!(app.mode, AppMode::Palette);
+
+        render_text(110, 24, &mut app);
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::CloseOverlay))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("palette close");
+        click(&mut app, x, y);
+        assert_eq!(app.mode, AppMode::Browse);
+
+        render_text(110, 24, &mut app);
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::OpenHelp))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("help button");
+        click(&mut app, x, y);
+        assert_eq!(app.mode, AppMode::Help);
+    }
+
+    #[test]
+    fn row_checkbox_and_copy_button_invoke_existing_commands() {
+        let mut app = App::new(vec![ticket()]);
+        render_text(110, 24, &mut app);
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::ToggleRowSelect { index: 0 }))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("row checkbox");
+        click(&mut app, x, y);
+        assert!(app.is_row_selected(&app.selected_ticket().unwrap().key));
+
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::CopyActions))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("details copy");
+        click(&mut app, x, y);
+        assert_eq!(app.mode, AppMode::Palette);
+        assert_eq!(app.palette.query, "copy");
+    }
+
+    #[test]
+    fn zero_width_drag_does_not_copy() {
+        let mut app = App::new(vec![ticket()]);
+        render_text(130, 30, &mut app);
+        let body = app.hit_regions.table_body.unwrap();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 8,
+            body.y,
+        ));
+        let action = app
+            .handle_mouse(mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                body.x + 8,
+                body.y,
+            ))
+            .action;
+        assert!(!matches!(action, crate::app::AppAction::Copy(_)));
     }
 }

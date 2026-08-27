@@ -77,6 +77,12 @@ impl FilterField {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FacetTarget {
+    Field(FilterField),
+    More,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FilterToken {
     Field { field: FilterField, value: String },

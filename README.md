@@ -88,10 +88,18 @@ to a database prepared by another tool.
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
 
-Mouse input can select rows, scroll either pane, sort by visible headers, click
-filter-bar pills to choose values, click extra-field chips to remove them, jump
-to an underlined family ticket in details, and open a detail URL or table ID in
-the browser.
+Mouse input stays captured so the TUI can provide its own pointer controls
+without restoring terminal drag-select. Wheel scrolling moves the hovered
+table, details pane, help, or overlay by three rows or lines and does not
+change keyboard focus or the selected ticket. Left-click activates the
+visible control under the pointer on release: search, filter pills, sort
+headers, ticket rows, checkboxes, bookmark markers, underlined IDs and URLs,
+tabs, overlay rows, and close/action buttons. Dragging over visible text
+selects it and copies the plain text on release. Bracketed paste inserts at
+the caret in search, the command palette, the import prompt, and the named-view
+editor. Scrollbar tracks page by a viewport-minus-one step; thumbs can be
+dragged. Right-click, double-click, and horizontal wheel gestures are not
+used.
 
 Search accepts a compact grammar such as `state:active type:bug
 assignee:"Avery Chen" priority:1 tag:rust`. Values in the same field are

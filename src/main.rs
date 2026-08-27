@@ -163,18 +163,25 @@ fn run_terminal(app: &mut App, repository: &mut SqliteTicketRepository) -> Resul
         if !event::poll(timeout)? {
             continue;
         }
-        redraw = true;
-        let action = match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
-            Event::Mouse(mouse) => app.handle_mouse(mouse),
+        let (action, event_redraw) = match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => (app.handle_key(key), true),
+            Event::Mouse(mouse) => {
+                let update = app.handle_mouse(mouse);
+                (update.action, update.redraw)
+            }
             Event::Paste(text) => {
                 app.handle_paste(&text);
-                AppAction::None
+                (AppAction::None, true)
             }
-            Event::Resize(_, _) | Event::FocusGained | Event::FocusLost | Event::Key(_) => {
-                AppAction::None
+            Event::Resize(_, _) => {
+                app.handle_resize();
+                (AppAction::None, true)
             }
+            Event::FocusGained | Event::FocusLost | Event::Key(_) => (AppAction::None, false),
         };
+        if event_redraw {
+            redraw = true;
+        }
         handle_action(action, app, repository, &opener, &mut reloader);
     }
     Ok(())

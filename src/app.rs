@@ -5,12 +5,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 
 use crate::columns::TableLayout;
 use crate::command::{Command, CommandId, matching_commands};
 use crate::export;
+pub use crate::filter::FacetTarget;
 use crate::filter::{
     FacetValue, FilterField, FilterToken, ParsedQuery, facet_values, format_query, parse_query,
 };
@@ -20,6 +20,11 @@ use crate::model::{
     TicketGraph, TicketKey, compare_tickets,
 };
 pub use crate::model::{RowDensity, SearchOrder};
+use crate::pointer::{
+    self, DragKind, PointerState, ScrollSurface, SelectableSurface, TextEditor, TextPos,
+    TextSelection,
+};
+pub use crate::pointer::{HitRegions, PointerTarget};
 use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
 use crate::session::{self, NamedView, Session};
 
@@ -56,6 +61,28 @@ pub enum AppAction {
     Import { path: PathBuf, format: ImportFormat },
 }
 
+#[derive(Debug)]
+pub struct PointerUpdate {
+    pub action: AppAction,
+    pub redraw: bool,
+}
+
+impl PointerUpdate {
+    fn none(redraw: bool) -> Self {
+        Self {
+            action: AppAction::None,
+            redraw,
+        }
+    }
+
+    fn action(action: AppAction) -> Self {
+        Self {
+            action,
+            redraw: true,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NotificationLevel {
     Info,
@@ -79,45 +106,30 @@ pub struct SortDraft {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct HitRegions {
-    pub search: Option<Rect>,
-    pub chips: Vec<(Rect, FilterToken)>,
-    pub facet_pills: Vec<(Rect, FacetTarget)>,
-    pub facet_values: Vec<(Rect, usize)>,
-    pub table: Option<Rect>,
-    pub table_body: Option<Rect>,
-    pub id_column: Option<Rect>,
-    pub headers: Vec<(Rect, SortField)>,
-    pub details: Option<Rect>,
-    pub detail_url: Option<Rect>,
-    pub detail_links: Vec<(Rect, TicketKey)>,
-    pub sort_rows: Vec<(Rect, SortField)>,
-    pub overlay_rows: Vec<(Rect, usize)>,
-}
-
-#[derive(Clone, Debug, Default)]
 pub struct FilterOverlay {
     pub field_index: usize,
     pub value_index: usize,
     pub showing_values: bool,
     pub scroll: u16,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FacetTarget {
-    Field(FilterField),
-    More,
+    pub max_scroll: u16,
+    pub viewport: u16,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct FacetBar {
     pub field_index: usize,
     pub value_index: usize,
+    pub scroll: u16,
+    pub max_scroll: u16,
+    pub viewport: u16,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ColumnOverlay {
     pub index: usize,
+    pub scroll: u16,
+    pub max_scroll: u16,
+    pub viewport: u16,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -125,12 +137,19 @@ pub struct PaletteState {
     pub query: String,
     pub cursor: usize,
     pub selected: usize,
+    pub scroll: u16,
+    pub max_scroll: u16,
+    pub viewport: u16,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ViewsOverlay {
     pub index: usize,
     pub naming: Option<String>,
+    pub name_cursor: usize,
+    pub scroll: u16,
+    pub max_scroll: u16,
+    pub viewport: u16,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,11 +214,15 @@ pub struct App {
     pub mode: AppMode,
     pub focus: Focus,
     pub table_state: TableState,
+    pub table_offset: usize,
+    pub table_viewport_rows: usize,
     pub details_scroll: u16,
     pub details_max_scroll: u16,
+    pub details_viewport: u16,
     pub link_cursor: usize,
     pub help_scroll: u16,
     pub help_max_scroll: u16,
+    pub help_viewport: u16,
     pub overlay_scroll: u16,
     pub overlay_max_scroll: u16,
     pub narrow_details: bool,
@@ -209,6 +232,7 @@ pub struct App {
     notification: Option<Notification>,
     pub sort_draft: SortDraft,
     pub hit_regions: HitRegions,
+    pub pointer: PointerState,
     pub filter_overlay: FilterOverlay,
     pub column_overlay: ColumnOverlay,
     pub palette: PaletteState,
@@ -254,11 +278,15 @@ impl App {
             mode: AppMode::Browse,
             focus: Focus::Tickets,
             table_state: TableState::default(),
+            table_offset: 0,
+            table_viewport_rows: 0,
             details_scroll: 0,
             details_max_scroll: 0,
+            details_viewport: 0,
             link_cursor: 0,
             help_scroll: 0,
             help_max_scroll: 0,
+            help_viewport: 0,
             overlay_scroll: 0,
             overlay_max_scroll: 0,
             narrow_details: false,
@@ -271,6 +299,7 @@ impl App {
                 direction: SortDirection::Descending,
             },
             hit_regions: HitRegions::default(),
+            pointer: PointerState::default(),
             filter_overlay: FilterOverlay::default(),
             column_overlay: ColumnOverlay::default(),
             palette: PaletteState::default(),
@@ -579,36 +608,63 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, pasted: &str) {
-        if self.mode == AppMode::Prompt {
-            if let Some(prompt) = self.prompt.as_mut() {
-                let pasted: String = pasted
-                    .chars()
-                    .filter(|character| !character.is_control())
-                    .collect();
-                prompt.buffer.push_str(&pasted);
-                prompt.cursor = prompt.buffer.chars().count();
+        match self.active_editor() {
+            Some(TextEditor::Search) => {
+                let pasted = sanitize_multiline(pasted);
+                if pasted.is_empty() {
+                    return;
+                }
+                let byte = byte_index(&self.query, self.query_cursor);
+                let mut query = self.query.clone();
+                query.insert_str(byte, &pasted);
+                let cursor = self.query_cursor + pasted.chars().count();
+                self.set_query_at(query, cursor);
             }
-            return;
+            Some(TextEditor::Palette) => {
+                let pasted = sanitize_multiline(pasted);
+                if pasted.is_empty() {
+                    return;
+                }
+                let byte = byte_index(&self.palette.query, self.palette.cursor);
+                self.palette.query.insert_str(byte, &pasted);
+                self.palette.cursor += pasted.chars().count();
+                self.palette.selected = 0;
+                self.palette.scroll = 0;
+            }
+            Some(TextEditor::Prompt) => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    let pasted = sanitize_single_line(pasted);
+                    if pasted.is_empty() {
+                        return;
+                    }
+                    let byte = byte_index(&prompt.buffer, prompt.cursor);
+                    prompt.buffer.insert_str(byte, &pasted);
+                    prompt.cursor += pasted.chars().count();
+                }
+            }
+            Some(TextEditor::ViewName) => {
+                if let Some(name) = self.views_overlay.naming.as_mut() {
+                    let pasted = sanitize_single_line(pasted);
+                    if pasted.is_empty() {
+                        return;
+                    }
+                    let byte = byte_index(name, self.views_overlay.name_cursor);
+                    name.insert_str(byte, &pasted);
+                    self.views_overlay.name_cursor += pasted.chars().count();
+                }
+            }
+            None => {}
         }
-        if self.mode != AppMode::Search {
-            return;
+    }
+
+    fn active_editor(&self) -> Option<TextEditor> {
+        match self.mode {
+            AppMode::Search => Some(TextEditor::Search),
+            AppMode::Palette => Some(TextEditor::Palette),
+            AppMode::Prompt => Some(TextEditor::Prompt),
+            AppMode::Views if self.views_overlay.naming.is_some() => Some(TextEditor::ViewName),
+            _ => None,
         }
-        let pasted: String = pasted
-            .chars()
-            .filter_map(|character| match character {
-                '\r' | '\n' | '\t' => Some(' '),
-                character if character.is_control() => None,
-                character => Some(character),
-            })
-            .collect();
-        if pasted.is_empty() {
-            return;
-        }
-        let byte = byte_index(&self.query, self.query_cursor);
-        let mut query = self.query.clone();
-        query.insert_str(byte, &pasted);
-        let cursor = self.query_cursor + pasted.chars().count();
-        self.set_query_at(query, cursor);
     }
 
     pub fn set_details_max_scroll(&mut self, maximum: u16) {
@@ -616,9 +672,74 @@ impl App {
         self.details_scroll = self.details_scroll.min(maximum);
     }
 
+    pub fn set_details_viewport(&mut self, viewport: u16, content: u16) {
+        self.details_viewport = viewport;
+        let maximum = content.saturating_sub(viewport);
+        self.set_details_max_scroll(maximum);
+    }
+
     pub fn set_help_max_scroll(&mut self, maximum: u16) {
         self.help_max_scroll = maximum;
         self.help_scroll = self.help_scroll.min(maximum);
+    }
+
+    pub fn set_help_viewport(&mut self, viewport: u16, content: u16) {
+        self.help_viewport = viewport;
+        let maximum = content.saturating_sub(viewport);
+        self.set_help_max_scroll(maximum);
+    }
+
+    pub fn set_table_viewport(&mut self, rows: usize) {
+        self.table_viewport_rows = rows;
+        self.table_offset = pointer::clamp_offset(self.table_offset, self.visible.len(), rows);
+    }
+
+    pub fn set_overlay_viewport(&mut self, surface: ScrollSurface, viewport: u16, content: u16) {
+        let max = content.saturating_sub(viewport);
+        match surface {
+            ScrollSurface::Filter => {
+                self.filter_overlay.viewport = viewport;
+                self.filter_overlay.max_scroll = max;
+                self.filter_overlay.scroll = self.filter_overlay.scroll.min(max);
+                self.overlay_scroll = self.filter_overlay.scroll;
+                self.overlay_max_scroll = max;
+            }
+            ScrollSurface::Columns => {
+                self.column_overlay.viewport = viewport;
+                self.column_overlay.max_scroll = max;
+                self.column_overlay.scroll = self.column_overlay.scroll.min(max);
+            }
+            ScrollSurface::Palette => {
+                self.palette.viewport = viewport;
+                self.palette.max_scroll = max;
+                self.palette.scroll = self.palette.scroll.min(max);
+            }
+            ScrollSurface::Views => {
+                self.views_overlay.viewport = viewport;
+                self.views_overlay.max_scroll = max;
+                self.views_overlay.scroll = self.views_overlay.scroll.min(max);
+            }
+            ScrollSurface::FacetMenu => {
+                self.facet_bar.viewport = viewport;
+                self.facet_bar.max_scroll = max;
+                self.facet_bar.scroll = self.facet_bar.scroll.min(max);
+            }
+            ScrollSurface::Sort => {
+                self.overlay_max_scroll = max;
+                self.overlay_scroll = self.overlay_scroll.min(max);
+            }
+            _ => {}
+        }
+    }
+
+    #[must_use]
+    pub fn hovered(&self) -> Option<&PointerTarget> {
+        self.pointer.hover.as_ref()
+    }
+
+    #[must_use]
+    pub fn selection(&self) -> Option<TextSelection> {
+        self.pointer.selection
     }
 
     fn set_query_at(&mut self, query: String, cursor: usize) {
@@ -725,95 +846,27 @@ impl App {
         }
     }
 
-    pub fn handle_mouse(&mut self, mouse: MouseEvent) -> AppAction {
-        if self.mode == AppMode::Help {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    self.help_scroll = self.help_scroll.saturating_sub(3);
-                }
-                MouseEventKind::ScrollDown => {
-                    self.help_scroll = self.help_scroll.saturating_add(3).min(self.help_max_scroll);
-                }
-                _ => {}
-            }
-            return AppAction::None;
-        }
-        if self.mode == AppMode::Facets {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    self.facet_bar.value_index = self.facet_bar.value_index.saturating_sub(3);
-                    return AppAction::None;
-                }
-                MouseEventKind::ScrollDown => {
-                    let count = self.focused_bar_facets().len();
-                    if count > 0 {
-                        self.facet_bar.value_index =
-                            (self.facet_bar.value_index + 3).min(count - 1);
-                    }
-                    return AppAction::None;
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    return self.handle_click(mouse.column, mouse.row);
-                }
-                _ => {}
-            }
-        }
-        if matches!(
-            self.mode,
-            AppMode::Sort
-                | AppMode::Filter
-                | AppMode::Columns
-                | AppMode::Palette
-                | AppMode::Views
-                | AppMode::Info
-                | AppMode::Prompt
-        ) {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    self.overlay_scroll = self.overlay_scroll.saturating_sub(3);
-                }
-                MouseEventKind::ScrollDown => {
-                    self.overlay_scroll = self
-                        .overlay_scroll
-                        .saturating_add(3)
-                        .min(self.overlay_max_scroll);
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    return self.handle_click(mouse.column, mouse.row);
-                }
-                _ => {}
-            }
-            return AppAction::None;
-        }
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) -> PointerUpdate {
         match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                if self.contains(self.hit_regions.details, mouse.column, mouse.row) {
-                    self.focus = Focus::Details;
-                    self.narrow_details = true;
-                    self.scroll_details(-3);
-                } else {
-                    self.focus = Focus::Tickets;
-                    self.narrow_details = false;
-                    self.move_selection(-3);
-                }
+            MouseEventKind::ScrollUp => self.handle_wheel(mouse.column, mouse.row, -3),
+            MouseEventKind::ScrollDown => self.handle_wheel(mouse.column, mouse.row, 3),
+            MouseEventKind::Down(MouseButton::Left) => self.handle_press(mouse.column, mouse.row),
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved
+                if self.pointer.is_pressed() =>
+            {
+                self.handle_drag(mouse.column, mouse.row)
             }
-            MouseEventKind::ScrollDown => {
-                if self.contains(self.hit_regions.details, mouse.column, mouse.row) {
-                    self.focus = Focus::Details;
-                    self.narrow_details = true;
-                    self.scroll_details(3);
-                } else {
-                    self.focus = Focus::Tickets;
-                    self.narrow_details = false;
-                    self.move_selection(3);
-                }
-            }
-            MouseEventKind::Down(MouseButton::Left) => {
-                return self.handle_click(mouse.column, mouse.row);
-            }
-            _ => {}
+            MouseEventKind::Moved => self.handle_hover(mouse.column, mouse.row),
+            MouseEventKind::Up(MouseButton::Left) => self.handle_release(mouse.column, mouse.row),
+            _ => PointerUpdate::none(false),
         }
-        AppAction::None
+    }
+
+    pub fn handle_resize(&mut self) {
+        self.pointer.clear_selection();
+        if matches!(self.pointer.drag(), DragKind::Text | DragKind::Cancelled) {
+            self.pointer.set_drag(DragKind::Cancelled);
+        }
     }
 
     fn handle_browse_key(&mut self, key: KeyEvent) -> AppAction {
@@ -971,174 +1024,555 @@ impl App {
         }
     }
 
-    fn handle_click(&mut self, column: u16, row: u16) -> AppAction {
-        if matches!(
-            self.mode,
-            AppMode::Browse | AppMode::Search | AppMode::Facets
-        ) {
-            if self.mode == AppMode::Facets
-                && let Some((_, index)) = self
-                    .hit_regions
-                    .facet_values
-                    .iter()
-                    .find(|(area, _)| contains(*area, column, row))
-            {
-                self.facet_bar.value_index = *index;
-                self.toggle_current_bar_facet();
-                return AppAction::None;
+    fn handle_hover(&mut self, column: u16, row: u16) -> PointerUpdate {
+        let hover = self
+            .hit_regions
+            .resolve(column, row)
+            .map(|region| region.target.clone());
+        let redraw = hover != self.pointer.hover;
+        self.pointer.hover = hover;
+        PointerUpdate::none(redraw)
+    }
+
+    fn handle_press(&mut self, column: u16, row: u16) -> PointerUpdate {
+        let region = self.hit_regions.resolve(column, row).cloned();
+        let selectable = self.hit_regions.resolve_selectable(column, row);
+        self.pointer.clear_selection();
+        if let Some(region) = region {
+            let scrollbar = match region.target {
+                PointerTarget::ScrollbarThumb { surface } => Some(surface),
+                _ => None,
+            };
+            self.pointer.hover = Some(region.target.clone());
+            self.pointer
+                .begin_press(region.target, column, row, selectable, scrollbar);
+        } else {
+            self.pointer.hover = None;
+            self.pointer.clear_press();
+        }
+        PointerUpdate::none(true)
+    }
+
+    fn handle_drag(&mut self, column: u16, row: u16) -> PointerUpdate {
+        let hover = self
+            .hit_regions
+            .resolve(column, row)
+            .map(|region| region.target.clone());
+        let hover_changed = hover != self.pointer.hover;
+        self.pointer.hover = hover;
+        if !self.pointer.moved_from_origin(column, row)
+            && matches!(self.pointer.drag(), DragKind::None)
+        {
+            return PointerUpdate::none(hover_changed);
+        }
+        match self.pointer.drag() {
+            DragKind::Scrollbar { surface, grab } => {
+                self.drag_scrollbar(surface, row, grab);
+                PointerUpdate::none(true)
             }
-            if let Some((_, target)) = self
-                .hit_regions
-                .facet_pills
-                .iter()
-                .find(|(area, _)| contains(*area, column, row))
-                .copied()
-            {
-                match target {
-                    FacetTarget::More => self.open_filters(),
-                    FacetTarget::Field(field) => {
-                        let index = FilterField::BAR
-                            .iter()
-                            .position(|entry| *entry == field)
-                            .unwrap_or_default();
-                        self.open_facets(index);
+            DragKind::Text => {
+                self.update_text_drag(column, row);
+                PointerUpdate::none(true)
+            }
+            DragKind::Cancelled => PointerUpdate::none(hover_changed),
+            DragKind::None => {
+                if let Some(surface) = self.pointer.press_scrollbar() {
+                    let grab = self.scrollbar_grab(surface, self.pointer.press_origin());
+                    self.pointer.set_drag(DragKind::Scrollbar { surface, grab });
+                    self.drag_scrollbar(surface, row, grab);
+                    PointerUpdate::none(true)
+                } else if let Some(surface) = self.pointer.press_selectable() {
+                    self.pointer.set_drag(DragKind::Text);
+                    if let Some(origin) = self.pointer.press_origin()
+                        && let Some(snapshot) = self.hit_regions.selectable(surface)
+                        && let Some(start) = snapshot.pos_at(origin.0, origin.1)
+                    {
+                        self.pointer.selection = Some(TextSelection {
+                            surface,
+                            start,
+                            end: start,
+                        });
+                    }
+                    self.update_text_drag(column, row);
+                    PointerUpdate::none(true)
+                } else {
+                    self.pointer.set_drag(DragKind::Cancelled);
+                    PointerUpdate::none(hover_changed)
+                }
+            }
+        }
+    }
+
+    fn handle_release(&mut self, column: u16, row: u16) -> PointerUpdate {
+        let drag = self.pointer.drag();
+        let target = self.pointer.press_target().cloned();
+        let selection = self.pointer.selection;
+        self.pointer.clear_press();
+        self.handle_hover(column, row);
+        match drag {
+            DragKind::Text => {
+                if let Some(selection) = selection.filter(|selection| !selection.is_empty())
+                    && let Some(snapshot) = self.hit_regions.selectable(selection.surface)
+                {
+                    let text = pointer::extract_selected_text(snapshot, &selection);
+                    if !text.is_empty() {
+                        return PointerUpdate::action(AppAction::Copy(text));
                     }
                 }
-                return AppAction::None;
+                PointerUpdate::none(true)
             }
-            if self.mode == AppMode::Facets {
-                self.mode = AppMode::Browse;
-            }
-        }
-        if self.mode == AppMode::Filter {
-            if let Some((_, index)) = self
-                .hit_regions
-                .overlay_rows
-                .iter()
-                .find(|(area, _)| contains(*area, column, row))
-            {
-                if self.filter_overlay.showing_values {
-                    self.filter_overlay.value_index = *index;
-                    self.toggle_current_facet();
+            DragKind::Scrollbar { .. } | DragKind::Cancelled => PointerUpdate::none(true),
+            DragKind::None => {
+                if let Some(target) = target {
+                    PointerUpdate::action(self.activate_target(target, column, row))
                 } else {
-                    self.filter_overlay.field_index = *index;
-                    self.filter_overlay.showing_values = true;
-                    self.filter_overlay.value_index = 0;
-                    self.overlay_scroll = 0;
+                    PointerUpdate::none(true)
                 }
             }
-            return AppAction::None;
         }
-        if self.mode == AppMode::Columns {
-            if let Some((_, index)) = self
-                .hit_regions
-                .overlay_rows
-                .iter()
-                .find(|(area, _)| contains(*area, column, row))
-            {
-                self.column_overlay.index = *index;
-                self.layout.toggle_visible(*index);
-                self.session_dirty = true;
+    }
+
+    fn handle_wheel(&mut self, column: u16, row: u16, delta: i32) -> PointerUpdate {
+        let Some(surface) = self.hit_regions.resolve_scroll(column, row) else {
+            return PointerUpdate::none(false);
+        };
+        let changed = self.scroll_surface(surface, delta);
+        PointerUpdate::none(changed)
+    }
+
+    fn activate_target(&mut self, target: PointerTarget, column: u16, row: u16) -> AppAction {
+        match target {
+            PointerTarget::SearchField => {
+                self.begin_search();
+                self.place_caret(TextEditor::Search, column, row);
             }
-            return AppAction::None;
-        }
-        if self.mode == AppMode::Palette {
-            if let Some((_, index)) = self
-                .hit_regions
-                .overlay_rows
-                .iter()
-                .find(|(area, _)| contains(*area, column, row))
-            {
-                self.palette.selected = *index;
-                return self.run_selected_command();
+            PointerTarget::ClearQuery => self.set_query(String::new()),
+            PointerTarget::OpenPalette => self.open_palette(),
+            PointerTarget::OpenHelp => {
+                self.help_scroll = 0;
+                self.mode = AppMode::Help;
             }
-            return AppAction::None;
-        }
-        if self.mode == AppMode::Views {
-            if self.views_overlay.naming.is_some() {
-                return AppAction::None;
+            PointerTarget::CopyActions => self.open_copy_actions(),
+            PointerTarget::CloseOverlay => self.close_overlay(),
+            PointerTarget::NarrowTickets => {
+                self.narrow_details = false;
+                self.focus = Focus::Tickets;
             }
-            if let Some((_, index)) = self
-                .hit_regions
-                .overlay_rows
-                .iter()
-                .find(|(area, _)| contains(*area, column, row))
-            {
-                self.views_overlay.index = *index;
-                self.apply_view_at(*index);
+            PointerTarget::NarrowDetails => {
+                self.narrow_details = true;
+                self.focus = Focus::Details;
             }
-            return AppAction::None;
-        }
-        if self.mode == AppMode::Sort {
-            if let Some((_, field)) = self
-                .hit_regions
-                .sort_rows
-                .iter()
-                .find(|(area, _)| contains(*area, column, row))
-            {
-                self.toggle_sort(*field);
-                self.mode = AppMode::Browse;
+            PointerTarget::FocusTickets => {
+                self.focus = Focus::Tickets;
+                self.narrow_details = false;
             }
-            return AppAction::None;
-        }
-        if self.mode == AppMode::Help {
-            return AppAction::None;
-        }
-        if self.contains(self.hit_regions.search, column, row) {
-            self.begin_search();
-            return AppAction::None;
-        }
-        if let Some((_, key)) = self
-            .hit_regions
-            .detail_links
-            .iter()
-            .find(|(area, _)| contains(*area, column, row))
-        {
-            let key = key.clone();
-            self.focus = Focus::Details;
-            self.jump_to_ticket(&key);
-            return AppAction::None;
-        }
-        if let Some((_, token)) = self
-            .hit_regions
-            .chips
-            .iter()
-            .find(|(area, _)| contains(*area, column, row))
-        {
-            self.remove_filter_token(token.clone());
-            return AppAction::None;
-        }
-        if self.contains(self.hit_regions.detail_url, column, row) {
-            self.focus = Focus::Details;
-            self.narrow_details = true;
-            return self.open_selected();
-        }
-        if let Some((_, field)) = self
-            .hit_regions
-            .headers
-            .iter()
-            .find(|(area, _)| contains(*area, column, row))
-        {
-            let field = *field;
-            self.toggle_sort(field);
-            return AppAction::None;
-        }
-        if let Some(body) = self.hit_regions.table_body
-            && contains(body, column, row)
-        {
-            self.focus = Focus::Tickets;
-            self.narrow_details = false;
-            let row_index = self.table_state.offset()
-                + usize::from((row - body.y) / self.row_density.row_height());
-            if row_index < self.visible.len() {
-                self.select_row(row_index);
-                self.record_history();
-                if self.contains(self.hit_regions.id_column, column, row) {
+            PointerTarget::FocusDetails => {
+                self.focus = Focus::Details;
+            }
+            PointerTarget::TableRow { index } => {
+                self.focus = Focus::Tickets;
+                self.narrow_details = false;
+                if index < self.visible.len() {
+                    self.select_row(index);
+                    self.record_history();
+                }
+            }
+            PointerTarget::OpenTicket { index } => {
+                self.focus = Focus::Tickets;
+                self.narrow_details = false;
+                if index < self.visible.len() {
+                    self.select_row(index);
+                    self.record_history();
                     return self.open_selected();
                 }
             }
+            PointerTarget::ToggleBookmark { index } => {
+                if index < self.visible.len() {
+                    self.select_row(index);
+                    self.toggle_bookmark();
+                }
+            }
+            PointerTarget::ToggleRowSelect { index } => {
+                if index < self.visible.len() {
+                    self.select_row(index);
+                    self.toggle_row_selection();
+                }
+            }
+            PointerTarget::SortHeader(field) => self.toggle_sort(field),
+            PointerTarget::OpenSelectedUrl => {
+                self.focus = Focus::Details;
+                self.narrow_details = true;
+                return self.open_selected();
+            }
+            PointerTarget::JumpToTicket(key) => {
+                self.focus = Focus::Details;
+                self.jump_to_ticket(&key);
+            }
+            PointerTarget::FacetPill(target) => match target {
+                FacetTarget::More => self.open_filters(),
+                FacetTarget::Field(field) => {
+                    let index = FilterField::BAR
+                        .iter()
+                        .position(|entry| *entry == field)
+                        .unwrap_or_default();
+                    self.open_facets(index);
+                }
+            },
+            PointerTarget::FacetValue { index } => {
+                self.facet_bar.value_index = index;
+                self.toggle_current_bar_facet();
+            }
+            PointerTarget::DismissFacet => {
+                if self.mode == AppMode::Facets {
+                    self.mode = AppMode::Browse;
+                }
+            }
+            PointerTarget::RemoveChip(token) => self.remove_filter_token(token),
+            PointerTarget::SortChoose(field) => {
+                self.toggle_sort(field);
+                self.mode = AppMode::Browse;
+            }
+            PointerTarget::SortSetDirection(direction) => {
+                self.sort_draft.direction = direction;
+            }
+            PointerTarget::FilterRow { index } => {
+                if self.filter_overlay.showing_values {
+                    self.filter_overlay.value_index = index;
+                    self.toggle_current_facet();
+                } else {
+                    self.filter_overlay.field_index = index;
+                    self.filter_overlay.showing_values = true;
+                    self.filter_overlay.value_index = 0;
+                    self.filter_overlay.scroll = 0;
+                    self.overlay_scroll = 0;
+                }
+            }
+            PointerTarget::ColumnToggle { index } => {
+                self.column_overlay.index = index;
+                self.layout.toggle_visible(index);
+                self.session_dirty = true;
+            }
+            PointerTarget::ColumnMove { index, delta } => {
+                self.column_overlay.index = self.layout.move_column(index, delta);
+                self.session_dirty = true;
+            }
+            PointerTarget::ColumnResize { index, delta } => {
+                self.column_overlay.index = index;
+                self.layout.resize(index, delta);
+                self.session_dirty = true;
+            }
+            PointerTarget::PaletteCommand { index } => {
+                self.palette.selected = index;
+                return self.run_selected_command();
+            }
+            PointerTarget::PaletteQuery => {
+                self.place_caret(TextEditor::Palette, column, row);
+            }
+            PointerTarget::ViewRow { index } => {
+                self.views_overlay.index = index;
+                self.apply_view_at(index);
+            }
+            PointerTarget::SaveView => {
+                if self.views_overlay.naming.is_some() {
+                    if let Some(name) = self
+                        .views_overlay
+                        .naming
+                        .take()
+                        .map(|name| name.trim().to_owned())
+                        .filter(|name| !name.is_empty())
+                    {
+                        self.save_view(name);
+                    }
+                } else {
+                    self.views_overlay.naming = Some(self.active_view.clone().unwrap_or_default());
+                    self.views_overlay.name_cursor = self
+                        .views_overlay
+                        .naming
+                        .as_ref()
+                        .map_or(0, |name| name.chars().count());
+                }
+            }
+            PointerTarget::DeleteView => self.delete_view_at(self.views_overlay.index),
+            PointerTarget::ViewName => {
+                self.place_caret(TextEditor::ViewName, column, row);
+            }
+            PointerTarget::CancelNaming => self.views_overlay.naming = None,
+            PointerTarget::ImportSubmit => return self.submit_import(),
+            PointerTarget::ImportCancel => {
+                self.prompt = None;
+                self.mode = AppMode::Browse;
+            }
+            PointerTarget::PromptField => {
+                self.place_caret(TextEditor::Prompt, column, row);
+            }
+            PointerTarget::OverlayBody => {}
+            PointerTarget::ScrollbarTrack { surface, page_down } => {
+                let step = self
+                    .hit_regions
+                    .scroll(surface)
+                    .map(|metrics| pointer::page_step(metrics.viewport) as i32)
+                    .unwrap_or(1);
+                self.scroll_surface(surface, if page_down { step } else { -step });
+            }
+            PointerTarget::ScrollbarThumb { .. } => {}
         }
         AppAction::None
+    }
+
+    fn close_overlay(&mut self) {
+        match self.mode {
+            AppMode::Views if self.views_overlay.naming.is_some() => {
+                self.views_overlay.naming = None;
+            }
+            AppMode::Prompt => {
+                self.prompt = None;
+                self.mode = AppMode::Browse;
+            }
+            AppMode::Facets => self.mode = AppMode::Browse,
+            AppMode::Filter if self.filter_overlay.showing_values => {
+                self.filter_overlay.showing_values = false;
+                self.filter_overlay.value_index = 0;
+                self.filter_overlay.scroll = 0;
+                self.overlay_scroll = 0;
+            }
+            AppMode::Browse | AppMode::Search => {}
+            _ => self.mode = AppMode::Browse,
+        }
+        self.pointer.clear_selection();
+    }
+
+    fn open_copy_actions(&mut self) {
+        self.open_palette();
+        self.palette.query = "copy".into();
+        self.palette.cursor = 4;
+    }
+
+    fn place_caret(&mut self, editor: TextEditor, column: u16, row: u16) {
+        let Some(snapshot) = self
+            .hit_regions
+            .selectable(match editor {
+                TextEditor::Search => SelectableSurface::Search,
+                TextEditor::Palette | TextEditor::ViewName => SelectableSurface::Overlay,
+                TextEditor::Prompt => SelectableSurface::Prompt,
+            })
+            .and_then(|snapshot| snapshot.pos_at(column, row))
+            .or_else(|| {
+                self.hit_regions.resolve(column, row).map(|region| TextPos {
+                    line: 0,
+                    col: usize::from(column.saturating_sub(region.rect.x)),
+                })
+            })
+        else {
+            return;
+        };
+        let index = snapshot.col;
+        match editor {
+            TextEditor::Search => {
+                self.query_cursor = index.min(self.query.chars().count());
+            }
+            TextEditor::Palette => {
+                self.palette.cursor = index.min(self.palette.query.chars().count());
+            }
+            TextEditor::Prompt => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    prompt.cursor = index.min(prompt.buffer.chars().count());
+                }
+            }
+            TextEditor::ViewName => {
+                if let Some(name) = self.views_overlay.naming.as_ref() {
+                    self.views_overlay.name_cursor = index.min(name.chars().count());
+                }
+            }
+        }
+    }
+
+    fn update_text_drag(&mut self, column: u16, row: u16) {
+        let Some(surface) = self
+            .pointer
+            .selection
+            .map(|selection| selection.surface)
+            .or_else(|| self.pointer.press_selectable())
+        else {
+            return;
+        };
+        let Some(snapshot) = self.hit_regions.selectable(surface) else {
+            return;
+        };
+        let Some(end) = snapshot
+            .pos_at(column, row)
+            .or_else(|| clamp_pos_to_snapshot(snapshot, column, row))
+        else {
+            return;
+        };
+        if let Some(selection) = self.pointer.selection.as_mut() {
+            selection.end = end;
+        } else if let Some(origin) = self.pointer.press_origin()
+            && let Some(start) = snapshot.pos_at(origin.0, origin.1)
+        {
+            self.pointer.selection = Some(TextSelection {
+                surface,
+                start,
+                end,
+            });
+        }
+    }
+
+    fn scrollbar_grab(&self, surface: ScrollSurface, origin: Option<(u16, u16)>) -> i16 {
+        let Some((_, row)) = origin else {
+            return 0;
+        };
+        let Some(metrics) = self.hit_regions.scroll(surface) else {
+            return 0;
+        };
+        let Some(thumb) = metrics.thumb() else {
+            return 0;
+        };
+        i16::try_from(row).unwrap_or(0)
+            - i16::try_from(metrics.track.y.saturating_add(thumb.y)).unwrap_or(0)
+    }
+
+    fn drag_scrollbar(&mut self, surface: ScrollSurface, row: u16, grab: i16) {
+        let Some(metrics) = self.hit_regions.scroll(surface) else {
+            return;
+        };
+        let Some(thumb) = metrics.thumb() else {
+            return;
+        };
+        let pointer = i32::from(row) - i32::from(grab);
+        let track_y = i32::from(metrics.track.y);
+        let rel = pointer.saturating_sub(track_y).max(0) as usize;
+        let offset =
+            pointer::offset_from_thumb(rel.min(thumb.travel), thumb.travel, thumb.max_offset);
+        self.set_scroll_offset(surface, offset);
+    }
+
+    fn scroll_surface(&mut self, surface: ScrollSurface, delta: i32) -> bool {
+        let (offset, content, viewport) = match surface {
+            ScrollSurface::Table => (
+                self.table_offset,
+                self.visible.len(),
+                self.table_viewport_rows.max(1),
+            ),
+            ScrollSurface::Details => (
+                usize::from(self.details_scroll),
+                usize::from(
+                    self.details_max_scroll
+                        .saturating_add(self.details_viewport),
+                ),
+                usize::from(self.details_viewport.max(1)),
+            ),
+            ScrollSurface::Help => (
+                usize::from(self.help_scroll),
+                usize::from(self.help_max_scroll.saturating_add(self.help_viewport)),
+                usize::from(self.help_viewport.max(1)),
+            ),
+            ScrollSurface::Filter => (
+                usize::from(self.filter_overlay.scroll),
+                usize::from(
+                    self.filter_overlay
+                        .max_scroll
+                        .saturating_add(self.filter_overlay.viewport),
+                ),
+                usize::from(self.filter_overlay.viewport.max(1)),
+            ),
+            ScrollSurface::Columns => (
+                usize::from(self.column_overlay.scroll),
+                usize::from(
+                    self.column_overlay
+                        .max_scroll
+                        .saturating_add(self.column_overlay.viewport),
+                ),
+                usize::from(self.column_overlay.viewport.max(1)),
+            ),
+            ScrollSurface::Palette => (
+                usize::from(self.palette.scroll),
+                usize::from(
+                    self.palette
+                        .max_scroll
+                        .saturating_add(self.palette.viewport),
+                ),
+                usize::from(self.palette.viewport.max(1)),
+            ),
+            ScrollSurface::Views => (
+                usize::from(self.views_overlay.scroll),
+                usize::from(
+                    self.views_overlay
+                        .max_scroll
+                        .saturating_add(self.views_overlay.viewport),
+                ),
+                usize::from(self.views_overlay.viewport.max(1)),
+            ),
+            ScrollSurface::FacetMenu => (
+                usize::from(self.facet_bar.scroll),
+                usize::from(
+                    self.facet_bar
+                        .max_scroll
+                        .saturating_add(self.facet_bar.viewport),
+                ),
+                usize::from(self.facet_bar.viewport.max(1)),
+            ),
+            ScrollSurface::Sort => (
+                usize::from(self.overlay_scroll),
+                usize::from(self.overlay_max_scroll.saturating_add(1)),
+                1,
+            ),
+        };
+        let next = pointer::scroll_by(offset, delta, content, viewport);
+        if next == offset {
+            return false;
+        }
+        self.set_scroll_offset(surface, next);
+        true
+    }
+
+    fn set_scroll_offset(&mut self, surface: ScrollSurface, offset: usize) {
+        match surface {
+            ScrollSurface::Table => {
+                self.table_offset =
+                    pointer::clamp_offset(offset, self.visible.len(), self.table_viewport_rows);
+            }
+            ScrollSurface::Details => {
+                self.details_scroll = u16::try_from(offset)
+                    .unwrap_or(u16::MAX)
+                    .min(self.details_max_scroll);
+            }
+            ScrollSurface::Help => {
+                self.help_scroll = u16::try_from(offset)
+                    .unwrap_or(u16::MAX)
+                    .min(self.help_max_scroll);
+            }
+            ScrollSurface::Filter => {
+                self.filter_overlay.scroll = u16::try_from(offset)
+                    .unwrap_or(u16::MAX)
+                    .min(self.filter_overlay.max_scroll);
+                self.overlay_scroll = self.filter_overlay.scroll;
+            }
+            ScrollSurface::Columns => {
+                self.column_overlay.scroll = u16::try_from(offset)
+                    .unwrap_or(u16::MAX)
+                    .min(self.column_overlay.max_scroll);
+            }
+            ScrollSurface::Palette => {
+                self.palette.scroll = u16::try_from(offset)
+                    .unwrap_or(u16::MAX)
+                    .min(self.palette.max_scroll);
+            }
+            ScrollSurface::Views => {
+                self.views_overlay.scroll = u16::try_from(offset)
+                    .unwrap_or(u16::MAX)
+                    .min(self.views_overlay.max_scroll);
+            }
+            ScrollSurface::FacetMenu => {
+                self.facet_bar.scroll = u16::try_from(offset)
+                    .unwrap_or(u16::MAX)
+                    .min(self.facet_bar.max_scroll);
+            }
+            ScrollSurface::Sort => {
+                self.overlay_scroll = u16::try_from(offset)
+                    .unwrap_or(u16::MAX)
+                    .min(self.overlay_max_scroll);
+            }
+        }
     }
 
     fn move_focused(&mut self, delta: isize) {
@@ -1310,9 +1744,15 @@ impl App {
     fn select_row(&mut self, row: usize) {
         if self.visible.is_empty() {
             self.table_state.select(None);
+            self.table_offset = 0;
         } else {
-            self.table_state
-                .select(Some(row.min(self.visible.len() - 1)));
+            let row = row.min(self.visible.len() - 1);
+            self.table_state.select(Some(row));
+            self.table_offset = pointer::ensure_index_visible(
+                self.table_offset,
+                self.table_viewport_rows.max(1),
+                row,
+            );
         }
         self.details_scroll = 0;
         self.link_cursor = 0;
@@ -1430,13 +1870,10 @@ impl App {
             .select((!self.visible.is_empty()).then_some(row.unwrap_or_default()));
         self.link_cursor = 0;
         if selected.is_none() || row.is_none() {
+            self.table_offset = 0;
             *self.table_state.offset_mut() = 0;
             self.details_scroll = 0;
         }
-    }
-
-    fn contains(&self, area: Option<Rect>, column: u16, row: u16) -> bool {
-        area.is_some_and(|area| contains(area, column, row))
     }
 
     fn open_filters(&mut self) {
@@ -1467,11 +1904,13 @@ impl App {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.facet_bar.value_index = self.facet_bar.value_index.saturating_sub(1);
+                self.ensure_facet_visible();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let count = self.focused_bar_facets().len();
                 if count > 0 {
                     self.facet_bar.value_index = (self.facet_bar.value_index + 1).min(count - 1);
+                    self.ensure_facet_visible();
                 }
             }
             KeyCode::Char(' ') | KeyCode::Enter => {
@@ -1492,6 +1931,57 @@ impl App {
     fn focused_bar_facets(&self) -> Vec<FacetValue> {
         self.focused_bar_field()
             .map_or_else(Vec::new, |field| self.facets_for(field))
+    }
+
+    fn ensure_facet_visible(&mut self) {
+        self.facet_bar.scroll = u16::try_from(pointer::ensure_index_visible(
+            usize::from(self.facet_bar.scroll),
+            usize::from(self.facet_bar.viewport.max(1)),
+            self.facet_bar.value_index,
+        ))
+        .unwrap_or(0);
+    }
+
+    fn ensure_column_visible(&mut self) {
+        self.column_overlay.scroll = u16::try_from(pointer::ensure_index_visible(
+            usize::from(self.column_overlay.scroll),
+            usize::from(self.column_overlay.viewport.max(1)),
+            self.column_overlay.index,
+        ))
+        .unwrap_or(0);
+    }
+
+    fn ensure_view_visible(&mut self) {
+        self.views_overlay.scroll = u16::try_from(pointer::ensure_index_visible(
+            usize::from(self.views_overlay.scroll),
+            usize::from(self.views_overlay.viewport.max(1)),
+            self.views_overlay.index,
+        ))
+        .unwrap_or(0);
+    }
+
+    fn submit_import(&mut self) -> AppAction {
+        let Some(prompt) = self.prompt.take() else {
+            self.mode = AppMode::Browse;
+            return AppAction::None;
+        };
+        self.mode = AppMode::Browse;
+        let path = prompt.buffer.trim().to_owned();
+        if path.is_empty() {
+            return AppAction::None;
+        }
+        if self.read_only {
+            self.set_error("Database is open read-only; import is disabled");
+            return AppAction::None;
+        }
+        let format = match prompt.kind {
+            PromptKind::ImportJson => ImportFormat::Json,
+            PromptKind::ImportCsv => ImportFormat::Csv,
+        };
+        AppAction::Import {
+            path: PathBuf::from(path),
+            format,
+        }
     }
 
     fn toggle_current_bar_facet(&mut self) {
@@ -1555,7 +2045,7 @@ impl App {
     }
 
     fn move_filter_cursor(&mut self, delta: isize) {
-        if self.filter_overlay.showing_values {
+        let index = if self.filter_overlay.showing_values {
             let count = self.current_facets().len();
             if count == 0 {
                 return;
@@ -1565,13 +2055,22 @@ impl App {
                 .value_index
                 .saturating_add_signed(delta)
                 .min(count - 1);
+            self.filter_overlay.value_index
         } else {
             self.filter_overlay.field_index = self
                 .filter_overlay
                 .field_index
                 .saturating_add_signed(delta)
                 .min(FilterField::ALL.len() - 1);
-        }
+            self.filter_overlay.field_index
+        };
+        self.filter_overlay.scroll = u16::try_from(pointer::ensure_index_visible(
+            usize::from(self.filter_overlay.scroll),
+            usize::from(self.filter_overlay.viewport.max(1)),
+            index,
+        ))
+        .unwrap_or(0);
+        self.overlay_scroll = self.filter_overlay.scroll;
     }
 
     fn toggle_current_facet(&mut self) {
@@ -1601,9 +2100,11 @@ impl App {
             KeyCode::Esc | KeyCode::Char('w') | KeyCode::Enter => self.mode = AppMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.column_overlay.index = self.column_overlay.index.saturating_sub(1);
+                self.ensure_column_visible();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.column_overlay.index = (self.column_overlay.index + 1).min(last);
+                self.ensure_column_visible();
             }
             KeyCode::Char(' ') => {
                 self.layout.toggle_visible(self.column_overlay.index);
@@ -1630,39 +2131,76 @@ impl App {
     }
 
     fn handle_palette_key(&mut self, key: KeyEvent) -> AppAction {
-        let commands = self.palette_commands();
         match key.code {
             KeyCode::Esc => self.mode = AppMode::Browse,
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.palette.selected = self.palette.selected.saturating_sub(1);
+                self.move_palette_selection(-1);
             }
             KeyCode::Down | KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if !commands.is_empty() {
-                    self.palette.selected = (self.palette.selected + 1).min(commands.len() - 1);
-                }
+                self.move_palette_selection(1);
             }
-            KeyCode::Up => self.palette.selected = self.palette.selected.saturating_sub(1),
-            KeyCode::Down => {
-                if !commands.is_empty() {
-                    self.palette.selected = (self.palette.selected + 1).min(commands.len() - 1);
-                }
-            }
+            KeyCode::Up => self.move_palette_selection(-1),
+            KeyCode::Down => self.move_palette_selection(1),
             KeyCode::Enter => return self.run_selected_command(),
+            KeyCode::Left => self.palette.cursor = self.palette.cursor.saturating_sub(1),
+            KeyCode::Right => {
+                self.palette.cursor =
+                    (self.palette.cursor + 1).min(self.palette.query.chars().count());
+            }
+            KeyCode::Home => self.palette.cursor = 0,
+            KeyCode::End => self.palette.cursor = self.palette.query.chars().count(),
             KeyCode::Backspace => {
-                self.palette.query.pop();
-                self.palette.selected = 0;
+                if self.palette.cursor > 0 {
+                    let start = byte_index(&self.palette.query, self.palette.cursor - 1);
+                    let end = byte_index(&self.palette.query, self.palette.cursor);
+                    self.palette.query.replace_range(start..end, "");
+                    self.palette.cursor -= 1;
+                    self.palette.selected = 0;
+                    self.palette.scroll = 0;
+                }
+            }
+            KeyCode::Delete => {
+                if self.palette.cursor < self.palette.query.chars().count() {
+                    let start = byte_index(&self.palette.query, self.palette.cursor);
+                    let end = byte_index(&self.palette.query, self.palette.cursor + 1);
+                    self.palette.query.replace_range(start..end, "");
+                    self.palette.selected = 0;
+                    self.palette.scroll = 0;
+                }
             }
             KeyCode::Char(character)
                 if !key
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                self.palette.query.push(character);
+                let byte = byte_index(&self.palette.query, self.palette.cursor);
+                self.palette.query.insert(byte, character);
+                self.palette.cursor += 1;
                 self.palette.selected = 0;
+                self.palette.scroll = 0;
             }
             _ => {}
         }
         AppAction::None
+    }
+
+    fn move_palette_selection(&mut self, delta: isize) {
+        let count = self.palette_commands().len();
+        if count == 0 {
+            self.palette.selected = 0;
+            return;
+        }
+        self.palette.selected = self
+            .palette
+            .selected
+            .saturating_add_signed(delta)
+            .min(count - 1);
+        self.palette.scroll = u16::try_from(pointer::ensure_index_visible(
+            usize::from(self.palette.scroll),
+            usize::from(self.palette.viewport.max(1)),
+            self.palette.selected,
+        ))
+        .unwrap_or(0);
     }
 
     fn run_selected_command(&mut self) -> AppAction {
@@ -1694,7 +2232,9 @@ impl App {
             }
             CommandId::SaveView => {
                 self.open_views();
-                self.views_overlay.naming = Some(self.active_view.clone().unwrap_or_default());
+                let name = self.active_view.clone().unwrap_or_default();
+                self.views_overlay.name_cursor = name.chars().count();
+                self.views_overlay.naming = Some(name);
                 AppAction::None
             }
             CommandId::Sort => {
@@ -1786,46 +2326,52 @@ impl App {
     }
 
     fn handle_prompt_key(&mut self, key: KeyEvent) -> AppAction {
-        let Some(prompt) = self.prompt.as_mut() else {
+        if self.prompt.is_none() {
             self.mode = AppMode::Browse;
             return AppAction::None;
-        };
+        }
         match key.code {
             KeyCode::Esc => {
                 self.prompt = None;
                 self.mode = AppMode::Browse;
+                return AppAction::None;
             }
-            KeyCode::Enter => {
-                let path = prompt.buffer.trim().to_owned();
-                let format = match prompt.kind {
-                    PromptKind::ImportJson => ImportFormat::Json,
-                    PromptKind::ImportCsv => ImportFormat::Csv,
-                };
-                self.prompt = None;
-                self.mode = AppMode::Browse;
-                if path.is_empty() {
-                    return AppAction::None;
-                }
-                if self.read_only {
-                    self.set_error("Database is open read-only; import is disabled");
-                    return AppAction::None;
-                }
-                return AppAction::Import {
-                    path: PathBuf::from(path),
-                    format,
-                };
+            KeyCode::Enter => return self.submit_import(),
+            _ => {}
+        }
+        let Some(prompt) = self.prompt.as_mut() else {
+            return AppAction::None;
+        };
+        match key.code {
+            KeyCode::Left => prompt.cursor = prompt.cursor.saturating_sub(1),
+            KeyCode::Right => {
+                prompt.cursor = (prompt.cursor + 1).min(prompt.buffer.chars().count());
             }
+            KeyCode::Home => prompt.cursor = 0,
+            KeyCode::End => prompt.cursor = prompt.buffer.chars().count(),
             KeyCode::Backspace => {
-                prompt.buffer.pop();
-                prompt.cursor = prompt.buffer.chars().count();
+                if prompt.cursor > 0 {
+                    let start = byte_index(&prompt.buffer, prompt.cursor - 1);
+                    let end = byte_index(&prompt.buffer, prompt.cursor);
+                    prompt.buffer.replace_range(start..end, "");
+                    prompt.cursor -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                if prompt.cursor < prompt.buffer.chars().count() {
+                    let start = byte_index(&prompt.buffer, prompt.cursor);
+                    let end = byte_index(&prompt.buffer, prompt.cursor + 1);
+                    prompt.buffer.replace_range(start..end, "");
+                }
             }
             KeyCode::Char(character)
                 if !key
                     .modifiers
                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                prompt.buffer.push(character);
-                prompt.cursor = prompt.buffer.chars().count();
+                let byte = byte_index(&prompt.buffer, prompt.cursor);
+                prompt.buffer.insert(byte, character);
+                prompt.cursor += 1;
             }
             _ => {}
         }
@@ -1848,9 +2394,45 @@ impl App {
                         self.save_view(name);
                     }
                 }
+                KeyCode::Left => {
+                    self.views_overlay.name_cursor =
+                        self.views_overlay.name_cursor.saturating_sub(1);
+                }
+                KeyCode::Right => {
+                    let len = self
+                        .views_overlay
+                        .naming
+                        .as_ref()
+                        .map_or(0, |name| name.chars().count());
+                    self.views_overlay.name_cursor = (self.views_overlay.name_cursor + 1).min(len);
+                }
+                KeyCode::Home => self.views_overlay.name_cursor = 0,
+                KeyCode::End => {
+                    self.views_overlay.name_cursor = self
+                        .views_overlay
+                        .naming
+                        .as_ref()
+                        .map_or(0, |name| name.chars().count());
+                }
                 KeyCode::Backspace => {
-                    if let Some(name) = self.views_overlay.naming.as_mut() {
-                        name.pop();
+                    if let Some(name) = self.views_overlay.naming.as_mut()
+                        && self.views_overlay.name_cursor > 0
+                    {
+                        let cursor = self.views_overlay.name_cursor;
+                        let start = byte_index(name, cursor - 1);
+                        let end = byte_index(name, cursor);
+                        name.replace_range(start..end, "");
+                        self.views_overlay.name_cursor = cursor - 1;
+                    }
+                }
+                KeyCode::Delete => {
+                    if let Some(name) = self.views_overlay.naming.as_mut()
+                        && self.views_overlay.name_cursor < name.chars().count()
+                    {
+                        let cursor = self.views_overlay.name_cursor;
+                        let start = byte_index(name, cursor);
+                        let end = byte_index(name, cursor + 1);
+                        name.replace_range(start..end, "");
                     }
                 }
                 KeyCode::Char(character)
@@ -1859,7 +2441,9 @@ impl App {
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
                     if let Some(name) = self.views_overlay.naming.as_mut() {
-                        name.push(character);
+                        let byte = byte_index(name, self.views_overlay.name_cursor);
+                        name.insert(byte, character);
+                        self.views_overlay.name_cursor += 1;
                     }
                 }
                 _ => {}
@@ -1870,16 +2454,19 @@ impl App {
             KeyCode::Esc | KeyCode::Char('V') => self.mode = AppMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.views_overlay.index = self.views_overlay.index.saturating_sub(1);
+                self.ensure_view_visible();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if !self.views.is_empty() {
                     self.views_overlay.index =
                         (self.views_overlay.index + 1).min(self.views.len() - 1);
+                    self.ensure_view_visible();
                 }
             }
             KeyCode::Enter => self.apply_view_at(self.views_overlay.index),
             KeyCode::Char('n') => {
                 self.views_overlay.naming = Some(String::new());
+                self.views_overlay.name_cursor = 0;
             }
             KeyCode::Char('d') | KeyCode::Delete => self.delete_view_at(self.views_overlay.index),
             _ => {}
@@ -2087,17 +2674,50 @@ impl App {
     }
 }
 
-fn contains(area: Rect, column: u16, row: u16) -> bool {
-    column >= area.x
-        && column < area.x.saturating_add(area.width)
-        && row >= area.y
-        && row < area.y.saturating_add(area.height)
-}
-
 fn byte_index(text: &str, character_index: usize) -> usize {
     text.char_indices()
         .nth(character_index)
         .map_or(text.len(), |(index, _)| index)
+}
+
+fn sanitize_multiline(pasted: &str) -> String {
+    pasted
+        .chars()
+        .filter_map(|character| match character {
+            '\r' | '\n' | '\t' => Some(' '),
+            character if character.is_control() => None,
+            character => Some(character),
+        })
+        .collect()
+}
+
+fn sanitize_single_line(pasted: &str) -> String {
+    pasted
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect()
+}
+
+fn clamp_pos_to_snapshot(
+    snapshot: &pointer::SelectableSnapshot,
+    column: u16,
+    row: u16,
+) -> Option<TextPos> {
+    if snapshot.cells.is_empty() {
+        return None;
+    }
+    let line = if row < snapshot.rect.y {
+        0
+    } else {
+        usize::from(row.saturating_sub(snapshot.rect.y)).min(snapshot.cells.len() - 1)
+    };
+    let width = snapshot.cells[line].len();
+    let col = if column < snapshot.rect.x {
+        0
+    } else {
+        usize::from(column.saturating_sub(snapshot.rect.x)).min(width)
+    };
+    Some(TextPos { line, col })
 }
 
 #[cfg(test)]
@@ -2295,17 +2915,18 @@ mod tests {
         let selected = app.selected_ticket().unwrap().key.clone();
         app.details_scroll = 3;
         app.details_max_scroll = 5;
-        *app.table_state.offset_mut() = 1;
+        app.table_offset = 1;
+        app.table_viewport_rows = 2;
 
         app.set_sort(SortField::Title, SortDirection::Descending);
         assert_eq!(app.selected_ticket().unwrap().key, selected);
         assert_eq!(app.details_scroll, 3);
-        assert_eq!(app.table_state.offset(), 1);
+        assert_eq!(app.table_offset, 1);
 
         app.replace_tickets(original);
         assert_eq!(app.selected_ticket().unwrap().key, selected);
         assert_eq!(app.details_scroll, 3);
-        assert_eq!(app.table_state.offset(), 1);
+        assert_eq!(app.table_offset, 1);
     }
 
     #[test]
@@ -2316,13 +2937,13 @@ mod tests {
         ]);
         app.select_row(1);
         app.details_scroll = 3;
-        *app.table_state.offset_mut() = 1;
+        app.table_offset = 1;
 
         app.replace_tickets(vec![ticket(3, "Gamma", "2026-03-01T00:00:00Z")]);
 
         assert_eq!(app.selected_ticket().unwrap().key.id, 3);
         assert_eq!(app.details_scroll, 0);
-        assert_eq!(app.table_state.offset(), 0);
+        assert_eq!(app.table_offset, 0);
     }
 
     #[test]
