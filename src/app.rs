@@ -36,6 +36,7 @@ pub enum AppMode {
     Views,
     Info,
     Prompt,
+    Facets,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -81,6 +82,9 @@ pub struct SortDraft {
 pub struct HitRegions {
     pub search: Option<Rect>,
     pub chips: Vec<(Rect, FilterToken)>,
+    pub facet_pills: Vec<(Rect, FacetTarget)>,
+    pub facet_values: Vec<(Rect, usize)>,
+    pub filter_hits: Vec<(Rect, FilterField, String)>,
     pub table: Option<Rect>,
     pub table_body: Option<Rect>,
     pub id_column: Option<Rect>,
@@ -97,6 +101,18 @@ pub struct FilterOverlay {
     pub value_index: usize,
     pub showing_values: bool,
     pub scroll: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FacetTarget {
+    Field(FilterField),
+    More,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FacetBar {
+    pub field_index: usize,
+    pub value_index: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -196,6 +212,7 @@ pub struct App {
     pub column_overlay: ColumnOverlay,
     pub palette: PaletteState,
     pub views_overlay: ViewsOverlay,
+    pub facet_bar: FacetBar,
     bookmarks: HashSet<TicketKey>,
     selected_keys: HashSet<TicketKey>,
     recent: Vec<TicketKey>,
@@ -256,6 +273,7 @@ impl App {
             column_overlay: ColumnOverlay::default(),
             palette: PaletteState::default(),
             views_overlay: ViewsOverlay::default(),
+            facet_bar: FacetBar::default(),
             bookmarks: HashSet::new(),
             selected_keys: HashSet::new(),
             recent: Vec::new(),
@@ -315,6 +333,31 @@ impl App {
     #[must_use]
     pub fn filter_tokens(&self) -> Vec<FilterToken> {
         self.parsed_query().filters.tokens()
+    }
+
+    #[must_use]
+    pub fn overflow_filter_tokens(&self) -> Vec<FilterToken> {
+        self.filter_tokens()
+            .into_iter()
+            .filter(|token| match token {
+                FilterToken::Bookmarked => true,
+                FilterToken::Field { field, .. } => !field.on_bar(),
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn facets_for(&self, field: FilterField) -> Vec<FacetValue> {
+        let filters = self.parsed_query().filters;
+        facet_values(self.tickets(), &filters, field, |ticket| {
+            self.bookmarks.contains(&ticket.key)
+        })
+    }
+
+    pub fn toggle_filter(&mut self, field: FilterField, value: &str) {
+        let mut parsed = self.parsed_query();
+        parsed.filters.toggle(field, value);
+        self.set_query(format_query(&parsed.filters, &parsed.fuzzy));
     }
 
     #[must_use]
@@ -637,6 +680,10 @@ impl App {
                 AppAction::None
             }
             AppMode::Prompt => self.handle_prompt_key(key),
+            AppMode::Facets => {
+                self.handle_facet_key(key);
+                AppAction::None
+            }
         }
     }
 
@@ -652,6 +699,26 @@ impl App {
                 _ => {}
             }
             return AppAction::None;
+        }
+        if self.mode == AppMode::Facets {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.facet_bar.value_index = self.facet_bar.value_index.saturating_sub(3);
+                    return AppAction::None;
+                }
+                MouseEventKind::ScrollDown => {
+                    let count = self.focused_bar_facets().len();
+                    if count > 0 {
+                        self.facet_bar.value_index =
+                            (self.facet_bar.value_index + 3).min(count - 1);
+                    }
+                    return AppAction::None;
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    return self.handle_click(mouse.column, mouse.row);
+                }
+                _ => {}
+            }
         }
         if matches!(
             self.mode,
@@ -734,7 +801,8 @@ impl App {
             KeyCode::Char('V') => self.open_views(),
             KeyCode::Char('c') => self.toggle_row_density(),
             KeyCode::Char('d') => self.toggle_narrow_details(),
-            KeyCode::Char('f') => self.open_filters(),
+            KeyCode::Char('f') => self.open_facets(0),
+            KeyCode::Char('+') => self.open_filters(),
             KeyCode::Char('w') => self.open_columns(),
             KeyCode::Char('p') | KeyCode::Char(':') => self.open_palette(),
             KeyCode::Char('i') => {
@@ -857,6 +925,54 @@ impl App {
     }
 
     fn handle_click(&mut self, column: u16, row: u16) -> AppAction {
+        if matches!(
+            self.mode,
+            AppMode::Browse | AppMode::Search | AppMode::Facets
+        ) {
+            if self.mode == AppMode::Facets
+                && let Some((_, index)) = self
+                    .hit_regions
+                    .facet_values
+                    .iter()
+                    .find(|(area, _)| contains(*area, column, row))
+            {
+                self.facet_bar.value_index = *index;
+                self.toggle_current_bar_facet();
+                return AppAction::None;
+            }
+            if let Some((_, target)) = self
+                .hit_regions
+                .facet_pills
+                .iter()
+                .find(|(area, _)| contains(*area, column, row))
+                .copied()
+            {
+                match target {
+                    FacetTarget::More => self.open_filters(),
+                    FacetTarget::Field(field) => {
+                        let index = FilterField::BAR
+                            .iter()
+                            .position(|entry| *entry == field)
+                            .unwrap_or_default();
+                        self.open_facets(index);
+                    }
+                }
+                return AppAction::None;
+            }
+            if let Some((_, field, value)) = self
+                .hit_regions
+                .filter_hits
+                .iter()
+                .find(|(area, _, _)| contains(*area, column, row))
+                .cloned()
+            {
+                self.toggle_filter(field, &value);
+                return AppAction::None;
+            }
+            if self.mode == AppMode::Facets {
+                self.mode = AppMode::Browse;
+            }
+        }
         if self.mode == AppMode::Filter {
             if let Some((_, index)) = self
                 .hit_regions
@@ -1235,6 +1351,69 @@ impl App {
         self.mode = AppMode::Filter;
     }
 
+    fn open_facets(&mut self, field_index: usize) {
+        self.facet_bar.field_index = field_index.min(FilterField::BAR.len());
+        self.facet_bar.value_index = 0;
+        self.overlay_scroll = 0;
+        self.mode = AppMode::Facets;
+    }
+
+    fn handle_facet_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('f') => self.mode = AppMode::Browse,
+            KeyCode::Char('+') => self.open_filters(),
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.facet_bar.field_index = self.facet_bar.field_index.saturating_sub(1);
+                self.facet_bar.value_index = 0;
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.facet_bar.field_index =
+                    (self.facet_bar.field_index + 1).min(FilterField::BAR.len());
+                self.facet_bar.value_index = 0;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.facet_bar.value_index = self.facet_bar.value_index.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let count = self.focused_bar_facets().len();
+                if count > 0 {
+                    self.facet_bar.value_index = (self.facet_bar.value_index + 1).min(count - 1);
+                }
+            }
+            KeyCode::Char(' ') | KeyCode::Enter => {
+                if self.facet_bar.field_index >= FilterField::BAR.len() {
+                    self.open_filters();
+                } else {
+                    self.toggle_current_bar_facet();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn focused_bar_field(&self) -> Option<FilterField> {
+        FilterField::BAR.get(self.facet_bar.field_index).copied()
+    }
+
+    fn focused_bar_facets(&self) -> Vec<FacetValue> {
+        self.focused_bar_field()
+            .map_or_else(Vec::new, |field| self.facets_for(field))
+    }
+
+    fn toggle_current_bar_facet(&mut self) {
+        let Some(field) = self.focused_bar_field() else {
+            return;
+        };
+        let Some(value) = self
+            .focused_bar_facets()
+            .get(self.facet_bar.value_index)
+            .map(|facet| facet.value.clone())
+        else {
+            return;
+        };
+        self.toggle_filter(field, &value);
+    }
+
     fn open_columns(&mut self) {
         self.column_overlay.index = 0;
         self.overlay_scroll = 0;
@@ -1310,9 +1489,7 @@ impl App {
         else {
             return;
         };
-        let mut parsed = self.parsed_query();
-        parsed.filters.toggle(field, &value);
-        self.set_query(format_query(&parsed.filters, &parsed.fuzzy));
+        self.toggle_filter(field, &value);
     }
 
     fn remove_filter_token(&mut self, token: FilterToken) {
@@ -1410,7 +1587,7 @@ impl App {
                 AppAction::None
             }
             CommandId::Filters => {
-                self.open_filters();
+                self.open_facets(0);
                 AppAction::None
             }
             CommandId::Columns => {
@@ -2063,6 +2240,24 @@ mod tests {
         assert_eq!(app.row_density, RowDensity::Comfortable);
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         assert_eq!(app.row_density, RowDensity::Compact);
+    }
+
+    #[test]
+    fn facet_bar_keyboard_toggles_the_focused_value() {
+        let mut app = App::new(vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+        ]);
+        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Facets);
+        assert_eq!(app.focused_bar_field(), Some(FilterField::State));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert!(app.query.to_ascii_lowercase().contains("state:"));
+        assert_eq!(app.visible_count(), 2);
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Browse);
     }
 
     #[test]

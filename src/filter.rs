@@ -26,6 +26,13 @@ impl FilterField {
         Self::Tags,
     ];
 
+    pub const BAR: [Self; 4] = [Self::State, Self::Type, Self::Tags, Self::Assignee];
+
+    #[must_use]
+    pub const fn on_bar(self) -> bool {
+        matches!(self, Self::State | Self::Type | Self::Tags | Self::Assignee)
+    }
+
     #[must_use]
     pub const fn key(self) -> &'static str {
         match self {
@@ -101,6 +108,14 @@ impl FilterSet {
     #[must_use]
     pub fn selected_count(&self, field: FilterField) -> usize {
         self.values.get(&field).map_or(0, BTreeSet::len)
+    }
+
+    #[must_use]
+    pub fn selected_values(&self, field: FilterField) -> Vec<String> {
+        self.values
+            .get(&field)
+            .map(|values| values.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     #[must_use]

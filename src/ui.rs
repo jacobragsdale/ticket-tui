@@ -13,7 +13,9 @@ use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
-use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder};
+use crate::app::{
+    App, AppMode, FacetTarget, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder,
+};
 use crate::filter::FilterField;
 use crate::model::{SortField, Ticket};
 use crate::search::QueryHighlighter;
@@ -106,20 +108,22 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
-    let chip_height = u16::from(!app.filter_tokens().is_empty());
+    let chip_height = u16::from(!app.overflow_filter_tokens().is_empty());
     let sections = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(1),
         Constraint::Length(chip_height),
         Constraint::Fill(1),
         Constraint::Length(1),
     ])
     .split(area);
     render_search(frame, app, sections[0]);
+    render_facet_bar(frame, app, sections[1]);
     if chip_height > 0 {
-        render_chips(frame, app, sections[1]);
+        render_chips(frame, app, sections[2]);
     }
-    render_content(frame, app, sections[2]);
-    render_footer(frame, app, sections[3]);
+    render_content(frame, app, sections[3]);
+    render_footer(frame, app, sections[4]);
 
     match app.mode {
         AppMode::Sort => render_sort_popup(frame, app),
@@ -130,6 +134,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::Views => render_views_overlay(frame, app),
         AppMode::Info => render_info_overlay(frame, app),
         AppMode::Prompt => render_prompt_overlay(frame, app),
+        AppMode::Facets => render_facet_menu(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
 }
@@ -145,7 +150,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     let text = if app.query.is_empty() && !active {
         Line::styled(
-            "Type / to search, or filters like state:active priority:1 tag:rust",
+            "Type / to search, click a tag, or use the filter bar below",
             Style::default().fg(theme().muted),
         )
     } else {
@@ -316,6 +321,7 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.hit_regions.id_column =
                 Some(Rect::new(id_area.x, body.y, id_area.width, body.height));
         }
+        record_table_filter_hits(app, &header_columns, &columns, body, density);
         let visible_rows = usize::from(body.height / density.row_height()).max(1);
         if count > visible_rows {
             let mut scrollbar_state = ScrollbarState::new(count)
@@ -379,7 +385,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     };
 
-    let metadata_height = inner.height.saturating_sub(2).min(4);
+    let metadata_height = inner.height.saturating_sub(2).min(5);
     let chunks = Layout::vertical([
         Constraint::Length(metadata_height),
         Constraint::Length((inner.height > metadata_height).into()),
@@ -399,6 +405,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ),
         ticket_identity_line(&ticket, &mut highlighter),
         ticket_assignment_line(&ticket, &mut highlighter),
+        tags_field_line(&ticket.tags, &mut highlighter),
         field_line(
             "Project / Revision",
             format!(
@@ -408,6 +415,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ),
     ]);
     frame.render_widget(Paragraph::new(metadata), chunks[0]);
+    record_detail_filter_hits(app, chunks[0], &ticket);
 
     if chunks[1].height > 0 {
         frame.render_widget(Paragraph::new(link_line(ticket.web_url.clone())), chunks[1]);
@@ -418,7 +426,6 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             section_line("Planning"),
             highlighted_field_line("Area", &ticket.area_path, &mut highlighter),
             highlighted_field_line("Iteration", &ticket.iteration_path, &mut highlighter),
-            tags_field_line(&ticket.tags, &mut highlighter),
             field_line("Created", exact_timestamp(&ticket.created_at)),
             field_line("Changed", exact_timestamp(&ticket.changed_at)),
         ];
@@ -520,6 +527,10 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             }
             AppMode::Sort => "↑↓ choose field  ←→ direction  Enter apply  Esc cancel",
             AppMode::Help => "↑↓/jk scroll  PgUp/PgDn page  Home/End jump  ?/Esc close",
+            AppMode::Facets if app.facet_bar.field_index >= FilterField::BAR.len() => {
+                "←→ field  Enter more filters  Esc back"
+            }
+            AppMode::Facets => "←→/hl field  ↑↓/jk value  Space toggle  + more  Esc back",
             AppMode::Filter if app.filter_overlay.showing_values => {
                 "↑↓ values  Space toggle  ← fields  Esc close"
             }
@@ -536,10 +547,10 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
             }
             AppMode::Browse if !app.query.is_empty() => {
-                "↑↓/jk move  / edit  f filters  p commands  Enter/o open  Esc clear  ? help  q quit"
+                "↑↓/jk move  f filters  click tag/type  Esc clear  ? help  q quit"
             }
             AppMode::Browse => {
-                "↑↓/jk move  / search  f filters  p commands  s sort  Enter/o open  ? help  q quit"
+                "↑↓/jk move  / search  f filters  click a tag  s sort  Enter/o open  ? help  q quit"
             }
         };
         (text, Style::default().fg(theme().muted))
@@ -615,7 +626,9 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  Ctrl-W/Ctrl-U   Delete word / clear query"),
         Line::from("  Ctrl-P/Ctrl-N   Previous / next completed query"),
         Line::from("  state:active    Structured filters in the query"),
-        Line::from("  f               Filter overlay with value counts"),
+        Line::from("  f               Focus the filter bar; Space toggles values"),
+        Line::from("  click tag/type  Toggle that value as a filter"),
+        Line::from("  +               More filters (priority, project, area…)"),
         Line::from("  Paste           Insert sanitized text"),
         Line::from(""),
         Line::styled("Actions", Style::default().add_modifier(Modifier::BOLD)),
@@ -667,7 +680,7 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
 fn render_chips(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut spans = Vec::new();
     let mut x = area.x;
-    for token in app.filter_tokens() {
+    for token in app.overflow_filter_tokens() {
         let label = format!(" {} × ", token.chip_label());
         let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
         if x.saturating_add(width) > area.x.saturating_add(area.width) {
@@ -686,6 +699,146 @@ fn render_chips(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         x = x.saturating_add(width.saturating_add(1));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_facet_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let filters = app.parsed_query().filters;
+    let focused = app.mode == AppMode::Facets;
+    let mut spans = Vec::new();
+    let mut x = area.x;
+    let mut remaining = area.width;
+    for (index, field) in FilterField::BAR.iter().enumerate() {
+        let label = facet_pill_label(*field, &filters);
+        let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+        if remaining < width.saturating_add(1) {
+            break;
+        }
+        let rect = Rect::new(x, area.y, width, 1);
+        app.hit_regions
+            .facet_pills
+            .push((rect, FacetTarget::Field(*field)));
+        let selected = focused && app.facet_bar.field_index == index;
+        let active = filters.selected_count(*field) > 0;
+        spans.push(Span::styled(label, pill_style(selected, active)));
+        spans.push(Span::raw(" "));
+        x = x.saturating_add(width.saturating_add(1));
+        remaining = remaining.saturating_sub(width.saturating_add(1));
+    }
+    if remaining >= 5 {
+        let more_count = app.overflow_filter_tokens().len();
+        let more = if more_count == 0 {
+            " + ".to_owned()
+        } else {
+            format!(" +{more_count} ")
+        };
+        let width = u16::try_from(more.chars().count()).unwrap_or(u16::MAX);
+        app.hit_regions.facet_pills.push((
+            Rect::new(x, area.y, width.min(remaining), 1),
+            FacetTarget::More,
+        ));
+        let selected = focused && app.facet_bar.field_index >= FilterField::BAR.len();
+        spans.push(Span::styled(more, pill_style(selected, more_count > 0)));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn facet_pill_label(field: FilterField, filters: &crate::filter::FilterSet) -> String {
+    let selected = filters.selected_values(field);
+    match selected.as_slice() {
+        [] => format!(" {} ▾ ", field.label()),
+        [value] => format!(" {}:{} ", field.label(), truncate_pill(value, 12)),
+        [value, rest @ ..] => {
+            format!(
+                " {}:{} +{} ",
+                field.label(),
+                truncate_pill(value, 8),
+                rest.len()
+            )
+        }
+    }
+}
+
+fn truncate_pill(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        value.to_owned()
+    } else {
+        format!(
+            "{}…",
+            value
+                .chars()
+                .take(max.saturating_sub(1))
+                .collect::<String>()
+        )
+    }
+}
+
+fn pill_style(selected: bool, active: bool) -> Style {
+    if selected {
+        Style::default()
+            .fg(theme().text)
+            .bg(theme().selected_background)
+            .add_modifier(Modifier::BOLD)
+    } else if active {
+        Style::default()
+            .fg(theme().text)
+            .bg(theme().selected_background)
+    } else {
+        Style::default().fg(theme().muted)
+    }
+}
+
+fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
+    let Some(field) = FilterField::BAR.get(app.facet_bar.field_index).copied() else {
+        return;
+    };
+    let facets = app.facets_for(field);
+    let pill = app
+        .hit_regions
+        .facet_pills
+        .iter()
+        .find(|(_, target)| *target == FacetTarget::Field(field))
+        .map(|(area, _)| *area);
+    let width = 36.min(frame.area().width.saturating_sub(2)).max(20);
+    let height = u16::try_from(facets.len().saturating_add(2))
+        .unwrap_or(u16::MAX)
+        .min(14)
+        .min(frame.area().height.saturating_sub(2));
+    let mut area = Rect {
+        x: pill.map_or(frame.area().x + 1, |pill| pill.x),
+        y: pill.map_or(4, |pill| pill.y.saturating_add(1)),
+        width,
+        height,
+    };
+    if area.x.saturating_add(area.width) > frame.area().width {
+        area.x = frame.area().width.saturating_sub(area.width);
+    }
+    if area.y.saturating_add(area.height) > frame.area().height {
+        area.y = area.y.saturating_sub(area.height.saturating_add(1));
+    }
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(format!(" {} ", field.label()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme().accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    app.hit_regions.facet_values.clear();
+    let lines = facets.into_iter().enumerate().map(|(index, facet)| {
+        let selected = index == app.facet_bar.value_index;
+        if let Ok(y) = u16::try_from(index) {
+            app.hit_regions.facet_values.push((
+                Rect::new(inner.x, inner.y.saturating_add(y), inner.width, 1),
+                index,
+            ));
+        }
+        let marker = if selected { "›" } else { " " };
+        let check = if facet.selected { "[x]" } else { "[ ]" };
+        overlay_line(
+            format!("{marker} {check} {:<18} {:>4}", facet.value, facet.count),
+            selected,
+        )
+    });
+    frame.render_widget(Paragraph::new(Text::from_iter(lines)), inner);
 }
 
 fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
@@ -994,6 +1147,160 @@ fn overlay_line(text: String, selected: bool) -> Line<'static> {
             Style::default()
         },
     )
+}
+
+fn record_table_filter_hits(
+    app: &mut App,
+    header_columns: &[Rect],
+    columns: &[crate::columns::ColumnConfig],
+    body: Rect,
+    density: RowDensity,
+) {
+    let offset = app.table_state.offset();
+    let row_height = density.row_height();
+    let visible = usize::from(body.height / row_height).max(1);
+    let rows: Vec<_> = app
+        .visible_tickets()
+        .skip(offset)
+        .take(visible)
+        .map(|ticket| {
+            (
+                ticket.state.clone(),
+                ticket.work_item_type.clone(),
+                ticket.tags.clone(),
+                ticket
+                    .assigned_to
+                    .clone()
+                    .unwrap_or_else(|| "Unassigned".into()),
+            )
+        })
+        .collect();
+    for (index, (state, work_item_type, tags, assignee)) in rows.into_iter().enumerate() {
+        let y = body
+            .y
+            .saturating_add(u16::try_from(index).unwrap_or(u16::MAX) * row_height);
+        if y >= body.y.saturating_add(body.height) {
+            break;
+        }
+        for (column_area, column) in header_columns.iter().zip(columns.iter()) {
+            let cell = Rect::new(column_area.x, y, column_area.width, 1);
+            match column.id {
+                SortField::State => {
+                    app.hit_regions
+                        .filter_hits
+                        .push((cell, FilterField::State, state.clone()))
+                }
+                SortField::Type => app.hit_regions.filter_hits.push((
+                    cell,
+                    FilterField::Type,
+                    work_item_type.clone(),
+                )),
+                SortField::Assignee => app.hit_regions.filter_hits.push((
+                    cell,
+                    FilterField::Assignee,
+                    assignee.clone(),
+                )),
+                SortField::Tags => record_tag_hits(
+                    &mut app.hit_regions.filter_hits,
+                    column_area.x,
+                    y,
+                    column_area.width,
+                    &tags,
+                ),
+                SortField::Title if density == RowDensity::Comfortable => {
+                    let tag_y = y.saturating_add(1);
+                    if tag_y < body.y.saturating_add(body.height) {
+                        record_tag_hits(
+                            &mut app.hit_regions.filter_hits,
+                            column_area.x,
+                            tag_y,
+                            column_area.width,
+                            &tags,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn record_detail_filter_hits(app: &mut App, area: Rect, ticket: &Ticket) {
+    if area.height < 2 {
+        return;
+    }
+    let identity_y = area.y.saturating_add(1);
+    let mut x = area.x.saturating_add(19); // "ID / Type / State: "
+    x = x.saturating_add(u16::try_from(ticket.key.id.to_string().chars().count()).unwrap_or(0));
+    x = x.saturating_add(3); // " · "
+    let type_width = u16::try_from(ticket.work_item_type.chars().count())
+        .unwrap_or(0)
+        .saturating_add(2);
+    app.hit_regions.filter_hits.push((
+        Rect::new(x, identity_y, type_width.max(1), 1),
+        FilterField::Type,
+        ticket.work_item_type.clone(),
+    ));
+    x = x.saturating_add(type_width.saturating_add(3));
+    let state_width = u16::try_from(ticket.state.chars().count())
+        .unwrap_or(1)
+        .max(1);
+    app.hit_regions.filter_hits.push((
+        Rect::new(x, identity_y, state_width, 1),
+        FilterField::State,
+        ticket.state.clone(),
+    ));
+
+    if area.height >= 3 {
+        let assignee = ticket
+            .assigned_to
+            .clone()
+            .unwrap_or_else(|| "Unassigned".into());
+        let assignee_width = u16::try_from(assignee.chars().count()).unwrap_or(1).max(1);
+        app.hit_regions.filter_hits.push((
+            Rect::new(
+                area.x.saturating_add(21),
+                area.y.saturating_add(2),
+                assignee_width,
+                1,
+            ),
+            FilterField::Assignee,
+            assignee,
+        ));
+    }
+    if area.height >= 4 && !ticket.tags.is_empty() {
+        record_tag_hits(
+            &mut app.hit_regions.filter_hits,
+            area.x.saturating_add(6),
+            area.y.saturating_add(3),
+            area.width.saturating_sub(6),
+            &ticket.tags,
+        );
+    }
+}
+
+fn record_tag_hits(
+    hits: &mut Vec<(Rect, FilterField, String)>,
+    mut x: u16,
+    y: u16,
+    width: u16,
+    tags: &[String],
+) {
+    let end = x.saturating_add(width);
+    for tag in tags {
+        let tag_width = u16::try_from(tag.chars().count())
+            .unwrap_or(1)
+            .saturating_add(2);
+        if x.saturating_add(tag_width) > end {
+            break;
+        }
+        hits.push((
+            Rect::new(x, y, tag_width, 1),
+            FilterField::Tags,
+            tag.clone(),
+        ));
+        x = x.saturating_add(tag_width.saturating_add(1));
+    }
 }
 
 fn table_cell(
@@ -1542,14 +1849,17 @@ mod tests {
     fn help_can_scroll_in_a_short_terminal() {
         let mut app = App::new(Vec::new());
         app.mode = AppMode::Help;
-        let initial = render_text(50, 10, &mut app);
+        let initial = render_text(50, 12, &mut app);
         assert!(initial.contains("Navigation"));
         assert!(app.help_max_scroll > 0);
 
         app.help_scroll = app.help_max_scroll;
-        let scrolled = render_text(50, 10, &mut app);
+        let scrolled = render_text(50, 12, &mut app);
         assert_ne!(initial, scrolled);
-        assert!(scrolled.contains("Press ? or Esc to close"));
+        assert!(
+            scrolled.contains("Press ? or Esc to close") || scrolled.contains("Quit"),
+            "scrolled help should reach the closing instructions"
+        );
     }
 
     #[test]
@@ -1754,6 +2064,36 @@ mod tests {
     }
 
     #[test]
+    fn facet_bar_is_visible_and_clicking_a_type_filters() {
+        let mut app = App::new(vec![ticket()]);
+        let text = render_text(110, 24, &mut app);
+        assert!(text.contains("State"));
+        assert!(text.contains("Type"));
+        assert!(text.contains("▾"));
+
+        let hit = app
+            .hit_regions
+            .filter_hits
+            .iter()
+            .find(|(_, field, value)| *field == FilterField::Type && value == "Bug")
+            .cloned()
+            .expect("type badge should be clickable");
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.0.x,
+            row: hit.0.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.query.to_ascii_lowercase().contains("type:bug"));
+        assert!(
+            app.hit_regions
+                .facet_pills
+                .iter()
+                .any(|(_, target)| matches!(target, FacetTarget::Field(FilterField::Type)))
+        );
+    }
+
+    #[test]
     fn types_and_tags_render_as_compact_badges() {
         let mut app = App::new(vec![ticket()]);
         let text = render_text(110, 24, &mut app);
@@ -1771,8 +2111,8 @@ mod tests {
         await_search(&mut app);
 
         let text = render_text(110, 24, &mut app);
-        assert!(text.contains("state:active"));
-        assert!(text.contains("type:bug"));
+        assert!(text.contains("State:active") || text.contains("state:active"));
+        assert!(text.contains("Type:bug") || text.contains("type:bug"));
 
         app.mode = AppMode::Filter;
         let overlay = render_text(110, 24, &mut app);

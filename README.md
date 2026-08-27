@@ -69,7 +69,8 @@ to a database prepared by another tool.
 | `s` | Open the sort menu; use arrows and `Enter` to apply |
 | `v` | Toggle relevance-first or strict field ordering during search |
 | `c` | Toggle compact or comfortable table rows |
-| `f` | Open the filter overlay; `Enter` a field, `Space` toggles values |
+| `f` | Focus the filter bar; `h`/`l` change field, `j`/`k` values, `Space` toggles |
+| `+` | Open the full filter overlay for extra fields |
 | `w` | Show, hide, reorder (`J`/`K`), and resize (`<`/`>`) columns |
 | `p` / `:` | Open the command palette |
 | `V` | Open named views; `n` saves, `Enter` loads, `d` deletes |
@@ -86,7 +87,9 @@ to a database prepared by another tool.
 | `q`, `Ctrl-C` | Quit |
 
 Mouse input can select rows, scroll either pane, sort by visible headers, click
-filter chips to remove them, and open an underlined ticket ID or detail URL.
+filter-bar pills and table/detail badges (state, type, tags, assignee) to
+toggle filters, click extra-field chips to remove them, and open an underlined
+ticket ID or detail URL.
 
 Search accepts a compact grammar such as `state:active type:bug
 assignee:"Avery Chen" priority:1 tag:rust`. Values in the same field are

@@ -39,7 +39,7 @@ pub struct Command {
 pub const COMMANDS: [Command; 27] = [
     Command {
         id: CommandId::Filters,
-        title: "Open filters",
+        title: "Open filter bar",
         hint: "f",
     },
     Command {
