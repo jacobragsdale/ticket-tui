@@ -96,6 +96,15 @@ fn theme() -> &'static Theme {
 }
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+    render_pass(frame, app);
+    if app.refresh_hover() {
+        render_pass(frame, app);
+    }
+    paint_hover(frame, app);
+    paint_selection(frame, app);
+}
+
+fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
     app.hit_regions = HitRegions::default();
     let area = frame.area();
     if area.width < 36 || area.height < 10 {
@@ -137,8 +146,6 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::Facets => render_facet_menu(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
-    paint_hover(frame, app);
-    paint_selection(frame, app);
 }
 
 fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -3676,10 +3683,29 @@ mod tests {
         let selected = app.selected_row();
         let details = app.hit_regions.details;
         let body = app.hit_regions.table_body.unwrap();
-        app.handle_mouse(mouse(MouseEventKind::ScrollDown, body.x + 2, body.y + 1));
+        let column = body.x + body.width / 2;
+        let row = body.y + 1;
+        app.handle_mouse(mouse(MouseEventKind::Moved, column, row));
+        assert_eq!(app.hovered(), Some(&PointerTarget::TableRow { index: 1 }));
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, column, row));
         assert_eq!(app.selected_row(), selected);
         assert_eq!(app.focus, Focus::Tickets);
         assert!(app.table_offset > 0);
+        let mut terminal = Terminal::new(TestBackend::new(60, 15)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert_eq!(
+            app.hovered(),
+            Some(&PointerTarget::TableRow {
+                index: app.table_offset + 1,
+            })
+        );
+        assert!(
+            terminal.backend().buffer()[(column, row)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "the ticket under the stationary pointer should remain highlighted"
+        );
         let _ = details;
     }
 

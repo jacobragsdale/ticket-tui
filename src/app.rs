@@ -851,6 +851,7 @@ impl App {
     }
 
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> PointerUpdate {
+        self.pointer.set_position(mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::ScrollUp => self.handle_wheel(mouse.column, mouse.row, -3),
             MouseEventKind::ScrollDown => self.handle_wheel(mouse.column, mouse.row, 3),
@@ -1047,13 +1048,19 @@ impl App {
     }
 
     fn handle_hover(&mut self, column: u16, row: u16) -> PointerUpdate {
+        self.pointer.set_position(column, row);
+        PointerUpdate::none(self.refresh_hover())
+    }
+
+    pub fn refresh_hover(&mut self) -> bool {
         let hover = self
-            .hit_regions
-            .resolve(column, row)
+            .pointer
+            .position()
+            .and_then(|(column, row)| self.hit_regions.resolve(column, row))
             .map(|region| region.target.clone());
-        let redraw = hover != self.pointer.hover;
+        let changed = hover != self.pointer.hover;
         self.pointer.hover = hover;
-        PointerUpdate::none(redraw)
+        changed
     }
 
     fn handle_press(&mut self, column: u16, row: u16) -> PointerUpdate {
@@ -1155,11 +1162,12 @@ impl App {
     }
 
     fn handle_wheel(&mut self, column: u16, row: u16, delta: i32) -> PointerUpdate {
+        let hover_changed = self.refresh_hover();
         let Some(surface) = self.hit_regions.resolve_scroll(column, row) else {
-            return PointerUpdate::none(false);
+            return PointerUpdate::none(hover_changed);
         };
         let changed = self.scroll_surface(surface, delta);
-        PointerUpdate::none(changed)
+        PointerUpdate::none(changed || hover_changed)
     }
 
     fn activate_target(&mut self, target: PointerTarget, column: u16, row: u16) -> AppAction {

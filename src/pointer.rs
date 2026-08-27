@@ -346,12 +346,22 @@ struct Press {
 #[derive(Clone, Debug, Default)]
 pub struct PointerState {
     pub hover: Option<PointerTarget>,
+    position: Option<(u16, u16)>,
     press: Option<Press>,
     drag: DragKind,
     pub selection: Option<TextSelection>,
 }
 
 impl PointerState {
+    pub fn set_position(&mut self, column: u16, row: u16) {
+        self.position = Some((column, row));
+    }
+
+    #[must_use]
+    pub fn position(&self) -> Option<(u16, u16)> {
+        self.position
+    }
+
     pub fn begin_press(
         &mut self,
         target: PointerTarget,
