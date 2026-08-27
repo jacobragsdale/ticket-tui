@@ -1,5 +1,7 @@
-use std::io;
+use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::Duration;
@@ -13,6 +15,7 @@ use crossterm::event::{
 use crossterm::execute;
 use ticket_tui::app::{App, AppAction, PreparedTickets};
 use ticket_tui::db::{SqliteTicketRepository, default_database_path};
+use ticket_tui::session;
 use url::Url;
 
 #[derive(Debug, Parser)]
@@ -76,13 +79,22 @@ fn run() -> Result<()> {
     let opened = SqliteTicketRepository::open(&database_path)?;
     let tickets = opened.repository.load_all()?;
     let mut app = App::new(tickets);
+    let session_path = session::path_for(opened.repository.path());
+    match session::load(&session_path) {
+        Ok(loaded) => app.restore_session(loaded),
+        Err(error) => app.set_error(format!("Could not load session: {error:#}")),
+    }
     if opened.seeded_demo_data {
         app.set_status(format!(
             "Created demo database with 500 tickets at {}",
             opened.repository.path().display()
         ));
     }
-    run_terminal(&mut app, &opened.repository)
+    let result = run_terminal(&mut app, &opened.repository);
+    if let Err(error) = session::save(&session_path, &app.snapshot_session()) {
+        eprintln!("warning: could not save session: {error:#}");
+    }
+    result
 }
 
 fn run_terminal(app: &mut App, repository: &SqliteTicketRepository) -> Result<()> {
@@ -97,6 +109,7 @@ fn run_terminal(app: &mut App, repository: &SqliteTicketRepository) -> Result<()
     while !app.should_quit {
         redraw |= app.poll_search();
         redraw |= poll_reload(app, &mut reloader);
+        redraw |= persist_session(app, repository);
         redraw |= app.tick();
         if redraw {
             terminal.draw(|frame| ticket_tui::ui::render(frame, app))?;
@@ -151,6 +164,85 @@ fn handle_action(
             Ok(()) => app.set_status(format!("Opened {raw_url}")),
             Err(error) => app.set_error(format!("Could not open ticket: {error:#}")),
         },
+        AppAction::Copy(text) => match copy_to_clipboard(&text) {
+            Ok(()) => app.set_status("Copied to clipboard"),
+            Err(error) => app.set_error(format!("Could not copy: {error:#}")),
+        },
+        AppAction::WriteFile { path, contents } => match fs::write(&path, contents) {
+            Ok(()) => app.set_status(format!("Exported {}", path.display())),
+            Err(error) => app.set_error(format!("Could not export {}: {error:#}", path.display())),
+        },
+    }
+}
+
+fn persist_session(app: &mut App, repository: &SqliteTicketRepository) -> bool {
+    if !app.session_dirty {
+        return false;
+    }
+    let path = session::path_for(repository.path());
+    match session::save(&path, &app.snapshot_session()) {
+        Ok(()) => app.session_dirty = false,
+        Err(error) => app.set_error(format!("Could not save session: {error:#}")),
+    }
+    true
+}
+
+fn copy_to_clipboard(text: &str) -> Result<()> {
+    let mut last_error = None;
+    for command in clipboard_commands() {
+        match write_to_command(command, text) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    match last_error {
+        Some(error) => Err(error).context("clipboard command failed"),
+        None => bail!("no clipboard command available"),
+    }
+}
+
+fn clipboard_commands() -> Vec<Command> {
+    if cfg!(target_os = "macos") {
+        vec![Command::new("pbcopy")]
+    } else {
+        vec![
+            {
+                let mut command = Command::new("wl-copy");
+                command.arg("--trim-newline");
+                command
+            },
+            {
+                let mut command = Command::new("xclip");
+                command.args(["-selection", "clipboard"]);
+                command
+            },
+            {
+                let mut command = Command::new("xsel");
+                command.args(["--clipboard", "--input"]);
+                command
+            },
+        ]
+    }
+}
+
+fn write_to_command(mut command: Command, text: &str) -> Result<()> {
+    let program = command.get_program().to_string_lossy().into_owned();
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to start {program}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .context("failed to write clipboard contents")?;
+    }
+    let status = child.wait().context("clipboard command stopped")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("clipboard command exited with {status}");
     }
 }
 

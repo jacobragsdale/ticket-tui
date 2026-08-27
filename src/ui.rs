@@ -14,6 +14,7 @@ use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder};
+use crate::filter::FilterField;
 use crate::model::{SortField, Ticket};
 use crate::search::QueryHighlighter;
 
@@ -92,12 +93,6 @@ fn theme() -> &'static Theme {
     THEME.get_or_init(|| Theme::new(std::env::var_os("NO_COLOR").is_some()))
 }
 
-#[derive(Clone, Copy)]
-struct ColumnDef {
-    field: SortField,
-    constraint: Constraint,
-}
-
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     app.hit_regions = HitRegions::default();
     let area = frame.area();
@@ -111,19 +106,28 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
+    let chip_height = u16::from(!app.filter_tokens().is_empty());
     let sections = Layout::vertical([
         Constraint::Length(3),
+        Constraint::Length(chip_height),
         Constraint::Fill(1),
         Constraint::Length(1),
     ])
     .split(area);
     render_search(frame, app, sections[0]);
-    render_content(frame, app, sections[1]);
-    render_footer(frame, app, sections[2]);
+    if chip_height > 0 {
+        render_chips(frame, app, sections[1]);
+    }
+    render_content(frame, app, sections[2]);
+    render_footer(frame, app, sections[3]);
 
     match app.mode {
         AppMode::Sort => render_sort_popup(frame, app),
         AppMode::Help => render_help_popup(frame, app),
+        AppMode::Filter => render_filter_overlay(frame, app),
+        AppMode::Columns => render_column_overlay(frame, app),
+        AppMode::Palette => render_palette(frame, app),
+        AppMode::Views => render_views_overlay(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
 }
@@ -139,7 +143,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     let text = if app.query.is_empty() && !active {
         Line::styled(
-            "Type / to search ID, title, assignee, state, type, area, iteration, or tags",
+            "Type / to search, or filters like state:active priority:1 tag:rust",
             Style::default().fg(theme().muted),
         )
     } else {
@@ -215,27 +219,30 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     };
     let block = focused_block(title, app.focus == Focus::Tickets);
     let inner = block.inner(area);
-    let columns = columns_for(inner.width);
-    let constraints: Vec<_> = columns.iter().map(|column| column.constraint).collect();
+    let columns = app.layout.visible_columns(inner.width);
+    let constraints: Vec<_> = columns
+        .iter()
+        .copied()
+        .map(crate::columns::TableLayout::constraint)
+        .collect();
 
     let header = Row::new(columns.iter().map(|column| {
-        let direction = if column.field == app.sort_field {
+        let direction = if column.id == app.sort_field {
             app.sort_direction.symbol()
         } else {
             ""
         };
-        let label = match column.field {
+        let label = match column.id {
             SortField::Priority => "Pri",
-            _ => column.field.label(),
+            SortField::Organization => "Org",
+            _ => column.id.label(),
         };
         let line = Line::from(format!("{label}{direction}"));
-        Cell::from(
-            if matches!(column.field, SortField::Id | SortField::Priority) {
-                line.right_aligned()
-            } else {
-                line
-            },
-        )
+        Cell::from(if column.id.is_numeric() {
+            line.right_aligned()
+        } else {
+            line
+        })
     }))
     .style(
         Style::default()
@@ -247,13 +254,22 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let now = OffsetDateTime::now_utc();
     let density = app.row_density;
-    let mut highlighter = QueryHighlighter::new(&app.query);
+    let fuzzy = app.fuzzy_query();
+    let mut highlighter = QueryHighlighter::new(&fuzzy);
     let rows = app.visible_tickets().map(|ticket| {
-        Row::new(
-            columns
-                .iter()
-                .map(|column| table_cell(ticket, column.field, now, density, &mut highlighter)),
-        )
+        let bookmarked = app.is_bookmarked(&ticket.key);
+        let checked = app.is_row_selected(&ticket.key);
+        Row::new(columns.iter().map(|column| {
+            table_cell(
+                ticket,
+                column.id,
+                now,
+                density,
+                &mut highlighter,
+                bookmarked,
+                checked,
+            )
+        }))
         .height(density.row_height())
     });
     let table = Table::new(rows, constraints.clone())
@@ -283,7 +299,7 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         app.hit_regions.headers = header_columns
             .iter()
             .zip(columns.iter())
-            .map(|(area, column)| (*area, column.field))
+            .map(|(area, column)| (*area, column.id))
             .collect();
         let body = Rect::new(
             inner.x,
@@ -317,7 +333,7 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if count == 0 && inner.height > 2 {
         let message = if app.reload_pending {
             "Reloading tickets…"
-        } else if app.query.is_empty() {
+        } else if !app.parsed_query().is_active() {
             "No tickets in this database"
         } else if app.search_pending {
             "Searching…"
@@ -465,14 +481,24 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             }
             AppMode::Sort => "↑↓ choose field  ←→ direction  Enter apply  Esc cancel",
             AppMode::Help => "↑↓/jk scroll  PgUp/PgDn page  Home/End jump  ?/Esc close",
+            AppMode::Filter if app.filter_overlay.showing_values => {
+                "↑↓ values  Space toggle  ← fields  Esc close"
+            }
+            AppMode::Filter => "↑↓ field  Enter values  Esc close",
+            AppMode::Columns => "↑↓ choose  Space show/hide  JK reorder  <> width  Esc close",
+            AppMode::Palette => "Type to filter  ↑↓ select  Enter run  Esc close",
+            AppMode::Views if app.views_overlay.naming.is_some() => {
+                "Type a view name  Enter save  Esc cancel"
+            }
+            AppMode::Views => "↑↓ choose  Enter load  n save  d delete  Esc close",
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
             }
             AppMode::Browse if !app.query.is_empty() => {
-                "↑↓/jk move  / edit search  v order  s sort  Enter/o open  Esc clear  ? help  q quit"
+                "↑↓/jk move  / edit  f filters  p commands  Enter/o open  Esc clear  ? help  q quit"
             }
             AppMode::Browse => {
-                "↑↓/jk move  / search  s sort  c density  Enter/o open  r reload  Tab details  ? help  q quit"
+                "↑↓/jk move  / search  f filters  p commands  s sort  Enter/o open  ? help  q quit"
             }
         };
         (text, Style::default().fg(theme().muted))
@@ -486,7 +512,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn render_sort_popup(frame: &mut Frame<'_>, app: &mut App) {
-    let area = centered_rect(frame.area(), 42, 11);
+    let area = centered_rect(frame.area(), 42, 16);
     frame.render_widget(Clear, area);
     let block = Block::default()
         .title(" Sort tickets ")
@@ -537,21 +563,33 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  Tab             Focus tickets/details"),
         Line::from("  d               Toggle details below 70 columns"),
         Line::from("  c               Toggle compact / comfortable rows"),
+        Line::from("  [ / ]           Recently viewed back / forward"),
         Line::from(""),
-        Line::styled("Search", Style::default().add_modifier(Modifier::BOLD)),
+        Line::styled(
+            "Search and filters",
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
         Line::from("  ←/→, Home/End   Move the query cursor"),
         Line::from("  Backspace/Del   Delete around the cursor"),
         Line::from("  Ctrl-W/Ctrl-U   Delete word / clear query"),
         Line::from("  Ctrl-P/Ctrl-N   Previous / next completed query"),
+        Line::from("  state:active    Structured filters in the query"),
+        Line::from("  f               Filter overlay with value counts"),
         Line::from("  Paste           Insert sanitized text"),
         Line::from(""),
         Line::styled("Actions", Style::default().add_modifier(Modifier::BOLD)),
         Line::from("  /               Search core ticket fields"),
+        Line::from("  p / :           Command palette"),
         Line::from("  s               Choose field and direction"),
+        Line::from("  w               Show, hide, reorder, resize columns"),
+        Line::from("  V               Save and restore named views"),
         Line::from("  v               Toggle relevance / field order"),
+        Line::from("  m               Bookmark the selected ticket"),
+        Line::from("  Space           Toggle multi-select"),
+        Line::from("  y               Copy selected IDs"),
         Line::from("  Enter/o         Open selected ticket in browser"),
         Line::from("  r               Reload tickets from SQLite"),
-        Line::from("  Esc             Clear active search"),
+        Line::from("  Esc             Clear active search or selection"),
         Line::from("  q / Ctrl-C      Quit"),
         Line::from(""),
         Line::styled(
@@ -584,48 +622,233 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
     }
 }
 
-fn columns_for(width: u16) -> Vec<ColumnDef> {
-    let mut columns = vec![
-        ColumnDef {
-            field: SortField::Id,
-            constraint: Constraint::Length(7),
+fn render_chips(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let mut spans = Vec::new();
+    let mut x = area.x;
+    for token in app.filter_tokens() {
+        let label = format!(" {} × ", token.chip_label());
+        let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+        if x.saturating_add(width) > area.x.saturating_add(area.width) {
+            break;
+        }
+        app.hit_regions
+            .chips
+            .push((Rect::new(x, area.y, width, 1), token.clone()));
+        spans.push(Span::styled(
+            label,
+            Style::default()
+                .fg(theme().text)
+                .bg(theme().selected_background),
+        ));
+        spans.push(Span::raw(" "));
+        x = x.saturating_add(width.saturating_add(1));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
+    let area = centered_rect(frame.area(), 52, 16);
+    frame.render_widget(Clear, area);
+    let title = if app.filter_overlay.showing_values {
+        format!(" {} ", app.facet_field().label())
+    } else {
+        " Filters ".into()
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme().accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    app.hit_regions.overlay_rows.clear();
+
+    let lines: Vec<Line> = if app.filter_overlay.showing_values {
+        app.current_facets()
+            .into_iter()
+            .enumerate()
+            .map(|(index, facet)| {
+                let selected = index == app.filter_overlay.value_index;
+                if let Ok(y) = u16::try_from(index) {
+                    app.hit_regions.overlay_rows.push((
+                        Rect::new(inner.x, inner.y.saturating_add(y), inner.width, 1),
+                        index,
+                    ));
+                }
+                let marker = if selected { "›" } else { " " };
+                let check = if facet.selected { "[x]" } else { "[ ]" };
+                overlay_line(
+                    format!("{marker} {check} {:<18} {:>4}", facet.value, facet.count),
+                    selected,
+                )
+            })
+            .collect()
+    } else {
+        FilterField::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                let selected = index == app.filter_overlay.field_index;
+                if let Ok(y) = u16::try_from(index) {
+                    app.hit_regions.overlay_rows.push((
+                        Rect::new(inner.x, inner.y.saturating_add(y), inner.width, 1),
+                        index,
+                    ));
+                }
+                let marker = if selected { "›" } else { " " };
+                let count = app.parsed_query().filters.selected_count(*field);
+                let suffix = if count == 0 {
+                    String::new()
+                } else {
+                    format!("{count} selected")
+                };
+                overlay_line(format!("{marker} {:<12} {suffix}", field.label()), selected)
+            })
+            .collect()
+    };
+    let paragraph = Paragraph::new(Text::from(lines)).scroll((app.overlay_scroll, 0));
+    app.set_overlay_max_scroll(
+        u16::try_from(
+            paragraph
+                .line_count(inner.width)
+                .saturating_sub(usize::from(inner.height)),
+        )
+        .unwrap_or(u16::MAX),
+    );
+    frame.render_widget(paragraph, inner);
+}
+
+fn render_column_overlay(frame: &mut Frame<'_>, app: &mut App) {
+    let area = centered_rect(frame.area(), 48, 18);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Columns ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme().accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    app.hit_regions.overlay_rows.clear();
+    let lines = app
+        .layout
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let selected = index == app.column_overlay.index;
+            if let Ok(y) = u16::try_from(index) {
+                app.hit_regions.overlay_rows.push((
+                    Rect::new(inner.x, inner.y.saturating_add(y), inner.width, 1),
+                    index,
+                ));
+            }
+            let marker = if selected { "›" } else { " " };
+            let check = if column.visible { "[x]" } else { "[ ]" };
+            let width = if column.id == SortField::Title {
+                "fill".into()
+            } else {
+                column.width.to_string()
+            };
+            overlay_line(
+                format!("{marker} {check} {:<12} {width}", column.id.label()),
+                selected,
+            )
+        });
+    frame.render_widget(Paragraph::new(Text::from_iter(lines)), inner);
+}
+
+fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
+    let commands = app.palette_commands();
+    let height = u16::try_from(commands.len().saturating_add(3))
+        .unwrap_or(u16::MAX)
+        .min(16);
+    let area = centered_rect(frame.area(), 56, height.max(6));
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(format!(" Commands / {} ", app.palette.query))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme().accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    app.hit_regions.overlay_rows.clear();
+    let lines = commands.iter().enumerate().map(|(index, command)| {
+        let selected = index == app.palette.selected;
+        if let Ok(y) = u16::try_from(index) {
+            app.hit_regions.overlay_rows.push((
+                Rect::new(inner.x, inner.y.saturating_add(y), inner.width, 1),
+                index,
+            ));
+        }
+        let marker = if selected { "›" } else { " " };
+        overlay_line(
+            format!("{marker} {:<28} {}", command.title, command.hint),
+            selected,
+        )
+    });
+    frame.render_widget(Paragraph::new(Text::from_iter(lines)), inner);
+}
+
+fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
+    let area = centered_rect(frame.area(), 48, 14);
+    frame.render_widget(Clear, area);
+    let title = if let Some(name) = &app.views_overlay.naming {
+        format!(" Save view: {name} ")
+    } else {
+        " Views ".into()
+    };
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme().accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    app.hit_regions.overlay_rows.clear();
+    if app.views().is_empty() && app.views_overlay.naming.is_none() {
+        frame.render_widget(
+            Paragraph::new("No saved views. Press n to save the current view.")
+                .style(Style::default().fg(theme().muted)),
+            inner,
+        );
+        return;
+    }
+    let views: Vec<(String, String, bool)> = app
+        .views()
+        .iter()
+        .map(|view| {
+            (
+                view.name.clone(),
+                view.query.clone(),
+                app.active_view.as_deref() == Some(view.name.as_str()),
+            )
+        })
+        .collect();
+    let lines = views
+        .into_iter()
+        .enumerate()
+        .map(|(index, (name, query, current))| {
+            let selected = index == app.views_overlay.index;
+            if let Ok(y) = u16::try_from(index) {
+                app.hit_regions.overlay_rows.push((
+                    Rect::new(inner.x, inner.y.saturating_add(y), inner.width, 1),
+                    index,
+                ));
+            }
+            let marker = if selected { "›" } else { " " };
+            let current = if current { "*" } else { " " };
+            overlay_line(format!("{marker}{current} {name:<18} {query}"), selected)
+        });
+    frame.render_widget(Paragraph::new(Text::from_iter(lines)), inner);
+}
+
+fn overlay_line(text: String, selected: bool) -> Line<'static> {
+    Line::styled(
+        text,
+        if selected {
+            Style::default()
+                .bg(theme().selected_background)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
         },
-        ColumnDef {
-            field: SortField::Title,
-            constraint: Constraint::Fill(1),
-        },
-    ];
-    if width >= 36 {
-        columns.push(ColumnDef {
-            field: SortField::State,
-            constraint: Constraint::Length(10),
-        });
-    }
-    if width >= 52 {
-        columns.push(ColumnDef {
-            field: SortField::Type,
-            constraint: Constraint::Length(13),
-        });
-    }
-    if width >= 65 {
-        columns.push(ColumnDef {
-            field: SortField::Priority,
-            constraint: Constraint::Length(4),
-        });
-    }
-    if width >= 78 {
-        columns.push(ColumnDef {
-            field: SortField::Changed,
-            constraint: Constraint::Length(10),
-        });
-    }
-    if width >= 98 {
-        columns.push(ColumnDef {
-            field: SortField::Assignee,
-            constraint: Constraint::Length(16),
-        });
-    }
-    columns
+    )
 }
 
 fn table_cell(
@@ -634,15 +857,34 @@ fn table_cell(
     now: OffsetDateTime,
     density: RowDensity,
     highlighter: &mut QueryHighlighter,
+    bookmarked: bool,
+    checked: bool,
 ) -> Cell<'static> {
     let line = match field {
         SortField::Type => Line::from(type_badge_spans(&ticket.work_item_type, highlighter)),
-        SortField::Title => highlight_searchable(&ticket.title, Style::default(), highlighter),
+        SortField::Title => {
+            let mut line = highlight_searchable(&ticket.title, Style::default(), highlighter);
+            if checked {
+                let mut spans = vec![Span::styled(
+                    "* ",
+                    Style::default()
+                        .fg(theme().accent)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                spans.extend(line.spans);
+                line = Line::from(spans);
+            }
+            line
+        }
         SortField::Id => {
             let style = Style::default()
                 .fg(theme().link)
                 .add_modifier(Modifier::UNDERLINED);
-            highlight_searchable(&ticket.key.id.to_string(), style, highlighter)
+            let mut text = ticket.key.id.to_string();
+            if bookmarked {
+                text.push('*');
+            }
+            highlight_searchable(&text, style, highlighter)
         }
         SortField::State => {
             highlight_searchable(&ticket.state, state_style(&ticket.state), highlighter)
@@ -668,6 +910,18 @@ fn table_cell(
         SortField::Changed => {
             Line::from(relative_changed_at(&ticket.changed_at, now)).right_aligned()
         }
+        SortField::Created => {
+            Line::from(relative_changed_at(&ticket.created_at, now)).right_aligned()
+        }
+        SortField::Organization => {
+            highlight_searchable(&ticket.key.organization, Style::default(), highlighter)
+        }
+        SortField::Project => highlight_searchable(&ticket.project, Style::default(), highlighter),
+        SortField::Area => highlight_searchable(&ticket.area_path, Style::default(), highlighter),
+        SortField::Iteration => {
+            highlight_searchable(&ticket.iteration_path, Style::default(), highlighter)
+        }
+        SortField::Tags => Line::from(tag_badge_spans(&ticket.tags, highlighter)),
     };
     let line = if field == SortField::Id {
         line.right_aligned()
@@ -1279,6 +1533,32 @@ mod tests {
         assert!(text.contains("[rust]"));
         assert!(text.contains("[search]"));
         assert!(!text.contains("Tags: rust, search"));
+    }
+
+    #[test]
+    fn filter_chips_and_overlay_render_active_filters() {
+        let mut app = App::new(vec![ticket()]);
+        app.set_query("state:active type:bug".into());
+        await_search(&mut app);
+
+        let text = render_text(110, 24, &mut app);
+        assert!(text.contains("state:active"));
+        assert!(text.contains("type:bug"));
+
+        app.mode = AppMode::Filter;
+        let overlay = render_text(110, 24, &mut app);
+        assert!(overlay.contains("Filters"));
+        assert!(overlay.contains("State"));
+    }
+
+    #[test]
+    fn command_palette_lists_matching_actions() {
+        let mut app = App::new(vec![ticket()]);
+        app.mode = AppMode::Palette;
+        app.palette.query = "copy".into();
+        let text = render_text(110, 24, &mut app);
+        assert!(text.contains("Copy ID"));
+        assert!(text.contains("Commands"));
     }
 
     #[test]

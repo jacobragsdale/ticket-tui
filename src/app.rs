@@ -1,4 +1,6 @@
 use std::cmp::Ordering;
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -6,8 +8,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 
+use crate::columns::TableLayout;
+use crate::command::{Command, CommandId, matching_commands};
+use crate::export;
+use crate::filter::{
+    FacetValue, FilterField, FilterToken, ParsedQuery, facet_values, format_query, parse_query,
+};
+pub use crate::model::{RowDensity, SearchOrder};
 use crate::model::{SortDirection, SortField, Ticket, TicketKey, compare_tickets};
 use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
+use crate::session::{self, NamedView, Session};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AppMode {
@@ -16,6 +26,10 @@ pub enum AppMode {
     Search,
     Sort,
     Help,
+    Filter,
+    Columns,
+    Palette,
+    Views,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -25,69 +39,13 @@ pub enum Focus {
     Details,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum SearchOrder {
-    #[default]
-    Relevance,
-    Field,
-}
-
-impl SearchOrder {
-    #[must_use]
-    pub const fn toggled(self) -> Self {
-        match self {
-            Self::Relevance => Self::Field,
-            Self::Field => Self::Relevance,
-        }
-    }
-
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Relevance => "Relevance",
-            Self::Field => "Field",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum RowDensity {
-    #[default]
-    Compact,
-    Comfortable,
-}
-
-impl RowDensity {
-    #[must_use]
-    pub const fn toggled(self) -> Self {
-        match self {
-            Self::Compact => Self::Comfortable,
-            Self::Comfortable => Self::Compact,
-        }
-    }
-
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Compact => "Compact",
-            Self::Comfortable => "Comfortable",
-        }
-    }
-
-    #[must_use]
-    pub const fn row_height(self) -> u16 {
-        match self {
-            Self::Compact => 1,
-            Self::Comfortable => 2,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppAction {
     None,
     Reload,
     OpenUrl(String),
+    Copy(String),
+    WriteFile { path: PathBuf, contents: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,6 +73,7 @@ pub struct SortDraft {
 #[derive(Clone, Debug, Default)]
 pub struct HitRegions {
     pub search: Option<Rect>,
+    pub chips: Vec<(Rect, FilterToken)>,
     pub table: Option<Rect>,
     pub table_body: Option<Rect>,
     pub id_column: Option<Rect>,
@@ -122,6 +81,33 @@ pub struct HitRegions {
     pub details: Option<Rect>,
     pub detail_url: Option<Rect>,
     pub sort_rows: Vec<(Rect, SortField)>,
+    pub overlay_rows: Vec<(Rect, usize)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FilterOverlay {
+    pub field_index: usize,
+    pub value_index: usize,
+    pub showing_values: bool,
+    pub scroll: u16,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ColumnOverlay {
+    pub index: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PaletteState {
+    pub query: String,
+    pub cursor: usize,
+    pub selected: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ViewsOverlay {
+    pub index: usize,
+    pub naming: Option<String>,
 }
 
 #[derive(Debug)]
@@ -162,6 +148,7 @@ pub struct App {
     pub row_density: RowDensity,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
+    pub layout: TableLayout,
     pub mode: AppMode,
     pub focus: Focus,
     pub table_state: TableState,
@@ -169,12 +156,25 @@ pub struct App {
     pub details_max_scroll: u16,
     pub help_scroll: u16,
     pub help_max_scroll: u16,
+    pub overlay_scroll: u16,
+    pub overlay_max_scroll: u16,
     pub narrow_details: bool,
     pub reload_pending: bool,
     pub should_quit: bool,
+    pub session_dirty: bool,
     notification: Option<Notification>,
     pub sort_draft: SortDraft,
     pub hit_regions: HitRegions,
+    pub filter_overlay: FilterOverlay,
+    pub column_overlay: ColumnOverlay,
+    pub palette: PaletteState,
+    pub views_overlay: ViewsOverlay,
+    bookmarks: HashSet<TicketKey>,
+    selected_keys: HashSet<TicketKey>,
+    recent: Vec<TicketKey>,
+    future: Vec<TicketKey>,
+    views: Vec<NamedView>,
+    pub active_view: Option<String>,
 }
 
 impl App {
@@ -198,6 +198,7 @@ impl App {
             row_density: RowDensity::Compact,
             sort_field: SortField::Changed,
             sort_direction: SortDirection::Descending,
+            layout: TableLayout::default(),
             mode: AppMode::Browse,
             focus: Focus::Tickets,
             table_state: TableState::default(),
@@ -205,15 +206,28 @@ impl App {
             details_max_scroll: 0,
             help_scroll: 0,
             help_max_scroll: 0,
+            overlay_scroll: 0,
+            overlay_max_scroll: 0,
             narrow_details: false,
             reload_pending: false,
             should_quit: false,
+            session_dirty: false,
             notification: None,
             sort_draft: SortDraft {
                 field_index: 0,
                 direction: SortDirection::Descending,
             },
             hit_regions: HitRegions::default(),
+            filter_overlay: FilterOverlay::default(),
+            column_overlay: ColumnOverlay::default(),
+            palette: PaletteState::default(),
+            views_overlay: ViewsOverlay::default(),
+            bookmarks: HashSet::new(),
+            selected_keys: HashSet::new(),
+            recent: Vec::new(),
+            future: Vec::new(),
+            views: Vec::new(),
+            active_view: None,
         };
         app.show_all(None);
         app
@@ -247,6 +261,62 @@ impl App {
         self.table_state.selected()
     }
 
+    #[must_use]
+    pub fn parsed_query(&self) -> ParsedQuery {
+        parse_query(&self.query)
+    }
+
+    #[must_use]
+    pub fn fuzzy_query(&self) -> String {
+        self.parsed_query().fuzzy
+    }
+
+    #[must_use]
+    pub fn filter_tokens(&self) -> Vec<FilterToken> {
+        self.parsed_query().filters.tokens()
+    }
+
+    #[must_use]
+    pub fn is_bookmarked(&self, key: &TicketKey) -> bool {
+        self.bookmarks.contains(key)
+    }
+
+    #[must_use]
+    pub fn is_row_selected(&self, key: &TicketKey) -> bool {
+        self.selected_keys.contains(key)
+    }
+
+    #[must_use]
+    pub fn views(&self) -> &[NamedView] {
+        &self.views
+    }
+
+    #[must_use]
+    pub fn palette_commands(&self) -> Vec<Command> {
+        matching_commands(&self.palette.query)
+    }
+
+    #[must_use]
+    pub fn facet_field(&self) -> FilterField {
+        FilterField::ALL[self
+            .filter_overlay
+            .field_index
+            .min(FilterField::ALL.len() - 1)]
+    }
+
+    #[must_use]
+    pub fn current_facets(&self) -> Vec<FacetValue> {
+        let filters = self.parsed_query().filters;
+        facet_values(self.tickets(), &filters, self.facet_field(), |ticket| {
+            self.bookmarks.contains(&ticket.key)
+        })
+    }
+
+    pub fn set_overlay_max_scroll(&mut self, maximum: u16) {
+        self.overlay_max_scroll = maximum;
+        self.overlay_scroll = self.overlay_scroll.min(maximum);
+    }
+
     pub fn replace_tickets(&mut self, tickets: Vec<Ticket>) {
         self.replace_prepared_tickets(PreparedTickets::new(tickets));
     }
@@ -255,7 +325,7 @@ impl App {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.tickets = Arc::new(prepared.tickets);
         self.search.replace_documents(prepared.search_documents);
-        if self.query.is_empty() {
+        if self.fuzzy_query().is_empty() {
             self.show_all(selected.as_ref());
         } else {
             self.pending_selection = selected;
@@ -309,7 +379,7 @@ impl App {
         let Some(result) = self.search.try_result() else {
             return false;
         };
-        if result.generation != self.search_generation || self.query.is_empty() {
+        if result.generation != self.search_generation || self.fuzzy_query().is_empty() {
             return false;
         }
 
@@ -318,6 +388,7 @@ impl App {
             .take()
             .or_else(|| self.selected_ticket().map(|ticket| ticket.key.clone()));
         self.visible = result.matches;
+        self.apply_filters();
         self.sort_visible();
         self.restore_selection(selected.as_ref());
         self.search_pending = false;
@@ -371,7 +442,8 @@ impl App {
         self.query_cursor = cursor.min(self.query.chars().count());
         self.search_history_index = None;
         self.search_history_draft.clone_from(&self.query);
-        if self.query.is_empty() {
+        self.session_dirty = true;
+        if self.fuzzy_query().is_empty() {
             self.search_generation = self.search_generation.wrapping_add(1);
             self.search_pending = false;
             self.pending_selection = None;
@@ -388,28 +460,34 @@ impl App {
         self.sort_direction = direction;
         self.sort_visible();
         self.restore_selection(selected.as_ref());
+        self.session_dirty = true;
     }
 
     pub fn toggle_row_density(&mut self) {
         self.row_density = self.row_density.toggled();
+        self.session_dirty = true;
         self.set_status(format!("Row density: {}", self.row_density.label()));
     }
 
     pub fn toggle_search_order(&mut self) {
-        if self.query.is_empty() {
+        if self.fuzzy_query().is_empty() {
             return;
         }
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.search_order = self.search_order.toggled();
         self.sort_visible();
         self.restore_selection(selected.as_ref());
+        self.session_dirty = true;
         self.set_status(format!("Search order: {}", self.search_order.label()));
     }
 
     pub fn toggle_sort(&mut self, field: SortField) {
         let direction = if self.sort_field == field {
             self.sort_direction.toggled()
-        } else if matches!(field, SortField::Changed | SortField::Priority) {
+        } else if matches!(
+            field,
+            SortField::Changed | SortField::Priority | SortField::Created
+        ) {
             SortDirection::Descending
         } else {
             SortDirection::Ascending
@@ -431,6 +509,16 @@ impl App {
                 self.handle_help_key(key);
                 AppAction::None
             }
+            AppMode::Filter => {
+                self.handle_filter_key(key);
+                AppAction::None
+            }
+            AppMode::Columns => {
+                self.handle_columns_key(key);
+                AppAction::None
+            }
+            AppMode::Palette => self.handle_palette_key(key),
+            AppMode::Views => self.handle_views_key(key),
         }
     }
 
@@ -447,9 +535,24 @@ impl App {
             }
             return AppAction::None;
         }
-        if self.mode == AppMode::Sort {
-            if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                return self.handle_click(mouse.column, mouse.row);
+        if matches!(
+            self.mode,
+            AppMode::Sort | AppMode::Filter | AppMode::Columns | AppMode::Palette | AppMode::Views
+        ) {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.overlay_scroll = self.overlay_scroll.saturating_sub(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.overlay_scroll = self
+                        .overlay_scroll
+                        .saturating_add(3)
+                        .min(self.overlay_max_scroll);
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    return self.handle_click(mouse.column, mouse.row);
+                }
+                _ => {}
             }
             return AppAction::None;
         }
@@ -503,9 +606,18 @@ impl App {
                 self.mode = AppMode::Help;
             }
             KeyCode::Char('r') => return AppAction::Reload,
-            KeyCode::Char('v') if !self.query.is_empty() => self.toggle_search_order(),
+            KeyCode::Char('v') if !self.fuzzy_query().is_empty() => self.toggle_search_order(),
+            KeyCode::Char('V') => self.open_views(),
             KeyCode::Char('c') => self.toggle_row_density(),
             KeyCode::Char('d') => self.toggle_narrow_details(),
+            KeyCode::Char('f') => self.open_filters(),
+            KeyCode::Char('w') => self.open_columns(),
+            KeyCode::Char('p') | KeyCode::Char(':') => self.open_palette(),
+            KeyCode::Char('m') => self.toggle_bookmark(),
+            KeyCode::Char('y') => return self.copy_with(export::copy_ids),
+            KeyCode::Char(' ') => self.toggle_row_selection(),
+            KeyCode::Char('[') => self.history_back(),
+            KeyCode::Char(']') => self.history_forward(),
             KeyCode::Tab => self.toggle_focus(),
             KeyCode::Down | KeyCode::Char('j') => self.move_focused(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_focused(-1),
@@ -519,8 +631,12 @@ impl App {
                 Focus::Tickets => self.select_row(self.visible.len().saturating_sub(1)),
                 Focus::Details => self.details_scroll = self.details_max_scroll,
             },
-            KeyCode::Enter | KeyCode::Char('o') => return self.open_selected(),
+            KeyCode::Enter | KeyCode::Char('o') => {
+                self.record_history();
+                return self.open_selected();
+            }
             KeyCode::Esc if !self.query.is_empty() => self.set_query(String::new()),
+            KeyCode::Esc if !self.selected_keys.is_empty() => self.selected_keys.clear(),
             _ => {}
         }
         AppAction::None
@@ -614,6 +730,65 @@ impl App {
     }
 
     fn handle_click(&mut self, column: u16, row: u16) -> AppAction {
+        if self.mode == AppMode::Filter {
+            if let Some((_, index)) = self
+                .hit_regions
+                .overlay_rows
+                .iter()
+                .find(|(area, _)| contains(*area, column, row))
+            {
+                if self.filter_overlay.showing_values {
+                    self.filter_overlay.value_index = *index;
+                    self.toggle_current_facet();
+                } else {
+                    self.filter_overlay.field_index = *index;
+                    self.filter_overlay.showing_values = true;
+                    self.filter_overlay.value_index = 0;
+                    self.overlay_scroll = 0;
+                }
+            }
+            return AppAction::None;
+        }
+        if self.mode == AppMode::Columns {
+            if let Some((_, index)) = self
+                .hit_regions
+                .overlay_rows
+                .iter()
+                .find(|(area, _)| contains(*area, column, row))
+            {
+                self.column_overlay.index = *index;
+                self.layout.toggle_visible(*index);
+                self.session_dirty = true;
+            }
+            return AppAction::None;
+        }
+        if self.mode == AppMode::Palette {
+            if let Some((_, index)) = self
+                .hit_regions
+                .overlay_rows
+                .iter()
+                .find(|(area, _)| contains(*area, column, row))
+            {
+                self.palette.selected = *index;
+                return self.run_selected_command();
+            }
+            return AppAction::None;
+        }
+        if self.mode == AppMode::Views {
+            if self.views_overlay.naming.is_some() {
+                return AppAction::None;
+            }
+            if let Some((_, index)) = self
+                .hit_regions
+                .overlay_rows
+                .iter()
+                .find(|(area, _)| contains(*area, column, row))
+            {
+                self.views_overlay.index = *index;
+                self.apply_view_at(*index);
+            }
+            return AppAction::None;
+        }
         if self.mode == AppMode::Sort {
             if let Some((_, field)) = self
                 .hit_regions
@@ -631,6 +806,15 @@ impl App {
         }
         if self.contains(self.hit_regions.search, column, row) {
             self.begin_search();
+            return AppAction::None;
+        }
+        if let Some((_, token)) = self
+            .hit_regions
+            .chips
+            .iter()
+            .find(|(area, _)| contains(*area, column, row))
+        {
+            self.remove_filter_token(token.clone());
             return AppAction::None;
         }
         if self.contains(self.hit_regions.detail_url, column, row) {
@@ -657,6 +841,7 @@ impl App {
                 + usize::from((row - body.y) / self.row_density.row_height());
             if row_index < self.visible.len() {
                 self.select_row(row_index);
+                self.record_history();
                 if self.contains(self.hit_regions.id_column, column, row) {
                     return self.open_selected();
                 }
@@ -769,6 +954,7 @@ impl App {
         self.search_history_index = None;
         self.search_history_draft.clear();
         self.mode = AppMode::Browse;
+        self.record_history();
     }
 
     fn recall_previous_search(&mut self) {
@@ -847,7 +1033,7 @@ impl App {
     }
 
     fn submit_search(&mut self) {
-        self.search_generation = self.search.submit(&self.query);
+        self.search_generation = self.search.submit(&self.fuzzy_query());
         self.search_pending = true;
     }
 
@@ -858,15 +1044,29 @@ impl App {
                 score: 0,
             })
             .collect();
+        self.apply_filters();
         self.sort_visible();
         self.restore_selection(selected);
+    }
+
+    fn apply_filters(&mut self) {
+        let filters = self.parsed_query().filters;
+        let bookmarks = self.bookmarks.clone();
+        let tickets = Arc::clone(&self.tickets);
+        self.visible.retain(|entry| {
+            filters.matches(
+                &tickets[entry.ticket_index],
+                bookmarks.contains(&tickets[entry.ticket_index].key),
+            )
+        });
     }
 
     fn sort_visible(&mut self) {
         let tickets = Arc::clone(&self.tickets);
         let field = self.sort_field;
         let direction = self.sort_direction;
-        let relevance_first = !self.query.is_empty() && self.search_order == SearchOrder::Relevance;
+        let relevance_first =
+            !self.fuzzy_query().is_empty() && self.search_order == SearchOrder::Relevance;
         self.visible.sort_by(|left, right| {
             let relevance = if relevance_first {
                 right.score.cmp(&left.score)
@@ -900,6 +1100,525 @@ impl App {
 
     fn contains(&self, area: Option<Rect>, column: u16, row: u16) -> bool {
         area.is_some_and(|area| contains(area, column, row))
+    }
+
+    fn open_filters(&mut self) {
+        self.filter_overlay = FilterOverlay::default();
+        self.overlay_scroll = 0;
+        self.mode = AppMode::Filter;
+    }
+
+    fn open_columns(&mut self) {
+        self.column_overlay.index = 0;
+        self.overlay_scroll = 0;
+        self.mode = AppMode::Columns;
+    }
+
+    fn open_palette(&mut self) {
+        self.palette = PaletteState::default();
+        self.overlay_scroll = 0;
+        self.mode = AppMode::Palette;
+    }
+
+    fn open_views(&mut self) {
+        self.views_overlay = ViewsOverlay::default();
+        self.overlay_scroll = 0;
+        self.mode = AppMode::Views;
+    }
+
+    fn handle_filter_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc if self.filter_overlay.showing_values => {
+                self.filter_overlay.showing_values = false;
+                self.filter_overlay.value_index = 0;
+                self.overlay_scroll = 0;
+            }
+            KeyCode::Esc | KeyCode::Char('f') => self.mode = AppMode::Browse,
+            KeyCode::Left | KeyCode::Char('h') if self.filter_overlay.showing_values => {
+                self.filter_overlay.showing_values = false;
+                self.overlay_scroll = 0;
+            }
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter
+                if !self.filter_overlay.showing_values =>
+            {
+                self.filter_overlay.showing_values = true;
+                self.filter_overlay.value_index = 0;
+                self.overlay_scroll = 0;
+            }
+            KeyCode::Up | KeyCode::Char('k') => self.move_filter_cursor(-1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_filter_cursor(1),
+            KeyCode::Char(' ') | KeyCode::Enter if self.filter_overlay.showing_values => {
+                self.toggle_current_facet();
+            }
+            _ => {}
+        }
+    }
+
+    fn move_filter_cursor(&mut self, delta: isize) {
+        if self.filter_overlay.showing_values {
+            let count = self.current_facets().len();
+            if count == 0 {
+                return;
+            }
+            self.filter_overlay.value_index = self
+                .filter_overlay
+                .value_index
+                .saturating_add_signed(delta)
+                .min(count - 1);
+        } else {
+            self.filter_overlay.field_index = self
+                .filter_overlay
+                .field_index
+                .saturating_add_signed(delta)
+                .min(FilterField::ALL.len() - 1);
+        }
+    }
+
+    fn toggle_current_facet(&mut self) {
+        let field = self.facet_field();
+        let Some(value) = self
+            .current_facets()
+            .get(self.filter_overlay.value_index)
+            .map(|facet| facet.value.clone())
+        else {
+            return;
+        };
+        let mut parsed = self.parsed_query();
+        parsed.filters.toggle(field, &value);
+        self.set_query(format_query(&parsed.filters, &parsed.fuzzy));
+    }
+
+    fn remove_filter_token(&mut self, token: FilterToken) {
+        let mut parsed = self.parsed_query();
+        match token {
+            FilterToken::Bookmarked => parsed.filters.bookmarked = false,
+            FilterToken::Field { field, value } => parsed.filters.remove(field, &value),
+        }
+        self.set_query(format_query(&parsed.filters, &parsed.fuzzy));
+    }
+
+    fn handle_columns_key(&mut self, key: KeyEvent) {
+        let last = self.layout.columns.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('w') | KeyCode::Enter => self.mode = AppMode::Browse,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.column_overlay.index = self.column_overlay.index.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.column_overlay.index = (self.column_overlay.index + 1).min(last);
+            }
+            KeyCode::Char(' ') => {
+                self.layout.toggle_visible(self.column_overlay.index);
+                self.session_dirty = true;
+            }
+            KeyCode::Char('K') => {
+                self.column_overlay.index = self.layout.move_column(self.column_overlay.index, -1);
+                self.session_dirty = true;
+            }
+            KeyCode::Char('J') => {
+                self.column_overlay.index = self.layout.move_column(self.column_overlay.index, 1);
+                self.session_dirty = true;
+            }
+            KeyCode::Left | KeyCode::Char('-') | KeyCode::Char('<') => {
+                self.layout.resize(self.column_overlay.index, -1);
+                self.session_dirty = true;
+            }
+            KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('>') => {
+                self.layout.resize(self.column_overlay.index, 1);
+                self.session_dirty = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_palette_key(&mut self, key: KeyEvent) -> AppAction {
+        let commands = self.palette_commands();
+        match key.code {
+            KeyCode::Esc => self.mode = AppMode::Browse,
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.palette.selected = self.palette.selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !commands.is_empty() {
+                    self.palette.selected = (self.palette.selected + 1).min(commands.len() - 1);
+                }
+            }
+            KeyCode::Up => self.palette.selected = self.palette.selected.saturating_sub(1),
+            KeyCode::Down => {
+                if !commands.is_empty() {
+                    self.palette.selected = (self.palette.selected + 1).min(commands.len() - 1);
+                }
+            }
+            KeyCode::Enter => return self.run_selected_command(),
+            KeyCode::Backspace => {
+                self.palette.query.pop();
+                self.palette.selected = 0;
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.palette.query.push(character);
+                self.palette.selected = 0;
+            }
+            _ => {}
+        }
+        AppAction::None
+    }
+
+    fn run_selected_command(&mut self) -> AppAction {
+        let Some(command) = self.palette_commands().get(self.palette.selected).copied() else {
+            self.mode = AppMode::Browse;
+            return AppAction::None;
+        };
+        self.mode = AppMode::Browse;
+        self.run_command(command.id)
+    }
+
+    fn run_command(&mut self, id: CommandId) -> AppAction {
+        match id {
+            CommandId::Palette => {
+                self.open_palette();
+                AppAction::None
+            }
+            CommandId::Filters => {
+                self.open_filters();
+                AppAction::None
+            }
+            CommandId::Columns => {
+                self.open_columns();
+                AppAction::None
+            }
+            CommandId::Views => {
+                self.open_views();
+                AppAction::None
+            }
+            CommandId::SaveView => {
+                self.open_views();
+                self.views_overlay.naming = Some(self.active_view.clone().unwrap_or_default());
+                AppAction::None
+            }
+            CommandId::Sort => {
+                self.sort_draft = SortDraft {
+                    field_index: SortField::ALL
+                        .iter()
+                        .position(|field| *field == self.sort_field)
+                        .unwrap_or_default(),
+                    direction: self.sort_direction,
+                };
+                self.mode = AppMode::Sort;
+                AppAction::None
+            }
+            CommandId::Help => {
+                self.help_scroll = 0;
+                self.mode = AppMode::Help;
+                AppAction::None
+            }
+            CommandId::Reload => AppAction::Reload,
+            CommandId::Open => {
+                self.record_history();
+                self.open_selected()
+            }
+            CommandId::ToggleDensity => {
+                self.toggle_row_density();
+                AppAction::None
+            }
+            CommandId::ToggleSearchOrder => {
+                self.toggle_search_order();
+                AppAction::None
+            }
+            CommandId::ToggleBookmark => {
+                self.toggle_bookmark();
+                AppAction::None
+            }
+            CommandId::CopyId => self.copy_with(export::copy_ids),
+            CommandId::CopyUrl => self.copy_with(export::copy_urls),
+            CommandId::CopyTitle => self.copy_with(export::copy_titles),
+            CommandId::CopyMarkdown => self.copy_with(export::copy_markdown_links),
+            CommandId::CopySummary => self.copy_with(export::copy_summaries),
+            CommandId::ExportJson => self.export_with("json", export::export_json),
+            CommandId::ExportCsv => self.export_with("csv", export::export_csv),
+            CommandId::SelectAll => {
+                self.selected_keys = self
+                    .visible_tickets()
+                    .map(|ticket| ticket.key.clone())
+                    .collect();
+                self.set_status(format!("Selected {} tickets", self.selected_keys.len()));
+                AppAction::None
+            }
+            CommandId::ClearSelection => {
+                self.selected_keys.clear();
+                self.set_status("Cleared selection");
+                AppAction::None
+            }
+            CommandId::HistoryBack => {
+                self.history_back();
+                AppAction::None
+            }
+            CommandId::HistoryForward => {
+                self.history_forward();
+                AppAction::None
+            }
+            CommandId::Quit => {
+                self.should_quit = true;
+                AppAction::None
+            }
+        }
+    }
+
+    fn handle_views_key(&mut self, key: KeyEvent) -> AppAction {
+        if self.views_overlay.naming.is_some() {
+            match key.code {
+                KeyCode::Esc => self.views_overlay.naming = None,
+                KeyCode::Enter => {
+                    let name = self
+                        .views_overlay
+                        .naming
+                        .take()
+                        .unwrap_or_default()
+                        .trim()
+                        .to_owned();
+                    if !name.is_empty() {
+                        self.save_view(name);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(name) = self.views_overlay.naming.as_mut() {
+                        name.pop();
+                    }
+                }
+                KeyCode::Char(character)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    if let Some(name) = self.views_overlay.naming.as_mut() {
+                        name.push(character);
+                    }
+                }
+                _ => {}
+            }
+            return AppAction::None;
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('V') => self.mode = AppMode::Browse,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.views_overlay.index = self.views_overlay.index.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if !self.views.is_empty() {
+                    self.views_overlay.index =
+                        (self.views_overlay.index + 1).min(self.views.len() - 1);
+                }
+            }
+            KeyCode::Enter => self.apply_view_at(self.views_overlay.index),
+            KeyCode::Char('n') => {
+                self.views_overlay.naming = Some(String::new());
+            }
+            KeyCode::Char('d') | KeyCode::Delete => self.delete_view_at(self.views_overlay.index),
+            _ => {}
+        }
+        AppAction::None
+    }
+
+    fn save_view(&mut self, name: String) {
+        let view = NamedView {
+            name: name.clone(),
+            query: self.query.clone(),
+            sort_field: session::encode_sort_field(self.sort_field).to_owned(),
+            sort_direction: session::encode_direction(self.sort_direction).to_owned(),
+            search_order: session::encode_search_order(self.search_order).to_owned(),
+            row_density: session::encode_density(self.row_density).to_owned(),
+            columns: session::encode_layout(&self.layout),
+            auto_hide: self.layout.auto_hide,
+        };
+        if let Some(existing) = self
+            .views
+            .iter_mut()
+            .find(|candidate| candidate.name == name)
+        {
+            *existing = view;
+        } else {
+            self.views.push(view);
+        }
+        self.active_view = Some(name.clone());
+        self.session_dirty = true;
+        self.set_status(format!("Saved view '{name}'"));
+    }
+
+    fn apply_view_at(&mut self, index: usize) {
+        let Some(view) = self.views.get(index).cloned() else {
+            return;
+        };
+        self.active_view = Some(view.name.clone());
+        self.sort_field = session::decode_sort_field(&view.sort_field).unwrap_or(self.sort_field);
+        self.sort_direction = session::decode_direction(&view.sort_direction);
+        self.search_order = session::decode_search_order(&view.search_order);
+        self.row_density = session::decode_density(&view.row_density);
+        self.layout = session::decode_layout(&view.columns, Some(view.auto_hide));
+        self.session_dirty = true;
+        self.set_query(view.query);
+        self.mode = AppMode::Browse;
+        self.set_status(format!("Loaded view '{}'", view.name));
+    }
+
+    fn delete_view_at(&mut self, index: usize) {
+        if index >= self.views.len() {
+            return;
+        }
+        let removed = self.views.remove(index);
+        if self.active_view.as_deref() == Some(removed.name.as_str()) {
+            self.active_view = None;
+        }
+        if !self.views.is_empty() {
+            self.views_overlay.index = self.views_overlay.index.min(self.views.len() - 1);
+        } else {
+            self.views_overlay.index = 0;
+        }
+        self.session_dirty = true;
+        self.set_status(format!("Deleted view '{}'", removed.name));
+    }
+
+    fn toggle_bookmark(&mut self) {
+        let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
+            return;
+        };
+        if self.bookmarks.remove(&key) {
+            self.set_status(format!("Removed bookmark {}", key.id));
+        } else {
+            self.bookmarks.insert(key.clone());
+            self.set_status(format!("Bookmarked {}", key.id));
+        }
+        self.session_dirty = true;
+        if self.parsed_query().filters.bookmarked {
+            let selected = Some(key);
+            if self.fuzzy_query().is_empty() {
+                self.show_all(selected.as_ref());
+            } else {
+                self.pending_selection = selected;
+                self.submit_search();
+            }
+        }
+    }
+
+    fn toggle_row_selection(&mut self) {
+        let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
+            return;
+        };
+        if !self.selected_keys.remove(&key) {
+            self.selected_keys.insert(key);
+        }
+    }
+
+    fn export_targets(&self) -> Vec<&Ticket> {
+        if self.selected_keys.is_empty() {
+            return self.selected_ticket().into_iter().collect();
+        }
+        self.tickets()
+            .iter()
+            .filter(|ticket| self.selected_keys.contains(&ticket.key))
+            .collect()
+    }
+
+    fn copy_with(&self, formatter: fn(&[&Ticket]) -> String) -> AppAction {
+        let tickets = self.export_targets();
+        if tickets.is_empty() {
+            return AppAction::None;
+        }
+        AppAction::Copy(formatter(&tickets))
+    }
+
+    fn export_with(&self, extension: &str, formatter: fn(&[&Ticket]) -> String) -> AppAction {
+        let tickets = self.export_targets();
+        if tickets.is_empty() {
+            return AppAction::None;
+        }
+        AppAction::WriteFile {
+            path: PathBuf::from(format!("ticket-tui-export.{extension}")),
+            contents: formatter(&tickets),
+        }
+    }
+
+    fn record_history(&mut self) {
+        let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
+            return;
+        };
+        if self.recent.last() == Some(&key) {
+            return;
+        }
+        self.recent.push(key);
+        if self.recent.len() > 50 {
+            self.recent.remove(0);
+        }
+        self.future.clear();
+        self.session_dirty = true;
+    }
+
+    fn history_back(&mut self) {
+        if self.recent.len() < 2 {
+            return;
+        }
+        let current = self.recent.pop().expect("recent ticket exists");
+        self.future.push(current);
+        let key = self.recent.last().cloned();
+        self.restore_selection(key.as_ref());
+        self.session_dirty = true;
+    }
+
+    fn history_forward(&mut self) {
+        let Some(key) = self.future.pop() else {
+            return;
+        };
+        self.recent.push(key.clone());
+        self.restore_selection(Some(&key));
+        self.session_dirty = true;
+    }
+
+    pub fn snapshot_session(&self) -> Session {
+        Session {
+            query: self.query.clone(),
+            sort_field: session::encode_sort_field(self.sort_field).to_owned(),
+            sort_direction: session::encode_direction(self.sort_direction).to_owned(),
+            search_order: session::encode_search_order(self.search_order).to_owned(),
+            row_density: session::encode_density(self.row_density).to_owned(),
+            columns: session::encode_layout(&self.layout),
+            auto_hide: Some(self.layout.auto_hide),
+            bookmarks: self
+                .bookmarks
+                .iter()
+                .map(session::SessionKey::from)
+                .collect(),
+            recent: self.recent.iter().map(session::SessionKey::from).collect(),
+            views: self.views.clone(),
+            active_view: self.active_view.clone(),
+            selected: self
+                .selected_ticket()
+                .map(|ticket| session::SessionKey::from(&ticket.key)),
+        }
+    }
+
+    pub fn restore_session(&mut self, session: Session) {
+        self.sort_field =
+            session::decode_sort_field(&session.sort_field).unwrap_or(self.sort_field);
+        self.sort_direction = session::decode_direction(&session.sort_direction);
+        self.search_order = session::decode_search_order(&session.search_order);
+        self.row_density = session::decode_density(&session.row_density);
+        self.layout = session::decode_layout(&session.columns, session.auto_hide);
+        self.bookmarks = session.bookmarks.iter().map(TicketKey::from).collect();
+        self.recent = session.recent.iter().map(TicketKey::from).collect();
+        self.views = session.views;
+        self.active_view = session.active_view;
+        let selected = session.selected.as_ref().map(TicketKey::from);
+        if session.query.is_empty() {
+            self.show_all(selected.as_ref());
+        } else {
+            self.set_query(session.query);
+            if let Some(selected) = selected {
+                self.pending_selection = Some(selected);
+            }
+        }
+        self.session_dirty = false;
     }
 }
 
@@ -1150,6 +1869,77 @@ mod tests {
         assert_eq!(app.row_density, RowDensity::Comfortable);
         app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         assert_eq!(app.row_density, RowDensity::Compact);
+    }
+
+    #[test]
+    fn structured_query_filters_tickets_and_keeps_fuzzy_search() {
+        let mut app = App::new(vec![
+            ticket(1, "Search alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Other beta", "2026-02-01T00:00:00Z"),
+        ]);
+        app.set_query("state:active search".into());
+        await_search(&mut app);
+
+        assert_eq!(app.visible_count(), 1);
+        assert_eq!(app.visible_tickets().next().unwrap().key.id, 1);
+        assert_eq!(app.fuzzy_query(), "search");
+        assert_eq!(app.filter_tokens().len(), 1);
+    }
+
+    #[test]
+    fn facet_toggle_rewrites_the_query_and_chip_removal_clears_it() {
+        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+        app.open_filters();
+        app.filter_overlay.showing_values = true;
+        app.filter_overlay.field_index = 0;
+        app.toggle_current_facet();
+
+        assert!(app.query.contains("state:"));
+        let token = app.filter_tokens().pop().unwrap();
+        app.remove_filter_token(token);
+        assert!(app.query.is_empty());
+    }
+
+    #[test]
+    fn named_views_restore_query_and_sort() {
+        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+        app.set_query("state:active".into());
+        app.set_sort(SortField::Title, SortDirection::Ascending);
+        app.save_view("Active".into());
+        app.set_query(String::new());
+        app.set_sort(SortField::Changed, SortDirection::Descending);
+
+        app.apply_view_at(0);
+
+        assert_eq!(app.query, "state:active");
+        assert_eq!(app.sort_field, SortField::Title);
+        assert_eq!(app.active_view.as_deref(), Some("Active"));
+    }
+
+    #[test]
+    fn bookmarks_multi_select_and_copy_use_selected_tickets() {
+        let mut app = App::new(vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+        ]);
+        app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
+        assert!(app.is_bookmarked(&app.selected_ticket().unwrap().key));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        app.select_row(1);
+        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        let action = app.copy_with(export::copy_ids);
+        assert_eq!(action, AppAction::Copy("1\n2\n".into()));
+    }
+
+    #[test]
+    fn command_palette_runs_density_toggle() {
+        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+        app.open_palette();
+        app.palette.query = "density".into();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.row_density, RowDensity::Comfortable);
+        assert_eq!(app.mode, AppMode::Browse);
     }
 
     #[test]

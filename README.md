@@ -21,8 +21,9 @@ You need Rust 1.88 or newer and a macOS or Linux terminal.
 2. On first run, the application creates a SQLite database and inserts 500 demo
    tickets. The status line displays the database path.
 
-3. Press `/`, type part of a ticket title or other core field, and watch the
-   table update. Press `Esc` to leave the search box while retaining the filter.
+3. Press `/`, type part of a ticket title or a filter such as `state:active`,
+   and watch the table update. Press `Esc` to leave the search box while
+   retaining the filter.
 
 4. Select a ticket and press `Enter` to open its fake ADO-shaped HTTPS URL.
    These demo URLs exercise the launcher but do not resolve to real work items.
@@ -52,10 +53,18 @@ to a database prepared by another tool.
 | `Ctrl-U` | Clear the query while searching |
 | `Ctrl-P`/`Ctrl-N` | Recall previous/next completed searches |
 | Paste | Insert sanitized pasted text into the search query |
-| `Esc` | Leave search, or clear an active filter from browse mode |
+| `Esc` | Leave search, clear the query, or clear a multi-selection |
 | `s` | Open the sort menu; use arrows and `Enter` to apply |
 | `v` | Toggle relevance-first or strict field ordering during search |
 | `c` | Toggle compact or comfortable table rows |
+| `f` | Open the filter overlay; `Enter` a field, `Space` toggles values |
+| `w` | Show, hide, reorder (`J`/`K`), and resize (`<`/`>`) columns |
+| `p` / `:` | Open the command palette |
+| `V` | Open named views; `n` saves, `Enter` loads, `d` deletes |
+| `m` | Bookmark or unbookmark the selected ticket |
+| `Space` | Toggle multi-select on the current row |
+| `y` | Copy selected (or current) ticket IDs |
+| `[` / `]` | Jump to the previous or next recently viewed ticket |
 | `Tab` | Switch focus between tickets and details |
 | `d` | Toggle the details screen when the terminal is under 70 columns |
 | `Enter`, `o` | Open the selected ticket in the system browser |
@@ -63,15 +72,23 @@ to a database prepared by another tool.
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
 
-Mouse input can select rows, scroll either pane, sort by visible headers, and
-open an underlined ticket ID or detail URL.
+Mouse input can select rows, scroll either pane, sort by visible headers, click
+filter chips to remove them, and open an underlined ticket ID or detail URL.
+
+Search accepts a compact grammar such as `state:active type:bug
+assignee:"Avery Chen" priority:1 tag:rust`. Values in the same field are
+combined with OR; different fields are combined with AND. `is:bookmarked`
+limits the table to locally bookmarked tickets. Active filters appear as
+removable chips. The command palette copies IDs, URLs, titles, Markdown links,
+or summaries, and exports the selection as JSON or CSV.
 
 Ticket states and priorities use restrained semantic colors, work-item types
 and tags render as compact badges, and matched search characters are
 underlined in visible results. Changed dates use compact relative labels, and
 exact UTC timestamps remain available in details. Press `c` to switch between
-compact and comfortable row density. Set the standard `NO_COLOR` environment
-variable to use the monochrome theme.
+compact and comfortable row density. Named views, column layout, bookmarks,
+and the last query are saved beside the database as `*.session.json`. Set the
+standard `NO_COLOR` environment variable to use the monochrome theme.
 
 ## Database reference
 
@@ -97,7 +114,8 @@ The versioned `work_items` table stores these columns:
 
 The primary key is `(organization, work_item_id)`. Tags use Azure DevOps-style
 semicolon separation. Fuzzy search covers ID, title, assignee, state, type,
-area, iteration, and tags; it intentionally excludes descriptions.
+area, iteration, and tags; it intentionally excludes descriptions. Structured
+`field:value` tokens are parsed out of the query before fuzzy matching.
 
 The application uses WAL mode and a busy timeout so a future synchronizer can
 update the database between reloads. There is no Azure DevOps authentication,

@@ -54,10 +54,16 @@ pub enum SortField {
     State,
     Type,
     Assignee,
+    Organization,
+    Project,
+    Area,
+    Iteration,
+    Created,
+    Tags,
 }
 
 impl SortField {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 13] = [
         Self::Changed,
         Self::Priority,
         Self::Id,
@@ -65,6 +71,12 @@ impl SortField {
         Self::State,
         Self::Type,
         Self::Assignee,
+        Self::Organization,
+        Self::Project,
+        Self::Area,
+        Self::Iteration,
+        Self::Created,
+        Self::Tags,
     ];
 
     #[must_use]
@@ -77,13 +89,82 @@ impl SortField {
             Self::State => "State",
             Self::Type => "Type",
             Self::Assignee => "Assignee",
+            Self::Organization => "Org",
+            Self::Project => "Project",
+            Self::Area => "Area",
+            Self::Iteration => "Iteration",
+            Self::Created => "Created",
+            Self::Tags => "Tags",
         }
+    }
+
+    #[must_use]
+    pub const fn is_numeric(self) -> bool {
+        matches!(self, Self::Id | Self::Priority)
     }
 }
 
 impl fmt::Display for SortField {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.label())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SearchOrder {
+    #[default]
+    Relevance,
+    Field,
+}
+
+impl SearchOrder {
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Relevance => Self::Field,
+            Self::Field => Self::Relevance,
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Relevance => "Relevance",
+            Self::Field => "Field",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RowDensity {
+    #[default]
+    Compact,
+    Comfortable,
+}
+
+impl RowDensity {
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Compact => Self::Comfortable,
+            Self::Comfortable => Self::Compact,
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Compact => "Compact",
+            Self::Comfortable => "Comfortable",
+        }
+    }
+
+    #[must_use]
+    pub const fn row_height(self) -> u16 {
+        match self {
+            Self::Compact => 1,
+            Self::Comfortable => 2,
+        }
     }
 }
 
@@ -121,6 +202,7 @@ pub fn compare_tickets(
 ) -> Ordering {
     let primary = match field {
         SortField::Changed => left.changed_at.cmp(&right.changed_at),
+        SortField::Created => left.created_at.cmp(&right.created_at),
         SortField::Priority => compare_optional_last(left.priority, right.priority, direction),
         SortField::Id => left.key.id.cmp(&right.key.id),
         SortField::Title => compare_text(&left.title, &right.title),
@@ -131,6 +213,11 @@ pub fn compare_tickets(
             right.assigned_to.as_deref(),
             direction,
         ),
+        SortField::Organization => compare_text(&left.key.organization, &right.key.organization),
+        SortField::Project => compare_text(&left.project, &right.project),
+        SortField::Area => compare_text(&left.area_path, &right.area_path),
+        SortField::Iteration => compare_text(&left.iteration_path, &right.iteration_path),
+        SortField::Tags => compare_text(&left.tags.join(";"), &right.tags.join(";")),
     };
 
     let directed = if matches!(field, SortField::Priority | SortField::Assignee) {

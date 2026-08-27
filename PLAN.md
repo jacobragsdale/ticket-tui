@@ -83,29 +83,29 @@ connect to a remote ticket service.
 
 ### Filtering and views
 
-- [ ] Add structured filters for state, type, assignee, priority, project, area,
+- [x] Add structured filters for state, type, assignee, priority, project, area,
   iteration, and tags.
-- [ ] Support a concise query grammar such as `state:active priority:1`.
-- [ ] Display active filters as removable filter chips.
-- [ ] Add a filter/facet overlay with value counts.
-- [ ] Save and restore named views containing filters, search, sorting, columns,
+- [x] Support a concise query grammar such as `state:active priority:1`.
+- [x] Display active filters as removable filter chips.
+- [x] Add a filter/facet overlay with value counts.
+- [x] Save and restore named views containing filters, search, sorting, columns,
   and layout preferences.
-- [ ] Persist the last active view and session state.
+- [x] Persist the last active view and session state.
 
 ### Table configuration
 
-- [ ] Let users show, hide, reorder, and resize columns.
-- [ ] Add columns for organization, project, area, iteration, created date, and
+- [x] Let users show, hide, reorder, and resize columns.
+- [x] Add columns for organization, project, area, iteration, created date, and
   tags.
-- [ ] Persist table configuration per saved view.
-- [ ] Add a command palette for actions that do not merit global shortcuts.
+- [x] Persist table configuration per saved view.
+- [x] Add a command palette for actions that do not merit global shortcuts.
 
 ### Personal workflow
 
-- [ ] Add local bookmarks independent of ticket data.
-- [ ] Add recently viewed tickets and quick navigation back/forward.
-- [ ] Add copy actions for ID, URL, title, Markdown link, and ticket summary.
-- [ ] Add multi-select and export selected tickets as IDs, URLs, Markdown, JSON,
+- [x] Add local bookmarks independent of ticket data.
+- [x] Add recently viewed tickets and quick navigation back/forward.
+- [x] Add copy actions for ID, URL, title, Markdown link, and ticket summary.
+- [x] Add multi-select and export selected tickets as IDs, URLs, Markdown, JSON,
   or CSV.
 
 ## Phase 4: richer local data
