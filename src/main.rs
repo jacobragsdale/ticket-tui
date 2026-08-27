@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -31,6 +32,24 @@ struct Cli {
     /// Import a local JSON or CSV file before opening the TUI
     #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
     import: Option<PathBuf>,
+    /// Capture the mouse for in-app clicks and scrolling
+    #[arg(long, overrides_with = "no_mouse")]
+    mouse: bool,
+    /// Leave the mouse to the terminal so drag-select can copy
+    #[arg(long, overrides_with = "mouse")]
+    no_mouse: bool,
+}
+
+impl Cli {
+    fn mouse_override(&self) -> Option<bool> {
+        if self.mouse {
+            Some(true)
+        } else if self.no_mouse {
+            Some(false)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Default)]
@@ -85,8 +104,17 @@ fn main() {
     }
 }
 
+fn running_in_herdr() -> bool {
+    std::env::var_os("HERDR_ENV").as_deref() == Some(OsStr::new("1"))
+}
+
+fn should_capture_mouse(explicit: Option<bool>, in_herdr: bool) -> bool {
+    explicit.unwrap_or(!in_herdr)
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let capture_mouse = should_capture_mouse(cli.mouse_override(), running_in_herdr());
     let database_path = cli.database.unwrap_or_else(default_database_path);
     if cli.read_only && cli.import.is_some() {
         bail!("--import cannot be used with --read-only");
@@ -126,20 +154,29 @@ fn run() -> Result<()> {
     } else if cli.read_only {
         app.set_status(format!("Opened {} read-only", repository.path().display()));
     }
-    let result = run_terminal(&mut app, &mut repository);
+    let result = run_terminal(&mut app, &mut repository, capture_mouse);
     if let Err(error) = session::save(&session_path, &app.snapshot_session()) {
         eprintln!("warning: could not save session: {error:#}");
     }
     result
 }
 
-fn run_terminal(app: &mut App, repository: &mut SqliteTicketRepository) -> Result<()> {
+fn run_terminal(
+    app: &mut App,
+    repository: &mut SqliteTicketRepository,
+    capture_mouse: bool,
+) -> Result<()> {
     let mut terminal = ratatui::init();
     let _restore = TerminalRestore;
     let opener = SystemUrlOpener;
     let mut reloader = ReloadEngine::default();
-    execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)
-        .context("failed to enable terminal input features")?;
+    if capture_mouse {
+        execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)
+            .context("failed to enable terminal input features")?;
+    } else {
+        execute!(io::stdout(), EnableBracketedPaste)
+            .context("failed to enable terminal input features")?;
+    }
 
     let mut redraw = true;
     while !app.should_quit {
@@ -429,6 +466,29 @@ mod tests {
         fn open(&self, _url: &Url) -> Result<()> {
             bail!("launcher unavailable")
         }
+    }
+
+    #[test]
+    fn mouse_capture_defaults_on_outside_herdr_and_off_inside() {
+        assert!(should_capture_mouse(None, false));
+        assert!(!should_capture_mouse(None, true));
+        assert!(should_capture_mouse(Some(true), true));
+        assert!(!should_capture_mouse(Some(false), false));
+    }
+
+    #[test]
+    fn mouse_flags_override_each_other() {
+        let default = Cli::try_parse_from(["ticket-tui"]).unwrap();
+        assert_eq!(default.mouse_override(), None);
+
+        let mouse = Cli::try_parse_from(["ticket-tui", "--mouse"]).unwrap();
+        assert_eq!(mouse.mouse_override(), Some(true));
+
+        let no_mouse = Cli::try_parse_from(["ticket-tui", "--no-mouse"]).unwrap();
+        assert_eq!(no_mouse.mouse_override(), Some(false));
+
+        let last_wins = Cli::try_parse_from(["ticket-tui", "--mouse", "--no-mouse"]).unwrap();
+        assert_eq!(last_wins.mouse_override(), Some(false));
     }
 
     #[test]

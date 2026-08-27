@@ -48,6 +48,13 @@ Import a local JSON or CSV file, then open the TUI:
 cargo run --release -- --database ./tickets.sqlite3 --import ./tickets.json
 ```
 
+Force in-app mouse capture, or leave the mouse to the terminal:
+
+```console
+cargo run --release -- --mouse
+cargo run --release -- --no-mouse
+```
+
 A nonexistent path is initialized and seeded. An existing empty database is
 migrated but deliberately left empty, which prevents demo rows from being added
 to a database prepared by another tool.
@@ -91,7 +98,9 @@ to a database prepared by another tool.
 Mouse input can select rows, scroll either pane, sort by visible headers, click
 filter-bar pills to choose values, click extra-field chips to remove them, jump
 to an underlined family ticket in details, and open a detail URL or table ID in
-the browser.
+the browser. Inside Herdr, mouse capture is off by default so pane drag-select
+can copy to the clipboard. Pass `--mouse` to keep in-app clicks and scrolling,
+or `--no-mouse` outside Herdr to leave selection to the terminal.
 
 Search accepts a compact grammar such as `state:active type:bug
 assignee:"Avery Chen" priority:1 tag:rust`. Values in the same field are
