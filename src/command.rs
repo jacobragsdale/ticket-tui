@@ -23,6 +23,9 @@ pub enum CommandId {
     HistoryBack,
     HistoryForward,
     SaveView,
+    ImportJson,
+    ImportCsv,
+    DatabaseInfo,
     Quit,
 }
 
@@ -33,7 +36,7 @@ pub struct Command {
     pub hint: &'static str,
 }
 
-pub const COMMANDS: [Command; 24] = [
+pub const COMMANDS: [Command; 27] = [
     Command {
         id: CommandId::Filters,
         title: "Open filters",
@@ -133,6 +136,21 @@ pub const COMMANDS: [Command; 24] = [
         id: CommandId::ClearSelection,
         title: "Clear selection",
         hint: "",
+    },
+    Command {
+        id: CommandId::ImportJson,
+        title: "Import JSON file",
+        hint: "",
+    },
+    Command {
+        id: CommandId::ImportCsv,
+        title: "Import CSV file",
+        hint: "",
+    },
+    Command {
+        id: CommandId::DatabaseInfo,
+        title: "Database info",
+        hint: "i",
     },
     Command {
         id: CommandId::Reload,

@@ -14,8 +14,12 @@ use crate::export;
 use crate::filter::{
     FacetValue, FilterField, FilterToken, ParsedQuery, facet_values, format_query, parse_query,
 };
+use crate::import::ImportFormat;
+use crate::model::{
+    CommentRecord, HistoryRecord, RelationRecord, SortDirection, SortField, Ticket, TicketGraph,
+    TicketKey, compare_tickets,
+};
 pub use crate::model::{RowDensity, SearchOrder};
-use crate::model::{SortDirection, SortField, Ticket, TicketKey, compare_tickets};
 use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
 use crate::session::{self, NamedView, Session};
 
@@ -30,6 +34,8 @@ pub enum AppMode {
     Columns,
     Palette,
     Views,
+    Info,
+    Prompt,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -46,6 +52,7 @@ pub enum AppAction {
     OpenUrl(String),
     Copy(String),
     WriteFile { path: PathBuf, contents: String },
+    Import { path: PathBuf, format: ImportFormat },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,19 +117,39 @@ pub struct ViewsOverlay {
     pub naming: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptKind {
+    ImportJson,
+    ImportCsv,
+}
+
+#[derive(Clone, Debug)]
+pub struct PromptState {
+    pub kind: PromptKind,
+    pub buffer: String,
+    pub cursor: usize,
+}
+
 #[derive(Debug)]
 pub struct PreparedTickets {
     tickets: Vec<Ticket>,
     search_documents: SearchDocuments,
+    graph: TicketGraph,
 }
 
 impl PreparedTickets {
     #[must_use]
     pub fn new(tickets: Vec<Ticket>) -> Self {
+        Self::with_graph(tickets, TicketGraph::default())
+    }
+
+    #[must_use]
+    pub fn with_graph(tickets: Vec<Ticket>, graph: TicketGraph) -> Self {
         let search_documents = SearchDocuments::prepare(&tickets);
         Self {
             tickets,
             search_documents,
+            graph,
         }
     }
 
@@ -175,6 +202,13 @@ pub struct App {
     future: Vec<TicketKey>,
     views: Vec<NamedView>,
     pub active_view: Option<String>,
+    graph: TicketGraph,
+    pub loaded_at: Instant,
+    pub database_path: PathBuf,
+    pub read_only: bool,
+    pub stale: bool,
+    pub data_signature: u128,
+    pub prompt: Option<PromptState>,
 }
 
 impl App {
@@ -228,6 +262,13 @@ impl App {
             future: Vec::new(),
             views: Vec::new(),
             active_view: None,
+            graph: prepared.graph,
+            loaded_at: Instant::now(),
+            database_path: PathBuf::new(),
+            read_only: false,
+            stale: false,
+            data_signature: 0,
+            prompt: None,
         };
         app.show_all(None);
         app
@@ -317,6 +358,59 @@ impl App {
         self.overlay_scroll = self.overlay_scroll.min(maximum);
     }
 
+    pub fn configure_database(&mut self, path: PathBuf, read_only: bool, signature: u128) {
+        self.database_path = path;
+        self.read_only = read_only;
+        self.data_signature = signature;
+        self.loaded_at = Instant::now();
+        self.stale = false;
+    }
+
+    pub fn set_workspace_graph(&mut self, graph: crate::model::TicketGraph) {
+        self.graph = graph;
+    }
+
+    pub fn mark_stale(&mut self) {
+        self.stale = true;
+    }
+
+    #[must_use]
+    pub fn freshness_label(&self) -> String {
+        let age = self.loaded_at.elapsed();
+        if age.as_secs() < 45 {
+            "just now".into()
+        } else if age.as_secs() < 3600 {
+            format!("{}m ago", age.as_secs() / 60)
+        } else if age.as_secs() < 86_400 {
+            format!("{}h ago", age.as_secs() / 3600)
+        } else {
+            format!("{}d ago", age.as_secs() / 86_400)
+        }
+    }
+
+    #[must_use]
+    pub fn ticket_title(&self, key: &TicketKey) -> Option<&str> {
+        self.tickets
+            .iter()
+            .find(|ticket| ticket.key == *key)
+            .map(|ticket| ticket.title.as_str())
+    }
+
+    #[must_use]
+    pub fn relations_from(&self, key: &TicketKey) -> Vec<&RelationRecord> {
+        self.graph.relations_from(key)
+    }
+
+    #[must_use]
+    pub fn comments_for(&self, key: &TicketKey) -> Vec<&CommentRecord> {
+        self.graph.comments_for(key)
+    }
+
+    #[must_use]
+    pub fn history_for(&self, key: &TicketKey) -> Vec<&HistoryRecord> {
+        self.graph.history_for(key)
+    }
+
     pub fn replace_tickets(&mut self, tickets: Vec<Ticket>) {
         self.replace_prepared_tickets(PreparedTickets::new(tickets));
     }
@@ -324,7 +418,10 @@ impl App {
     pub fn replace_prepared_tickets(&mut self, prepared: PreparedTickets) {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.tickets = Arc::new(prepared.tickets);
+        self.graph = prepared.graph;
         self.search.replace_documents(prepared.search_documents);
+        self.loaded_at = Instant::now();
+        self.stale = false;
         if self.fuzzy_query().is_empty() {
             self.show_all(selected.as_ref());
         } else {
@@ -401,6 +498,17 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, pasted: &str) {
+        if self.mode == AppMode::Prompt {
+            if let Some(prompt) = self.prompt.as_mut() {
+                let pasted: String = pasted
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .collect();
+                prompt.buffer.push_str(&pasted);
+                prompt.cursor = prompt.buffer.chars().count();
+            }
+            return;
+        }
         if self.mode != AppMode::Search {
             return;
         }
@@ -519,6 +627,16 @@ impl App {
             }
             AppMode::Palette => self.handle_palette_key(key),
             AppMode::Views => self.handle_views_key(key),
+            AppMode::Info => {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('i') | KeyCode::Char('q')
+                ) {
+                    self.mode = AppMode::Browse;
+                }
+                AppAction::None
+            }
+            AppMode::Prompt => self.handle_prompt_key(key),
         }
     }
 
@@ -537,7 +655,13 @@ impl App {
         }
         if matches!(
             self.mode,
-            AppMode::Sort | AppMode::Filter | AppMode::Columns | AppMode::Palette | AppMode::Views
+            AppMode::Sort
+                | AppMode::Filter
+                | AppMode::Columns
+                | AppMode::Palette
+                | AppMode::Views
+                | AppMode::Info
+                | AppMode::Prompt
         ) {
             match mouse.kind {
                 MouseEventKind::ScrollUp => {
@@ -613,6 +737,9 @@ impl App {
             KeyCode::Char('f') => self.open_filters(),
             KeyCode::Char('w') => self.open_columns(),
             KeyCode::Char('p') | KeyCode::Char(':') => self.open_palette(),
+            KeyCode::Char('i') => {
+                self.mode = AppMode::Info;
+            }
             KeyCode::Char('m') => self.toggle_bookmark(),
             KeyCode::Char('y') => return self.copy_with(export::copy_ids),
             KeyCode::Char(' ') => self.toggle_row_selection(),
@@ -1360,11 +1487,78 @@ impl App {
                 self.history_forward();
                 AppAction::None
             }
+            CommandId::ImportJson => self.begin_import(PromptKind::ImportJson),
+            CommandId::ImportCsv => self.begin_import(PromptKind::ImportCsv),
+            CommandId::DatabaseInfo => {
+                self.mode = AppMode::Info;
+                AppAction::None
+            }
             CommandId::Quit => {
                 self.should_quit = true;
                 AppAction::None
             }
         }
+    }
+
+    fn begin_import(&mut self, kind: PromptKind) -> AppAction {
+        if self.read_only {
+            self.set_error("Database is open read-only; import is disabled");
+            return AppAction::None;
+        }
+        self.prompt = Some(PromptState {
+            kind,
+            buffer: String::new(),
+            cursor: 0,
+        });
+        self.mode = AppMode::Prompt;
+        AppAction::None
+    }
+
+    fn handle_prompt_key(&mut self, key: KeyEvent) -> AppAction {
+        let Some(prompt) = self.prompt.as_mut() else {
+            self.mode = AppMode::Browse;
+            return AppAction::None;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.prompt = None;
+                self.mode = AppMode::Browse;
+            }
+            KeyCode::Enter => {
+                let path = prompt.buffer.trim().to_owned();
+                let format = match prompt.kind {
+                    PromptKind::ImportJson => ImportFormat::Json,
+                    PromptKind::ImportCsv => ImportFormat::Csv,
+                };
+                self.prompt = None;
+                self.mode = AppMode::Browse;
+                if path.is_empty() {
+                    return AppAction::None;
+                }
+                if self.read_only {
+                    self.set_error("Database is open read-only; import is disabled");
+                    return AppAction::None;
+                }
+                return AppAction::Import {
+                    path: PathBuf::from(path),
+                    format,
+                };
+            }
+            KeyCode::Backspace => {
+                prompt.buffer.pop();
+                prompt.cursor = prompt.buffer.chars().count();
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                prompt.buffer.push(character);
+                prompt.cursor = prompt.buffer.chars().count();
+            }
+            _ => {}
+        }
+        AppAction::None
     }
 
     fn handle_views_key(&mut self, key: KeyEvent) -> AppAction {

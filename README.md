@@ -36,6 +36,18 @@ To use another database path:
 cargo run --release -- --database ./tickets.sqlite3
 ```
 
+Open an existing database without migrating, seeding, or journal changes:
+
+```console
+cargo run --release -- --database ./tickets.sqlite3 --read-only
+```
+
+Import a local JSON or CSV file, then open the TUI:
+
+```console
+cargo run --release -- --database ./tickets.sqlite3 --import ./tickets.json
+```
+
 A nonexistent path is initialized and seeded. An existing empty database is
 migrated but deliberately left empty, which prevents demo rows from being added
 to a database prepared by another tool.
@@ -69,6 +81,7 @@ to a database prepared by another tool.
 | `d` | Toggle the details screen when the terminal is under 70 columns |
 | `Enter`, `o` | Open the selected ticket in the system browser |
 | `r` | Reload and rebuild the search index in the background |
+| `i` | Show database path, row counts, and data freshness |
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
 
@@ -80,7 +93,11 @@ assignee:"Avery Chen" priority:1 tag:rust`. Values in the same field are
 combined with OR; different fields are combined with AND. `is:bookmarked`
 limits the table to locally bookmarked tickets. Active filters appear as
 removable chips. The command palette copies IDs, URLs, titles, Markdown links,
-or summaries, and exports the selection as JSON or CSV.
+or summaries, exports the selection as JSON or CSV, and imports local JSON or
+CSV files with row-level diagnostics. Press `i` for database path, row count,
+and freshness. Local SQLite changes reload automatically; the table title
+shows `Stale` until the reload finishes. `--read-only` opens an existing
+database without migrating, seeding, or changing journal mode.
 
 Ticket states and priorities use restrained semantic colors, work-item types
 and tags render as compact badges, and matched search characters are
@@ -113,9 +130,12 @@ The versioned `work_items` table stores these columns:
 | `web_url` | HTTPS browser URL for the work item |
 
 The primary key is `(organization, work_item_id)`. Tags use Azure DevOps-style
-semicolon separation. Fuzzy search covers ID, title, assignee, state, type,
-area, iteration, and tags; it intentionally excludes descriptions. Structured
-`field:value` tokens are parsed out of the query before fuzzy matching.
+semicolon separation. Schema version 2 adds local `work_item_relations`,
+`work_item_comments`, and `work_item_history` tables. The TUI displays those
+records but never edits them. Fuzzy search covers ID, title, assignee, state,
+type, area, iteration, and tags; it intentionally excludes descriptions.
+Structured `field:value` tokens are parsed out of the query before fuzzy
+matching.
 
 The application uses WAL mode and a busy timeout so a future synchronizer can
 update the database between reloads. There is no Azure DevOps authentication,

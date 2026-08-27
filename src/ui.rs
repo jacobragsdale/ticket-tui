@@ -128,6 +128,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::Columns => render_column_overlay(frame, app),
         AppMode::Palette => render_palette(frame, app),
         AppMode::Views => render_views_overlay(frame, app),
+        AppMode::Info => render_info_overlay(frame, app),
+        AppMode::Prompt => render_prompt_overlay(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
 }
@@ -201,6 +203,8 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     };
     let activity = if app.reload_pending {
         " · Reloading…"
+    } else if app.stale {
+        " · Stale"
     } else {
         ""
     };
@@ -406,15 +410,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(metadata), chunks[0]);
 
     if chunks[1].height > 0 {
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                ticket.web_url.as_str(),
-                Style::default()
-                    .fg(theme().link)
-                    .add_modifier(Modifier::UNDERLINED),
-            )),
-            chunks[1],
-        );
+        frame.render_widget(Paragraph::new(link_line(ticket.web_url.clone())), chunks[1]);
         app.hit_regions.detail_url = Some(chunks[1]);
     }
     if chunks[2].height > 0 {
@@ -425,9 +421,52 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             tags_field_line(&ticket.tags, &mut highlighter),
             field_line("Created", exact_timestamp(&ticket.created_at)),
             field_line("Changed", exact_timestamp(&ticket.changed_at)),
-            Line::default(),
-            section_line("Description"),
         ];
+        let relations = app.relations_from(&ticket.key);
+        if !relations.is_empty() {
+            detail_lines.push(Line::default());
+            detail_lines.push(section_line("Relationships"));
+            for relation in relations {
+                let title = app.ticket_title(&relation.to).unwrap_or("missing ticket");
+                detail_lines.push(relation_line(relation.kind.label(), relation.to.id, title));
+            }
+        }
+        let history = app.history_for(&ticket.key);
+        if !history.is_empty() {
+            detail_lines.push(Line::default());
+            detail_lines.push(section_line("History"));
+            for entry in history {
+                let who = entry.changed_by.as_deref().unwrap_or("unknown");
+                let old = entry.old_value.as_deref().unwrap_or("—");
+                let new = entry.new_value.as_deref().unwrap_or("—");
+                detail_lines.push(Line::from(format!(
+                    "  r{} · {} · {who}",
+                    entry.revision,
+                    exact_timestamp(&entry.changed_at)
+                )));
+                detail_lines.push(Line::styled(
+                    format!("    {}: {old} → {new}", entry.field_name),
+                    Style::default().fg(theme().body),
+                ));
+            }
+        }
+        let comments = app.comments_for(&ticket.key);
+        if !comments.is_empty() {
+            detail_lines.push(Line::default());
+            detail_lines.push(section_line("Comments"));
+            for comment in comments {
+                let who = comment.author.as_deref().unwrap_or("unknown");
+                detail_lines.push(Line::from(format!(
+                    "  {who} · {}",
+                    exact_timestamp(&comment.created_at)
+                )));
+                detail_lines.extend(comment.text.lines().map(|line| {
+                    Line::styled(format!("    {line}"), Style::default().fg(theme().body))
+                }));
+            }
+        }
+        detail_lines.push(Line::default());
+        detail_lines.push(section_line("Description"));
         if let Some(reason) = ticket.reason.as_deref() {
             detail_lines.push(field_line("Reason", reason));
             detail_lines.push(Line::default());
@@ -491,6 +530,8 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 "Type a view name  Enter save  Esc cancel"
             }
             AppMode::Views => "↑↓ choose  Enter load  n save  d delete  Esc close",
+            AppMode::Info => "Esc/i close",
+            AppMode::Prompt => "Type a file path  Enter import  Esc cancel",
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
             }
@@ -587,6 +628,7 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  m               Bookmark the selected ticket"),
         Line::from("  Space           Toggle multi-select"),
         Line::from("  y               Copy selected IDs"),
+        Line::from("  i               Database path, freshness, and counts"),
         Line::from("  Enter/o         Open selected ticket in browser"),
         Line::from("  r               Reload tickets from SQLite"),
         Line::from("  Esc             Clear active search or selection"),
@@ -838,6 +880,109 @@ fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(Paragraph::new(Text::from_iter(lines)), inner);
 }
 
+fn link_line(text: String) -> Line<'static> {
+    terminate_underline(Line::from(Span::styled(
+        text,
+        Style::default()
+            .fg(theme().link)
+            .add_modifier(Modifier::UNDERLINED),
+    )))
+}
+
+fn terminate_underline(mut line: Line<'static>) -> Line<'static> {
+    line.spans.push(Span::styled(
+        " ",
+        Style::default().remove_modifier(Modifier::UNDERLINED),
+    ));
+    line
+}
+
+fn relation_line(kind: &str, id: i64, title: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(format!("  {kind:<12} ")),
+        Span::styled(
+            id.to_string(),
+            Style::default()
+                .fg(theme().link)
+                .add_modifier(Modifier::UNDERLINED),
+        ),
+        Span::styled(" ", Style::default().remove_modifier(Modifier::UNDERLINED)),
+        Span::raw(format!(" {title}")),
+    ])
+}
+
+fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
+    let area = centered_rect(frame.area(), 62, 11);
+    frame.render_widget(Clear, area);
+    let mode = if app.read_only {
+        "read-only"
+    } else {
+        "read-write"
+    };
+    let stale = if app.stale { "stale" } else { "current" };
+    let path = if app.database_path.as_os_str().is_empty() {
+        "(not set)".into()
+    } else {
+        app.database_path.display().to_string()
+    };
+    let text = Text::from(vec![
+        field_line("Path", path),
+        field_line("Mode", mode),
+        field_line("Tickets", app.tickets().len().to_string()),
+        field_line("Visible", app.visible_count().to_string()),
+        field_line("Loaded", app.freshness_label()),
+        field_line("Freshness", stale),
+        Line::default(),
+        Line::styled(
+            "Press Esc or i to close",
+            Style::default().fg(theme().muted),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(text).block(
+            Block::default()
+                .title(" Database ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme().accent)),
+        ),
+        area,
+    );
+}
+
+fn render_prompt_overlay(frame: &mut Frame<'_>, app: &mut App) {
+    let area = centered_rect(frame.area(), 64, 5);
+    frame.render_widget(Clear, area);
+    let title = match app.prompt.as_ref().map(|prompt| prompt.kind) {
+        Some(crate::app::PromptKind::ImportCsv) => " Import CSV ",
+        _ => " Import JSON ",
+    };
+    let buffer = app
+        .prompt
+        .as_ref()
+        .map_or("", |prompt| prompt.buffer.as_str());
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme().accent));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Path: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(buffer),
+        ])),
+        inner,
+    );
+    let cursor_x = inner
+        .x
+        .saturating_add(6)
+        .saturating_add(u16::try_from(buffer.chars().count()).unwrap_or(u16::MAX));
+    frame.set_cursor_position((
+        cursor_x.min(inner.x.saturating_add(inner.width.saturating_sub(1))),
+        inner.y,
+    ));
+}
+
 fn overlay_line(text: String, selected: bool) -> Line<'static> {
     Line::styled(
         text,
@@ -884,7 +1029,7 @@ fn table_cell(
             if bookmarked {
                 text.push('*');
             }
-            highlight_searchable(&text, style, highlighter)
+            terminate_underline(highlight_searchable(&text, style, highlighter))
         }
         SortField::State => {
             highlight_searchable(&ticket.state, state_style(&ticket.state), highlighter)
@@ -922,11 +1067,6 @@ fn table_cell(
             highlight_searchable(&ticket.iteration_path, Style::default(), highlighter)
         }
         SortField::Tags => Line::from(tag_badge_spans(&ticket.tags, highlighter)),
-    };
-    let line = if field == SortField::Id {
-        line.right_aligned()
-    } else {
-        line
     };
 
     if density == RowDensity::Comfortable && field == SortField::Title {
@@ -1235,7 +1375,9 @@ mod tests {
     use time::macros::datetime;
 
     use super::*;
-    use crate::model::TicketKey;
+    use crate::model::{
+        CommentRecord, HistoryRecord, RelationKind, RelationRecord, TicketGraph, TicketKey,
+    };
 
     fn ticket() -> Ticket {
         Ticket {
@@ -1522,6 +1664,93 @@ mod tests {
                 "expected underline on matched title character {offset}"
             );
         }
+    }
+
+    #[test]
+    fn id_underline_does_not_extend_past_the_digits() {
+        let mut app = App::new(vec![ticket()]);
+        let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let area = app.hit_regions.id_column.expect("id column");
+        let (x, y) = find_buffer_text_in(buffer, area, "10001").expect("id visible in table");
+        for offset in 0..5 {
+            assert!(
+                buffer[(x + offset, y)]
+                    .modifier
+                    .contains(Modifier::UNDERLINED),
+                "digit {offset} should be underlined"
+            );
+        }
+        assert!(
+            !buffer[(x + 5, y)].modifier.contains(Modifier::UNDERLINED),
+            "padding after the id must not stay underlined"
+        );
+    }
+
+    fn find_buffer_text_in(
+        buffer: &ratatui::buffer::Buffer,
+        area: Rect,
+        needle: &str,
+    ) -> Option<(u16, u16)> {
+        let chars: Vec<char> = needle.chars().collect();
+        for y in area.y..area.y.saturating_add(area.height) {
+            let width = area.width;
+            let row: Vec<char> = (0..width)
+                .map(|dx| {
+                    buffer[(area.x + dx, y)]
+                        .symbol()
+                        .chars()
+                        .next()
+                        .unwrap_or(' ')
+                })
+                .collect();
+            if let Some(start) = row.windows(chars.len()).position(|window| window == chars) {
+                return Some((area.x + u16::try_from(start).unwrap(), y));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn details_render_relationships_history_and_comments() {
+        let item = ticket();
+        let mut app = App::new(vec![item.clone()]);
+        app.narrow_details = true;
+        app.focus = Focus::Details;
+        app.set_workspace_graph(TicketGraph {
+            relations: vec![RelationRecord {
+                from: item.key.clone(),
+                to: TicketKey {
+                    organization: "demo".into(),
+                    id: 99,
+                },
+                kind: RelationKind::Parent,
+            }],
+            comments: vec![CommentRecord {
+                ticket: item.key.clone(),
+                comment_id: 1,
+                created_at: "2026-01-03T00:00:00Z".into(),
+                author: Some("Avery Chen".into()),
+                text: "Looks good".into(),
+            }],
+            history: vec![HistoryRecord {
+                ticket: item.key,
+                revision: 2,
+                changed_at: "2026-01-02T00:00:00Z".into(),
+                changed_by: Some("Jordan Patel".into()),
+                field_name: "State".into(),
+                old_value: Some("New".into()),
+                new_value: Some("Active".into()),
+            }],
+        });
+
+        let text = render_text(60, 36, &mut app);
+        assert!(text.contains("Relationships"));
+        assert!(text.contains("Parent"));
+        assert!(text.contains("History"));
+        assert!(text.contains("Comments"));
+        assert!(text.contains("Looks good"));
     }
 
     #[test]

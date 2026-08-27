@@ -56,7 +56,7 @@ connect to a remote ticket service.
 - [x] Preserve ticket selection, table offset, detail position, and active pane
   whenever the underlying operation permits it.
 - [x] Make empty, loading, and error states visually distinct.
-- [ ] Add a stale-data state after automatic watching and freshness metadata
+- [x] Add a stale-data state after automatic watching and freshness metadata
   are available.
 - [x] Provide immediate visual feedback for every mouse affordance.
 
@@ -71,7 +71,7 @@ connect to a remote ticket service.
 - [x] Show relative changed times in the table and exact timestamps in details.
 - [x] Reorganize current details into clear overview, planning, and description
   sections with all metadata reachable by scrolling.
-- [ ] Add relationships and history sections when those data are available.
+- [x] Add relationships and history sections when those data are available.
 - [x] Add a detail scrollbar and bounded position indicator.
 - [x] Add a table scrollbar or equivalent position indicator.
 - [x] Replace the narrow-layout `d` convention with a visible Tickets/Details
@@ -110,16 +110,16 @@ connect to a remote ticket service.
 
 ## Phase 4: richer local data
 
-- [ ] Add optional local JSON and CSV import commands with validation and clear
+- [x] Add optional local JSON and CSV import commands with validation and clear
   diagnostics.
-- [ ] Add a true `--read-only` database mode that performs no migration,
+- [x] Add a true `--read-only` database mode that performs no migration,
   journaling change, directory creation, or seeding.
-- [ ] Detect local SQLite changes and reload automatically.
-- [ ] Show database path, last load time, row count, and data freshness.
-- [ ] Extend the versioned schema for parent, child, related, predecessor,
+- [x] Detect local SQLite changes and reload automatically.
+- [x] Show database path, last load time, row count, and data freshness.
+- [x] Extend the versioned schema for parent, child, related, predecessor,
   successor, and duplicate relationships.
-- [ ] Display ticket relationships as a compact tree or linked list.
-- [ ] Support locally supplied history and comment records without editing them.
+- [x] Display ticket relationships as a compact tree or linked list.
+- [x] Support locally supplied history and comment records without editing them.
 
 ## Phase 5: scale, accessibility, and distribution
 

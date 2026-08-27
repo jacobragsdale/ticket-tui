@@ -100,7 +100,136 @@ impl SortField {
 
     #[must_use]
     pub const fn is_numeric(self) -> bool {
-        matches!(self, Self::Id | Self::Priority)
+        matches!(self, Self::Priority)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelationKind {
+    Parent,
+    Child,
+    Related,
+    Predecessor,
+    Successor,
+    Duplicate,
+}
+
+impl RelationKind {
+    pub const ALL: [Self; 6] = [
+        Self::Parent,
+        Self::Child,
+        Self::Related,
+        Self::Predecessor,
+        Self::Successor,
+        Self::Duplicate,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Parent => "parent",
+            Self::Child => "child",
+            Self::Related => "related",
+            Self::Predecessor => "predecessor",
+            Self::Successor => "successor",
+            Self::Duplicate => "duplicate",
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Parent => "Parent",
+            Self::Child => "Child",
+            Self::Related => "Related",
+            Self::Predecessor => "Predecessor",
+            Self::Successor => "Successor",
+            Self::Duplicate => "Duplicate",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value.trim().to_ascii_lowercase().as_str() {
+            "parent" => Self::Parent,
+            "child" => Self::Child,
+            "related" | "relates" => Self::Related,
+            "predecessor" | "predecessorof" => Self::Predecessor,
+            "successor" | "successorof" => Self::Successor,
+            "duplicate" | "duplicateof" => Self::Duplicate,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelationRecord {
+    pub from: TicketKey,
+    pub to: TicketKey,
+    pub kind: RelationKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommentRecord {
+    pub ticket: TicketKey,
+    pub comment_id: i64,
+    pub created_at: String,
+    pub author: Option<String>,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoryRecord {
+    pub ticket: TicketKey,
+    pub revision: i64,
+    pub changed_at: String,
+    pub changed_by: Option<String>,
+    pub field_name: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TicketGraph {
+    pub relations: Vec<RelationRecord>,
+    pub comments: Vec<CommentRecord>,
+    pub history: Vec<HistoryRecord>,
+}
+
+impl TicketGraph {
+    #[must_use]
+    pub fn relations_from(&self, key: &TicketKey) -> Vec<&RelationRecord> {
+        self.relations
+            .iter()
+            .filter(|relation| relation.from == *key)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn comments_for(&self, key: &TicketKey) -> Vec<&CommentRecord> {
+        let mut comments: Vec<_> = self
+            .comments
+            .iter()
+            .filter(|comment| comment.ticket == *key)
+            .collect();
+        comments.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+        comments
+    }
+
+    #[must_use]
+    pub fn history_for(&self, key: &TicketKey) -> Vec<&HistoryRecord> {
+        let mut history: Vec<_> = self
+            .history
+            .iter()
+            .filter(|entry| entry.ticket == *key)
+            .collect();
+        history.sort_by(|left, right| {
+            left.revision
+                .cmp(&right.revision)
+                .then_with(|| left.changed_at.cmp(&right.changed_at))
+                .then_with(|| left.field_name.cmp(&right.field_name))
+        });
+        history
     }
 }
 

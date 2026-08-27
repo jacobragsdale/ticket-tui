@@ -14,7 +14,8 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use ticket_tui::app::{App, AppAction, PreparedTickets};
-use ticket_tui::db::{SqliteTicketRepository, default_database_path};
+use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
+use ticket_tui::import::{self, ImportFormat};
 use ticket_tui::session;
 use url::Url;
 
@@ -24,6 +25,12 @@ struct Cli {
     /// SQLite database to open instead of the platform data-directory default
     #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
     database: Option<PathBuf>,
+    /// Open the database without migrating, seeding, or journal changes
+    #[arg(long)]
+    read_only: bool,
+    /// Import a local JSON or CSV file before opening the TUI
+    #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+    import: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -32,7 +39,7 @@ struct ReloadEngine {
 }
 
 impl ReloadEngine {
-    fn start(&mut self, path: &Path) -> Result<bool> {
+    fn start(&mut self, path: &Path, read_only: bool) -> Result<bool> {
         if self.receiver.is_some() {
             return Ok(false);
         }
@@ -43,9 +50,14 @@ impl ReloadEngine {
             .name("ticket-reload".into())
             .spawn(move || {
                 let result = (|| -> Result<PreparedTickets> {
-                    let opened = SqliteTicketRepository::open(&path)?;
-                    let tickets = opened.repository.load_all()?;
-                    Ok(PreparedTickets::new(tickets))
+                    let repository = if read_only {
+                        SqliteTicketRepository::open_read_only(&path)?
+                    } else {
+                        SqliteTicketRepository::open(&path)?.repository
+                    };
+                    let tickets = repository.load_all()?;
+                    let graph = repository.load_graph()?;
+                    Ok(PreparedTickets::with_graph(tickets, graph))
                 })()
                 .map_err(|error| format!("{error:#}"));
                 let _ = sender.send(result);
@@ -76,28 +88,52 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let database_path = cli.database.unwrap_or_else(default_database_path);
-    let opened = SqliteTicketRepository::open(&database_path)?;
-    let tickets = opened.repository.load_all()?;
+    if cli.read_only && cli.import.is_some() {
+        bail!("--import cannot be used with --read-only");
+    }
+    let (mut repository, seeded_demo_data) = if cli.read_only {
+        (
+            SqliteTicketRepository::open_read_only(&database_path)?,
+            false,
+        )
+    } else {
+        let opened = SqliteTicketRepository::open(&database_path)?;
+        (opened.repository, opened.seeded_demo_data)
+    };
+    if let Some(import_path) = &cli.import {
+        let report = import_file(&mut repository, import_path, import_format(import_path))?;
+        eprintln!("imported {report}");
+    }
+    let tickets = repository.load_all()?;
+    let graph = repository.load_graph()?;
     let mut app = App::new(tickets);
-    let session_path = session::path_for(opened.repository.path());
+    app.set_workspace_graph(graph);
+    app.configure_database(
+        repository.path().to_path_buf(),
+        cli.read_only,
+        db::data_signature(repository.path()),
+    );
+    let session_path = session::path_for(repository.path());
     match session::load(&session_path) {
         Ok(loaded) => app.restore_session(loaded),
         Err(error) => app.set_error(format!("Could not load session: {error:#}")),
     }
-    if opened.seeded_demo_data {
+    if seeded_demo_data {
         app.set_status(format!(
             "Created demo database with 500 tickets at {}",
-            opened.repository.path().display()
+            repository.path().display()
         ));
+    } else if cli.read_only {
+        app.set_status(format!("Opened {} read-only", repository.path().display()));
     }
-    let result = run_terminal(&mut app, &opened.repository);
+    let result = run_terminal(&mut app, &mut repository);
     if let Err(error) = session::save(&session_path, &app.snapshot_session()) {
         eprintln!("warning: could not save session: {error:#}");
     }
     result
 }
 
-fn run_terminal(app: &mut App, repository: &SqliteTicketRepository) -> Result<()> {
+fn run_terminal(app: &mut App, repository: &mut SqliteTicketRepository) -> Result<()> {
     let mut terminal = ratatui::init();
     let _restore = TerminalRestore;
     let opener = SystemUrlOpener;
@@ -108,7 +144,8 @@ fn run_terminal(app: &mut App, repository: &SqliteTicketRepository) -> Result<()
     let mut redraw = true;
     while !app.should_quit {
         redraw |= app.poll_search();
-        redraw |= poll_reload(app, &mut reloader);
+        redraw |= poll_reload(app, repository, &mut reloader);
+        redraw |= poll_watch(app, repository, &mut reloader);
         redraw |= persist_session(app, repository);
         redraw |= app.tick();
         if redraw {
@@ -146,20 +183,13 @@ fn run_terminal(app: &mut App, repository: &SqliteTicketRepository) -> Result<()
 fn handle_action(
     action: AppAction,
     app: &mut App,
-    repository: &SqliteTicketRepository,
+    repository: &mut SqliteTicketRepository,
     opener: &dyn UrlOpener,
     reloader: &mut ReloadEngine,
 ) {
     match action {
         AppAction::None => {}
-        AppAction::Reload => match reloader.start(repository.path()) {
-            Ok(true) => {
-                app.reload_pending = true;
-                app.set_status("Reloading tickets…");
-            }
-            Ok(false) => app.set_status("Reload already in progress"),
-            Err(error) => app.set_error(format!("Could not start reload: {error:#}")),
-        },
+        AppAction::Reload => start_reload(app, repository, reloader, "Reloading tickets…"),
         AppAction::OpenUrl(raw_url) => match open_https_url(&raw_url, opener) {
             Ok(()) => app.set_status(format!("Opened {raw_url}")),
             Err(error) => app.set_error(format!("Could not open ticket: {error:#}")),
@@ -172,6 +202,92 @@ fn handle_action(
             Ok(()) => app.set_status(format!("Exported {}", path.display())),
             Err(error) => app.set_error(format!("Could not export {}: {error:#}", path.display())),
         },
+        AppAction::Import { path, format } => match import_file(repository, &path, format) {
+            Ok(summary) => {
+                app.set_status(format!("Imported {summary}"));
+                start_reload(app, repository, reloader, "Reloading imported tickets…");
+            }
+            Err(error) => app.set_error(format!("Import failed: {error:#}")),
+        },
+    }
+}
+
+fn start_reload(
+    app: &mut App,
+    repository: &SqliteTicketRepository,
+    reloader: &mut ReloadEngine,
+    message: &str,
+) {
+    match reloader.start(repository.path(), app.read_only) {
+        Ok(true) => {
+            app.reload_pending = true;
+            app.set_status(message);
+        }
+        Ok(false) => app.set_status("Reload already in progress"),
+        Err(error) => app.set_error(format!("Could not start reload: {error:#}")),
+    }
+}
+
+fn poll_watch(
+    app: &mut App,
+    repository: &SqliteTicketRepository,
+    reloader: &mut ReloadEngine,
+) -> bool {
+    let signature = db::data_signature(repository.path());
+    if signature == app.data_signature || app.reload_pending {
+        return false;
+    }
+    app.mark_stale();
+    start_reload(app, repository, reloader, "Database changed; reloading…");
+    true
+}
+
+fn import_file(
+    repository: &mut SqliteTicketRepository,
+    path: &Path,
+    format: ImportFormat,
+) -> Result<String> {
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let batch = match format {
+        ImportFormat::Json => import::parse_json(&raw),
+        ImportFormat::Csv => import::parse_csv(&raw),
+    };
+    if batch.tickets.is_empty() {
+        let details = batch
+            .diagnostics
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        bail!(
+            "no valid tickets in {}{}",
+            path.display(),
+            if details.is_empty() {
+                String::new()
+            } else {
+                format!(" ({details})")
+            }
+        );
+    }
+    repository.import_batch(&batch)?;
+    let mut summary = batch.summary();
+    if !batch.diagnostics.is_empty() {
+        let issues: Vec<_> = batch.diagnostics.iter().map(ToString::to_string).collect();
+        summary = format!("{summary}; issues: {}", issues.join("; "));
+    }
+    Ok(summary)
+}
+
+fn import_format(path: &Path) -> ImportFormat {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("csv") => ImportFormat::Csv,
+        _ => ImportFormat::Json,
     }
 }
 
@@ -246,7 +362,11 @@ fn write_to_command(mut command: Command, text: &str) -> Result<()> {
     }
 }
 
-fn poll_reload(app: &mut App, reloader: &mut ReloadEngine) -> bool {
+fn poll_reload(
+    app: &mut App,
+    repository: &SqliteTicketRepository,
+    reloader: &mut ReloadEngine,
+) -> bool {
     let Some(result) = reloader.try_result() else {
         return false;
     };
@@ -255,6 +375,11 @@ fn poll_reload(app: &mut App, reloader: &mut ReloadEngine) -> bool {
         Ok(prepared) => {
             let count = prepared.ticket_count();
             app.replace_prepared_tickets(prepared);
+            app.configure_database(
+                repository.path().to_path_buf(),
+                app.read_only,
+                db::data_signature(repository.path()),
+            );
             app.set_status(format!("Reloaded {count} tickets"));
         }
         Err(error) => app.set_error(format!("Reload failed: {error}")),
@@ -332,8 +457,8 @@ mod tests {
         drop(opened);
         let mut reloader = ReloadEngine::default();
 
-        assert!(reloader.start(&path).unwrap());
-        assert!(!reloader.start(&path).unwrap());
+        assert!(reloader.start(&path, false).unwrap());
+        assert!(!reloader.start(&path, false).unwrap());
 
         let deadline = Instant::now() + Duration::from_secs(2);
         let prepared = loop {

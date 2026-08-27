@@ -4,6 +4,7 @@ pub mod command;
 pub mod db;
 pub mod export;
 pub mod filter;
+pub mod import;
 pub mod model;
 pub mod search;
 pub mod session;
