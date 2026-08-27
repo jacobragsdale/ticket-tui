@@ -315,6 +315,8 @@ impl SqliteTicketRepository {
         migrate(&connection)?;
         if is_new {
             seed_demo_data(&mut connection, DEMO_TICKET_COUNT)?;
+        } else {
+            seed_demo_graph_if_absent(&mut connection)?;
         }
 
         Ok(OpenedRepository {
@@ -795,6 +797,52 @@ fn upsert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
     Ok(())
 }
 
+fn seed_demo_graph_if_absent(connection: &mut Connection) -> Result<bool> {
+    if !demo_graph_is_missing(connection)? {
+        return Ok(false);
+    }
+    let transaction = connection.transaction()?;
+    seed_demo_graph(&transaction, DEMO_TICKET_COUNT, OffsetDateTime::now_utc())?;
+    transaction.commit()?;
+    Ok(true)
+}
+
+fn demo_graph_is_missing(connection: &Connection) -> Result<bool> {
+    if !table_exists(connection, "work_items")? || !table_exists(connection, "work_item_relations")?
+    {
+        return Ok(false);
+    }
+    let ticket_count: i64 =
+        connection.query_row("SELECT COUNT(*) FROM work_items", [], |row| row.get(0))?;
+    if ticket_count != DEMO_TICKET_COUNT as i64 {
+        return Ok(false);
+    }
+    let demo_tickets: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM work_items
+         WHERE organization = 'example-org'
+           AND project = 'atlas'
+           AND work_item_id BETWEEN 10001 AND 10500",
+        [],
+        |row| row.get(0),
+    )?;
+    if demo_tickets != ticket_count {
+        return Ok(false);
+    }
+    let relation_count: i64 =
+        connection.query_row("SELECT COUNT(*) FROM work_item_relations", [], |row| {
+            row.get(0)
+        })?;
+    let comment_count: i64 =
+        connection.query_row("SELECT COUNT(*) FROM work_item_comments", [], |row| {
+            row.get(0)
+        })?;
+    let history_count: i64 =
+        connection.query_row("SELECT COUNT(*) FROM work_item_history", [], |row| {
+            row.get(0)
+        })?;
+    Ok(relation_count == 0 && comment_count == 0 && history_count == 0)
+}
+
 fn seed_demo_data(connection: &mut Connection, count: usize) -> Result<()> {
     let transaction = connection.transaction()?;
     let anchor = OffsetDateTime::now_utc();
@@ -1011,6 +1059,35 @@ mod tests {
 
         assert!(!opened.seeded_demo_data);
         assert!(opened.repository.load_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn existing_demo_tickets_gain_family_links_when_the_graph_is_empty() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let opened = SqliteTicketRepository::open(&path).unwrap();
+        opened
+            .repository
+            .connection
+            .execute_batch(
+                "DELETE FROM work_item_relations;
+                 DELETE FROM work_item_comments;
+                 DELETE FROM work_item_history;",
+            )
+            .unwrap();
+        drop(opened);
+
+        let reopened = SqliteTicketRepository::open(&path).unwrap();
+        let graph = reopened.repository.load_graph().unwrap();
+        assert!(!graph.relations.is_empty());
+        assert!(
+            graph.relations.iter().any(|relation| {
+                relation.from.id == 10_007
+                    && relation.to.id == 10_006
+                    && relation.kind == RelationKind::Parent
+            }),
+            "epic 10006 should have child 10007 after the graph is backfilled"
+        );
     }
 
     #[test]
