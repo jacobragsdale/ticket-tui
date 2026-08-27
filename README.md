@@ -75,13 +75,13 @@ to a database prepared by another tool.
 | `p` / `:` | Open the command palette |
 | `V` | Open named views; `n` saves, `Enter` loads, `d` deletes |
 | `m` | Bookmark or unbookmark the selected ticket |
-| `Space` | Toggle multi-select on the current row |
+| `Space` | Toggle multi-select, or expand / collapse the family cursor |
 | `y` | Copy selected (or current) ticket IDs |
 | `[` / `]` | Jump to the previous or next recently viewed ticket |
-| `Tab` | Switch focus between tickets and details |
+| `Tab` | Cycle focus through tickets, family, and details |
 | `d` | Toggle the details screen when the terminal is under 70 columns |
-| `h` / `l` | When details is focused, highlight the previous or next family ticket |
-| `Enter` | Jump to the highlighted family ticket, or open it in the browser |
+| `h` / `l` | When family is focused, collapse / expand, or move to the parent / first child |
+| `Enter` | Select the family cursor ticket, or open the selected ticket in the browser |
 | `o` | Open the selected ticket in the system browser |
 | `r` | Reload and rebuild the search index in the background |
 | `i` | Show database path, row counts, and data freshness |
@@ -93,8 +93,8 @@ without restoring terminal drag-select. Wheel scrolling moves the hovered
 table, details pane, help, or overlay by three rows or lines and does not
 change keyboard focus or the selected ticket. Left-click activates the
 visible control under the pointer on release: search, filter pills, sort
-headers, ticket rows, checkboxes, bookmark markers, underlined IDs and URLs,
-tabs, overlay rows, and close/action buttons. Dragging over visible text
+headers, ticket rows, checkboxes, bookmark markers, family disclosure markers,
+underlined IDs and URLs, tabs, overlay rows, and close/action buttons. Dragging over visible text
 selects it and copies the plain text on release. Bracketed paste inserts at
 the caret in search, the command palette, the import prompt, and the named-view
 editor. Scrollbar tracks page by a viewport-minus-one step; thumbs can be
@@ -145,10 +145,11 @@ The versioned `work_items` table stores these columns:
 The primary key is `(organization, work_item_id)`. Tags use Azure DevOps-style
 semicolon separation. Schema version 2 adds local `work_item_relations`,
 `work_item_comments`, and `work_item_history` tables. The TUI displays those
-records but never edits them. Parent and child links render as a family tree in
-the details pane; other relation kinds stay in a separate Links list. Click a
-family ticket ID, or highlight one with `h`/`l` and press `Enter`, to select it
-in the table. Fuzzy search covers ID, title, assignee, state,
+records but never edits them. Parent and child links render as a collapsible
+family tree in the details pane; related, predecessor, successor, and duplicate
+links stay in a separate Links list. Click a disclosure marker to expand or
+collapse a branch, click a family row, or press `Enter` on the family cursor to
+select that ticket in the table. Fuzzy search covers ID, title, assignee, state,
 type, area, iteration, and tags; it intentionally excludes descriptions.
 Structured `field:value` tokens are parsed out of the query before fuzzy
 matching.
