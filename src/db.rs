@@ -74,6 +74,214 @@ CREATE TABLE IF NOT EXISTS work_item_history (
 );
 "#;
 
+#[derive(Clone, Copy)]
+enum SqlAffinity {
+    Integer,
+    Text,
+}
+
+impl SqlAffinity {
+    const fn as_sql(self) -> &'static str {
+        match self {
+            Self::Integer => "INTEGER",
+            Self::Text => "TEXT",
+        }
+    }
+
+    fn matches(self, declared: &str) -> bool {
+        let upper = declared.to_ascii_uppercase();
+        match self {
+            Self::Integer => upper.contains("INT"),
+            Self::Text => {
+                upper.contains("CHAR") || upper.contains("CLOB") || upper.contains("TEXT")
+            }
+        }
+    }
+}
+
+struct ColumnSpec {
+    name: &'static str,
+    affinity: SqlAffinity,
+}
+
+struct TableSpec {
+    name: &'static str,
+    columns: &'static [ColumnSpec],
+}
+
+const WORK_ITEMS_TABLE: TableSpec = TableSpec {
+    name: "work_items",
+    columns: &[
+        ColumnSpec {
+            name: "organization",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "project",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "work_item_id",
+            affinity: SqlAffinity::Integer,
+        },
+        ColumnSpec {
+            name: "revision",
+            affinity: SqlAffinity::Integer,
+        },
+        ColumnSpec {
+            name: "work_item_type",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "title",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "state",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "reason",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "assigned_to",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "priority",
+            affinity: SqlAffinity::Integer,
+        },
+        ColumnSpec {
+            name: "area_path",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "iteration_path",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "tags",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "description",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "created_at",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "changed_at",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "web_url",
+            affinity: SqlAffinity::Text,
+        },
+    ],
+};
+
+const RELATED_TABLES: [TableSpec; 3] = [
+    TableSpec {
+        name: "work_item_relations",
+        columns: &[
+            ColumnSpec {
+                name: "organization",
+                affinity: SqlAffinity::Text,
+            },
+            ColumnSpec {
+                name: "from_id",
+                affinity: SqlAffinity::Integer,
+            },
+            ColumnSpec {
+                name: "to_id",
+                affinity: SqlAffinity::Integer,
+            },
+            ColumnSpec {
+                name: "kind",
+                affinity: SqlAffinity::Text,
+            },
+        ],
+    },
+    TableSpec {
+        name: "work_item_comments",
+        columns: &[
+            ColumnSpec {
+                name: "organization",
+                affinity: SqlAffinity::Text,
+            },
+            ColumnSpec {
+                name: "work_item_id",
+                affinity: SqlAffinity::Integer,
+            },
+            ColumnSpec {
+                name: "comment_id",
+                affinity: SqlAffinity::Integer,
+            },
+            ColumnSpec {
+                name: "created_at",
+                affinity: SqlAffinity::Text,
+            },
+            ColumnSpec {
+                name: "author",
+                affinity: SqlAffinity::Text,
+            },
+            ColumnSpec {
+                name: "body",
+                affinity: SqlAffinity::Text,
+            },
+        ],
+    },
+    TableSpec {
+        name: "work_item_history",
+        columns: &[
+            ColumnSpec {
+                name: "organization",
+                affinity: SqlAffinity::Text,
+            },
+            ColumnSpec {
+                name: "work_item_id",
+                affinity: SqlAffinity::Integer,
+            },
+            ColumnSpec {
+                name: "revision",
+                affinity: SqlAffinity::Integer,
+            },
+            ColumnSpec {
+                name: "changed_at",
+                affinity: SqlAffinity::Text,
+            },
+            ColumnSpec {
+                name: "changed_by",
+                affinity: SqlAffinity::Text,
+            },
+            ColumnSpec {
+                name: "field_name",
+                affinity: SqlAffinity::Text,
+            },
+            ColumnSpec {
+                name: "old_value",
+                affinity: SqlAffinity::Text,
+            },
+            ColumnSpec {
+                name: "new_value",
+                affinity: SqlAffinity::Text,
+            },
+        ],
+    },
+];
+
+const CURRENT_TABLES: [&TableSpec; 4] = [
+    &WORK_ITEMS_TABLE,
+    &RELATED_TABLES[0],
+    &RELATED_TABLES[1],
+    &RELATED_TABLES[2],
+];
+
+const SCHEMA_REPAIR_HINT: &str = "Recreate this database or restore a backup that matches schema version 2. Older ticket-tui files can be migrated by opening them without --read-only.";
+
 #[derive(Debug)]
 pub struct OpenedRepository {
     pub repository: SqliteTicketRepository,
@@ -136,6 +344,7 @@ impl SqliteTicketRepository {
     }
 
     pub fn load_all(&self) -> Result<Vec<Ticket>> {
+        validate_schema(&self.connection)?;
         let mut statement = self.connection.prepare(
             "SELECT organization, project, work_item_id, revision, work_item_type,
                     title, state, reason, assigned_to, priority, area_path,
@@ -360,8 +569,12 @@ pub fn default_database_path() -> PathBuf {
     )
 }
 
+fn schema_version(connection: &Connection) -> Result<i64> {
+    Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+}
+
 fn migrate(connection: &Connection) -> Result<()> {
-    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let version = schema_version(connection)?;
     if version > SCHEMA_VERSION {
         bail!("database schema version {version} is newer than supported version {SCHEMA_VERSION}");
     }
@@ -379,17 +592,22 @@ fn migrate(connection: &Connection) -> Result<()> {
         connection.execute_batch(CREATE_WORK_ITEMS)?;
         connection.execute_batch(CREATE_RELATED_TABLES)?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        return Ok(());
-    }
-    if version == 1 {
+    } else if version == 1 {
+        let problems = schema_problems(connection, &[&WORK_ITEMS_TABLE])?;
+        if !problems.is_empty() {
+            bail!(
+                "cannot migrate schema version 1 to {SCHEMA_VERSION}:\n- {}\n{SCHEMA_REPAIR_HINT}",
+                problems.join("\n- ")
+            );
+        }
         connection.execute_batch(CREATE_RELATED_TABLES)?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
-    Ok(())
+    validate_schema(connection)
 }
 
 fn validate_readable_schema(connection: &Connection) -> Result<()> {
-    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    let version = schema_version(connection)?;
     if version == 0 {
         bail!("database has no ticket-tui schema; reopen without --read-only to migrate");
     }
@@ -401,10 +619,76 @@ fn validate_readable_schema(connection: &Connection) -> Result<()> {
             "database schema version {version} needs migration to {SCHEMA_VERSION}; reopen without --read-only"
         );
     }
-    if !table_exists(connection, "work_items")? {
-        bail!("database is missing the work_items table");
+    validate_schema(connection)
+}
+
+fn validate_schema(connection: &Connection) -> Result<()> {
+    let problems = schema_problems(connection, &CURRENT_TABLES)?;
+    if problems.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    bail!(
+        "incompatible ticket-tui schema (version {SCHEMA_VERSION}):\n- {}\n{SCHEMA_REPAIR_HINT}",
+        problems.join("\n- ")
+    );
+}
+
+fn schema_problems(connection: &Connection, tables: &[&TableSpec]) -> Result<Vec<String>> {
+    let mut problems = Vec::new();
+    for table in tables {
+        match table_columns(connection, table.name)? {
+            None => problems.push(format!("missing table {}", table.name)),
+            Some(columns) => {
+                for spec in table.columns {
+                    match columns
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(spec.name))
+                    {
+                        None => problems.push(format!(
+                            "{} is missing column {} ({})",
+                            table.name,
+                            spec.name,
+                            spec.affinity.as_sql()
+                        )),
+                        Some((_, declared)) if !spec.affinity.matches(declared) => {
+                            let declared = if declared.is_empty() {
+                                "no type"
+                            } else {
+                                declared.as_str()
+                            };
+                            problems.push(format!(
+                                "{}.{} is declared as {}; {} is required",
+                                table.name,
+                                spec.name,
+                                declared,
+                                spec.affinity.as_sql()
+                            ));
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+    }
+    Ok(problems)
+}
+
+fn table_columns(
+    connection: &Connection,
+    name: &'static str,
+) -> Result<Option<Vec<(String, String)>>> {
+    let name = match name {
+        "work_items" | "work_item_relations" | "work_item_comments" | "work_item_history" => name,
+        other => bail!("internal error: unknown table {other}"),
+    };
+    if !table_exists(connection, name)? {
+        return Ok(None);
+    }
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({name})"))?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    })?;
+    Ok(Some(rows.collect::<rusqlite::Result<Vec<_>>>()?))
 }
 
 fn parse_row_timestamp(
@@ -851,5 +1135,170 @@ mod tests {
         let error = format!("{:#}", opened.repository.load_all().unwrap_err());
         assert!(error.contains("10001"), "{error}");
         assert!(error.contains("created_at"), "{error}");
+    }
+
+    fn write_v2_work_items(connection: &Connection, extra_ddl: &str) {
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE work_items (
+                    organization TEXT NOT NULL,
+                    project TEXT NOT NULL,
+                    work_item_id INTEGER NOT NULL,
+                    revision INTEGER NOT NULL,
+                    work_item_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    reason TEXT,
+                    assigned_to TEXT,
+                    priority INTEGER,
+                    area_path TEXT NOT NULL,
+                    iteration_path TEXT NOT NULL,
+                    tags TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    changed_at TEXT NOT NULL
+                    {extra_ddl}
+                    , PRIMARY KEY (organization, work_item_id)
+                );
+                {CREATE_RELATED_TABLES}
+                PRAGMA user_version = 2;"
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn missing_column_is_reported_before_rows_load() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("missing-column.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        write_v2_work_items(&connection, "");
+        drop(connection);
+
+        let error = format!("{:#}", SqliteTicketRepository::open(&path).unwrap_err());
+        assert!(error.contains("web_url"), "{error}");
+        assert!(error.contains("missing column"), "{error}");
+        assert!(error.contains("schema version 2"), "{error}");
+    }
+
+    #[test]
+    fn wrong_column_type_and_missing_table_are_reported() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("wrong-type.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE work_items (
+                    organization TEXT NOT NULL,
+                    project TEXT NOT NULL,
+                    work_item_id INTEGER NOT NULL,
+                    revision INTEGER NOT NULL,
+                    work_item_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    reason TEXT,
+                    assigned_to TEXT,
+                    priority TEXT,
+                    area_path TEXT NOT NULL,
+                    iteration_path TEXT NOT NULL,
+                    tags TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    changed_at TEXT NOT NULL,
+                    web_url TEXT NOT NULL,
+                    PRIMARY KEY (organization, work_item_id)
+                );
+                PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = format!("{:#}", SqliteTicketRepository::open(&path).unwrap_err());
+        assert!(error.contains("priority"), "{error}");
+        assert!(error.contains("INTEGER"), "{error}");
+        assert!(error.contains("work_item_relations"), "{error}");
+    }
+
+    #[test]
+    fn extra_columns_are_compatible() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("extra.sqlite3");
+        let opened = SqliteTicketRepository::open(&path).unwrap();
+        opened
+            .repository
+            .connection
+            .execute("ALTER TABLE work_items ADD COLUMN extra TEXT", [])
+            .unwrap();
+        drop(opened);
+
+        let reopened = SqliteTicketRepository::open(&path).unwrap();
+        assert_eq!(
+            reopened.repository.load_all().unwrap().len(),
+            DEMO_TICKET_COUNT
+        );
+    }
+
+    #[test]
+    fn read_only_mode_rejects_outdated_and_broken_schema() {
+        let directory = tempdir().unwrap();
+        let v1 = directory.path().join("v1.sqlite3");
+        let connection = Connection::open(&v1).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE work_items (
+                    organization TEXT NOT NULL,
+                    project TEXT NOT NULL,
+                    work_item_id INTEGER NOT NULL,
+                    revision INTEGER NOT NULL,
+                    work_item_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    reason TEXT,
+                    assigned_to TEXT,
+                    priority INTEGER,
+                    area_path TEXT NOT NULL,
+                    iteration_path TEXT NOT NULL,
+                    tags TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    changed_at TEXT NOT NULL,
+                    web_url TEXT NOT NULL,
+                    PRIMARY KEY (organization, work_item_id)
+                );",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        drop(connection);
+
+        let error = format!(
+            "{:#}",
+            SqliteTicketRepository::open_read_only(&v1).unwrap_err()
+        );
+        assert!(error.contains("needs migration"), "{error}");
+        assert!(error.contains("--read-only"), "{error}");
+    }
+
+    #[test]
+    fn v1_missing_column_blocks_migration() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("v1-broken.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE work_items (
+                    organization TEXT NOT NULL,
+                    project TEXT NOT NULL,
+                    work_item_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    PRIMARY KEY (organization, work_item_id)
+                );",
+            )
+            .unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        drop(connection);
+
+        let error = format!("{:#}", SqliteTicketRepository::open(&path).unwrap_err());
+        assert!(error.contains("cannot migrate"), "{error}");
+        assert!(error.contains("web_url"), "{error}");
     }
 }
