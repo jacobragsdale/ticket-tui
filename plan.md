@@ -137,8 +137,8 @@ Additional rules:
   select.
 - Wheel input over the tree continues to scroll `ScrollSurface::Details` by the
   existing amount without moving the family cursor or changing focus.
-- Do not paint a family row as selected on pointer hover. A drag that begins on
-  a tree row remains text selection rather than a click.
+- Paint family rows with the same full-row hover highlight as ticket rows. A
+  drag that begins on a tree row remains text selection rather than a click.
 - Do not add double-click, right-click, hover tooltips, drag-to-reparent, or
   horizontal gestures.
 
@@ -251,9 +251,8 @@ In `src/ui.rs`:
    example: `↑↓ move  Enter select  Tab details`.
 
 Continue using `PointerTarget::JumpToTicket` for each tree row and
-`ScrollSurface::Details` for its scroll ownership. Exclude tree rows from
-generic hover painting while preserving press, release, drag cancellation, and
-layered-target behavior.
+`ScrollSurface::Details` for its scroll ownership. Reuse generic hover painting
+while preserving press, release, drag cancellation, and layered-target behavior.
 
 ### 5. Keep responsive behavior deliberate
 
@@ -301,7 +300,7 @@ Extend `src/ui.rs` tests to cover:
 - all descendants appearing in the buffer and hit regions;
 - narrow truncation preserving connectors and IDs;
 - a row click selecting its ticket;
-- pointer hover not highlighting family rows;
+- pointer hover highlighting family rows;
 - correct hit targets after details scrolling;
 - wheel scrolling leaving cursor and focus unchanged;
 - selected and focused styles remaining distinguishable under `NO_COLOR`.

@@ -768,6 +768,11 @@ impl App {
         self.pointer.hover.as_ref()
     }
 
+    pub(crate) fn hovered_region(&self) -> Option<&pointer::PointerRegion> {
+        let (column, row) = self.pointer.position()?;
+        self.hit_regions.resolve(column, row)
+    }
+
     #[must_use]
     pub fn selection(&self) -> Option<TextSelection> {
         self.pointer.selection

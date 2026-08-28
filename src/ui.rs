@@ -2605,9 +2605,10 @@ fn capture_selectable(
 }
 
 fn paint_hover(frame: &mut Frame<'_>, app: &App) {
-    let Some(target) = app.hovered() else {
+    let Some(region) = app.hovered_region() else {
         return;
     };
+    let target = &region.target;
     if matches!(
         target,
         PointerTarget::FocusTickets
@@ -2618,13 +2619,9 @@ fn paint_hover(frame: &mut Frame<'_>, app: &App) {
             | PointerTarget::PaletteQuery
             | PointerTarget::PromptField
             | PointerTarget::ViewName
-            | PointerTarget::JumpToTicket(_)
     ) {
         return;
     }
-    let Some(region) = app.hit_regions.find_target(|candidate| candidate == target) else {
-        return;
-    };
     let rect = region.rect;
     let buffer = frame.buffer_mut();
     for y in rect.y..rect.y.saturating_add(rect.height) {
@@ -3329,7 +3326,7 @@ mod tests {
     }
 
     #[test]
-    fn hovering_a_family_row_does_not_highlight_it() {
+    fn hovering_a_family_row_highlights_it() {
         let mut app = auth_family_app();
         let mut terminal = Terminal::new(TestBackend::new(72, 36)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
@@ -3340,17 +3337,14 @@ mod tests {
             .find(|(_, key)| key.id == 10_001)
             .map(|(area, _)| *area)
             .expect("parent row");
-        let before: Vec<_> = (row.x..row.x.saturating_add(row.width))
-            .map(|x| terminal.backend().buffer()[(x, row.y)].style())
-            .collect();
-
         app.handle_mouse(mouse(MouseEventKind::Moved, row.x + 8, row.y));
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
 
-        let after: Vec<_> = (row.x..row.x.saturating_add(row.width))
-            .map(|x| terminal.backend().buffer()[(x, row.y)].style())
-            .collect();
-        assert_eq!(after, before);
+        assert!((row.x..row.x.saturating_add(row.width)).all(|x| {
+            terminal.backend().buffer()[(x, row.y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        }));
     }
 
     fn auth_family_app_with_long_details() -> App {
