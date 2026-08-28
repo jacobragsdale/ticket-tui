@@ -957,16 +957,18 @@ impl App {
                 Focus::Family => self.move_family_cursor_to_edge(true),
                 Focus::Details => self.details_scroll = self.details_max_scroll,
             },
-            KeyCode::Enter => {
-                if self.focus == Focus::Family {
+            KeyCode::Enter => match self.focus {
+                Focus::Tickets => {}
+                Focus::Family => {
                     if let Some(key) = self.family_cursor.clone() {
                         self.jump_to_ticket(&key);
                     }
-                    return AppAction::None;
                 }
-                self.record_history();
-                return self.open_selected();
-            }
+                Focus::Details => {
+                    self.record_history();
+                    return self.open_selected();
+                }
+            },
             KeyCode::Char('o') => {
                 self.record_history();
                 return self.open_selected();
@@ -1664,7 +1666,6 @@ impl App {
 
     fn toggle_focus(&mut self) {
         self.focus = match self.focus {
-            Focus::Tickets if self.selected_has_family() => Focus::Family,
             Focus::Tickets => Focus::Details,
             Focus::Family => Focus::Details,
             Focus::Details => Focus::Tickets,
@@ -3321,13 +3322,9 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_through_family_only_when_a_hierarchy_exists() {
+    fn tab_toggles_between_tickets_and_details() {
         let mut app = family_app();
         assert_eq!(app.focus, Focus::Tickets);
-
-        press(&mut app, KeyCode::Tab);
-        assert_eq!(app.focus, Focus::Family);
-        assert!(app.narrow_details);
 
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Focus::Details);
@@ -3337,11 +3334,32 @@ mod tests {
         assert_eq!(app.focus, Focus::Tickets);
         assert!(!app.narrow_details);
 
-        let mut lonely = App::new(vec![ticket(1, "Solo", "2026-01-01T00:00:00Z")]);
-        press(&mut lonely, KeyCode::Tab);
-        assert_eq!(lonely.focus, Focus::Details);
-        press(&mut lonely, KeyCode::Tab);
-        assert_eq!(lonely.focus, Focus::Tickets);
+        app.focus = Focus::Family;
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.focus, Focus::Details);
+
+        let mut without_family = App::new(vec![ticket(1, "Solo", "2026-01-01T00:00:00Z")]);
+        press(&mut without_family, KeyCode::Tab);
+        assert_eq!(without_family.focus, Focus::Details);
+        press(&mut without_family, KeyCode::Tab);
+        assert_eq!(without_family.focus, Focus::Tickets);
+    }
+
+    #[test]
+    fn enter_does_not_open_a_ticket_from_the_tickets_pane() {
+        let mut app = family_app();
+
+        assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
+        assert!(matches!(
+            press(&mut app, KeyCode::Char('o')),
+            AppAction::OpenUrl(_)
+        ));
+
+        app.focus = Focus::Details;
+        assert!(matches!(
+            press(&mut app, KeyCode::Enter),
+            AppAction::OpenUrl(_)
+        ));
     }
 
     #[test]

@@ -85,9 +85,8 @@ The breadcrumb above the details body should stay compact: primary parent,
 
 Add `Focus::Family` as a small extension to the existing focus enum.
 
-- `Tab` cycles `Tickets -> Family -> Details -> Tickets` when the selected
-  ticket has a family tree.
-- Skip `Family` when the selected ticket has no parent or child rows.
+- `Tab` toggles `Tickets -> Details -> Tickets`; `Family` is not a separate tab
+  stop.
 - In the under-70-column layout, both `Family` and `Details` show the details
   screen; returning to `Tickets` shows the ticket table again.
 - Treat the details border as focused for either `Family` or `Details`, and add
@@ -222,7 +221,7 @@ application mode:
 
 - extend `move_focused`, `Home`, `End`, `Page Up`, `Page Down`, and `Enter` for
   `Focus::Family`;
-- update `toggle_focus` to skip `Family` when there is no hierarchy;
+- update `toggle_focus` to move directly between `Tickets` and `Details`;
 - consider `Family` part of the details screen in narrow-layout focus helpers;
 - keep `jump_to_ticket` as the only path that changes the table selection from
   a relationship row.
@@ -285,7 +284,7 @@ Add focused tests in `src/model.rs` for:
 Add tests in `src/app.rs` for:
 
 - the selected tree always including every descendant;
-- conditional `Tab` focus order with and without a family;
+- two-step `Tab` focus order with and without a family;
 - cursor movement clamping at the first and last visible row;
 - `Enter` selecting a visible ticket and recording history once;
 - a filtered-out target preserving the query and current selection while

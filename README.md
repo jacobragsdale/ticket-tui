@@ -25,7 +25,7 @@ You need Rust 1.88 or newer and a macOS or Linux terminal.
    and watch the table update. Press `Esc` to leave the search box while
    retaining the filter.
 
-4. Select a ticket and press `Enter` to open its fake ADO-shaped HTTPS URL.
+4. Select a ticket and press `o` to open its fake ADO-shaped HTTPS URL.
    These demo URLs exercise the launcher but do not resolve to real work items.
 
 5. Press `q` to exit.
@@ -78,9 +78,9 @@ to a database prepared by another tool.
 | `Space` | Toggle ticket multi-select |
 | `y` | Copy selected (or current) ticket IDs |
 | `[` / `]` | Jump to the previous or next recently viewed ticket |
-| `Tab` | Cycle focus through tickets, family, and details |
+| `Tab` | Toggle focus between tickets and details |
 | `d` | Toggle the details screen when the terminal is under 70 columns |
-| `Enter` | Select the family cursor ticket, or open the selected ticket in the browser |
+| `Enter` | Select the family cursor ticket, or open from the details pane |
 | `o` | Open the selected ticket in the system browser |
 | `r` | Reload and rebuild the search index in the background |
 | `i` | Show database path, row counts, and data freshness |

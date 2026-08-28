@@ -75,7 +75,7 @@ pub const COMMANDS: [Command; 27] = [
     Command {
         id: CommandId::Open,
         title: "Open ticket in browser",
-        hint: "Enter",
+        hint: "o",
     },
     Command {
         id: CommandId::ToggleBookmark,
