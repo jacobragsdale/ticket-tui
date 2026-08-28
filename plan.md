@@ -77,7 +77,8 @@ widths, omit type details before the title. Do not wrap a tree row because
 wrapping makes branch connectors and mouse targets ambiguous.
 
 The breadcrumb above the details body should stay compact: primary parent,
-`this`, and direct-child completion. It remains a summary.
+`this`, and direct-child completion. It remains a non-interactive summary;
+only rows inside the tree select family tickets.
 
 ## Interaction contract
 
@@ -139,6 +140,8 @@ Additional rules:
   existing amount without moving the family cursor or changing focus.
 - Paint family rows with the same full-row hover highlight as ticket rows. A
   drag that begins on a tree row remains text selection rather than a click.
+- On terminals supporting OSC 22, request the `pointer` shape over external URL
+  targets and restore the default shape everywhere else and on exit.
 - Do not add double-click, right-click, hover tooltips, drag-to-reparent, or
   horizontal gestures.
 
@@ -300,6 +303,7 @@ Extend `src/ui.rs` tests to cover:
 - all descendants appearing in the buffer and hit regions;
 - narrow truncation preserving connectors and IDs;
 - a row click selecting its ticket;
+- the Family summary remaining non-interactive;
 - pointer hover highlighting family rows;
 - correct hit targets after details scrolling;
 - wheel scrolling leaving cursor and focus unchanged;

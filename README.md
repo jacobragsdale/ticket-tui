@@ -98,7 +98,8 @@ selects it and copies the plain text on release. Bracketed paste inserts at
 the caret in search, the command palette, the import prompt, and the named-view
 editor. Scrollbar tracks page by a viewport-minus-one step; thumbs can be
 dragged. Right-click, double-click, and horizontal wheel gestures are not
-used.
+used. Terminals supporting OSC 22 show a browser-style pointer over external
+URL targets.
 
 Search accepts a compact grammar such as `state:active type:bug
 assignee:"Avery Chen" priority:1 tag:rust`. Values in the same field are

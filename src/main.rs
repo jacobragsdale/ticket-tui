@@ -13,7 +13,7 @@ use crossterm::event::{
     Event, KeyEventKind,
 };
 use crossterm::execute;
-use ticket_tui::app::{App, AppAction, CopiedContent, PreparedTickets};
+use ticket_tui::app::{App, AppAction, CopiedContent, PointerTarget, PreparedTickets};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
 use ticket_tui::import::{self, ImportFormat};
 use ticket_tui::session;
@@ -138,6 +138,7 @@ fn run_terminal(app: &mut App, repository: &mut SqliteTicketRepository) -> Resul
     let _restore = TerminalRestore;
     let opener = SystemUrlOpener;
     let mut reloader = ReloadEngine::default();
+    let mut mouse_pointer = MousePointerShape::Default;
     execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)
         .context("failed to enable terminal input features")?;
 
@@ -150,6 +151,7 @@ fn run_terminal(app: &mut App, repository: &mut SqliteTicketRepository) -> Resul
         redraw |= app.tick();
         if redraw {
             terminal.draw(|frame| ticket_tui::ui::render(frame, app))?;
+            sync_mouse_pointer(app, &mut mouse_pointer);
             redraw = false;
         }
 
@@ -328,6 +330,45 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MousePointerShape {
+    Default,
+    Link,
+}
+
+impl MousePointerShape {
+    const fn escape_sequence(self) -> &'static [u8] {
+        match self {
+            Self::Default => b"\x1b]22;\x1b\\",
+            Self::Link => b"\x1b]22;pointer\x1b\\",
+        }
+    }
+}
+
+fn sync_mouse_pointer(app: &App, current: &mut MousePointerShape) {
+    let desired = mouse_pointer_for_hover(app.hovered());
+    if desired == *current {
+        return;
+    }
+    if write_mouse_pointer_shape(&mut io::stdout(), desired).is_ok() {
+        *current = desired;
+    }
+}
+
+fn mouse_pointer_for_hover(target: Option<&PointerTarget>) -> MousePointerShape {
+    match target {
+        Some(PointerTarget::OpenTicket { .. } | PointerTarget::OpenSelectedUrl) => {
+            MousePointerShape::Link
+        }
+        _ => MousePointerShape::Default,
+    }
+}
+
+fn write_mouse_pointer_shape(writer: &mut impl Write, shape: MousePointerShape) -> io::Result<()> {
+    writer.write_all(shape.escape_sequence())?;
+    writer.flush()
+}
+
 fn clipboard_commands() -> Vec<Command> {
     if cfg!(target_os = "macos") {
         vec![Command::new("pbcopy")]
@@ -422,6 +463,7 @@ struct TerminalRestore;
 
 impl Drop for TerminalRestore {
     fn drop(&mut self) {
+        let _ = write_mouse_pointer_shape(&mut io::stdout(), MousePointerShape::Default);
         let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
         ratatui::restore();
     }
@@ -470,6 +512,28 @@ mod tests {
             copied_status(CopiedContent::MarkdownLink),
             "Copied markdown link to clipboard!"
         );
+    }
+
+    #[test]
+    fn mouse_pointer_sequences_set_and_reset_link_hover() {
+        assert_eq!(
+            mouse_pointer_for_hover(Some(&PointerTarget::OpenSelectedUrl)),
+            MousePointerShape::Link
+        );
+        assert_eq!(
+            mouse_pointer_for_hover(Some(&PointerTarget::OpenTicket { index: 0 })),
+            MousePointerShape::Link
+        );
+        assert_eq!(
+            mouse_pointer_for_hover(Some(&PointerTarget::TableRow { index: 0 })),
+            MousePointerShape::Default
+        );
+
+        let mut output = Vec::new();
+        write_mouse_pointer_shape(&mut output, MousePointerShape::Link).unwrap();
+        write_mouse_pointer_shape(&mut output, MousePointerShape::Default).unwrap();
+
+        assert_eq!(output, b"\x1b]22;pointer\x1b\\\x1b]22;\x1b\\");
     }
 
     #[test]

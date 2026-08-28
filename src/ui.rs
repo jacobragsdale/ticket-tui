@@ -607,24 +607,6 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     ])
     .split(inner);
     frame.render_widget(Paragraph::new(Text::from(metadata_lines)), chunks[0]);
-    if family.has_family()
-        && metadata_height >= 3
-        && let Some(parent) = family.parent()
-        && app.ticket_by_key(parent).is_some()
-    {
-        app.hit_regions.push(region(
-            Rect::new(
-                chunks[0].x,
-                chunks[0].y.saturating_add(2),
-                chunks[0].width,
-                1,
-            ),
-            PointerTarget::JumpToTicket(parent.clone()),
-            PointerLayer::Base,
-            Some(SelectableSurface::Details),
-            Some(ScrollSurface::Details),
-        ));
-    }
 
     if chunks[1].height > 0 {
         frame.render_widget(Paragraph::new(link_line(ticket.web_url.clone())), chunks[1]);
@@ -1904,17 +1886,8 @@ fn family_breadcrumb_line(app: &App, family: &FamilySnapshot) -> Line<'static> {
         let type_label = ticket.map_or("?", |ticket| ticket.work_item_type.as_str());
         let title = ticket.map_or("missing ticket", |ticket| ticket.title.as_str());
         spans.push(Span::raw(format!("{type_label} ")));
-        spans.push(Span::styled(
-            parent.id.to_string(),
-            Style::default()
-                .fg(theme().link)
-                .add_modifier(Modifier::UNDERLINED),
-        ));
-        spans.push(Span::styled(
-            " ",
-            Style::default().remove_modifier(Modifier::UNDERLINED),
-        ));
-        spans.push(Span::raw(format!(" {title} › this")));
+        spans.push(Span::raw(parent.id.to_string()));
+        spans.push(Span::raw(format!("  {title} › this")));
     } else {
         spans.push(Span::raw("this"));
     }
@@ -3228,6 +3201,27 @@ mod tests {
         assert_eq!(key.id, 10_001);
         assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
         assert_eq!(app.focus, Focus::Family);
+    }
+
+    #[test]
+    fn clicking_the_family_summary_does_not_select_its_parent() {
+        let mut app = auth_family_app();
+        app.focus = Focus::Details;
+        render_text(72, 36, &mut app);
+        let details = app.hit_regions.details.expect("details area");
+        let summary_x = details.x.saturating_add(8);
+        let summary_y = details.y.saturating_add(3);
+        assert!(!matches!(
+            app.hit_regions
+                .resolve(summary_x, summary_y)
+                .map(|region| &region.target),
+            Some(PointerTarget::JumpToTicket(_))
+        ));
+
+        click(&mut app, summary_x, summary_y);
+
+        assert_eq!(app.selected_ticket().unwrap().key.id, 10_002);
+        assert_eq!(app.focus, Focus::Details);
     }
 
     fn auth_family_app() -> App {
