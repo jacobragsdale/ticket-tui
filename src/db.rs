@@ -14,7 +14,7 @@ use crate::model::{
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 pub const DEMO_TICKET_COUNT: usize = 500;
 
 const CREATE_WORK_ITEMS: &str = r#"
@@ -71,6 +71,15 @@ CREATE TABLE IF NOT EXISTS work_item_history (
     old_value    TEXT,
     new_value    TEXT,
     PRIMARY KEY (organization, work_item_id, revision, field_name)
+);
+"#;
+
+const CREATE_CURRENT_SELECTION: &str = r#"
+CREATE TABLE IF NOT EXISTS current_selection (
+    singleton    INTEGER PRIMARY KEY CHECK (singleton = 1),
+    organization TEXT NOT NULL,
+    work_item_id INTEGER NOT NULL,
+    selected_at  TEXT NOT NULL
 );
 "#;
 
@@ -273,14 +282,44 @@ const RELATED_TABLES: [TableSpec; 3] = [
     },
 ];
 
-const CURRENT_TABLES: [&TableSpec; 4] = [
+const CURRENT_SELECTION_TABLE: TableSpec = TableSpec {
+    name: "current_selection",
+    columns: &[
+        ColumnSpec {
+            name: "singleton",
+            affinity: SqlAffinity::Integer,
+        },
+        ColumnSpec {
+            name: "organization",
+            affinity: SqlAffinity::Text,
+        },
+        ColumnSpec {
+            name: "work_item_id",
+            affinity: SqlAffinity::Integer,
+        },
+        ColumnSpec {
+            name: "selected_at",
+            affinity: SqlAffinity::Text,
+        },
+    ],
+};
+
+const VERSION_2_TABLES: [&TableSpec; 4] = [
     &WORK_ITEMS_TABLE,
     &RELATED_TABLES[0],
     &RELATED_TABLES[1],
     &RELATED_TABLES[2],
 ];
 
-const SCHEMA_REPAIR_HINT: &str = "Recreate this database or restore a backup that matches schema version 2. Older ticket-tui files can be migrated by opening them without --read-only.";
+const CURRENT_TABLES: [&TableSpec; 5] = [
+    &WORK_ITEMS_TABLE,
+    &RELATED_TABLES[0],
+    &RELATED_TABLES[1],
+    &RELATED_TABLES[2],
+    &CURRENT_SELECTION_TABLE,
+];
+
+const SCHEMA_REPAIR_HINT: &str = "Recreate this database or restore a backup that matches schema version 3. Older ticket-tui files can be migrated by opening them without --read-only.";
 
 #[derive(Debug)]
 pub struct OpenedRepository {
@@ -453,6 +492,31 @@ impl SqliteTicketRepository {
         Ok(batch.tickets.len())
     }
 
+    pub fn set_current_selection(&self, selected: Option<&TicketKey>) -> Result<()> {
+        let Some(selected) = selected else {
+            self.connection
+                .execute("DELETE FROM current_selection WHERE singleton = 1", [])
+                .context("failed to clear current ticket selection")?;
+            return Ok(());
+        };
+        let selected_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .context("failed to format current ticket selection time")?;
+        self.connection
+            .execute(
+                "INSERT INTO current_selection
+                    (singleton, organization, work_item_id, selected_at)
+                 VALUES (1, ?1, ?2, ?3)
+                 ON CONFLICT(singleton) DO UPDATE SET
+                    organization = excluded.organization,
+                    work_item_id = excluded.work_item_id,
+                    selected_at = excluded.selected_at",
+                params![selected.organization, selected.id, selected_at],
+            )
+            .context("failed to publish current ticket selection")?;
+        Ok(())
+    }
+
     fn load_relations(&self) -> Result<Vec<RelationRecord>> {
         if !table_exists(&self.connection, "work_item_relations")? {
             return Ok(Vec::new());
@@ -593,6 +657,7 @@ fn migrate(connection: &Connection) -> Result<()> {
         }
         connection.execute_batch(CREATE_WORK_ITEMS)?;
         connection.execute_batch(CREATE_RELATED_TABLES)?;
+        connection.execute_batch(CREATE_CURRENT_SELECTION)?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     } else if version == 1 {
         let problems = schema_problems(connection, &[&WORK_ITEMS_TABLE])?;
@@ -603,6 +668,17 @@ fn migrate(connection: &Connection) -> Result<()> {
             );
         }
         connection.execute_batch(CREATE_RELATED_TABLES)?;
+        connection.execute_batch(CREATE_CURRENT_SELECTION)?;
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    } else if version == 2 {
+        let problems = schema_problems(connection, &VERSION_2_TABLES)?;
+        if !problems.is_empty() {
+            bail!(
+                "cannot migrate schema version 2 to {SCHEMA_VERSION}:\n- {}\n{SCHEMA_REPAIR_HINT}",
+                problems.join("\n- ")
+            );
+        }
+        connection.execute_batch(CREATE_CURRENT_SELECTION)?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     validate_schema(connection)
@@ -680,7 +756,11 @@ fn table_columns(
     name: &'static str,
 ) -> Result<Option<Vec<(String, String)>>> {
     let name = match name {
-        "work_items" | "work_item_relations" | "work_item_comments" | "work_item_history" => name,
+        "work_items"
+        | "work_item_relations"
+        | "work_item_comments"
+        | "work_item_history"
+        | "current_selection" => name,
         other => bail!("internal error: unknown table {other}"),
     };
     if !table_exists(connection, name)? {
@@ -1158,6 +1238,55 @@ mod tests {
     }
 
     #[test]
+    fn current_selection_is_published_updated_and_cleared() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let repository = SqliteTicketRepository::open(&path).unwrap().repository;
+        let first = TicketKey {
+            organization: "example-org".into(),
+            id: 10_001,
+        };
+        let second = TicketKey {
+            organization: "example-org".into(),
+            id: 10_002,
+        };
+
+        repository.set_current_selection(Some(&first)).unwrap();
+        repository.set_current_selection(Some(&second)).unwrap();
+
+        let (singleton, organization, work_item_id, selected_at): (i64, String, i64, String) =
+            repository
+                .connection
+                .query_row(
+                    "SELECT singleton, organization, work_item_id, selected_at
+                     FROM current_selection",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+        assert_eq!(singleton, 1);
+        assert_eq!(organization, "example-org");
+        assert_eq!(work_item_id, 10_002);
+        assert!(Timestamp::parse(&selected_at).is_ok());
+        let count: i64 = repository
+            .connection
+            .query_row("SELECT COUNT(*) FROM current_selection", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+
+        repository.set_current_selection(None).unwrap();
+        let count: i64 = repository
+            .connection
+            .query_row("SELECT COUNT(*) FROM current_selection", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
     fn import_upserts_tickets_and_relations() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("import.sqlite3");
@@ -1241,6 +1370,23 @@ mod tests {
                 PRAGMA user_version = 2;"
             ))
             .unwrap();
+    }
+
+    #[test]
+    fn schema_v2_migrates_and_gains_current_selection_table() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("v2.sqlite3");
+        let connection = Connection::open(&path).unwrap();
+        write_v2_work_items(&connection, ", web_url TEXT NOT NULL");
+        drop(connection);
+
+        let opened = SqliteTicketRepository::open(&path).unwrap();
+
+        assert!(table_exists(&opened.repository.connection, "current_selection").unwrap());
+        assert_eq!(
+            schema_version(&opened.repository.connection).unwrap(),
+            SCHEMA_VERSION
+        );
     }
 
     #[test]
