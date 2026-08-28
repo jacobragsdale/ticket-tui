@@ -146,11 +146,10 @@ The primary key is `(organization, work_item_id)`. Tags use Azure DevOps-style
 semicolon separation. Schema version 2 adds local `work_item_relations`,
 `work_item_comments`, and `work_item_history` tables. The TUI displays those
 records but never edits them. Parent and child links render as a collapsible
-family tree in the details pane; related, predecessor, successor, and duplicate
-links stay in a separate Links list. Click a disclosure marker to expand or
-collapse a branch, click a family row, or press `Enter` on the family cursor to
-select that ticket in the table. Fuzzy search covers ID, title, assignee, state,
-type, area, iteration, and tags; it intentionally excludes descriptions.
+family tree in the details pane. Click a disclosure marker to expand or collapse
+a branch, click a family row, or press `Enter` on the family cursor to select
+that ticket in the table. Fuzzy search covers ID, title, assignee, state, type,
+area, iteration, and tags; it intentionally excludes descriptions.
 Structured `field:value` tokens are parsed out of the query before fuzzy
 matching.
 

@@ -685,20 +685,6 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             }
             detail_lines.push(Line::default());
         }
-        if !family.other_links.is_empty() {
-            detail_lines.push(section_line("Links"));
-            for (kind, key) in &family.other_links {
-                let title = app.ticket_title(key).unwrap_or("missing ticket");
-                let jumpable = app.ticket_by_key(key).is_some();
-                if let Ok(index) = u16::try_from(detail_lines.len())
-                    && jumpable
-                {
-                    line_links.push((index, key.clone()));
-                }
-                detail_lines.push(other_link_line(kind.label(), key.id, title, false, width));
-            }
-            detail_lines.push(Line::default());
-        }
         detail_lines.push(section_line("Planning"));
         detail_lines.push(highlighted_field_line(
             "Area",
@@ -2040,29 +2026,6 @@ fn family_member_line(
     ])
 }
 
-fn other_link_line(kind: &str, id: i64, title: &str, focused: bool, width: u16) -> Line<'static> {
-    let prefix = format!("  {kind:<12} ");
-    let id_text = id.to_string();
-    let used = prefix.chars().count() + id_text.chars().count() + 2;
-    let title = take_chars(title, usize::from(width).saturating_sub(used));
-    let base = if focused {
-        Style::default()
-            .bg(theme().selected_background)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-    Line::from(vec![
-        Span::styled(prefix, base),
-        Span::styled(
-            id_text,
-            base.fg(theme().link).add_modifier(Modifier::UNDERLINED),
-        ),
-        Span::styled(" ", base.remove_modifier(Modifier::UNDERLINED)),
-        Span::styled(format!(" {title}"), base.fg(theme().body)),
-    ])
-}
-
 fn take_chars(text: &str, max: usize) -> String {
     let total = text.chars().count();
     if total <= max {
@@ -3210,7 +3173,7 @@ mod tests {
     }
 
     #[test]
-    fn details_render_family_tree_and_keep_other_links_separate() {
+    fn details_render_family_tree_without_other_links() {
         let mut app = App::new(vec![
             ticket_at(
                 10_001,
@@ -3265,9 +3228,9 @@ mod tests {
         assert!(text.contains("current"));
         assert!(text.contains("├─"));
         assert!(text.contains("└─"));
-        assert!(text.contains("Links"));
-        assert!(text.contains("Related"));
-        assert!(text.contains("10005"));
+        assert!(!text.contains("Links"));
+        assert!(!text.contains("Related"));
+        assert!(!text.contains("10005"));
         assert!(!text.contains("Relationships"));
         assert!(!app.hit_regions.detail_links.is_empty());
     }
