@@ -68,7 +68,6 @@ pub enum PointerTarget {
     SortHeader(SortField),
     OpenSelectedUrl,
     JumpToTicket(TicketKey),
-    ToggleFamily(TicketKey),
     FacetPill(FacetTarget),
     FacetValue {
         index: usize,

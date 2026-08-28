@@ -13,7 +13,7 @@ use crossterm::event::{
     Event, KeyEventKind,
 };
 use crossterm::execute;
-use ticket_tui::app::{App, AppAction, PreparedTickets};
+use ticket_tui::app::{App, AppAction, CopiedContent, PreparedTickets};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
 use ticket_tui::import::{self, ImportFormat};
 use ticket_tui::session;
@@ -201,8 +201,8 @@ fn handle_action(
             Ok(()) => app.set_status(format!("Opened {raw_url}")),
             Err(error) => app.set_error(format!("Could not open ticket: {error:#}")),
         },
-        AppAction::Copy(text) => match copy_to_clipboard(&text) {
-            Ok(()) => app.set_status("Copied to clipboard"),
+        AppAction::Copy { text, content } => match copy_to_clipboard(&text) {
+            Ok(()) => app.set_status(copied_status(content)),
             Err(error) => app.set_error(format!("Could not copy: {error:#}")),
         },
         AppAction::WriteFile { path, contents } => match fs::write(&path, contents) {
@@ -217,6 +217,10 @@ fn handle_action(
             Err(error) => app.set_error(format!("Import failed: {error:#}")),
         },
     }
+}
+
+fn copied_status(content: CopiedContent) -> String {
+    format!("Copied {} to clipboard!", content.label())
 }
 
 fn start_reload(
@@ -454,6 +458,18 @@ mod tests {
     fn reports_launcher_failures_without_opening_a_browser() {
         let error = open_https_url("https://dev.azure.com/demo", &FailingOpener).unwrap_err();
         assert!(error.to_string().contains("system URL launcher failed"));
+    }
+
+    #[test]
+    fn clipboard_status_names_the_copied_content() {
+        assert_eq!(
+            copied_status(CopiedContent::Url),
+            "Copied url to clipboard!"
+        );
+        assert_eq!(
+            copied_status(CopiedContent::MarkdownLink),
+            "Copied markdown link to clipboard!"
+        );
     }
 
     #[test]

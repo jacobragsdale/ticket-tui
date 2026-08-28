@@ -75,12 +75,11 @@ to a database prepared by another tool.
 | `p` / `:` | Open the command palette |
 | `V` | Open named views; `n` saves, `Enter` loads, `d` deletes |
 | `m` | Bookmark or unbookmark the selected ticket |
-| `Space` | Toggle multi-select, or expand / collapse the family cursor |
+| `Space` | Toggle ticket multi-select |
 | `y` | Copy selected (or current) ticket IDs |
 | `[` / `]` | Jump to the previous or next recently viewed ticket |
 | `Tab` | Cycle focus through tickets, family, and details |
 | `d` | Toggle the details screen when the terminal is under 70 columns |
-| `h` / `l` | When family is focused, collapse / expand, or move to the parent / first child |
 | `Enter` | Select the family cursor ticket, or open the selected ticket in the browser |
 | `o` | Open the selected ticket in the system browser |
 | `r` | Reload and rebuild the search index in the background |
@@ -93,7 +92,7 @@ without restoring terminal drag-select. Wheel scrolling moves the hovered
 table, details pane, help, or overlay by three rows or lines and does not
 change keyboard focus or the selected ticket. Left-click activates the
 visible control under the pointer on release: search, filter pills, sort
-headers, ticket rows, checkboxes, bookmark markers, family disclosure markers,
+headers, ticket rows, checkboxes, bookmark markers,
 underlined IDs and URLs, tabs, overlay rows, and close/action buttons. Dragging over visible text
 selects it and copies the plain text on release. Bracketed paste inserts at
 the caret in search, the command palette, the import prompt, and the named-view
@@ -145,10 +144,10 @@ The versioned `work_items` table stores these columns:
 The primary key is `(organization, work_item_id)`. Tags use Azure DevOps-style
 semicolon separation. Schema version 2 adds local `work_item_relations`,
 `work_item_comments`, and `work_item_history` tables. The TUI displays those
-records but never edits them. Parent and child links render as a collapsible
-family tree in the details pane. Click a disclosure marker to expand or collapse
-a branch, click a family row, or press `Enter` on the family cursor to select
-that ticket in the table. Fuzzy search covers ID, title, assignee, state, type,
+records but never edits them. Parent and child links render as an always-expanded
+family tree in the details pane. Click a family row, or press `Enter` on the
+family cursor, to select that ticket in the table. Fuzzy search covers ID,
+title, assignee, state, type,
 area, iteration, and tags; it intentionally excludes descriptions.
 Structured `field:value` tokens are parsed out of the query before fuzzy
 matching.

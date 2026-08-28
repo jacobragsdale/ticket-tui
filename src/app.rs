@@ -64,9 +64,42 @@ pub enum AppAction {
     None,
     Reload,
     OpenUrl(String),
-    Copy(String),
-    WriteFile { path: PathBuf, contents: String },
-    Import { path: PathBuf, format: ImportFormat },
+    Copy {
+        text: String,
+        content: CopiedContent,
+    },
+    WriteFile {
+        path: PathBuf,
+        contents: String,
+    },
+    Import {
+        path: PathBuf,
+        format: ImportFormat,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CopiedContent {
+    Text,
+    Id,
+    Url,
+    Title,
+    MarkdownLink,
+    Summary,
+}
+
+impl CopiedContent {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Id => "id",
+            Self::Url => "url",
+            Self::Title => "title",
+            Self::MarkdownLink => "markdown link",
+            Self::Summary => "summary",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -228,7 +261,6 @@ pub struct App {
     pub details_max_scroll: u16,
     pub details_viewport: u16,
     pub family_cursor: Option<TicketKey>,
-    pub family_expanded: HashSet<TicketKey>,
     pub help_scroll: u16,
     pub help_max_scroll: u16,
     pub help_viewport: u16,
@@ -293,7 +325,6 @@ impl App {
             details_max_scroll: 0,
             details_viewport: 0,
             family_cursor: None,
-            family_expanded: HashSet::new(),
             help_scroll: 0,
             help_max_scroll: 0,
             help_viewport: 0,
@@ -507,10 +538,7 @@ impl App {
     #[must_use]
     pub fn visible_family_tree(&self) -> Vec<FamilyTreeEntry> {
         self.selected_ticket()
-            .map(|ticket| {
-                self.graph
-                    .visible_family_tree(&ticket.key, &self.family_expanded)
-            })
+            .map(|ticket| self.graph.visible_family_tree(&ticket.key))
             .unwrap_or_default()
     }
 
@@ -535,7 +563,6 @@ impl App {
         self.search.replace_documents(prepared.search_documents);
         self.loaded_at = Instant::now();
         self.stale = false;
-        self.retain_live_family_expansion();
         if self.fuzzy_query().is_empty() {
             self.show_all(selected.as_ref());
         } else {
@@ -905,20 +932,11 @@ impl App {
                 self.mode = AppMode::Info;
             }
             KeyCode::Char('m') => self.toggle_bookmark(),
-            KeyCode::Char('y') => return self.copy_with(export::copy_ids),
-            KeyCode::Char(' ') => match self.focus {
-                Focus::Family => self.toggle_cursor_family_expansion(),
-                Focus::Tickets | Focus::Details => self.toggle_row_selection(),
-            },
+            KeyCode::Char('y') => return self.copy_with(CopiedContent::Id, export::copy_ids),
+            KeyCode::Char(' ') if self.focus != Focus::Family => self.toggle_row_selection(),
             KeyCode::Char('[') => self.history_back(),
             KeyCode::Char(']') => self.history_forward(),
             KeyCode::Tab => self.toggle_focus(),
-            KeyCode::Left | KeyCode::Char('h') if self.focus == Focus::Family => {
-                self.collapse_or_parent();
-            }
-            KeyCode::Right | KeyCode::Char('l') if self.focus == Focus::Family => {
-                self.expand_or_child();
-            }
             KeyCode::Down | KeyCode::Char('j') => self.move_focused(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_focused(-1),
             KeyCode::PageDown => match self.focus {
@@ -1145,7 +1163,10 @@ impl App {
                 {
                     let text = pointer::extract_selected_text(snapshot, &selection);
                     if !text.is_empty() {
-                        return PointerUpdate::action(AppAction::Copy(text));
+                        return PointerUpdate::action(AppAction::Copy {
+                            text,
+                            content: CopiedContent::Text,
+                        });
                     }
                 }
                 PointerUpdate::none(true)
@@ -1254,12 +1275,6 @@ impl App {
                     self.focus = Focus::Details;
                 }
                 self.jump_to_ticket(&key);
-            }
-            PointerTarget::ToggleFamily(key) => {
-                self.focus = Focus::Family;
-                self.family_cursor = Some(key.clone());
-                self.toggle_family_expansion(&key);
-                self.ensure_family_cursor_visible();
             }
             PointerTarget::FacetPill(target) => match target {
                 FacetTarget::More => self.open_filters(),
@@ -1917,36 +1932,10 @@ impl App {
     }
 
     fn sync_family_state(&mut self) {
-        self.retain_live_family_expansion();
-        self.reveal_selected_family_path();
         self.reset_family_cursor();
         if self.focus == Focus::Family && !self.selected_has_family() {
             self.focus = Focus::Details;
         }
-    }
-
-    fn retain_live_family_expansion(&mut self) {
-        let tickets = Arc::clone(&self.tickets);
-        let graph = &self.graph;
-        self.family_expanded.retain(|key| {
-            tickets.iter().any(|ticket| ticket.key == *key)
-                || graph
-                    .relations
-                    .iter()
-                    .any(|relation| relation.from == *key || relation.to == *key)
-        });
-    }
-
-    fn reveal_selected_family_path(&mut self) {
-        let Some(ticket) = self.selected_ticket() else {
-            return;
-        };
-        let key = ticket.key.clone();
-        let family = self.graph.family(&key);
-        for ancestor in family.ancestors {
-            self.family_expanded.insert(ancestor);
-        }
-        self.family_expanded.insert(key);
     }
 
     fn reset_family_cursor(&mut self) {
@@ -1983,68 +1972,6 @@ impl App {
             return;
         };
         self.family_cursor = Some(entry.key.clone());
-        self.ensure_family_cursor_visible();
-    }
-
-    fn toggle_cursor_family_expansion(&mut self) {
-        let Some(key) = self.family_cursor.clone() else {
-            return;
-        };
-        self.toggle_family_expansion(&key);
-        self.ensure_family_cursor_visible();
-    }
-
-    fn toggle_family_expansion(&mut self, key: &TicketKey) {
-        if self.graph.children_of(key).is_empty() {
-            return;
-        }
-        if !self.family_expanded.remove(key) {
-            self.family_expanded.insert(key.clone());
-        }
-        self.clamp_family_cursor();
-    }
-
-    fn collapse_or_parent(&mut self) {
-        let Some(key) = self.family_cursor.clone() else {
-            return;
-        };
-        let tree = self.visible_family_tree();
-        let Some(entry) = tree.iter().find(|entry| entry.key == key) else {
-            return;
-        };
-        if entry.is_expanded {
-            self.family_expanded.remove(&key);
-            self.clamp_family_cursor();
-            self.ensure_family_cursor_visible();
-            return;
-        }
-        if let Some(parent) = self.graph.parents_of(&key).into_iter().next()
-            && tree.iter().any(|entry| entry.key == parent)
-        {
-            self.family_cursor = Some(parent);
-        }
-        self.ensure_family_cursor_visible();
-    }
-
-    fn expand_or_child(&mut self) {
-        let Some(key) = self.family_cursor.clone() else {
-            return;
-        };
-        let tree = self.visible_family_tree();
-        let Some(entry) = tree.iter().find(|entry| entry.key == key).cloned() else {
-            return;
-        };
-        if entry.has_children && !entry.is_expanded {
-            self.family_expanded.insert(key);
-            self.ensure_family_cursor_visible();
-            return;
-        }
-        if let Some(child) = self.graph.children_of(&key).into_iter().next() {
-            let tree = self.visible_family_tree();
-            if tree.iter().any(|entry| entry.key == child) {
-                self.family_cursor = Some(child);
-            }
-        }
         self.ensure_family_cursor_visible();
     }
 
@@ -2494,11 +2421,15 @@ impl App {
                 self.toggle_bookmark();
                 AppAction::None
             }
-            CommandId::CopyId => self.copy_with(export::copy_ids),
-            CommandId::CopyUrl => self.copy_with(export::copy_urls),
-            CommandId::CopyTitle => self.copy_with(export::copy_titles),
-            CommandId::CopyMarkdown => self.copy_with(export::copy_markdown_links),
-            CommandId::CopySummary => self.copy_with(export::copy_summaries),
+            CommandId::CopyId => self.copy_with(CopiedContent::Id, export::copy_ids),
+            CommandId::CopyUrl => self.copy_with(CopiedContent::Url, export::copy_urls),
+            CommandId::CopyTitle => self.copy_with(CopiedContent::Title, export::copy_titles),
+            CommandId::CopyMarkdown => {
+                self.copy_with(CopiedContent::MarkdownLink, export::copy_markdown_links)
+            }
+            CommandId::CopySummary => {
+                self.copy_with(CopiedContent::Summary, export::copy_summaries)
+            }
             CommandId::ExportJson => self.export_with("json", export::export_json),
             CommandId::ExportCsv => self.export_with("csv", export::export_csv),
             CommandId::SelectAll => {
@@ -2797,12 +2728,15 @@ impl App {
             .collect()
     }
 
-    fn copy_with(&self, formatter: fn(&[&Ticket]) -> String) -> AppAction {
+    fn copy_with(&self, content: CopiedContent, formatter: fn(&[&Ticket]) -> String) -> AppAction {
         let tickets = self.export_targets();
         if tickets.is_empty() {
             return AppAction::None;
         }
-        AppAction::Copy(formatter(&tickets))
+        AppAction::Copy {
+            text: formatter(&tickets),
+            content,
+        }
     }
 
     fn export_with(&self, extension: &str, formatter: fn(&[&Ticket]) -> String) -> AppAction {
@@ -3256,8 +3190,14 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
         app.select_row(1);
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        let action = app.copy_with(export::copy_ids);
-        assert_eq!(action, AppAction::Copy("1\n2\n".into()));
+        let action = app.copy_with(CopiedContent::Id, export::copy_ids);
+        assert_eq!(
+            action,
+            AppAction::Copy {
+                text: "1\n2\n".into(),
+                content: CopiedContent::Id,
+            }
+        );
     }
 
     #[test]
@@ -3366,20 +3306,16 @@ mod tests {
     }
 
     #[test]
-    fn selected_family_branch_is_expanded_by_default() {
+    fn selected_family_tree_is_always_fully_expanded() {
         let app = family_app();
         let tree = app.visible_family_tree();
-        assert!(
-            tree.iter()
-                .any(|entry| entry.key.id == 1 && entry.is_expanded)
+        assert_eq!(
+            tree.iter().map(|entry| entry.key.id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
         );
         assert!(
             tree.iter()
-                .any(|entry| { entry.key.id == 2 && entry.is_current && entry.is_expanded })
-        );
-        assert!(
-            tree.iter()
-                .any(|entry| entry.key.id == 3 && !entry.has_children)
+                .any(|entry| entry.key.id == 2 && entry.is_current)
         );
         assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(2));
     }
@@ -3419,74 +3355,6 @@ mod tests {
         press(&mut app, KeyCode::End);
         press(&mut app, KeyCode::Down);
         assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(3));
-    }
-
-    #[test]
-    fn collapsing_a_sibling_keeps_the_key_based_cursor() {
-        let mut app = branched_family_app();
-        app.focus = Focus::Family;
-        app.family_expanded.insert(family_key(4));
-        app.family_cursor = Some(family_key(3));
-        app.family_expanded.remove(&family_key(4));
-
-        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(3));
-        assert!(
-            app.visible_family_tree()
-                .iter()
-                .any(|entry| entry.key.id == 3)
-        );
-        assert!(
-            !app.visible_family_tree()
-                .iter()
-                .any(|entry| entry.key.id == 5)
-        );
-    }
-
-    #[test]
-    fn family_left_right_and_space_follow_tree_semantics() {
-        let mut app = family_app();
-        app.focus = Focus::Family;
-        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(2));
-
-        press(&mut app, KeyCode::Char('h'));
-        assert!(
-            app.visible_family_tree()
-                .iter()
-                .any(|entry| entry.key.id == 2 && !entry.is_expanded)
-        );
-        assert!(
-            !app.visible_family_tree()
-                .iter()
-                .any(|entry| entry.key.id == 3)
-        );
-
-        press(&mut app, KeyCode::Char('h'));
-        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(1));
-
-        press(&mut app, KeyCode::Char('l'));
-        press(&mut app, KeyCode::Char('l'));
-        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(2));
-
-        press(&mut app, KeyCode::Char(' '));
-        assert!(
-            app.visible_family_tree()
-                .iter()
-                .any(|entry| entry.key.id == 2 && !entry.is_expanded)
-        );
-        press(&mut app, KeyCode::Char(' '));
-        assert!(
-            app.visible_family_tree()
-                .iter()
-                .any(|entry| entry.key.id == 2 && entry.is_expanded)
-        );
-
-        app.family_cursor = Some(family_key(3));
-        press(&mut app, KeyCode::Char(' '));
-        assert!(
-            app.visible_family_tree()
-                .iter()
-                .any(|entry| entry.key.id == 3 && !entry.has_children)
-        );
     }
 
     #[test]
@@ -3533,7 +3401,6 @@ mod tests {
     fn family_selection_and_cursor_restore_after_reload() {
         let mut app = family_app();
         app.focus = Focus::Family;
-        app.family_expanded.insert(family_key(99));
         press(&mut app, KeyCode::Down);
         assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(3));
         press(&mut app, KeyCode::Enter);
@@ -3545,9 +3412,13 @@ mod tests {
 
         assert_eq!(app.selected_ticket().unwrap().key.id, 3);
         assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(3));
-        assert!(!app.family_expanded.contains(&family_key(99)));
-        assert!(app.family_expanded.contains(&family_key(2)));
-        assert!(app.family_expanded.contains(&family_key(3)));
+        assert_eq!(
+            app.visible_family_tree()
+                .iter()
+                .map(|entry| entry.key.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
     }
 
     #[test]
@@ -3563,51 +3434,11 @@ mod tests {
     }
 
     #[test]
-    fn family_expansion_does_not_mark_the_session_dirty() {
+    fn family_navigation_does_not_mark_the_session_dirty() {
         let mut app = family_app();
         app.session_dirty = false;
         app.focus = Focus::Family;
-        press(&mut app, KeyCode::Char(' '));
-        press(&mut app, KeyCode::Char('h'));
-        press(&mut app, KeyCode::Char('l'));
         press(&mut app, KeyCode::Down);
         assert!(!app.session_dirty);
-    }
-
-    fn branched_family_app() -> App {
-        let mut app = family_app();
-        let mut sibling = ticket(4, "Sibling", "2026-01-10T00:00:00Z");
-        sibling.work_item_type = "User Story".into();
-        let nephew = ticket(5, "Nephew", "2026-01-11T00:00:00Z");
-        let mut tickets = app.tickets().to_vec();
-        tickets.push(sibling);
-        tickets.push(nephew);
-        let graph = TicketGraph {
-            relations: vec![
-                RelationRecord {
-                    from: family_key(2),
-                    to: family_key(1),
-                    kind: crate::model::RelationKind::Parent,
-                },
-                RelationRecord {
-                    from: family_key(3),
-                    to: family_key(2),
-                    kind: crate::model::RelationKind::Parent,
-                },
-                RelationRecord {
-                    from: family_key(4),
-                    to: family_key(1),
-                    kind: crate::model::RelationKind::Parent,
-                },
-                RelationRecord {
-                    from: family_key(5),
-                    to: family_key(4),
-                    kind: crate::model::RelationKind::Parent,
-                },
-            ],
-            ..TicketGraph::default()
-        };
-        app.replace_prepared_tickets(PreparedTickets::with_graph(tickets, graph));
-        app
     }
 }

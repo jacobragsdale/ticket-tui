@@ -409,7 +409,7 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut local_state);
 
     if area.width < NARROW_BREAKPOINT {
-        register_narrow_tabs(app, area, false);
+        register_narrow_tabs(app, area);
     }
     if inner.height >= 2 {
         let header_area = Rect::new(
@@ -531,12 +531,7 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let title = if area.width < NARROW_BREAKPOINT {
-        " [Tickets] [Details] "
-    } else {
-        " Details "
-    };
-    let mut block = focused_block(title, app.focus.is_details_pane());
+    let mut block = focused_block(" Details ", app.focus.is_details_pane());
     if area.width >= 24 {
         block = block.title(Line::from("[Copy]").right_aligned());
     }
@@ -550,9 +545,6 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Some(SelectableSurface::Details),
         Some(ScrollSurface::Details),
     ));
-    if area.width < NARROW_BREAKPOINT {
-        register_narrow_tabs(app, area, true);
-    }
     if area.width >= 24 {
         app.hit_regions.push(region(
             Rect::new(
@@ -660,13 +652,12 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             for entry in app.visible_family_tree() {
                 let related = app.ticket_by_key(&entry.key);
                 let is_cursor = family_focused && cursor.as_ref() == Some(&entry.key);
-                let (line, marker_col) = family_tree_line(&entry, related, is_cursor, width);
+                let line = family_tree_line(&entry, related, is_cursor, width);
                 if let Ok(index) = u16::try_from(detail_lines.len()) {
                     family_hits.push(FamilyHit {
                         line: index,
                         key: entry.key.clone(),
                         jumpable: related.is_some(),
-                        marker_col: entry.has_children.then_some(marker_col),
                     });
                 }
                 detail_lines.push(line);
@@ -775,15 +766,6 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     Some(ScrollSurface::Details),
                 ));
             }
-            if let Some(marker_col) = hit.marker_col {
-                app.hit_regions.push(region(
-                    Rect::new(chunks[2].x.saturating_add(marker_col), y, 1, 1),
-                    PointerTarget::ToggleFamily(hit.key),
-                    PointerLayer::Base,
-                    Some(SelectableSurface::Details),
-                    Some(ScrollSurface::Details),
-                ));
-            }
         }
         for (logical, key) in line_links {
             if let Some(y) = visible_row_y(chunks[2], logical, scroll) {
@@ -845,9 +827,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             AppMode::Views => "↑↓ choose  Enter load  n save  d delete  Esc close",
             AppMode::Info => "Esc/i close",
             AppMode::Prompt => "Type a file path  Enter import  Esc cancel",
-            AppMode::Browse if app.focus == Focus::Family => {
-                "↑↓ move  ←→ fold  Enter select  Tab details"
-            }
+            AppMode::Browse if app.focus == Focus::Family => "↑↓ move  Enter select  Tab details",
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
             }
@@ -954,7 +934,6 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  d               Toggle details below 70 columns"),
         Line::from("  c               Toggle compact / comfortable rows"),
         Line::from("  [ / ]           Recently viewed back / forward"),
-        Line::from("  h / l           Collapse or expand family, or move levels"),
         Line::from(""),
         Line::styled(
             "Search and filters",
@@ -977,7 +956,7 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  V               Save and restore named views"),
         Line::from("  v               Toggle relevance / field order"),
         Line::from("  m               Bookmark the selected ticket"),
-        Line::from("  Space           Toggle multi-select, or expand / collapse family"),
+        Line::from("  Space           Toggle ticket multi-select"),
         Line::from("  y               Copy selected IDs"),
         Line::from("  i               Database path, freshness, and counts"),
         Line::from("  Enter           Select the family cursor ticket, else open"),
@@ -1746,7 +1725,6 @@ struct FamilyHit {
     line: u16,
     key: TicketKey,
     jumpable: bool,
-    marker_col: Option<u16>,
 }
 
 fn family_closed_summary(app: &App, family: &FamilySnapshot) -> Option<(usize, usize)> {
@@ -1802,16 +1780,6 @@ pub(crate) fn with_cursor_style(style: Style) -> Style {
     }
 }
 
-fn disclosure_marker(entry: &FamilyTreeEntry) -> &'static str {
-    if !entry.has_children {
-        "•"
-    } else if entry.is_expanded {
-        "▾"
-    } else {
-        "▸"
-    }
-}
-
 fn family_connector(prefix: &str) -> String {
     if prefix.chars().all(char::is_whitespace) {
         prefix.to_owned()
@@ -1825,30 +1793,18 @@ fn family_tree_line(
     ticket: Option<&Ticket>,
     is_cursor: bool,
     width: u16,
-) -> (Line<'static>, u16) {
-    let marker = disclosure_marker(entry);
+) -> Line<'static> {
     let connector = family_connector(&entry.prefix);
-    let marker_col = u16::try_from(connector.chars().count()).unwrap_or(u16::MAX);
     let id = entry.key.id.to_string();
     let type_label = ticket.map_or("?", |ticket| ticket.work_item_type.as_str());
     let title = ticket.map_or("missing ticket", |ticket| ticket.title.as_str());
     let current_label = if entry.is_current { " current" } else { "" };
-    let child_label = if entry.has_children && !entry.is_expanded {
-        if entry.child_count == 1 {
-            " 1 child".to_owned()
-        } else {
-            format!(" {} children", entry.child_count)
-        }
-    } else {
-        String::new()
-    };
     let packed = pack_family_row(
         usize::from(width),
-        &format!("{connector}{marker} {id}"),
+        &format!("{connector}{id}"),
         type_label,
         title,
         current_label,
-        &child_label,
     );
     let base = family_row_style(entry.is_current, is_cursor);
     let id_style = if entry.is_current || ticket.is_none() {
@@ -1861,18 +1817,13 @@ fn family_tree_line(
     } else {
         base.fg(theme().body)
     };
-    let head_len = connector.chars().count() + marker.chars().count() + 1 + id.chars().count();
+    let head_len = connector.chars().count() + id.chars().count();
     let rest: String = packed.chars().skip(head_len).collect();
-    (
-        Line::from(vec![
-            Span::styled(connector, base),
-            Span::styled(marker.to_owned(), base),
-            Span::styled(" ", base),
-            Span::styled(id, id_style),
-            Span::styled(rest, rest_style.remove_modifier(Modifier::UNDERLINED)),
-        ]),
-        marker_col,
-    )
+    Line::from(vec![
+        Span::styled(connector, base),
+        Span::styled(id, id_style),
+        Span::styled(rest, rest_style.remove_modifier(Modifier::UNDERLINED)),
+    ])
 }
 
 fn pack_family_row(
@@ -1881,7 +1832,6 @@ fn pack_family_row(
     type_label: &str,
     title: &str,
     current_label: &str,
-    child_label: &str,
 ) -> String {
     let assemble = |include_type: bool, include_current: bool, title: &str| {
         let mut text = head.to_owned();
@@ -1896,7 +1846,6 @@ fn pack_family_row(
         if include_current {
             text.push_str(current_label);
         }
-        text.push_str(child_label);
         text
     };
     let include_current = !current_label.is_empty();
@@ -2461,7 +2410,7 @@ fn row_marker_line(checked: bool, bookmarked: bool) -> Line<'static> {
     ])
 }
 
-fn register_narrow_tabs(app: &mut App, area: Rect, details_selected: bool) {
+fn register_narrow_tabs(app: &mut App, area: Rect) {
     let tickets = Rect::new(area.x.saturating_add(1), area.y, 9, 1);
     let details = Rect::new(area.x.saturating_add(11), area.y, 9, 1);
     app.hit_regions.push(region(
@@ -2478,7 +2427,6 @@ fn register_narrow_tabs(app: &mut App, area: Rect, details_selected: bool) {
         None,
         None,
     ));
-    let _ = details_selected;
 }
 
 fn render_modal_frame(frame: &mut Frame<'_>, app: &mut App, area: Rect, title: &str) -> Rect {
@@ -2670,6 +2618,7 @@ fn paint_hover(frame: &mut Frame<'_>, app: &App) {
             | PointerTarget::PaletteQuery
             | PointerTarget::PromptField
             | PointerTarget::ViewName
+            | PointerTarget::JumpToTicket(_)
     ) {
         return;
     }
@@ -2880,7 +2829,8 @@ mod tests {
         app.narrow_details = true;
         let details = render_text(60, 20, &mut app);
         assert!(details.contains("Details"));
-        assert!(details.contains("[Tickets]"));
+        assert!(!details.contains("[Tickets]"));
+        assert!(!details.contains("[Details]"));
         assert!(details.contains("Fix ticket search"));
     }
 
@@ -3219,8 +3169,6 @@ mod tests {
         let text = render_text(60, 36, &mut app);
         assert!(text.contains("Family: Feature 10001  Auth rewrite › this"));
         assert!(text.contains("0/1 closed"));
-        assert!(text.contains("▾"));
-        assert!(text.contains("•"));
         assert!(text.contains("10001"));
         assert!(text.contains("10002"));
         assert!(text.contains("10004"));
@@ -3343,10 +3291,8 @@ mod tests {
                 text.contains("10002"),
                 "id should remain visible at width {width}\n{text}"
             );
-            assert!(
-                text.contains('▾') || text.contains('▸') || text.contains('•'),
-                "disclosure should remain visible at width {width}\n{text}"
-            );
+            assert!(!text.contains('▸'), "fold marker should be absent\n{text}");
+            assert!(!text.contains('•'), "leaf marker should be absent\n{text}");
             assert_eq!(app.selected_ticket().unwrap().key.id, 10_002);
         }
         let (_, short) = family_render_at(72, 10);
@@ -3354,64 +3300,20 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_descendants_leave_the_buffer_and_hit_regions() {
+    fn family_tree_always_renders_descendants_and_hit_regions() {
         let mut app = auth_family_app();
-        render_text(60, 36, &mut app);
+        let text = render_text(60, 36, &mut app);
+        assert!(text.contains("10004"));
         assert!(
             app.hit_regions
                 .detail_links
                 .iter()
                 .any(|(_, key)| key.id == 10_004)
         );
-
-        app.family_expanded.remove(&TicketKey {
-            organization: "demo".into(),
-            id: 10_002,
-        });
-        let text = render_text(60, 36, &mut app);
-        assert!(!text.contains("10004"));
-        assert!(
-            !app.hit_regions
-                .detail_links
-                .iter()
-                .any(|(_, key)| key.id == 10_004)
-        );
-        assert!(!app.hit_regions.regions().iter().any(|region| matches!(
-            &region.target,
-            PointerTarget::ToggleFamily(key) if key.id == 10_004
-        )));
     }
 
     #[test]
-    fn disclosure_click_toggles_without_selecting() {
-        let mut app = auth_family_app();
-        render_text(72, 36, &mut app);
-        let toggle = app
-            .hit_regions
-            .find_target(
-                |target| matches!(target, PointerTarget::ToggleFamily(key) if key.id == 10_002),
-            )
-            .expect("disclosure target")
-            .rect;
-        let selected = app.selected_ticket().unwrap().key.id;
-        let expanded = app
-            .visible_family_tree()
-            .iter()
-            .any(|entry| entry.key.id == 10_002 && entry.is_expanded);
-
-        click(&mut app, toggle.x, toggle.y);
-        assert_eq!(app.selected_ticket().unwrap().key.id, selected);
-        assert_eq!(app.focus, Focus::Family);
-        assert_ne!(
-            app.visible_family_tree()
-                .iter()
-                .any(|entry| entry.key.id == 10_002 && entry.is_expanded),
-            expanded
-        );
-    }
-
-    #[test]
-    fn family_row_click_selects_without_toggling() {
+    fn family_row_click_selects_the_ticket() {
         let mut app = auth_family_app();
         render_text(72, 36, &mut app);
         let row = app
@@ -3424,12 +3326,31 @@ mod tests {
         click(&mut app, row.x + 8, row.y);
         assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
         assert_eq!(app.focus, Focus::Family);
-        assert!(
-            app.visible_family_tree()
-                .iter()
-                .any(|entry| entry.key.id == 10_001 && entry.is_expanded),
-            "selecting a row must not collapse it"
-        );
+    }
+
+    #[test]
+    fn hovering_a_family_row_does_not_highlight_it() {
+        let mut app = auth_family_app();
+        let mut terminal = Terminal::new(TestBackend::new(72, 36)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let row = app
+            .hit_regions
+            .detail_links
+            .iter()
+            .find(|(_, key)| key.id == 10_001)
+            .map(|(area, _)| *area)
+            .expect("parent row");
+        let before: Vec<_> = (row.x..row.x.saturating_add(row.width))
+            .map(|x| terminal.backend().buffer()[(x, row.y)].style())
+            .collect();
+
+        app.handle_mouse(mouse(MouseEventKind::Moved, row.x + 8, row.y));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let after: Vec<_> = (row.x..row.x.saturating_add(row.width))
+            .map(|x| terminal.backend().buffer()[(x, row.y)].style())
+            .collect();
+        assert_eq!(after, before);
     }
 
     fn auth_family_app_with_long_details() -> App {
@@ -3455,14 +3376,14 @@ mod tests {
         let before = app
             .hit_regions
             .find_target(
-                |target| matches!(target, PointerTarget::ToggleFamily(key) if key.id == 10_001),
+                |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
             )
             .map(|region| region.rect.y)
-            .expect("parent disclosure should be on screen");
+            .expect("parent row should be on screen");
         app.details_scroll = app.details_max_scroll;
         render_text(60, 24, &mut app);
         let after = app.hit_regions.find_target(
-            |target| matches!(target, PointerTarget::ToggleFamily(key) if key.id == 10_001),
+            |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
         );
         assert!(after.is_none() || after.is_some_and(|region| region.rect.y != before));
     }
@@ -3480,11 +3401,9 @@ mod tests {
             .expect("current family row");
         let cursor = app.family_cursor.clone();
         let focus = app.focus;
-        let expanded = app.family_expanded.clone();
         app.handle_mouse(mouse(MouseEventKind::ScrollDown, row.x + 8, row.y));
         assert_eq!(app.family_cursor, cursor);
         assert_eq!(app.focus, focus);
-        assert_eq!(app.family_expanded, expanded);
         assert!(app.details_scroll > 0);
     }
 
@@ -3506,10 +3425,10 @@ mod tests {
         let cursor = app
             .hit_regions
             .find_target(
-                |target| matches!(target, PointerTarget::ToggleFamily(key) if key.id == 10_001),
+                |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
             )
             .map(|region| region.rect)
-            .expect("cursor disclosure");
+            .expect("cursor row");
         let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let buffer = terminal.backend().buffer();
@@ -3691,7 +3610,7 @@ mod tests {
             ))
             .action;
         assert!(
-            matches!(action, crate::app::AppAction::Copy(_)),
+            matches!(action, crate::app::AppAction::Copy { .. }),
             "drag should copy visible text, got {action:?}"
         );
         assert!(!matches!(action, crate::app::AppAction::OpenUrl(_)));
@@ -3829,6 +3748,6 @@ mod tests {
                 body.y,
             ))
             .action;
-        assert!(!matches!(action, crate::app::AppAction::Copy(_)));
+        assert!(!matches!(action, crate::app::AppAction::Copy { .. }));
     }
 }
