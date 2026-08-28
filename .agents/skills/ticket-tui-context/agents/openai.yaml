@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ticket TUI Context"
+  short_description: "Read and interpret the live ticket-tui view"
+  default_prompt: "Use $ticket-tui-context to inspect what the user is currently viewing in ticket-tui."

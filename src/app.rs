@@ -7,6 +7,9 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::widgets::TableState;
 
+use crate::agent_context::{
+    AgentContext, SearchContext, SortContext, TicketContext, TicketReference, TicketsContext,
+};
 use crate::columns::TableLayout;
 use crate::command::{Command, CommandId, matching_commands};
 use crate::export;
@@ -390,6 +393,86 @@ impl App {
     #[must_use]
     pub fn selected_row(&self) -> Option<usize> {
         self.table_state.selected()
+    }
+
+    #[must_use]
+    pub fn agent_context(&self) -> AgentContext {
+        let parsed = self.parsed_query();
+        let visible_rows = self
+            .visible_tickets()
+            .skip(self.table_offset)
+            .take(self.table_viewport_rows)
+            .map(|ticket| self.ticket_context(ticket))
+            .collect();
+        let checked_tickets = self
+            .tickets()
+            .iter()
+            .filter(|ticket| self.selected_keys.contains(&ticket.key))
+            .map(|ticket| self.ticket_context(ticket))
+            .collect();
+        AgentContext {
+            database_path: self.database_path.display().to_string(),
+            read_only: self.read_only,
+            mode: mode_name(self.mode).into(),
+            focus: focus_name(self.focus).into(),
+            screen: if self.narrow_details {
+                "details"
+            } else {
+                "workspace"
+            }
+            .into(),
+            active_view: self.active_view.clone(),
+            search: SearchContext {
+                query: self.query.clone(),
+                fuzzy_text: parsed.fuzzy,
+                filters: parsed
+                    .filters
+                    .tokens()
+                    .into_iter()
+                    .map(|token| token.chip_label())
+                    .collect(),
+                pending: self.search_pending,
+                order: session::encode_search_order(self.search_order).into(),
+            },
+            sort: SortContext {
+                field: session::encode_sort_field(self.sort_field).into(),
+                direction: session::encode_direction(self.sort_direction).into(),
+                row_density: session::encode_density(self.row_density).into(),
+            },
+            tickets: TicketsContext {
+                total_count: self.tickets.len(),
+                matching_count: self.visible.len(),
+                viewport_start: self.table_offset,
+                viewport_size: self.table_viewport_rows,
+                visible_rows,
+            },
+            selected_ticket: self
+                .selected_ticket()
+                .map(|ticket| self.ticket_context(ticket)),
+            checked_tickets,
+            family_cursor: self.family_cursor.as_ref().map(|key| TicketReference {
+                organization: key.organization.clone(),
+                id: key.id,
+            }),
+            details_scroll_line: self.details_scroll,
+        }
+    }
+
+    fn ticket_context(&self, ticket: &Ticket) -> TicketContext {
+        TicketContext {
+            organization: ticket.key.organization.clone(),
+            project: ticket.project.clone(),
+            id: ticket.key.id,
+            work_item_type: ticket.work_item_type.clone(),
+            title: ticket.title.clone(),
+            state: ticket.state.clone(),
+            assigned_to: ticket.assigned_to.clone(),
+            priority: ticket.priority,
+            tags: ticket.tags.clone(),
+            web_url: ticket.web_url.clone(),
+            bookmarked: self.bookmarks.contains(&ticket.key),
+            checked: self.selected_keys.contains(&ticket.key),
+        }
     }
 
     #[must_use]
@@ -2838,6 +2921,30 @@ impl App {
     }
 }
 
+const fn mode_name(mode: AppMode) -> &'static str {
+    match mode {
+        AppMode::Browse => "browse",
+        AppMode::Search => "search",
+        AppMode::Sort => "sort",
+        AppMode::Help => "help",
+        AppMode::Filter => "filter",
+        AppMode::Columns => "columns",
+        AppMode::Palette => "palette",
+        AppMode::Views => "views",
+        AppMode::Info => "info",
+        AppMode::Prompt => "prompt",
+        AppMode::Facets => "facets",
+    }
+}
+
+const fn focus_name(focus: Focus) -> &'static str {
+    match focus {
+        Focus::Tickets => "tickets",
+        Focus::Family => "family",
+        Focus::Details => "details",
+    }
+}
+
 fn byte_index(text: &str, character_index: usize) -> usize {
     text.char_indices()
         .nth(character_index)
@@ -2932,6 +3039,37 @@ mod tests {
         ]);
 
         assert_eq!(app.visible_tickets().next().unwrap().key.id, 2);
+    }
+
+    #[test]
+    fn agent_context_describes_the_live_ticket_workspace() {
+        let mut app = App::new(vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+            ticket(3, "Gamma", "2026-03-01T00:00:00Z"),
+        ]);
+        app.configure_database(PathBuf::from("/tmp/tickets.sqlite3"), false, 0);
+        app.set_table_viewport(2);
+        app.set_query("state:Active".into());
+        app.toggle_row_selection();
+        app.focus = Focus::Details;
+        app.mode = AppMode::Filter;
+        app.active_view = Some("Active work".into());
+
+        let context = app.agent_context();
+
+        assert_eq!(context.database_path, "/tmp/tickets.sqlite3");
+        assert_eq!(context.mode, "filter");
+        assert_eq!(context.focus, "details");
+        assert_eq!(context.active_view.as_deref(), Some("Active work"));
+        assert_eq!(context.search.filters, vec!["state:Active"]);
+        assert_eq!(context.tickets.total_count, 3);
+        assert_eq!(context.tickets.matching_count, 3);
+        assert_eq!(context.tickets.visible_rows.len(), 2);
+        assert_eq!(context.selected_ticket.as_ref().unwrap().id, 3);
+        assert!(context.selected_ticket.as_ref().unwrap().checked);
+        assert_eq!(context.checked_tickets.len(), 1);
+        assert_eq!(context.checked_tickets[0].id, 3);
     }
 
     #[test]

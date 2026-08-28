@@ -152,34 +152,48 @@ title, assignee, state, type, area, iteration, and tags; it intentionally
 excludes descriptions. Structured `field:value` tokens are parsed out of the
 query before fuzzy matching.
 
-Schema version 3 adds the `current_selection` table as a stable interface for
-other local programs. It contains zero or one row:
-
-| Column | Meaning |
-|---|---|
-| `singleton` | Always `1`; enforces the one-row contract |
-| `organization`, `work_item_id` | Identity of the ticket currently shown |
-| `selected_at` | UTC RFC 3339 time when that ticket became current |
-
-Query the current ticket with:
-
-```sql
-SELECT organization, work_item_id, selected_at
-FROM current_selection
-WHERE singleton = 1;
-```
-
-In normal writable mode, ticket-tui replaces this row whenever its selected
-ticket changes and deletes it on a clean exit. An empty result means there is
-no published selection. `--read-only` mode never publishes or clears this row.
-If the process is killed or crashes, its last row can remain, so consumers
-should treat the row as the last observed selection rather than proof that the
-application is still running.
-
 The application uses WAL mode and a busy timeout so external SQLite readers can
 query the database while the TUI is running. Normal browsing does not edit work
 items; an explicit import can upsert ticket data. There is no Azure DevOps
 authentication or network client in this release.
+
+Schema version 4 keeps transient UI state out of SQLite. Opening a schema
+version 3 database in writable mode removes its obsolete `current_selection`
+table during migration.
+
+## Live agent context
+
+While ticket-tui is running, it atomically publishes a compact JSON snapshot
+beside the database. For `tickets.sqlite3`, the file is
+`tickets.context.json`. This is the supported interface for an LLM agent to
+understand the current view without scraping terminal cells or causing SQLite
+reloads.
+
+The versioned snapshot includes:
+
+- selected and checked tickets;
+- the rows currently rendered in the ticket viewport, plus matching and total
+  counts;
+- the complete query, fuzzy text, and parsed filters;
+- sort order, named view, mode, focused pane, family cursor, and details scroll;
+- database path, read-only status, process ID, and last-change timestamp.
+
+The file is replaced after meaningful rendered-state changes and removed on a
+clean exit. A crash or forced termination can leave a stale file, so consumers
+must check its process ID and treat stale data as the last observed view. The
+context file is published even when SQLite is opened with `--read-only`.
+
+This repository includes the `ticket-tui-context` agent skill and a compact
+reader:
+
+```console
+uv run .agents/skills/ticket-tui-context/scripts/read_context.py
+```
+
+Pass `--database PATH` for a custom database, `--json` for the exact snapshot,
+or `--details` to join the selected ticket to its full SQLite records. See the
+skill's [context schema reference](.agents/skills/ticket-tui-context/references/context-schema.md)
+for field-level semantics.
 
 ## Develop and verify
 

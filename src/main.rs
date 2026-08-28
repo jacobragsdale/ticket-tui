@@ -13,10 +13,10 @@ use crossterm::event::{
     Event, KeyEventKind,
 };
 use crossterm::execute;
+use ticket_tui::agent_context::{self, AgentContext};
 use ticket_tui::app::{App, AppAction, CopiedContent, PointerTarget, PreparedTickets};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
 use ticket_tui::import::{self, ImportFormat};
-use ticket_tui::model::TicketKey;
 use ticket_tui::session;
 use url::Url;
 
@@ -37,6 +37,34 @@ struct Cli {
 #[derive(Default)]
 struct ReloadEngine {
     receiver: Option<Receiver<std::result::Result<PreparedTickets, String>>>,
+}
+
+struct AgentContextPublisher {
+    path: PathBuf,
+    last: Option<AgentContext>,
+}
+
+impl AgentContextPublisher {
+    fn new(database: &Path) -> Self {
+        Self {
+            path: agent_context::path_for(database),
+            last: None,
+        }
+    }
+
+    fn publish(&mut self, app: &App) -> Result<()> {
+        let context = app.agent_context();
+        if self.last.as_ref() == Some(&context) {
+            return Ok(());
+        }
+        agent_context::save(&self.path, &context)?;
+        self.last = Some(context);
+        Ok(())
+    }
+
+    fn remove(&self) -> Result<()> {
+        agent_context::remove(&self.path)
+    }
 }
 
 impl ReloadEngine {
@@ -127,25 +155,17 @@ fn run() -> Result<()> {
     } else if cli.read_only {
         app.set_status(format!("Opened {} read-only", repository.path().display()));
     }
-    let mut published_selection = app.selected_ticket().map(|ticket| ticket.key.clone());
-    if !cli.read_only {
-        repository.set_current_selection(published_selection.as_ref())?;
-        app.data_signature = db::data_signature(repository.path());
-    }
-    let result = run_terminal(&mut app, &mut repository, &mut published_selection);
-    let clear_selection = if cli.read_only {
-        Ok(())
-    } else {
-        repository.set_current_selection(None)
-    };
+    let mut context_publisher = AgentContextPublisher::new(repository.path());
+    let result = run_terminal(&mut app, &mut repository, &mut context_publisher);
+    let remove_context = context_publisher.remove();
     if let Err(error) = session::save(&session_path, &app.snapshot_session()) {
         eprintln!("warning: could not save session: {error:#}");
     }
-    if let Err(error) = clear_selection {
+    if let Err(error) = remove_context {
         if result.is_ok() {
-            return Err(error.context("failed to clear current ticket selection on exit"));
+            return Err(error.context("failed to remove agent context on exit"));
         }
-        eprintln!("warning: could not clear current ticket selection: {error:#}");
+        eprintln!("warning: could not remove agent context: {error:#}");
     }
     result
 }
@@ -153,7 +173,7 @@ fn run() -> Result<()> {
 fn run_terminal(
     app: &mut App,
     repository: &mut SqliteTicketRepository,
-    published_selection: &mut Option<TicketKey>,
+    context_publisher: &mut AgentContextPublisher,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
     let _restore = TerminalRestore;
@@ -168,13 +188,16 @@ fn run_terminal(
         redraw |= app.poll_search();
         redraw |= poll_reload(app, repository, &mut reloader);
         redraw |= poll_watch(app, repository, &mut reloader);
-        redraw |= publish_current_selection(app, repository, published_selection);
         redraw |= persist_session(app, repository);
         redraw |= app.tick();
         if redraw {
             terminal.draw(|frame| ticket_tui::ui::render(frame, app))?;
             sync_mouse_pointer(app, &mut mouse_pointer);
             redraw = false;
+            if let Err(error) = context_publisher.publish(app) {
+                app.set_error(format!("Could not publish agent context: {error:#}"));
+                redraw = true;
+            }
         }
 
         let timeout = if app.search_pending || app.reload_pending {
@@ -209,31 +232,6 @@ fn run_terminal(
         handle_action(action, app, repository, &opener, &mut reloader);
     }
     Ok(())
-}
-
-fn publish_current_selection(
-    app: &mut App,
-    repository: &SqliteTicketRepository,
-    published: &mut Option<TicketKey>,
-) -> bool {
-    if app.read_only {
-        return false;
-    }
-    let selected = app.selected_ticket().map(|ticket| ticket.key.clone());
-    if selected == *published {
-        return false;
-    }
-    match repository.set_current_selection(selected.as_ref()) {
-        Ok(()) => {
-            *published = selected;
-            app.data_signature = db::data_signature(repository.path());
-            false
-        }
-        Err(error) => {
-            app.set_error(format!("Could not publish current selection: {error:#}"));
-            true
-        }
-    }
 }
 
 fn handle_action(
@@ -606,36 +604,37 @@ mod tests {
     }
 
     #[test]
-    fn selection_changes_are_published_to_the_database() {
+    fn view_changes_are_published_to_the_agent_context_file() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tickets.sqlite3");
         let repository = SqliteTicketRepository::open(&path).unwrap().repository;
         let mut app = App::new(repository.load_all().unwrap());
         app.configure_database(path.clone(), false, db::data_signature(&path));
-        let mut published = app.selected_ticket().map(|ticket| ticket.key.clone());
-        repository
-            .set_current_selection(published.as_ref())
-            .unwrap();
+        app.set_table_viewport(3);
+        let mut publisher = AgentContextPublisher::new(&path);
+        publisher.publish(&app).unwrap();
 
         app.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Down,
             crossterm::event::KeyModifiers::NONE,
         ));
         let expected = app.selected_ticket().unwrap().key.clone();
-        assert!(!publish_current_selection(
-            &mut app,
-            &repository,
-            &mut published
-        ));
+        publisher.publish(&app).unwrap();
 
-        let observer = rusqlite::Connection::open(&path).unwrap();
-        let observed: (String, i64) = observer
-            .query_row(
-                "SELECT organization, work_item_id FROM current_selection",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(observed, (expected.organization, expected.id));
+        let context_path = agent_context::path_for(&path);
+        let observed: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(context_path).unwrap()).unwrap();
+        assert_eq!(
+            observed["selected_ticket"]["organization"],
+            expected.organization
+        );
+        assert_eq!(observed["selected_ticket"]["id"], expected.id);
+        assert_eq!(
+            observed["tickets"]["visible_rows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
     }
 }

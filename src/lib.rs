@@ -1,3 +1,4 @@
+pub mod agent_context;
 pub mod app;
 pub mod columns;
 pub mod command;
