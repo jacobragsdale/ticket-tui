@@ -17,7 +17,6 @@ pub use crate::filter::FacetTarget;
 use crate::filter::{
     FacetValue, FilterField, FilterToken, ParsedQuery, facet_values, format_query, parse_query,
 };
-use crate::import::ImportFormat;
 use crate::model::{
     CommentRecord, FamilySnapshot, FamilyTreeEntry, HistoryRecord, RelationRecord, SortDirection,
     SortField, Ticket, TicketGraph, TicketKey, compare_tickets,
@@ -43,7 +42,6 @@ pub enum AppMode {
     Palette,
     Views,
     Info,
-    Prompt,
     Facets,
 }
 
@@ -74,10 +72,6 @@ pub enum AppAction {
     WriteFile {
         path: PathBuf,
         contents: String,
-    },
-    Import {
-        path: PathBuf,
-        format: ImportFormat,
     },
 }
 
@@ -196,19 +190,6 @@ pub struct ViewsOverlay {
     pub viewport: u16,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PromptKind {
-    ImportJson,
-    ImportCsv,
-}
-
-#[derive(Clone, Debug)]
-pub struct PromptState {
-    pub kind: PromptKind,
-    pub buffer: String,
-    pub cursor: usize,
-}
-
 #[derive(Debug)]
 pub struct PreparedTickets {
     tickets: Vec<Ticket>,
@@ -291,10 +272,8 @@ pub struct App {
     graph: TicketGraph,
     pub loaded_at: Instant,
     pub database_path: PathBuf,
-    pub read_only: bool,
     pub stale: bool,
     pub data_signature: u128,
-    pub prompt: Option<PromptState>,
 }
 
 impl App {
@@ -358,10 +337,8 @@ impl App {
             graph: prepared.graph,
             loaded_at: Instant::now(),
             database_path: PathBuf::new(),
-            read_only: false,
             stale: false,
             data_signature: 0,
-            prompt: None,
         };
         app.show_all(None);
         app
@@ -412,7 +389,6 @@ impl App {
             .collect();
         AgentContext {
             database_path: self.database_path.display().to_string(),
-            read_only: self.read_only,
             mode: mode_name(self.mode).into(),
             focus: focus_name(self.focus).into(),
             screen: if self.narrow_details {
@@ -556,9 +532,8 @@ impl App {
         self.overlay_scroll = self.overlay_scroll.min(maximum);
     }
 
-    pub fn configure_database(&mut self, path: PathBuf, read_only: bool, signature: u128) {
+    pub fn configure_database(&mut self, path: PathBuf, signature: u128) {
         self.database_path = path;
-        self.read_only = read_only;
         self.data_signature = signature;
         self.loaded_at = Instant::now();
         self.stale = false;
@@ -745,17 +720,6 @@ impl App {
                 self.palette.selected = 0;
                 self.palette.scroll = 0;
             }
-            Some(TextEditor::Prompt) => {
-                if let Some(prompt) = self.prompt.as_mut() {
-                    let pasted = sanitize_single_line(pasted);
-                    if pasted.is_empty() {
-                        return;
-                    }
-                    let byte = byte_index(&prompt.buffer, prompt.cursor);
-                    prompt.buffer.insert_str(byte, &pasted);
-                    prompt.cursor += pasted.chars().count();
-                }
-            }
             Some(TextEditor::ViewName) => {
                 if let Some(name) = self.views_overlay.naming.as_mut() {
                     let pasted = sanitize_single_line(pasted);
@@ -775,7 +739,6 @@ impl App {
         match self.mode {
             AppMode::Search => Some(TextEditor::Search),
             AppMode::Palette => Some(TextEditor::Palette),
-            AppMode::Prompt => Some(TextEditor::Prompt),
             AppMode::Views if self.views_overlay.naming.is_some() => Some(TextEditor::ViewName),
             _ => None,
         }
@@ -957,7 +920,6 @@ impl App {
                 }
                 AppAction::None
             }
-            AppMode::Prompt => self.handle_prompt_key(key),
             AppMode::Facets => {
                 self.handle_facet_key(key);
                 AppAction::None
@@ -1455,14 +1417,6 @@ impl App {
                 self.place_caret(TextEditor::ViewName, column, row);
             }
             PointerTarget::CancelNaming => self.views_overlay.naming = None,
-            PointerTarget::ImportSubmit => return self.submit_import(),
-            PointerTarget::ImportCancel => {
-                self.prompt = None;
-                self.mode = AppMode::Browse;
-            }
-            PointerTarget::PromptField => {
-                self.place_caret(TextEditor::Prompt, column, row);
-            }
             PointerTarget::OverlayBody => {}
             PointerTarget::ScrollbarTrack { surface, page_down } => {
                 let step = self
@@ -1481,10 +1435,6 @@ impl App {
         match self.mode {
             AppMode::Views if self.views_overlay.naming.is_some() => {
                 self.views_overlay.naming = None;
-            }
-            AppMode::Prompt => {
-                self.prompt = None;
-                self.mode = AppMode::Browse;
             }
             AppMode::Facets => self.mode = AppMode::Browse,
             AppMode::Filter if self.filter_overlay.showing_values => {
@@ -1511,7 +1461,6 @@ impl App {
             .selectable(match editor {
                 TextEditor::Search => SelectableSurface::Search,
                 TextEditor::Palette | TextEditor::ViewName => SelectableSurface::Overlay,
-                TextEditor::Prompt => SelectableSurface::Prompt,
             })
             .and_then(|snapshot| snapshot.pos_at(column, row))
             .or_else(|| {
@@ -1530,11 +1479,6 @@ impl App {
             }
             TextEditor::Palette => {
                 self.palette.cursor = index.min(self.palette.query.chars().count());
-            }
-            TextEditor::Prompt => {
-                if let Some(prompt) = self.prompt.as_mut() {
-                    prompt.cursor = index.min(prompt.buffer.chars().count());
-                }
             }
             TextEditor::ViewName => {
                 if let Some(name) = self.views_overlay.naming.as_ref() {
@@ -2200,30 +2144,6 @@ impl App {
         .unwrap_or(0);
     }
 
-    fn submit_import(&mut self) -> AppAction {
-        let Some(prompt) = self.prompt.take() else {
-            self.mode = AppMode::Browse;
-            return AppAction::None;
-        };
-        self.mode = AppMode::Browse;
-        let path = prompt.buffer.trim().to_owned();
-        if path.is_empty() {
-            return AppAction::None;
-        }
-        if self.read_only {
-            self.set_error("Database is open read-only; import is disabled");
-            return AppAction::None;
-        }
-        let format = match prompt.kind {
-            PromptKind::ImportJson => ImportFormat::Json,
-            PromptKind::ImportCsv => ImportFormat::Csv,
-        };
-        AppAction::Import {
-            path: PathBuf::from(path),
-            format,
-        }
-    }
-
     fn toggle_current_bar_facet(&mut self) {
         let Some(field) = self.focused_bar_field() else {
             return;
@@ -2542,8 +2462,6 @@ impl App {
                 self.history_forward();
                 AppAction::None
             }
-            CommandId::ImportJson => self.begin_import(PromptKind::ImportJson),
-            CommandId::ImportCsv => self.begin_import(PromptKind::ImportCsv),
             CommandId::DatabaseInfo => {
                 self.mode = AppMode::Info;
                 AppAction::None
@@ -2553,73 +2471,6 @@ impl App {
                 AppAction::None
             }
         }
-    }
-
-    fn begin_import(&mut self, kind: PromptKind) -> AppAction {
-        if self.read_only {
-            self.set_error("Database is open read-only; import is disabled");
-            return AppAction::None;
-        }
-        self.prompt = Some(PromptState {
-            kind,
-            buffer: String::new(),
-            cursor: 0,
-        });
-        self.mode = AppMode::Prompt;
-        AppAction::None
-    }
-
-    fn handle_prompt_key(&mut self, key: KeyEvent) -> AppAction {
-        if self.prompt.is_none() {
-            self.mode = AppMode::Browse;
-            return AppAction::None;
-        }
-        match key.code {
-            KeyCode::Esc => {
-                self.prompt = None;
-                self.mode = AppMode::Browse;
-                return AppAction::None;
-            }
-            KeyCode::Enter => return self.submit_import(),
-            _ => {}
-        }
-        let Some(prompt) = self.prompt.as_mut() else {
-            return AppAction::None;
-        };
-        match key.code {
-            KeyCode::Left => prompt.cursor = prompt.cursor.saturating_sub(1),
-            KeyCode::Right => {
-                prompt.cursor = (prompt.cursor + 1).min(prompt.buffer.chars().count());
-            }
-            KeyCode::Home => prompt.cursor = 0,
-            KeyCode::End => prompt.cursor = prompt.buffer.chars().count(),
-            KeyCode::Backspace => {
-                if prompt.cursor > 0 {
-                    let start = byte_index(&prompt.buffer, prompt.cursor - 1);
-                    let end = byte_index(&prompt.buffer, prompt.cursor);
-                    prompt.buffer.replace_range(start..end, "");
-                    prompt.cursor -= 1;
-                }
-            }
-            KeyCode::Delete => {
-                if prompt.cursor < prompt.buffer.chars().count() {
-                    let start = byte_index(&prompt.buffer, prompt.cursor);
-                    let end = byte_index(&prompt.buffer, prompt.cursor + 1);
-                    prompt.buffer.replace_range(start..end, "");
-                }
-            }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                let byte = byte_index(&prompt.buffer, prompt.cursor);
-                prompt.buffer.insert(byte, character);
-                prompt.cursor += 1;
-            }
-            _ => {}
-        }
-        AppAction::None
     }
 
     fn handle_views_key(&mut self, key: KeyEvent) -> AppAction {
@@ -2931,7 +2782,6 @@ const fn mode_name(mode: AppMode) -> &'static str {
         AppMode::Palette => "palette",
         AppMode::Views => "views",
         AppMode::Info => "info",
-        AppMode::Prompt => "prompt",
         AppMode::Facets => "facets",
     }
 }
@@ -3047,7 +2897,7 @@ mod tests {
             ticket(2, "Beta", "2026-02-01T00:00:00Z"),
             ticket(3, "Gamma", "2026-03-01T00:00:00Z"),
         ]);
-        app.configure_database(PathBuf::from("/tmp/tickets.sqlite3"), false, 0);
+        app.configure_database(PathBuf::from("/tmp/tickets.sqlite3"), 0);
         app.set_table_viewport(2);
         app.set_query("state:Active".into());
         app.toggle_row_selection();

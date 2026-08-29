@@ -2,22 +2,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use time::format_description::well_known::Rfc3339;
-use time::{Duration, OffsetDateTime};
+use rusqlite::{Connection, Transaction, params};
 
-use crate::import::ImportBatch;
 use crate::model::{
     CommentRecord, HistoryRecord, RelationKind, RelationRecord, Ticket, TicketGraph, TicketKey,
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 4;
-pub const DEMO_TICKET_COUNT: usize = 500;
+const SCHEMA_VERSION: i64 = 5;
 
-const CREATE_WORK_ITEMS: &str = r#"
+/// SQLite is a disposable cache of Azure DevOps, so any database that is not at
+/// the current schema version is dropped and recreated instead of migrated.
+const RESET_SCHEMA: &str = r"
+DROP TABLE IF EXISTS work_items;
+DROP TABLE IF EXISTS work_item_relations;
+DROP TABLE IF EXISTS work_item_comments;
+DROP TABLE IF EXISTS work_item_history;
 CREATE TABLE work_items (
     organization   TEXT NOT NULL,
     project        TEXT NOT NULL,
@@ -42,17 +44,14 @@ CREATE INDEX work_items_changed_idx ON work_items(changed_at);
 CREATE INDEX work_items_priority_idx ON work_items(priority);
 CREATE INDEX work_items_state_idx ON work_items(state);
 CREATE INDEX work_items_type_idx ON work_items(work_item_type);
-"#;
-
-const CREATE_RELATED_TABLES: &str = r#"
-CREATE TABLE IF NOT EXISTS work_item_relations (
+CREATE TABLE work_item_relations (
     organization TEXT NOT NULL,
     from_id      INTEGER NOT NULL,
     to_id        INTEGER NOT NULL,
     kind         TEXT NOT NULL,
     PRIMARY KEY (organization, from_id, to_id, kind)
 );
-CREATE TABLE IF NOT EXISTS work_item_comments (
+CREATE TABLE work_item_comments (
     organization TEXT NOT NULL,
     work_item_id INTEGER NOT NULL,
     comment_id   INTEGER NOT NULL,
@@ -61,7 +60,7 @@ CREATE TABLE IF NOT EXISTS work_item_comments (
     body         TEXT NOT NULL,
     PRIMARY KEY (organization, work_item_id, comment_id)
 );
-CREATE TABLE IF NOT EXISTS work_item_history (
+CREATE TABLE work_item_history (
     organization TEXT NOT NULL,
     work_item_id INTEGER NOT NULL,
     revision     INTEGER NOT NULL,
@@ -72,253 +71,12 @@ CREATE TABLE IF NOT EXISTS work_item_history (
     new_value    TEXT,
     PRIMARY KEY (organization, work_item_id, revision, field_name)
 );
-"#;
+";
 
-#[derive(Clone, Copy)]
-enum SqlAffinity {
-    Integer,
-    Text,
-}
-
-impl SqlAffinity {
-    const fn as_sql(self) -> &'static str {
-        match self {
-            Self::Integer => "INTEGER",
-            Self::Text => "TEXT",
-        }
-    }
-
-    fn matches(self, declared: &str) -> bool {
-        let upper = declared.to_ascii_uppercase();
-        match self {
-            Self::Integer => upper.contains("INT"),
-            Self::Text => {
-                upper.contains("CHAR") || upper.contains("CLOB") || upper.contains("TEXT")
-            }
-        }
-    }
-}
-
-struct ColumnSpec {
-    name: &'static str,
-    affinity: SqlAffinity,
-}
-
-struct TableSpec {
-    name: &'static str,
-    columns: &'static [ColumnSpec],
-}
-
-const WORK_ITEMS_TABLE: TableSpec = TableSpec {
-    name: "work_items",
-    columns: &[
-        ColumnSpec {
-            name: "organization",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "project",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "work_item_id",
-            affinity: SqlAffinity::Integer,
-        },
-        ColumnSpec {
-            name: "revision",
-            affinity: SqlAffinity::Integer,
-        },
-        ColumnSpec {
-            name: "work_item_type",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "title",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "state",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "reason",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "assigned_to",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "priority",
-            affinity: SqlAffinity::Integer,
-        },
-        ColumnSpec {
-            name: "area_path",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "iteration_path",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "tags",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "description",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "created_at",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "changed_at",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "web_url",
-            affinity: SqlAffinity::Text,
-        },
-    ],
-};
-
-const RELATED_TABLES: [TableSpec; 3] = [
-    TableSpec {
-        name: "work_item_relations",
-        columns: &[
-            ColumnSpec {
-                name: "organization",
-                affinity: SqlAffinity::Text,
-            },
-            ColumnSpec {
-                name: "from_id",
-                affinity: SqlAffinity::Integer,
-            },
-            ColumnSpec {
-                name: "to_id",
-                affinity: SqlAffinity::Integer,
-            },
-            ColumnSpec {
-                name: "kind",
-                affinity: SqlAffinity::Text,
-            },
-        ],
-    },
-    TableSpec {
-        name: "work_item_comments",
-        columns: &[
-            ColumnSpec {
-                name: "organization",
-                affinity: SqlAffinity::Text,
-            },
-            ColumnSpec {
-                name: "work_item_id",
-                affinity: SqlAffinity::Integer,
-            },
-            ColumnSpec {
-                name: "comment_id",
-                affinity: SqlAffinity::Integer,
-            },
-            ColumnSpec {
-                name: "created_at",
-                affinity: SqlAffinity::Text,
-            },
-            ColumnSpec {
-                name: "author",
-                affinity: SqlAffinity::Text,
-            },
-            ColumnSpec {
-                name: "body",
-                affinity: SqlAffinity::Text,
-            },
-        ],
-    },
-    TableSpec {
-        name: "work_item_history",
-        columns: &[
-            ColumnSpec {
-                name: "organization",
-                affinity: SqlAffinity::Text,
-            },
-            ColumnSpec {
-                name: "work_item_id",
-                affinity: SqlAffinity::Integer,
-            },
-            ColumnSpec {
-                name: "revision",
-                affinity: SqlAffinity::Integer,
-            },
-            ColumnSpec {
-                name: "changed_at",
-                affinity: SqlAffinity::Text,
-            },
-            ColumnSpec {
-                name: "changed_by",
-                affinity: SqlAffinity::Text,
-            },
-            ColumnSpec {
-                name: "field_name",
-                affinity: SqlAffinity::Text,
-            },
-            ColumnSpec {
-                name: "old_value",
-                affinity: SqlAffinity::Text,
-            },
-            ColumnSpec {
-                name: "new_value",
-                affinity: SqlAffinity::Text,
-            },
-        ],
-    },
-];
-
-const VERSION_3_SELECTION_TABLE: TableSpec = TableSpec {
-    name: "current_selection",
-    columns: &[
-        ColumnSpec {
-            name: "singleton",
-            affinity: SqlAffinity::Integer,
-        },
-        ColumnSpec {
-            name: "organization",
-            affinity: SqlAffinity::Text,
-        },
-        ColumnSpec {
-            name: "work_item_id",
-            affinity: SqlAffinity::Integer,
-        },
-        ColumnSpec {
-            name: "selected_at",
-            affinity: SqlAffinity::Text,
-        },
-    ],
-};
-
-const VERSION_2_TABLES: [&TableSpec; 4] = [
-    &WORK_ITEMS_TABLE,
-    &RELATED_TABLES[0],
-    &RELATED_TABLES[1],
-    &RELATED_TABLES[2],
-];
-
-const VERSION_3_TABLES: [&TableSpec; 5] = [
-    &WORK_ITEMS_TABLE,
-    &RELATED_TABLES[0],
-    &RELATED_TABLES[1],
-    &RELATED_TABLES[2],
-    &VERSION_3_SELECTION_TABLE,
-];
-
-const CURRENT_TABLES: [&TableSpec; 4] = VERSION_2_TABLES;
-
-const SCHEMA_REPAIR_HINT: &str = "Recreate this database or restore a backup that matches schema version 4. Older ticket-tui files can be migrated by opening them without --read-only.";
-
-#[derive(Debug)]
-pub struct OpenedRepository {
-    pub repository: SqliteTicketRepository,
-    pub seeded_demo_data: bool,
-}
+const CLEAR_CACHE: &str = "DELETE FROM work_items;
+DELETE FROM work_item_relations;
+DELETE FROM work_item_comments;
+DELETE FROM work_item_history;";
 
 #[derive(Debug)]
 pub struct SqliteTicketRepository {
@@ -327,15 +85,14 @@ pub struct SqliteTicketRepository {
 }
 
 impl SqliteTicketRepository {
-    pub fn open(path: impl AsRef<Path>) -> Result<OpenedRepository> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let is_new = !path.exists();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
 
-        let mut connection = Connection::open(&path)
+        let connection = Connection::open(&path)
             .with_context(|| format!("failed to open database at {}", path.display()))?;
         connection
             .busy_timeout(StdDuration::from_secs(3))
@@ -344,31 +101,8 @@ impl SqliteTicketRepository {
             .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
             .context("failed to configure SQLite")?;
 
-        migrate(&connection)?;
-        if is_new {
-            seed_demo_data(&mut connection, DEMO_TICKET_COUNT)?;
-        } else {
-            seed_demo_graph_if_absent(&mut connection)?;
-        }
+        ensure_current_schema(&connection)?;
 
-        Ok(OpenedRepository {
-            repository: Self { connection, path },
-            seeded_demo_data: is_new,
-        })
-    }
-
-    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref().to_path_buf();
-        if !path.exists() {
-            bail!("database {} does not exist", path.display());
-        }
-        let connection =
-            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .with_context(|| format!("failed to open {} in read-only mode", path.display()))?;
-        connection
-            .busy_timeout(StdDuration::from_secs(3))
-            .context("failed to configure SQLite busy timeout")?;
-        validate_readable_schema(&connection)?;
         Ok(Self { connection, path })
     }
 
@@ -378,7 +112,6 @@ impl SqliteTicketRepository {
     }
 
     pub fn load_all(&self) -> Result<Vec<Ticket>> {
-        validate_schema(&self.connection)?;
         let mut statement = self.connection.prepare(
             "SELECT organization, project, work_item_id, revision, work_item_type,
                     title, state, reason, assigned_to, priority, area_path,
@@ -431,19 +164,16 @@ impl SqliteTicketRepository {
         })
     }
 
-    /// Replace every cached row with a fresh pull from Azure DevOps.
-    pub fn replace_all(&mut self, tickets: &[Ticket], relations: &[RelationRecord]) -> Result<()> {
+    /// Replaces the cached work items and their graph with a freshly pulled set.
+    pub fn replace_all(&mut self, tickets: &[Ticket], graph: &TicketGraph) -> Result<usize> {
         let transaction = self.connection.transaction()?;
-        transaction.execute_batch(
-            "DELETE FROM work_items;
-             DELETE FROM work_item_relations;
-             DELETE FROM work_item_comments;
-             DELETE FROM work_item_history;",
-        )?;
+        transaction
+            .execute_batch(CLEAR_CACHE)
+            .context("failed to clear the ticket cache")?;
         for ticket in tickets {
-            upsert_ticket(&transaction, ticket)?;
+            insert_ticket(&transaction, ticket)?;
         }
-        for relation in relations {
+        for relation in &graph.relations {
             transaction.execute(
                 "INSERT OR REPLACE INTO work_item_relations (organization, from_id, to_id, kind)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -455,28 +185,7 @@ impl SqliteTicketRepository {
                 ],
             )?;
         }
-        transaction.commit()?;
-        Ok(())
-    }
-
-    pub fn import_batch(&mut self, batch: &ImportBatch) -> Result<usize> {
-        let transaction = self.connection.transaction()?;
-        for ticket in &batch.tickets {
-            upsert_ticket(&transaction, ticket)?;
-        }
-        for relation in &batch.relations {
-            transaction.execute(
-                "INSERT OR REPLACE INTO work_item_relations (organization, from_id, to_id, kind)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    relation.from.organization,
-                    relation.from.id,
-                    relation.to.id,
-                    relation.kind.as_str()
-                ],
-            )?;
-        }
-        for comment in &batch.comments {
+        for comment in &graph.comments {
             transaction.execute(
                 "INSERT OR REPLACE INTO work_item_comments
                     (organization, work_item_id, comment_id, created_at, author, body)
@@ -491,7 +200,7 @@ impl SqliteTicketRepository {
                 ],
             )?;
         }
-        for entry in &batch.history {
+        for entry in &graph.history {
             transaction.execute(
                 "INSERT OR REPLACE INTO work_item_history
                     (organization, work_item_id, revision, changed_at, changed_by,
@@ -510,13 +219,10 @@ impl SqliteTicketRepository {
             )?;
         }
         transaction.commit()?;
-        Ok(batch.tickets.len())
+        Ok(tickets.len())
     }
 
     fn load_relations(&self) -> Result<Vec<RelationRecord>> {
-        if !table_exists(&self.connection, "work_item_relations")? {
-            return Ok(Vec::new());
-        }
         let mut statement = self
             .connection
             .prepare("SELECT organization, from_id, to_id, kind FROM work_item_relations")?;
@@ -540,9 +246,6 @@ impl SqliteTicketRepository {
     }
 
     fn load_comments(&self) -> Result<Vec<CommentRecord>> {
-        if !table_exists(&self.connection, "work_item_comments")? {
-            return Ok(Vec::new());
-        }
         let mut statement = self.connection.prepare(
             "SELECT organization, work_item_id, comment_id, created_at, author, body
              FROM work_item_comments",
@@ -567,9 +270,6 @@ impl SqliteTicketRepository {
     }
 
     fn load_history(&self) -> Result<Vec<HistoryRecord>> {
-        if !table_exists(&self.connection, "work_item_history")? {
-            return Ok(Vec::new());
-        }
         let mut statement = self.connection.prepare(
             "SELECT organization, work_item_id, revision, changed_at, changed_by,
                     field_name, old_value, new_value
@@ -635,145 +335,15 @@ fn schema_version(connection: &Connection) -> Result<i64> {
     Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
 }
 
-fn migrate(connection: &Connection) -> Result<()> {
-    let version = schema_version(connection)?;
-    if version > SCHEMA_VERSION {
-        bail!("database schema version {version} is newer than supported version {SCHEMA_VERSION}");
-    }
-    if version == 0 {
-        let existing_table: Option<String> = connection
-            .query_row(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'work_items'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if existing_table.is_some() {
-            bail!("database contains an unversioned work_items table; refusing to overwrite it");
-        }
-        connection.execute_batch(CREATE_WORK_ITEMS)?;
-        connection.execute_batch(CREATE_RELATED_TABLES)?;
-        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    } else if version == 1 {
-        let problems = schema_problems(connection, &[&WORK_ITEMS_TABLE])?;
-        if !problems.is_empty() {
-            bail!(
-                "cannot migrate schema version 1 to {SCHEMA_VERSION}:\n- {}\n{SCHEMA_REPAIR_HINT}",
-                problems.join("\n- ")
-            );
-        }
-        connection.execute_batch(CREATE_RELATED_TABLES)?;
-        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    } else if version == 2 {
-        let problems = schema_problems(connection, &VERSION_2_TABLES)?;
-        if !problems.is_empty() {
-            bail!(
-                "cannot migrate schema version 2 to {SCHEMA_VERSION}:\n- {}\n{SCHEMA_REPAIR_HINT}",
-                problems.join("\n- ")
-            );
-        }
-        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    } else if version == 3 {
-        let problems = schema_problems(connection, &VERSION_3_TABLES)?;
-        if !problems.is_empty() {
-            bail!(
-                "cannot migrate schema version 3 to {SCHEMA_VERSION}:\n- {}\n{SCHEMA_REPAIR_HINT}",
-                problems.join("\n- ")
-            );
-        }
-        connection.execute_batch("DROP TABLE current_selection")?;
-        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    }
-    validate_schema(connection)
-}
-
-fn validate_readable_schema(connection: &Connection) -> Result<()> {
-    let version = schema_version(connection)?;
-    if version == 0 {
-        bail!("database has no ticket-tui schema; reopen without --read-only to migrate");
-    }
-    if version > SCHEMA_VERSION {
-        bail!("database schema version {version} is newer than supported version {SCHEMA_VERSION}");
-    }
-    if version < SCHEMA_VERSION {
-        bail!(
-            "database schema version {version} needs migration to {SCHEMA_VERSION}; reopen without --read-only"
-        );
-    }
-    validate_schema(connection)
-}
-
-fn validate_schema(connection: &Connection) -> Result<()> {
-    let problems = schema_problems(connection, &CURRENT_TABLES)?;
-    if problems.is_empty() {
+fn ensure_current_schema(connection: &Connection) -> Result<()> {
+    if schema_version(connection)? == SCHEMA_VERSION {
         return Ok(());
     }
-    bail!(
-        "incompatible ticket-tui schema (version {SCHEMA_VERSION}):\n- {}\n{SCHEMA_REPAIR_HINT}",
-        problems.join("\n- ")
-    );
-}
-
-fn schema_problems(connection: &Connection, tables: &[&TableSpec]) -> Result<Vec<String>> {
-    let mut problems = Vec::new();
-    for table in tables {
-        match table_columns(connection, table.name)? {
-            None => problems.push(format!("missing table {}", table.name)),
-            Some(columns) => {
-                for spec in table.columns {
-                    match columns
-                        .iter()
-                        .find(|(name, _)| name.eq_ignore_ascii_case(spec.name))
-                    {
-                        None => problems.push(format!(
-                            "{} is missing column {} ({})",
-                            table.name,
-                            spec.name,
-                            spec.affinity.as_sql()
-                        )),
-                        Some((_, declared)) if !spec.affinity.matches(declared) => {
-                            let declared = if declared.is_empty() {
-                                "no type"
-                            } else {
-                                declared.as_str()
-                            };
-                            problems.push(format!(
-                                "{}.{} is declared as {}; {} is required",
-                                table.name,
-                                spec.name,
-                                declared,
-                                spec.affinity.as_sql()
-                            ));
-                        }
-                        Some(_) => {}
-                    }
-                }
-            }
-        }
-    }
-    Ok(problems)
-}
-
-fn table_columns(
-    connection: &Connection,
-    name: &'static str,
-) -> Result<Option<Vec<(String, String)>>> {
-    let name = match name {
-        "work_items"
-        | "work_item_relations"
-        | "work_item_comments"
-        | "work_item_history"
-        | "current_selection" => name,
-        other => bail!("internal error: unknown table {other}"),
-    };
-    if !table_exists(connection, name)? {
-        return Ok(None);
-    }
-    let mut statement = connection.prepare(&format!("PRAGMA table_info({name})"))?;
-    let rows = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
-    })?;
-    Ok(Some(rows.collect::<rusqlite::Result<Vec<_>>>()?))
+    connection
+        .execute_batch(RESET_SCHEMA)
+        .context("failed to rebuild the ticket cache schema")?;
+    connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
 }
 
 fn parse_row_timestamp(
@@ -823,40 +393,13 @@ impl std::error::Error for InvalidTimestamp {
     }
 }
 
-fn table_exists(connection: &Connection, name: &str) -> Result<bool> {
-    let found: Option<String> = connection
-        .query_row(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            [name],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(found.is_some())
-}
-
-fn upsert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
+fn insert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
     transaction.execute(
-        "INSERT INTO work_items (
+        "INSERT OR REPLACE INTO work_items (
             organization, project, work_item_id, revision, work_item_type,
             title, state, reason, assigned_to, priority, area_path,
             iteration_path, tags, description, created_at, changed_at, web_url
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
-         ON CONFLICT(organization, work_item_id) DO UPDATE SET
-            project = excluded.project,
-            revision = excluded.revision,
-            work_item_type = excluded.work_item_type,
-            title = excluded.title,
-            state = excluded.state,
-            reason = excluded.reason,
-            assigned_to = excluded.assigned_to,
-            priority = excluded.priority,
-            area_path = excluded.area_path,
-            iteration_path = excluded.iteration_path,
-            tags = excluded.tags,
-            description = excluded.description,
-            created_at = excluded.created_at,
-            changed_at = excluded.changed_at,
-            web_url = excluded.web_url",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             ticket.key.organization,
             ticket.project,
@@ -880,393 +423,132 @@ fn upsert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
     Ok(())
 }
 
-fn seed_demo_graph_if_absent(connection: &mut Connection) -> Result<bool> {
-    if !demo_graph_is_missing(connection)? {
-        return Ok(false);
-    }
-    let transaction = connection.transaction()?;
-    seed_demo_graph(&transaction, DEMO_TICKET_COUNT, OffsetDateTime::now_utc())?;
-    transaction.commit()?;
-    Ok(true)
-}
-
-fn demo_graph_is_missing(connection: &Connection) -> Result<bool> {
-    if !table_exists(connection, "work_items")? || !table_exists(connection, "work_item_relations")?
-    {
-        return Ok(false);
-    }
-    let ticket_count: i64 =
-        connection.query_row("SELECT COUNT(*) FROM work_items", [], |row| row.get(0))?;
-    if ticket_count != DEMO_TICKET_COUNT as i64 {
-        return Ok(false);
-    }
-    let demo_tickets: i64 = connection.query_row(
-        "SELECT COUNT(*) FROM work_items
-         WHERE organization = 'example-org'
-           AND project = 'atlas'
-           AND work_item_id BETWEEN 10001 AND 10500",
-        [],
-        |row| row.get(0),
-    )?;
-    if demo_tickets != ticket_count {
-        return Ok(false);
-    }
-    let relation_count: i64 =
-        connection.query_row("SELECT COUNT(*) FROM work_item_relations", [], |row| {
-            row.get(0)
-        })?;
-    let comment_count: i64 =
-        connection.query_row("SELECT COUNT(*) FROM work_item_comments", [], |row| {
-            row.get(0)
-        })?;
-    let history_count: i64 =
-        connection.query_row("SELECT COUNT(*) FROM work_item_history", [], |row| {
-            row.get(0)
-        })?;
-    Ok(relation_count == 0 && comment_count == 0 && history_count == 0)
-}
-
-fn seed_demo_data(connection: &mut Connection, count: usize) -> Result<()> {
-    let transaction = connection.transaction()?;
-    let anchor = OffsetDateTime::now_utc();
-    for index in 0..count {
-        insert_demo_ticket(&transaction, index, anchor)?;
-    }
-    seed_demo_graph(&transaction, count, anchor)?;
-    transaction.commit()?;
-    Ok(())
-}
-
-#[allow(clippy::cast_possible_wrap)]
-fn insert_demo_ticket(
-    transaction: &Transaction<'_>,
-    index: usize,
-    anchor: OffsetDateTime,
-) -> Result<()> {
-    const TYPES: [&str; 5] = ["Epic", "Feature", "User Story", "Bug", "Task"];
-    const STATES: [(&str, &str); 5] = [
-        ("New", "New work item"),
-        ("Active", "Implementation started"),
-        ("Resolved", "Ready for validation"),
-        ("Closed", "Work completed"),
-        ("Removed", "Removed from backlog"),
-    ];
-    const ASSIGNEES: [Option<&str>; 7] = [
-        Some("Avery Chen"),
-        Some("Jordan Patel"),
-        Some("Morgan Lee"),
-        Some("Riley Smith"),
-        Some("Taylor Garcia"),
-        Some("Casey Nguyen"),
-        None,
-    ];
-    const AREAS: [&str; 5] = [
-        "Atlas\\Platform",
-        "Atlas\\Developer Experience",
-        "Atlas\\Billing",
-        "Atlas\\Identity",
-        "Atlas\\Observability",
-    ];
-    const TITLE_VERBS: [&str; 10] = [
-        "Improve",
-        "Fix",
-        "Add",
-        "Investigate",
-        "Document",
-        "Harden",
-        "Migrate",
-        "Simplify",
-        "Measure",
-        "Automate",
-    ];
-    const TITLE_OBJECTS: [&str; 10] = [
-        "deployment health checks",
-        "ticket search relevance",
-        "session timeout handling",
-        "billing export pipeline",
-        "developer onboarding",
-        "audit log retention",
-        "service ownership metadata",
-        "release notifications",
-        "API retry behavior",
-        "dashboard accessibility",
-    ];
-    const TAG_SETS: [&str; 8] = [
-        "backend;rust",
-        "frontend;accessibility",
-        "customer;priority",
-        "platform;reliability",
-        "security;identity",
-        "technical-debt",
-        "documentation;developer-experience",
-        "observability;performance",
-    ];
-
-    let id = 10_001 + index as i64;
-    let (state, reason) = STATES[index % STATES.len()];
-    let created = anchor - Duration::days((index % 365) as i64 + 7);
-    let changed = created + Duration::days((index % 30) as i64 + 1);
-    let priority = (!index.is_multiple_of(11)).then_some((index % 4 + 1) as i64);
-    let assignee = ASSIGNEES[index % ASSIGNEES.len()];
-    let title = format!(
-        "{} {}",
-        TITLE_VERBS[index % TITLE_VERBS.len()],
-        TITLE_OBJECTS[(index * 7) % TITLE_OBJECTS.len()]
-    );
-    let iteration = format!("Atlas\\2026\\Sprint {}", index % 12 + 1);
-    let description = format!(
-        "Demo work item {id}. This locally generated description exercises wrapping and scrolling in the ticket detail pane."
-    );
-    let created_at = created.format(&Rfc3339)?;
-    let changed_at = changed.format(&Rfc3339)?;
-    let web_url = format!("https://dev.azure.com/example-org/atlas/_workitems/edit/{id}");
-
-    transaction.execute(
-        "INSERT INTO work_items (
-            organization, project, work_item_id, revision, work_item_type,
-            title, state, reason, assigned_to, priority, area_path,
-            iteration_path, tags, description, created_at, changed_at, web_url
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-        params![
-            "example-org",
-            "atlas",
-            id,
-            index as i64 % 9 + 1,
-            TYPES[index % TYPES.len()],
-            title,
-            state,
-            reason,
-            assignee,
-            priority,
-            AREAS[index % AREAS.len()],
-            iteration,
-            TAG_SETS[index % TAG_SETS.len()],
-            description,
-            created_at,
-            changed_at,
-            web_url,
-        ],
-    )?;
-    Ok(())
-}
-
-fn seed_demo_graph(
-    transaction: &Transaction<'_>,
-    count: usize,
-    anchor: OffsetDateTime,
-) -> Result<()> {
-    for index in 0..count {
-        let id = 10_001 + index as i64;
-        if !index.is_multiple_of(5) {
-            let parent = 10_001 + (index - index % 5) as i64;
-            insert_relation(transaction, id, parent, "parent")?;
-            insert_relation(transaction, parent, id, "child")?;
-        }
-        if index.is_multiple_of(11) && index + 1 < count {
-            insert_relation(transaction, id, id + 1, "related")?;
-            insert_relation(transaction, id + 1, id, "related")?;
-        }
-        if index.is_multiple_of(7) {
-            let created = (anchor - Duration::days((index % 20) as i64 + 1)).format(&Rfc3339)?;
-            transaction.execute(
-                "INSERT INTO work_item_comments
-                    (organization, work_item_id, comment_id, created_at, author, body)
-                 VALUES ('example-org', ?1, 1, ?2, 'Avery Chen', ?3)",
-                params![
-                    id,
-                    created,
-                    format!(
-                        "Demo comment on work item {id}. Stored locally and not edited by the TUI."
-                    )
-                ],
-            )?;
-            transaction.execute(
-                "INSERT INTO work_item_history
-                    (organization, work_item_id, revision, changed_at, changed_by,
-                     field_name, old_value, new_value)
-                 VALUES ('example-org', ?1, 2, ?2, 'Jordan Patel', 'State', 'New', 'Active')",
-                params![id, created],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn insert_relation(
-    transaction: &Transaction<'_>,
-    from_id: i64,
-    to_id: i64,
-    kind: &str,
-) -> Result<()> {
-    transaction.execute(
-        "INSERT OR IGNORE INTO work_item_relations (organization, from_id, to_id, kind)
-         VALUES ('example-org', ?1, ?2, ?3)",
-        params![from_id, to_id, kind],
-    )?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::timestamp::ts;
     use tempfile::tempdir;
 
+    fn ticket(id: i64) -> Ticket {
+        Ticket {
+            key: TicketKey {
+                organization: "example-org".into(),
+                id,
+            },
+            project: "atlas".into(),
+            revision: 3,
+            work_item_type: "Bug".into(),
+            title: format!("Ticket {id}"),
+            state: "Active".into(),
+            reason: Some("Investigating".into()),
+            assigned_to: Some("Avery Chen".into()),
+            priority: Some(2),
+            area_path: "Atlas\\Platform".into(),
+            iteration_path: "Atlas\\2026\\Sprint 1".into(),
+            tags: vec!["backend".into(), "rust".into()],
+            description: "Cached from Azure DevOps.".into(),
+            created_at: ts("2026-01-01T00:00:00Z"),
+            changed_at: ts("2026-02-01T00:00:00Z"),
+            web_url: format!("https://dev.azure.com/example-org/atlas/_workitems/edit/{id}"),
+        }
+    }
+
     #[test]
-    fn new_database_is_migrated_and_seeded_once() {
+    fn open_creates_an_empty_cache_at_the_current_schema_version() {
         let directory = tempdir().unwrap();
-        let path = directory.path().join("tickets.sqlite3");
+        let path = directory.path().join("nested").join("tickets.sqlite3");
 
-        let opened = SqliteTicketRepository::open(&path).unwrap();
-        assert!(opened.seeded_demo_data);
-        assert_eq!(
-            opened.repository.load_all().unwrap().len(),
-            DEMO_TICKET_COUNT
-        );
-        drop(opened);
+        let repository = SqliteTicketRepository::open(&path).unwrap();
 
-        let reopened = SqliteTicketRepository::open(&path).unwrap();
-        assert!(!reopened.seeded_demo_data);
+        assert!(repository.load_all().unwrap().is_empty());
+        assert_eq!(repository.load_graph().unwrap(), TicketGraph::default());
         assert_eq!(
-            reopened.repository.load_all().unwrap().len(),
-            DEMO_TICKET_COUNT
+            schema_version(&repository.connection).unwrap(),
+            SCHEMA_VERSION
         );
     }
 
     #[test]
-    fn existing_empty_database_is_migrated_but_not_seeded() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("empty.sqlite3");
-        Connection::open(&path).unwrap();
-
-        let opened = SqliteTicketRepository::open(&path).unwrap();
-
-        assert!(!opened.seeded_demo_data);
-        assert!(opened.repository.load_all().unwrap().is_empty());
-    }
-
-    #[test]
-    fn existing_demo_tickets_gain_family_links_when_the_graph_is_empty() {
+    fn replace_all_round_trips_tickets_and_relations() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tickets.sqlite3");
-        let opened = SqliteTicketRepository::open(&path).unwrap();
-        opened
-            .repository
-            .connection
-            .execute_batch(
-                "DELETE FROM work_item_relations;
-                 DELETE FROM work_item_comments;
-                 DELETE FROM work_item_history;",
-            )
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+        let tickets = vec![ticket(1), ticket(2)];
+        let graph = TicketGraph {
+            relations: vec![RelationRecord {
+                from: tickets[1].key.clone(),
+                to: tickets[0].key.clone(),
+                kind: RelationKind::Parent,
+            }],
+            comments: vec![CommentRecord {
+                ticket: tickets[0].key.clone(),
+                comment_id: 7,
+                created_at: ts("2026-02-02T00:00:00Z"),
+                author: Some("Jordan Patel".into()),
+                text: "Looks good".into(),
+            }],
+            history: vec![HistoryRecord {
+                ticket: tickets[0].key.clone(),
+                revision: 2,
+                changed_at: ts("2026-02-03T00:00:00Z"),
+                changed_by: Some("Morgan Lee".into()),
+                field_name: "State".into(),
+                old_value: Some("New".into()),
+                new_value: Some("Active".into()),
+            }],
+        };
+
+        assert_eq!(repository.replace_all(&tickets, &graph).unwrap(), 2);
+
+        let mut loaded = repository.load_all().unwrap();
+        loaded.sort_by_key(|ticket| ticket.key.id);
+        assert_eq!(loaded, tickets);
+        assert_eq!(repository.load_graph().unwrap(), graph);
+
+        let survivor = vec![ticket(3)];
+        repository
+            .replace_all(&survivor, &TicketGraph::default())
             .unwrap();
-        drop(opened);
-
-        let reopened = SqliteTicketRepository::open(&path).unwrap();
-        let graph = reopened.repository.load_graph().unwrap();
-        assert!(!graph.relations.is_empty());
-        assert!(
-            graph.relations.iter().any(|relation| {
-                relation.from.id == 10_007
-                    && relation.to.id == 10_006
-                    && relation.kind == RelationKind::Parent
-            }),
-            "epic 10006 should have child 10007 after the graph is backfilled"
-        );
+        assert_eq!(repository.load_all().unwrap(), survivor);
+        assert_eq!(repository.load_graph().unwrap(), TicketGraph::default());
     }
 
     #[test]
-    fn newer_schema_version_is_rejected() {
+    fn stale_schema_version_rebuilds_the_cache_instead_of_migrating() {
         let directory = tempdir().unwrap();
-        let path = directory.path().join("future.sqlite3");
-        let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None, "user_version", 99).unwrap();
-        drop(connection);
-
-        let error = SqliteTicketRepository::open(&path).unwrap_err();
-
-        assert!(error.to_string().contains("newer than supported"));
-    }
-
-    #[test]
-    fn schema_v1_migrates_and_gains_relation_tables() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("v1.sqlite3");
+        let path = directory.path().join("stale.sqlite3");
         let connection = Connection::open(&path).unwrap();
         connection
             .execute_batch(
                 "CREATE TABLE work_items (
                     organization TEXT NOT NULL,
-                    project TEXT NOT NULL,
                     work_item_id INTEGER NOT NULL,
-                    revision INTEGER NOT NULL,
-                    work_item_type TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    reason TEXT,
-                    assigned_to TEXT,
-                    priority INTEGER,
-                    area_path TEXT NOT NULL,
-                    iteration_path TEXT NOT NULL,
-                    tags TEXT NOT NULL DEFAULT '',
-                    description TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    changed_at TEXT NOT NULL,
-                    web_url TEXT NOT NULL,
-                    PRIMARY KEY (organization, work_item_id)
-                );",
+                    title TEXT NOT NULL
+                );
+                INSERT INTO work_items VALUES ('example-org', 10001, 'Stale');
+                PRAGMA user_version = 4;",
             )
             .unwrap();
-        connection.pragma_update(None, "user_version", 1).unwrap();
         drop(connection);
 
-        let opened = SqliteTicketRepository::open(&path).unwrap();
-        let graph = opened.repository.load_graph().unwrap();
-        assert!(graph.relations.is_empty());
-        assert!(table_exists(&opened.repository.connection, "work_item_relations").unwrap());
-    }
+        let repository = SqliteTicketRepository::open(&path).unwrap();
 
-    #[test]
-    fn read_only_mode_opens_existing_files_and_rejects_missing_ones() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tickets.sqlite3");
-        SqliteTicketRepository::open(&path).unwrap();
-
-        let repository = SqliteTicketRepository::open_read_only(&path).unwrap();
-        assert_eq!(repository.load_all().unwrap().len(), DEMO_TICKET_COUNT);
-        assert!(!repository.load_graph().unwrap().relations.is_empty());
-
-        let missing = directory.path().join("missing").join("tickets.sqlite3");
-        let error = SqliteTicketRepository::open_read_only(&missing).unwrap_err();
-        assert!(error.to_string().contains("does not exist"));
-        assert!(!missing.parent().unwrap().exists());
-    }
-
-    #[test]
-    fn import_upserts_tickets_and_relations() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("import.sqlite3");
-        let mut opened = SqliteTicketRepository::open(&path).unwrap();
-        let batch = crate::import::parse_json(
-            r#"[{"id":42,"organization":"example-org","project":"atlas","title":"Imported","type":"Bug","relations":[{"kind":"parent","id":10001}]}]"#,
-        );
-        assert_eq!(opened.repository.import_batch(&batch).unwrap(), 1);
-        let tickets = opened.repository.load_all().unwrap();
-        assert!(tickets.iter().any(|ticket| ticket.key.id == 42));
-        let graph = opened.repository.load_graph().unwrap();
-        assert!(
-            graph
-                .relations
-                .iter()
-                .any(|relation| relation.from.id == 42 && relation.to.id == 10_001)
+        assert!(repository.load_all().unwrap().is_empty());
+        assert_eq!(
+            schema_version(&repository.connection).unwrap(),
+            SCHEMA_VERSION
         );
     }
 
     #[test]
-    fn load_parses_offset_timestamps_and_rejects_invalid_ones() {
+    fn load_reports_invalid_timestamps_with_the_row_id() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("timestamps.sqlite3");
-        let opened = SqliteTicketRepository::open(&path).unwrap();
-        opened
-            .repository
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+        repository
+            .replace_all(&[ticket(10_001)], &TicketGraph::default())
+            .unwrap();
+        repository
             .connection
             .execute(
                 "UPDATE work_items SET changed_at = '2026-08-26T13:00:00-05:00'
@@ -1274,239 +556,19 @@ mod tests {
                 [],
             )
             .unwrap();
-        let tickets = opened.repository.load_all().unwrap();
-        let ticket = tickets
-            .iter()
-            .find(|ticket| ticket.key.id == 10_001)
-            .unwrap();
-        assert_eq!(
-            ticket.changed_at,
-            crate::timestamp::ts("2026-08-26T18:00:00Z")
-        );
+        let tickets = repository.load_all().unwrap();
+        assert_eq!(tickets[0].changed_at, ts("2026-08-26T18:00:00Z"));
 
-        opened
-            .repository
+        repository
             .connection
             .execute(
                 "UPDATE work_items SET created_at = 'not-a-date' WHERE work_item_id = 10001",
                 [],
             )
             .unwrap();
-        let error = format!("{:#}", opened.repository.load_all().unwrap_err());
+
+        let error = format!("{:#}", repository.load_all().unwrap_err());
         assert!(error.contains("10001"), "{error}");
         assert!(error.contains("created_at"), "{error}");
-    }
-
-    fn write_v2_work_items(connection: &Connection, extra_ddl: &str) {
-        connection
-            .execute_batch(&format!(
-                "CREATE TABLE work_items (
-                    organization TEXT NOT NULL,
-                    project TEXT NOT NULL,
-                    work_item_id INTEGER NOT NULL,
-                    revision INTEGER NOT NULL,
-                    work_item_type TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    reason TEXT,
-                    assigned_to TEXT,
-                    priority INTEGER,
-                    area_path TEXT NOT NULL,
-                    iteration_path TEXT NOT NULL,
-                    tags TEXT NOT NULL DEFAULT '',
-                    description TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    changed_at TEXT NOT NULL
-                    {extra_ddl}
-                    , PRIMARY KEY (organization, work_item_id)
-                );
-                {CREATE_RELATED_TABLES}
-                PRAGMA user_version = 2;"
-            ))
-            .unwrap();
-    }
-
-    #[test]
-    fn schema_v2_migrates_without_live_ui_state_in_sqlite() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("v2.sqlite3");
-        let connection = Connection::open(&path).unwrap();
-        write_v2_work_items(&connection, ", web_url TEXT NOT NULL");
-        drop(connection);
-
-        let opened = SqliteTicketRepository::open(&path).unwrap();
-
-        assert!(!table_exists(&opened.repository.connection, "current_selection").unwrap());
-        assert_eq!(
-            schema_version(&opened.repository.connection).unwrap(),
-            SCHEMA_VERSION
-        );
-    }
-
-    #[test]
-    fn schema_v3_drops_the_obsolete_current_selection_table() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("v3.sqlite3");
-        let connection = Connection::open(&path).unwrap();
-        write_v2_work_items(&connection, ", web_url TEXT NOT NULL");
-        connection
-            .execute_batch(
-                "CREATE TABLE current_selection (
-                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                    organization TEXT NOT NULL,
-                    work_item_id INTEGER NOT NULL,
-                    selected_at TEXT NOT NULL
-                );
-                INSERT INTO current_selection
-                    (singleton, organization, work_item_id, selected_at)
-                VALUES (1, 'example-org', 10001, '2026-08-27T00:00:00Z');
-                PRAGMA user_version = 3;",
-            )
-            .unwrap();
-        drop(connection);
-
-        let opened = SqliteTicketRepository::open(&path).unwrap();
-
-        assert!(!table_exists(&opened.repository.connection, "current_selection").unwrap());
-        assert_eq!(
-            schema_version(&opened.repository.connection).unwrap(),
-            SCHEMA_VERSION
-        );
-    }
-
-    #[test]
-    fn missing_column_is_reported_before_rows_load() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("missing-column.sqlite3");
-        let connection = Connection::open(&path).unwrap();
-        write_v2_work_items(&connection, "");
-        drop(connection);
-
-        let error = format!("{:#}", SqliteTicketRepository::open(&path).unwrap_err());
-        assert!(error.contains("web_url"), "{error}");
-        assert!(error.contains("missing column"), "{error}");
-        assert!(error.contains("schema version 2"), "{error}");
-    }
-
-    #[test]
-    fn wrong_column_type_and_missing_table_are_reported() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("wrong-type.sqlite3");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE work_items (
-                    organization TEXT NOT NULL,
-                    project TEXT NOT NULL,
-                    work_item_id INTEGER NOT NULL,
-                    revision INTEGER NOT NULL,
-                    work_item_type TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    reason TEXT,
-                    assigned_to TEXT,
-                    priority TEXT,
-                    area_path TEXT NOT NULL,
-                    iteration_path TEXT NOT NULL,
-                    tags TEXT NOT NULL DEFAULT '',
-                    description TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    changed_at TEXT NOT NULL,
-                    web_url TEXT NOT NULL,
-                    PRIMARY KEY (organization, work_item_id)
-                );
-                PRAGMA user_version = 2;",
-            )
-            .unwrap();
-        drop(connection);
-
-        let error = format!("{:#}", SqliteTicketRepository::open(&path).unwrap_err());
-        assert!(error.contains("priority"), "{error}");
-        assert!(error.contains("INTEGER"), "{error}");
-        assert!(error.contains("work_item_relations"), "{error}");
-    }
-
-    #[test]
-    fn extra_columns_are_compatible() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("extra.sqlite3");
-        let opened = SqliteTicketRepository::open(&path).unwrap();
-        opened
-            .repository
-            .connection
-            .execute("ALTER TABLE work_items ADD COLUMN extra TEXT", [])
-            .unwrap();
-        drop(opened);
-
-        let reopened = SqliteTicketRepository::open(&path).unwrap();
-        assert_eq!(
-            reopened.repository.load_all().unwrap().len(),
-            DEMO_TICKET_COUNT
-        );
-    }
-
-    #[test]
-    fn read_only_mode_rejects_outdated_and_broken_schema() {
-        let directory = tempdir().unwrap();
-        let v1 = directory.path().join("v1.sqlite3");
-        let connection = Connection::open(&v1).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE work_items (
-                    organization TEXT NOT NULL,
-                    project TEXT NOT NULL,
-                    work_item_id INTEGER NOT NULL,
-                    revision INTEGER NOT NULL,
-                    work_item_type TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    reason TEXT,
-                    assigned_to TEXT,
-                    priority INTEGER,
-                    area_path TEXT NOT NULL,
-                    iteration_path TEXT NOT NULL,
-                    tags TEXT NOT NULL DEFAULT '',
-                    description TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL,
-                    changed_at TEXT NOT NULL,
-                    web_url TEXT NOT NULL,
-                    PRIMARY KEY (organization, work_item_id)
-                );",
-            )
-            .unwrap();
-        connection.pragma_update(None, "user_version", 1).unwrap();
-        drop(connection);
-
-        let error = format!(
-            "{:#}",
-            SqliteTicketRepository::open_read_only(&v1).unwrap_err()
-        );
-        assert!(error.contains("needs migration"), "{error}");
-        assert!(error.contains("--read-only"), "{error}");
-    }
-
-    #[test]
-    fn v1_missing_column_blocks_migration() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("v1-broken.sqlite3");
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE work_items (
-                    organization TEXT NOT NULL,
-                    project TEXT NOT NULL,
-                    work_item_id INTEGER NOT NULL,
-                    title TEXT NOT NULL,
-                    state TEXT NOT NULL,
-                    PRIMARY KEY (organization, work_item_id)
-                );",
-            )
-            .unwrap();
-        connection.pragma_update(None, "user_version", 1).unwrap();
-        drop(connection);
-
-        let error = format!("{:#}", SqliteTicketRepository::open(&path).unwrap_err());
-        assert!(error.contains("cannot migrate"), "{error}");
-        assert!(error.contains("web_url"), "{error}");
     }
 }
