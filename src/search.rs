@@ -209,24 +209,7 @@ fn search_worker(receiver: Receiver<Command>, sender: Sender<SearchResult>) {
             return;
         };
 
-        let pattern = Pattern::new(
-            &query,
-            CaseMatching::Ignore,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-        );
-        let mut matches: Vec<_> = documents
-            .iter()
-            .filter_map(|document| {
-                pattern
-                    .score(document.text.slice(..), &mut matcher)
-                    .map(|score| SearchMatch {
-                        ticket_index: document.ticket_index,
-                        score,
-                    })
-            })
-            .collect();
-        matches.sort_by_key(|entry| std::cmp::Reverse(entry.score));
+        let matches = score(&documents, &query, &mut matcher);
 
         if sender
             .send(SearchResult {
@@ -238,6 +221,43 @@ fn search_worker(receiver: Receiver<Command>, sender: Sender<SearchResult>) {
             return;
         }
     }
+}
+
+/// Scores prepared documents against one fuzzy query, best first.
+fn score(documents: &[SearchDocument], query: &str, matcher: &mut Matcher) -> Vec<SearchMatch> {
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut matches: Vec<_> = documents
+        .iter()
+        .filter_map(|document| {
+            pattern
+                .score(document.text.slice(..), matcher)
+                .map(|score| SearchMatch {
+                    ticket_index: document.ticket_index,
+                    score,
+                })
+        })
+        .collect();
+    matches.sort_by_key(|entry| std::cmp::Reverse(entry.score));
+    matches
+}
+
+/// Ranks work items against a fuzzy query on the calling thread, best first.
+/// The engine above does the same work off the main thread so that typing
+/// never waits for it; a one-shot read with no frames to draw has nothing to
+/// wait for and asks here instead.
+#[must_use]
+pub fn rank(tickets: &[Ticket], query: &str) -> Vec<SearchMatch> {
+    let documents = SearchDocuments::prepare(tickets);
+    score(
+        &documents.documents,
+        query,
+        &mut Matcher::new(Config::DEFAULT),
+    )
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, ValueHint};
+use clap::Parser;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyEventKind,
@@ -21,6 +21,7 @@ use ticket_tui::app::{
     App, AppAction, CopiedContent, DividerOrientation, PointerTarget, PreparedTickets, SyncTarget,
 };
 use ticket_tui::azure::{AzureClient, AzureConfig};
+use ticket_tui::cli::{self, Cli, resolve_me};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
 use ticket_tui::edit::{EditRejection, EditRequest, FieldEdit};
 use ticket_tui::markdown;
@@ -32,31 +33,6 @@ use ticket_tui::sync::{
 };
 use ticket_tui::timestamp::Timestamp;
 use url::Url;
-
-#[derive(Debug, Parser)]
-#[command(version, about)]
-struct Cli {
-    /// SQLite database to open instead of the platform data-directory default
-    #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
-    database: Option<PathBuf>,
-    /// Pull every work item from Azure DevOps into the database before opening the TUI
-    #[arg(long)]
-    sync: bool,
-    /// Azure DevOps organization (slug or URL); defaults to TICKET_TUI_ORG or `az devops configure`
-    #[arg(long, value_name = "ORG")]
-    org: Option<String>,
-    /// Azure DevOps project; defaults to TICKET_TUI_PROJECT or `az devops configure`
-    #[arg(long, value_name = "PROJECT")]
-    project: Option<String>,
-    /// Seconds between background pulls from Azure DevOps, 0 to turn the timer
-    /// off; defaults to TICKET_TUI_REFRESH or 60
-    #[arg(long, value_name = "SECONDS")]
-    refresh: Option<u64>,
-    /// Extra WIQL condition ANDed into every pull, narrowing a large project;
-    /// defaults to TICKET_TUI_QUERY
-    #[arg(long, value_name = "WIQL")]
-    query: Option<String>,
-}
 
 /// How often the background pull runs when nothing says otherwise.
 const DEFAULT_REFRESH_SECONDS: u64 = 60;
@@ -264,6 +240,14 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    // Every subcommand does its one thing and exits; only a bare invocation
+    // opens the TUI.
+    if let Some(command) = &cli.command {
+        return cli::run(&cli, command);
+    }
+    if cli.sync {
+        eprintln!("note: --sync is deprecated; run `ticket-tui sync` to pull and exit");
+    }
     let refresh = resolve_refresh(cli.refresh, std::env::var("TICKET_TUI_REFRESH").ok())?;
     let database_path = cli.database.clone().unwrap_or_else(default_database_path);
     let mut repository = SqliteTicketRepository::open(&database_path)?;
@@ -475,7 +459,7 @@ const fn pull_at_startup(
 /// What a run without a configured organization opens with.
 fn offline_status(database_is_empty: bool) -> &'static str {
     if database_is_empty {
-        "Database is empty and offline; run with --sync --org ORG --project PROJECT to pull work items"
+        "Database is empty and offline; run `ticket-tui sync --org ORG --project PROJECT` to pull work items"
     } else {
         "Browsing the database offline; no Azure DevOps organization is configured"
     }
@@ -536,17 +520,6 @@ fn sync_source(config: &AzureConfig, refresh: u64) -> String {
         source.push_str(&format!(" · scope ({scope})"));
     }
     source
-}
-
-/// Who "mine" means: the display name the last sync recorded, overridden by
-/// `TICKET_TUI_ME` for anyone whose profile name differs from the name their
-/// work items are assigned to. Blank values count as unset.
-fn resolve_me(stored: Option<String>, env: Option<String>) -> Option<String> {
-    [env, stored]
-        .into_iter()
-        .flatten()
-        .map(|name| name.trim().to_owned())
-        .find(|name| !name.is_empty())
 }
 
 fn run_terminal(
@@ -1079,8 +1052,9 @@ fn poll_sync(
     redraw
 }
 
-/// Another process writing the database — an agent, or `ticket-tui --sync` in
-/// another terminal — still reloads the rows from SQLite.
+/// Another process writing the database — an agent running `ticket-tui edit`,
+/// or `ticket-tui sync` in another terminal — still reloads the rows from
+/// SQLite.
 fn poll_watch(
     app: &mut App,
     repository: &SqliteTicketRepository,
@@ -1669,30 +1643,6 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_overrides_the_display_name_recorded_by_the_last_sync() {
-        assert_eq!(
-            resolve_me(Some("Jacob Ragsdale".into()), None).as_deref(),
-            Some("Jacob Ragsdale")
-        );
-        assert_eq!(
-            resolve_me(Some("Jacob Ragsdale".into()), Some("  Avery Chen ".into())).as_deref(),
-            Some("Avery Chen"),
-            "TICKET_TUI_ME wins over the cached profile name"
-        );
-        assert_eq!(
-            resolve_me(Some("Jacob Ragsdale".into()), Some("   ".into())).as_deref(),
-            Some("Jacob Ragsdale"),
-            "a blank override is not an override"
-        );
-        assert_eq!(
-            resolve_me(None, Some("Avery Chen".into())).as_deref(),
-            Some("Avery Chen")
-        );
-        assert_eq!(resolve_me(None, None), None);
-        assert_eq!(resolve_me(Some(String::new()), None), None);
-    }
-
-    #[test]
     fn the_refresh_interval_comes_from_the_flag_before_the_environment() {
         assert_eq!(resolve_refresh(None, None).unwrap(), 60);
         assert_eq!(resolve_refresh(Some(5), None).unwrap(), 5);
@@ -2013,7 +1963,7 @@ mod tests {
         assert_eq!(level, NotificationLevel::Error);
         assert!(!app.sync_pending);
         assert_eq!(app.activity_label(), None);
-        assert!(offline_status(true).contains("--sync"));
+        assert!(offline_status(true).contains("ticket-tui sync"));
         assert!(offline_status(false).contains("offline"));
     }
 

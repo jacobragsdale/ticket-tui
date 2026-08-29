@@ -187,6 +187,18 @@ pub trait WorkItemSource {
     /// Write one work item with a JSON Patch document, answering with the copy
     /// the server stored.
     fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<(Ticket, Vec<RelationRecord>)>;
+    /// Add a work item to the project, answering with the copy the server
+    /// stored. `fields` are the operations that set its fields and `parent` is
+    /// the work item it hangs under. A source that cannot create one says so
+    /// rather than pretending to have.
+    fn create_work_item(
+        &self,
+        _work_item_type: &str,
+        _fields: &[Value],
+        _parent: Option<i64>,
+    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        Err(anyhow!("this source cannot create work items"))
+    }
     /// The states one work item type allows, which is what the state picker
     /// offers once a pull has cached them.
     fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>>;
@@ -243,6 +255,15 @@ impl WorkItemSource for AzureClient {
 
     fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<(Ticket, Vec<RelationRecord>)> {
         self.update_work_item(id, patch)
+    }
+
+    fn create_work_item(
+        &self,
+        work_item_type: &str,
+        fields: &[Value],
+        parent: Option<i64>,
+    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        AzureClient::create_work_item(self, work_item_type, fields, parent)
     }
 
     fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>> {
@@ -372,21 +393,41 @@ impl SyncHandle {
     }
 }
 
+/// One pull, run to completion on the calling thread, for the `ticket-tui
+/// sync` subcommand: the same worker the TUI drives, with nobody to hand the
+/// reloaded rows to. `full` brings the whole project down rather than starting
+/// from the stored watermark, which is how a database is rebuilt.
+///
+/// The signed-in display name is written alongside the rows, the way a pull
+/// under the TUI has the main thread write it, so `@me` still resolves for a
+/// database only ever synced from the command line.
+pub fn pull_once(
+    database: PathBuf,
+    connector: Box<dyn SourceConnector>,
+    full: bool,
+) -> SyncOutcome {
+    let (events, received) = mpsc::channel();
+    let mut worker = Worker::new(database, connector);
+    worker.force_full = full;
+    let outcome = worker.pull(&events);
+    drop(events);
+    for event in received {
+        if let SyncEvent::DisplayName(name) = event
+            && let Ok(repository) = worker.repository()
+        {
+            drop(repository.set_meta(db::ME_DISPLAY_NAME_KEY, &name));
+        }
+    }
+    outcome
+}
+
 fn work(
     database: PathBuf,
     connector: Box<dyn SourceConnector>,
     requests: &Receiver<SyncRequest>,
     events: &Sender<SyncEvent>,
 ) {
-    let mut worker = Worker {
-        database,
-        connector,
-        source: None,
-        repository: None,
-        typed_states: HashSet::new(),
-        typed_states_seeded: false,
-        throttled: None,
-    };
+    let mut worker = Worker::new(database, connector);
     while let Ok(request) = requests.recv() {
         let event = match request {
             SyncRequest::Pull(origin) => {
@@ -434,9 +475,26 @@ struct Worker {
     /// for. Taken with the pull's outcome, so a pull that landed anyway still
     /// tells the timer to hold off.
     throttled: Option<Duration>,
+    /// Whether every pull brings the whole project down rather than starting
+    /// from the stored watermark. Only `ticket-tui sync --full` sets it: the
+    /// TUI's worker lets the watermark decide.
+    force_full: bool,
 }
 
 impl Worker {
+    fn new(database: PathBuf, connector: Box<dyn SourceConnector>) -> Self {
+        Self {
+            database,
+            connector,
+            source: None,
+            repository: None,
+            typed_states: HashSet::new(),
+            typed_states_seeded: false,
+            throttled: None,
+            force_full: false,
+        }
+    }
+
     /// A timer pull turned away for throttling is not retried here: the main
     /// thread owns the clock, and sleeping on this thread would only hold every
     /// edit typed in the meantime behind a pull nobody asked for.
@@ -688,7 +746,9 @@ impl Worker {
             // the project: the condition may have widened, and only a full pull
             // brings in what it now admits, or narrowed, and only a full pull
             // drops what it now excludes.
-            Some(watermark) if !self.rescoped()? => self.pull_changed(watermark, events)?,
+            Some(watermark) if !self.force_full && !self.rescoped()? => {
+                self.pull_changed(watermark, events)?
+            }
             _ => self.pull_everything(events)?,
         };
         // Which project these rows came from, recorded after the pull that

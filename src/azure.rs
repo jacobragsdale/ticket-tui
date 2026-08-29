@@ -310,6 +310,25 @@ impl AzureClient {
         parse_work_item(&item, &self.config)
     }
 
+    /// Add a work item to the project, answering with Azure DevOps's own copy
+    /// of what it stored. `fields` are the operations that set its fields —
+    /// [`crate::edit::set_field`] builds one each — and `parent` is the work
+    /// item it hangs under, which goes out as a link rather than as a field.
+    ///
+    /// A creation is a `POST` carrying a JSON Patch document: there is no
+    /// revision to test, because there is nothing there yet.
+    pub fn create_work_item(
+        &self,
+        work_item_type: &str,
+        fields: &[Value],
+        parent: Option<i64>,
+    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        let document = create_document(fields, parent, &self.config);
+        let url = create_work_item_url(work_item_type, &self.config)?;
+        let item = self.send(&url, Request::PostPatch(&document))?;
+        parse_work_item(&item, &self.config)
+    }
+
     /// The states one work item type allows, in the order the process template
     /// lists them, which is the order the state picker offers. A state carries
     /// the category Azure DevOps assigned it rather than one guessed from its
@@ -544,8 +563,12 @@ impl AzureClient {
     }
 
     fn query_work_item_ids(&self, wiql: &str) -> Result<Vec<i64>> {
+        // `timePrecision` is what lets a date in the query carry a time as
+        // well. Without it Azure DevOps refuses the incremental pull outright:
+        // the watermark names the second an edit landed, and a query read at
+        // date precision may not mention one.
         let url = format!(
-            "{}/{}/_apis/wit/wiql?api-version={API_VERSION}",
+            "{}/{}/_apis/wit/wiql?timePrecision=true&api-version={API_VERSION}",
             self.config.base_url(),
             self.config.project
         );
@@ -602,6 +625,10 @@ impl AzureClient {
                 .header("Content-Type", "application/json-patch+json")
                 .send_json(patch)
                 .with_context(|| format!("PATCH {url} failed"))?,
+            Request::PostPatch(document) => authorized(self.agent.post(url), &authorization)
+                .header("Content-Type", "application/json-patch+json")
+                .send_json(document)
+                .with_context(|| format!("POST {url} failed"))?,
         };
         self.note_rate_limit(response.headers());
         read_json(response, url)
@@ -642,6 +669,9 @@ enum Request<'a> {
     /// A JSON Patch document, which Azure DevOps takes only under its own
     /// media type.
     Patch(&'a [Value]),
+    /// The same document posted rather than patched, which is how a work item
+    /// is created: there is no work item yet to patch.
+    PostPatch(&'a [Value]),
 }
 
 /// The headers every Azure DevOps request carries, whatever its method.
@@ -965,6 +995,53 @@ fn base64(bytes: &[u8]) -> String {
         }
     }
     output
+}
+
+/// Where a new work item is posted. The type is a path segment with a literal
+/// `$` in front of it, and both it and the project name can carry spaces —
+/// `User Story`, `Product Backlog Item` — so the URL is assembled rather than
+/// formatted.
+fn create_work_item_url(work_item_type: &str, config: &AzureConfig) -> Result<String> {
+    let mut url = Url::parse(&config.base_url())
+        .with_context(|| format!("invalid Azure DevOps URL {}", config.base_url()))?;
+    url.path_segments_mut()
+        .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?
+        .extend([
+            config.project.as_str(),
+            "_apis",
+            "wit",
+            "workitems",
+            &format!("${work_item_type}"),
+        ]);
+    // Without `$expand=relations` the answer carries no links at all, so a work
+    // item created under a parent would be stored without one.
+    url.set_query(Some(&format!(
+        "$expand=relations&api-version={API_VERSION}"
+    )));
+    Ok(url.into())
+}
+
+/// The JSON Patch document that creates a work item: the operations setting
+/// its fields, then the link to its parent when it has one.
+///
+/// A parent is not a field, so it cannot be written like one: it is a relation
+/// appended to the work item's own list, naming the link type and the parent's
+/// API URL. The URL hangs off the organization rather than the project, which
+/// is the form [`parse_work_item`] reads back.
+#[must_use]
+pub fn create_document(fields: &[Value], parent: Option<i64>, config: &AzureConfig) -> Vec<Value> {
+    let mut document = fields.to_vec();
+    if let Some(parent) = parent {
+        document.push(json!({
+            "op": "add",
+            "path": "/relations/-",
+            "value": {
+                "rel": "System.LinkTypes.Hierarchy-Reverse",
+                "url": format!("{}/_apis/wit/workItems/{parent}", config.base_url()),
+            },
+        }));
+    }
+    document
 }
 
 /// Map one `/_apis/wit/workitems` entry onto a ticket and its relations.
@@ -1858,6 +1935,73 @@ mod tests {
             format!("{error:#}"),
             format!("Azure DevOps returned HTTP 404 for {url}: does not exist"),
             "typing the refusal keeps the message it always had"
+        );
+    }
+
+    #[test]
+    fn creating_a_work_item_posts_its_fields_and_hangs_it_under_its_parent() {
+        let fields = [
+            crate::edit::set_field(crate::edit::TITLE_FIELD, "Edit dispatcher"),
+            crate::edit::set_field(crate::edit::PRIORITY_FIELD, 2),
+        ];
+
+        let alone = create_document(&fields, None, &config());
+        assert_eq!(
+            alone,
+            fields.to_vec(),
+            "a work item with no parent is its fields and nothing else"
+        );
+
+        let parented = create_document(&fields, Some(613), &config());
+        assert_eq!(&parented[..2], &fields[..], "the fields lead, in order");
+        assert_eq!(
+            parented[2],
+            json!({
+                "op": "add",
+                "path": "/relations/-",
+                "value": {
+                    "rel": "System.LinkTypes.Hierarchy-Reverse",
+                    "url": "https://dev.azure.com/demo/_apis/wit/workItems/613",
+                },
+            }),
+            "the parent travels as a link on the organization, not as a field"
+        );
+        let (_, relations) = parse_work_item(
+            &json!({
+                "id": 700,
+                "rev": 1,
+                "fields": {
+                    "System.Title": "Edit dispatcher",
+                    "System.CreatedDate": "2026-08-29T09:00:00Z",
+                    "System.ChangedDate": "2026-08-29T09:00:00Z",
+                },
+                "relations": [parented[2].get("value").unwrap().clone()],
+            }),
+            &config(),
+        )
+        .unwrap();
+        assert_eq!(
+            relations[0].to.id, 613,
+            "the link reads back as the parent it named"
+        );
+    }
+
+    #[test]
+    fn the_create_url_keeps_the_dollar_before_an_escaped_work_item_type() {
+        assert_eq!(
+            create_work_item_url("Issue", &config()).unwrap(),
+            "https://dev.azure.com/demo/development/_apis/wit/workitems/$Issue\
+             ?$expand=relations&api-version=7.1"
+        );
+        let spaced = AzureConfig {
+            project: "Fabrikam Fiber".into(),
+            ..config()
+        };
+        assert_eq!(
+            create_work_item_url("User Story", &spaced).unwrap(),
+            "https://dev.azure.com/demo/Fabrikam%20Fiber/_apis/wit/workitems/$User%20Story\
+             ?$expand=relations&api-version=7.1",
+            "a space is escaped either side of the type; the dollar is not"
         );
     }
 
