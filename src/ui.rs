@@ -398,17 +398,11 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let bookmarked = app.is_bookmarked(&ticket.key);
         let checked = app.is_row_selected(&ticket.key);
         let mut cells = vec![Cell::from(row_marker_line(checked, bookmarked))];
-        cells.extend(columns.iter().map(|column| {
-            table_cell(
-                ticket,
-                column.id,
-                now,
-                density,
-                &mut highlighter,
-                bookmarked,
-                checked,
-            )
-        }));
+        cells.extend(
+            columns
+                .iter()
+                .map(|column| table_cell(ticket, column.id, now, density, &mut highlighter)),
+        );
         Row::new(cells).height(row_height)
     });
     let table = Table::new(rows, constraints.clone())
@@ -855,73 +849,65 @@ fn render_sort_popup(frame: &mut Frame<'_>, app: &mut App) {
     let area = centered_rect(frame.area(), 48, 16);
     frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, app, area, " Sort tickets ");
-    let selected_index = app.sort_draft.field_index;
-    let lines: Vec<Line> = SortField::ALL
+    let selected = app.sort_draft.field_index;
+    let rows: Vec<Line> = SortField::ALL
         .iter()
         .enumerate()
         .map(|(index, field)| {
-            let selected = index == selected_index;
-            let marker = if selected { "›" } else { " " };
-            let direction = if selected {
+            let marker = if index == selected { "›" } else { " " };
+            let direction = if index == selected {
                 app.sort_draft.direction.symbol()
             } else if *field == app.sort_field {
                 app.sort_direction.symbol()
             } else {
                 " "
             };
-            overlay_line(
-                format!("{marker} {:<14} {direction}", field.label()),
-                selected,
-            )
+            Line::from(format!("{marker} {:<14} {direction}", field.label()))
         })
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-    for (index, field) in SortField::ALL.iter().enumerate() {
-        let Ok(y) = u16::try_from(index) else {
-            continue;
-        };
-        if y >= inner.height {
-            continue;
-        }
-        app.hit_regions.push(region(
-            Rect::new(inner.x, inner.y + y, inner.width.saturating_sub(8), 1),
-            PointerTarget::SortChoose(*field),
-            PointerLayer::Modal,
-            Some(SelectableSurface::Overlay),
-            Some(ScrollSurface::Sort),
-        ));
-        if index == selected_index {
-            render_control(
-                frame,
-                app,
-                Rect::new(
-                    inner.x.saturating_add(inner.width.saturating_sub(7)),
-                    inner.y + y,
-                    3,
-                    1,
-                ),
-                "[↑]",
-                PointerTarget::SortSetDirection(SortDirection::Ascending),
-                PointerLayer::Modal,
-                true,
-            );
-            render_control(
-                frame,
-                app,
-                Rect::new(
-                    inner.x.saturating_add(inner.width.saturating_sub(3)),
-                    inner.y + y,
-                    3,
-                    1,
-                ),
-                "[↓]",
-                PointerTarget::SortSetDirection(SortDirection::Descending),
-                PointerLayer::Modal,
-                true,
-            );
-        }
-    }
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: inner,
+            surface: ScrollSurface::Sort,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: false,
+            selected,
+            rows,
+            row_hit_width: Some(inner.width.saturating_sub(8)),
+            target: &|index| PointerTarget::SortChoose(SortField::ALL[index]),
+            decorate: Some(&|frame: &mut Frame<'_>, app: &mut App, logical, y| {
+                if logical == selected {
+                    render_sort_controls(frame, app, inner, y);
+                }
+            }),
+        },
+    );
     capture_selectable(frame, app, SelectableSurface::Overlay, inner, false);
+}
+
+fn render_sort_controls(frame: &mut Frame<'_>, app: &mut App, inner: Rect, y: u16) {
+    for (offset, label, direction) in [
+        (7, "[↑]", SortDirection::Ascending),
+        (3, "[↓]", SortDirection::Descending),
+    ] {
+        render_control(
+            frame,
+            app,
+            Rect::new(
+                inner.x.saturating_add(inner.width.saturating_sub(offset)),
+                y,
+                3,
+                1,
+            ),
+            label,
+            PointerTarget::SortSetDirection(direction),
+            PointerLayer::Modal,
+            true,
+        );
+    }
 }
 
 fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
@@ -1134,6 +1120,97 @@ fn pill_style(selected: bool, active: bool) -> Style {
     }
 }
 
+/// Paints extras for one visible overlay row, given its logical index and `y`.
+type RowDecorator<'a> = &'a dyn Fn(&mut Frame<'_>, &mut App, usize, u16);
+
+struct ListOverlay<'a> {
+    area: Rect,
+    surface: ScrollSurface,
+    layer: PointerLayer,
+    /// Selectable surface recorded on each row hit region.
+    selectable: Option<SelectableSurface>,
+    /// Snapshot `area` for text selection once the rows are painted.
+    capture: bool,
+    selected: usize,
+    /// One unstyled line per logical row; the selected row is styled here.
+    rows: Vec<Line<'a>>,
+    /// Hit region width, defaulting to the area minus its scrollbar column.
+    row_hit_width: Option<u16>,
+    target: &'a dyn Fn(usize) -> PointerTarget,
+    /// Extra painting for each visible row. It runs before the scrollbar, so row
+    /// controls reaching into the last column stay underneath the scrollbar.
+    decorate: Option<RowDecorator<'a>>,
+}
+
+/// Renders one scrollable list inside an overlay: viewport bookkeeping, the visible
+/// window, selection styling, per-row hit regions, the scrollbar on overflow, and the
+/// text selection snapshot.
+fn render_list_overlay(frame: &mut Frame<'_>, app: &mut App, overlay: ListOverlay<'_>) {
+    let ListOverlay {
+        area,
+        surface,
+        layer,
+        selectable,
+        capture,
+        selected,
+        rows,
+        row_hit_width,
+        target,
+        decorate,
+    } = overlay;
+    let content = rows.len();
+    app.set_overlay_viewport(
+        surface,
+        area.height,
+        u16::try_from(content).unwrap_or(u16::MAX),
+    );
+    let scroll = usize::from(overlay_scroll(app, surface));
+    let viewport = usize::from(area.height);
+    let lines: Vec<Line<'_>> = rows
+        .into_iter()
+        .enumerate()
+        .skip(scroll)
+        .take(viewport)
+        .map(|(index, line)| overlay_line(line, index == selected))
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
+    let hit_width = row_hit_width.unwrap_or_else(|| area.width.saturating_sub(1));
+    let visible = scroll..content.min(scroll.saturating_add(viewport));
+    for (logical, y) in visible.clone().zip(area.y..) {
+        app.hit_regions.push(region(
+            Rect::new(area.x, y, hit_width, 1),
+            target(logical),
+            layer,
+            selectable,
+            Some(surface),
+        ));
+    }
+    if let Some(decorate) = decorate {
+        for (logical, y) in visible.zip(area.y..) {
+            decorate(frame, app, logical, y);
+        }
+    }
+    let overflow = content > viewport;
+    if overflow {
+        render_scrollbar(frame, app, area, surface, content, scroll, viewport);
+    }
+    if capture && let Some(surface) = selectable {
+        capture_selectable(frame, app, surface, area, overflow);
+    }
+}
+
+fn overlay_scroll(app: &App, surface: ScrollSurface) -> u16 {
+    match surface {
+        ScrollSurface::Filter => app.filter_overlay.scroll,
+        ScrollSurface::Columns => app.column_overlay.scroll,
+        ScrollSurface::Palette => app.palette.scroll,
+        ScrollSurface::Views => app.views_overlay.scroll,
+        ScrollSurface::FacetMenu => app.facet_bar.scroll,
+        ScrollSurface::Sort => app.overlay_scroll,
+        ScrollSurface::Table | ScrollSurface::Details | ScrollSurface::Help => 0,
+    }
+}
+
 fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
     let Some(field) = FilterField::BAR.get(app.facet_bar.field_index).copied() else {
         return;
@@ -1171,55 +1248,35 @@ fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
     ));
     frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, app, area, &format!(" {} ", field.label()));
-    let viewport = usize::from(inner.height);
-    let content = facets.len();
-    app.set_overlay_viewport(
-        ScrollSurface::FacetMenu,
-        inner.height,
-        u16::try_from(content).unwrap_or(u16::MAX),
-    );
-    let scroll = usize::from(app.facet_bar.scroll);
-    let lines: Vec<Line> = facets
+    let selected = app.facet_bar.value_index;
+    let rows: Vec<Line> = facets
         .iter()
         .enumerate()
-        .skip(scroll)
-        .take(viewport)
         .map(|(index, facet)| {
-            let selected = index == app.facet_bar.value_index;
-            let marker = if selected { "›" } else { " " };
+            let marker = if index == selected { "›" } else { " " };
             let check = if facet.selected { "[x]" } else { "[ ]" };
-            overlay_line(
-                format!("{marker} {check} {:<18} {:>4}", facet.value, facet.count),
-                selected,
-            )
+            Line::from(format!(
+                "{marker} {check} {:<18} {:>4}",
+                facet.value, facet.count
+            ))
         })
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-    for visible in 0..content.saturating_sub(scroll).min(viewport) {
-        let logical = scroll + visible;
-        let y = inner
-            .y
-            .saturating_add(u16::try_from(visible).unwrap_or(u16::MAX));
-        app.hit_regions.push(region(
-            Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
-            PointerTarget::FacetValue { index: logical },
-            PointerLayer::Popup,
-            None,
-            Some(ScrollSurface::FacetMenu),
-        ));
-    }
-    let overflow = content > viewport;
-    if overflow {
-        render_scrollbar(
-            frame,
-            app,
-            inner,
-            ScrollSurface::FacetMenu,
-            content,
-            scroll,
-            viewport,
-        );
-    }
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: inner,
+            surface: ScrollSurface::FacetMenu,
+            layer: PointerLayer::Popup,
+            selectable: None,
+            capture: false,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::FacetValue { index },
+            decorate: None,
+        },
+    );
 }
 
 fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
@@ -1237,20 +1294,17 @@ fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         app.filter_overlay.field_index
     };
-    let lines: Vec<(usize, Line)> = if showing_values {
+    let rows: Vec<Line> = if showing_values {
         app.current_facets()
             .into_iter()
             .enumerate()
             .map(|(index, facet)| {
                 let marker = if index == selected { "›" } else { " " };
                 let check = if facet.selected { "[x]" } else { "[ ]" };
-                (
-                    index,
-                    overlay_line(
-                        format!("{marker} {check} {:<18} {:>4}", facet.value, facet.count),
-                        index == selected,
-                    ),
-                )
+                Line::from(format!(
+                    "{marker} {check} {:<18} {:>4}",
+                    facet.value, facet.count
+                ))
             })
             .collect()
     } else {
@@ -1265,61 +1319,26 @@ fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
                 } else {
                     format!("{count} selected")
                 };
-                (
-                    index,
-                    overlay_line(
-                        format!("{marker} {:<12} {suffix}", field.label()),
-                        index == selected,
-                    ),
-                )
+                Line::from(format!("{marker} {:<12} {suffix}", field.label()))
             })
             .collect()
     };
-    let content = lines.len();
-    app.set_overlay_viewport(
-        ScrollSurface::Filter,
-        inner.height,
-        u16::try_from(content).unwrap_or(u16::MAX),
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: inner,
+            surface: ScrollSurface::Filter,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: true,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::FilterRow { index },
+            decorate: None,
+        },
     );
-    let scroll = usize::from(app.filter_overlay.scroll);
-    let viewport = usize::from(inner.height);
-    frame.render_widget(
-        Paragraph::new(Text::from(
-            lines
-                .iter()
-                .skip(scroll)
-                .take(viewport)
-                .map(|(_, line)| line.clone())
-                .collect::<Vec<_>>(),
-        )),
-        inner,
-    );
-    for visible in 0..content.saturating_sub(scroll).min(viewport) {
-        let logical = scroll + visible;
-        let y = inner
-            .y
-            .saturating_add(u16::try_from(visible).unwrap_or(u16::MAX));
-        app.hit_regions.push(region(
-            Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
-            PointerTarget::FilterRow { index: logical },
-            PointerLayer::Modal,
-            Some(SelectableSurface::Overlay),
-            Some(ScrollSurface::Filter),
-        ));
-    }
-    let overflow = content > viewport;
-    if overflow {
-        render_scrollbar(
-            frame,
-            app,
-            inner,
-            ScrollSurface::Filter,
-            content,
-            scroll,
-            viewport,
-        );
-    }
-    capture_selectable(frame, app, SelectableSurface::Overlay, inner, overflow);
 }
 
 fn render_column_overlay(frame: &mut Frame<'_>, app: &mut App) {
@@ -1327,21 +1346,12 @@ fn render_column_overlay(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, app, area, " Columns ");
     let content = app.layout.columns.len();
-    app.set_overlay_viewport(
-        ScrollSurface::Columns,
-        inner.height,
-        u16::try_from(content).unwrap_or(u16::MAX),
-    );
-    let scroll = usize::from(app.column_overlay.scroll);
-    let viewport = usize::from(inner.height);
     let selected = app.column_overlay.index;
-    let lines: Vec<Line> = app
+    let rows: Vec<Line> = app
         .layout
         .columns
         .iter()
         .enumerate()
-        .skip(scroll)
-        .take(viewport)
         .map(|(index, column)| {
             let marker = if index == selected { "›" } else { " " };
             let check = if column.visible { "[x]" } else { "[ ]" };
@@ -1350,117 +1360,97 @@ fn render_column_overlay(frame: &mut Frame<'_>, app: &mut App) {
             } else {
                 column.width.to_string()
             };
-            overlay_line(
-                format!("{marker} {check} {:<12} {width}", column.id.label()),
-                index == selected,
-            )
+            Line::from(format!(
+                "{marker} {check} {:<12} {width}",
+                column.id.label()
+            ))
         })
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
-    for visible in 0..content.saturating_sub(scroll).min(viewport) {
-        let logical = scroll + visible;
-        let y = inner
-            .y
-            .saturating_add(u16::try_from(visible).unwrap_or(u16::MAX));
-        let toggleable = app
-            .layout
-            .columns
-            .get(logical)
-            .is_some_and(|column| !matches!(column.id, SortField::Id | SortField::Title));
-        let resizable = app
-            .layout
-            .columns
-            .get(logical)
-            .is_some_and(|column| column.id != SortField::Title);
-        app.hit_regions.push(region(
-            Rect::new(inner.x, y, 5, 1),
-            PointerTarget::ColumnToggle { index: logical },
-            PointerLayer::Modal,
-            None,
-            Some(ScrollSurface::Columns),
-        ));
-        let can_up = logical > 0;
-        let can_down = logical + 1 < content;
-        render_control(
-            frame,
-            app,
-            Rect::new(
-                inner.x.saturating_add(inner.width.saturating_sub(15)),
-                y,
-                3,
-                1,
-            ),
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: inner,
+            surface: ScrollSurface::Columns,
+            layer: PointerLayer::Modal,
+            selectable: None,
+            capture: false,
+            selected,
+            rows,
+            row_hit_width: Some(5),
+            target: &|index| PointerTarget::ColumnToggle { index },
+            decorate: Some(&|frame: &mut Frame<'_>, app: &mut App, logical, y| {
+                render_column_controls(frame, app, inner, content, logical, y);
+            }),
+        },
+    );
+}
+
+fn render_column_controls(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    inner: Rect,
+    content: usize,
+    logical: usize,
+    y: u16,
+) {
+    let resizable = app
+        .layout
+        .columns
+        .get(logical)
+        .is_some_and(|column| column.id != SortField::Title);
+    let controls = [
+        (
+            15,
             "[↑]",
             PointerTarget::ColumnMove {
                 index: logical,
                 delta: -1,
             },
-            PointerLayer::Modal,
-            can_up,
-        );
-        render_control(
-            frame,
-            app,
-            Rect::new(
-                inner.x.saturating_add(inner.width.saturating_sub(11)),
-                y,
-                3,
-                1,
-            ),
+            logical > 0,
+        ),
+        (
+            11,
             "[↓]",
             PointerTarget::ColumnMove {
                 index: logical,
                 delta: 1,
             },
-            PointerLayer::Modal,
-            can_down,
-        );
-        render_control(
-            frame,
-            app,
-            Rect::new(
-                inner.x.saturating_add(inner.width.saturating_sub(7)),
-                y,
-                3,
-                1,
-            ),
+            logical + 1 < content,
+        ),
+        (
+            7,
             "[−]",
             PointerTarget::ColumnResize {
                 index: logical,
                 delta: -1,
             },
-            PointerLayer::Modal,
             resizable,
-        );
-        render_control(
-            frame,
-            app,
-            Rect::new(
-                inner.x.saturating_add(inner.width.saturating_sub(3)),
-                y,
-                3,
-                1,
-            ),
+        ),
+        (
+            3,
             "[+]",
             PointerTarget::ColumnResize {
                 index: logical,
                 delta: 1,
             },
-            PointerLayer::Modal,
             resizable,
-        );
-        let _ = toggleable;
-    }
-    let overflow = content > viewport;
-    if overflow {
-        render_scrollbar(
+        ),
+    ];
+    for (offset, label, target, enabled) in controls {
+        render_control(
             frame,
             app,
-            inner,
-            ScrollSurface::Columns,
-            content,
-            scroll,
-            viewport,
+            Rect::new(
+                inner.x.saturating_add(inner.width.saturating_sub(offset)),
+                y,
+                3,
+                1,
+            ),
+            label,
+            target,
+            PointerLayer::Modal,
+            enabled,
         );
     }
 }
@@ -1499,54 +1489,31 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
             .min(query_area.width.saturating_sub(1)),
     );
     frame.set_cursor_position((cursor_x, query_area.y));
-    let content = commands.len();
-    app.set_overlay_viewport(
-        ScrollSurface::Palette,
-        list_area.height,
-        u16::try_from(content).unwrap_or(u16::MAX),
-    );
-    let scroll = usize::from(app.palette.scroll);
-    let viewport = usize::from(list_area.height);
     let selected = app.palette.selected;
-    let lines: Vec<Line> = commands
+    let rows: Vec<Line> = commands
         .iter()
         .enumerate()
-        .skip(scroll)
-        .take(viewport)
         .map(|(index, command)| {
             let marker = if index == selected { "›" } else { " " };
-            overlay_line(
-                format!("{marker} {:<28} {}", command.title, command.hint),
-                index == selected,
-            )
+            Line::from(format!("{marker} {:<28} {}", command.title, command.hint))
         })
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
-    for visible in 0..content.saturating_sub(scroll).min(viewport) {
-        let logical = scroll + visible;
-        let y = list_area
-            .y
-            .saturating_add(u16::try_from(visible).unwrap_or(u16::MAX));
-        app.hit_regions.push(region(
-            Rect::new(list_area.x, y, list_area.width.saturating_sub(1), 1),
-            PointerTarget::PaletteCommand { index: logical },
-            PointerLayer::Modal,
-            Some(SelectableSurface::Overlay),
-            Some(ScrollSurface::Palette),
-        ));
-    }
-    let overflow = content > viewport;
-    if overflow {
-        render_scrollbar(
-            frame,
-            app,
-            list_area,
-            ScrollSurface::Palette,
-            content,
-            scroll,
-            viewport,
-        );
-    }
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: list_area,
+            surface: ScrollSurface::Palette,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: false,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::PaletteCommand { index },
+            decorate: None,
+        },
+    );
 }
 
 fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
@@ -1656,55 +1623,32 @@ fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
             )
         })
         .collect();
-    let content = views.len();
-    app.set_overlay_viewport(
-        ScrollSurface::Views,
-        list.height,
-        u16::try_from(content).unwrap_or(u16::MAX),
-    );
-    let scroll = usize::from(app.views_overlay.scroll);
-    let viewport = usize::from(list.height);
     let selected = app.views_overlay.index;
-    let lines: Vec<Line> = views
+    let rows: Vec<Line> = views
         .iter()
         .enumerate()
-        .skip(scroll)
-        .take(viewport)
         .map(|(index, (name, query, current))| {
             let marker = if index == selected { "›" } else { " " };
             let current = if *current { "*" } else { " " };
-            overlay_line(
-                format!("{marker}{current} {name:<18} {query}"),
-                index == selected,
-            )
+            Line::from(format!("{marker}{current} {name:<18} {query}"))
         })
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), list);
-    for visible in 0..content.saturating_sub(scroll).min(viewport) {
-        let logical = scroll + visible;
-        let y = list
-            .y
-            .saturating_add(u16::try_from(visible).unwrap_or(u16::MAX));
-        app.hit_regions.push(region(
-            Rect::new(list.x, y, list.width.saturating_sub(1), 1),
-            PointerTarget::ViewRow { index: logical },
-            PointerLayer::Modal,
-            Some(SelectableSurface::Overlay),
-            Some(ScrollSurface::Views),
-        ));
-    }
-    let overflow = content > viewport;
-    if overflow {
-        render_scrollbar(
-            frame,
-            app,
-            list,
-            ScrollSurface::Views,
-            content,
-            scroll,
-            viewport,
-        );
-    }
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: list,
+            surface: ScrollSurface::Views,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: false,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::ViewRow { index },
+            decorate: None,
+        },
+    );
 }
 
 fn link_line(text: String) -> Line<'static> {
@@ -2040,17 +1984,16 @@ fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
     capture_selectable(frame, app, SelectableSurface::Overlay, inner, false);
 }
 
-fn overlay_line(text: String, selected: bool) -> Line<'static> {
-    Line::styled(
-        text,
-        if selected {
+fn overlay_line(line: Line<'_>, selected: bool) -> Line<'_> {
+    if selected {
+        line.style(
             Style::default()
                 .bg(theme().selected_background)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        },
-    )
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        line
+    }
 }
 
 fn table_cell(
@@ -2059,8 +2002,6 @@ fn table_cell(
     now: OffsetDateTime,
     density: RowDensity,
     highlighter: &mut QueryHighlighter,
-    _bookmarked: bool,
-    _checked: bool,
 ) -> Cell<'static> {
     let line = match field {
         SortField::Type => Line::from(type_badge_spans(&ticket.work_item_type, highlighter)),
