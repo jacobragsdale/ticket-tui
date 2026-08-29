@@ -2102,7 +2102,7 @@ fn render_prompt(frame: &mut Frame<'_>, app: &mut App) {
 }
 
 fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
-    let area = centered_rect(frame.area(), 56, 14);
+    let area = centered_rect(frame.area(), 56, 18);
     frame.render_widget(Clear, area);
     let title = if app.views_overlay.naming.is_some() {
         " Save view "
@@ -2185,7 +2185,7 @@ fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
             "[Delete]",
             PointerTarget::DeleteView,
             PointerLayer::Modal,
-            !app.views().is_empty(),
+            app.can_delete_focused_view(),
         );
     }
     let list = Rect::new(
@@ -2194,33 +2194,23 @@ fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
         inner.width,
         inner.height.saturating_sub(1),
     );
-    if app.views().is_empty() {
-        frame.render_widget(
-            Paragraph::new("No saved views. Press n to save the current view.")
-                .style(Style::default().fg(theme().muted)),
-            list,
-        );
-        return;
-    }
-    let views: Vec<(String, String, bool)> = app
-        .views()
-        .iter()
-        .map(|view| {
-            (
-                view.name.clone(),
-                view.query.clone(),
-                app.active_view.as_deref() == Some(view.name.as_str()),
-            )
-        })
-        .collect();
     let selected = app.views_overlay.index;
-    let rows: Vec<Line> = views
+    let rows: Vec<Line> = app
+        .view_rows()
         .iter()
         .enumerate()
-        .map(|(index, (name, query, current))| {
+        .map(|(index, row)| {
+            if row.is_heading() {
+                return Line::from(Span::styled(
+                    row.label.clone(),
+                    Style::default()
+                        .fg(theme().muted)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
             let marker = if index == selected { "›" } else { " " };
-            let current = if *current { "*" } else { " " };
-            Line::from(format!("{marker}{current} {name:<18} {query}"))
+            let current = if row.active { "*" } else { " " };
+            Line::from(format!("{marker}{current} {:<18} {}", row.label, row.query))
         })
         .collect();
     render_list_overlay(
@@ -5955,6 +5945,48 @@ mod tests {
         assert_eq!(
             overlay_width(OverlayAnchor::Below(field), &wide, 52, screen),
             44
+        );
+    }
+
+    #[test]
+    fn the_views_overlay_paints_the_built_ins_under_their_heading_above_the_saved_ones() {
+        let mut app = App::new(vec![ticket()]);
+        app.set_query("tag:rust".into());
+        app.handle_key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT));
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        for character in "Rust work".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let screen = render_text(80, 26, &mut app);
+        let at = |needle: &str| {
+            screen
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} should be on screen:\n{screen}"))
+        };
+        let listed = [
+            "Built-in",
+            "assignee:@me",
+            "assignee:@none",
+            "state:doing",
+            "changed:>14d state:@open",
+            "iteration:@current",
+            "Saved",
+            "Rust work",
+        ];
+
+        for pair in listed.windows(2) {
+            assert!(
+                at(pair[0]) < at(pair[1]),
+                "{} should be listed above {}:\n{screen}",
+                pair[0],
+                pair[1]
+            );
+        }
+        assert!(
+            screen.contains("\u{203a}  Mine"),
+            "the cursor opens on the first built-in rather than on its heading:\n{screen}"
         );
     }
 }

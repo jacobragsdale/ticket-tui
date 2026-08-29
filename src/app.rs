@@ -20,7 +20,8 @@ use crate::edit::{EditApplied, EditRejection, EditRequest, normalize_tags};
 use crate::export;
 pub use crate::filter::FacetTarget;
 use crate::filter::{
-    FacetValue, FilterField, FilterToken, ParsedQuery, facet_values, format_query, parse_query,
+    FacetValue, FilterField, FilterToken, MatchContext, ParsedQuery, facet_values, format_query,
+    parse_query,
 };
 use crate::model::{
     CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity,
@@ -524,6 +525,109 @@ pub struct TextPrompt {
     pub id: i64,
     /// The text the prompt opened with; saving that back writes nothing.
     pub original: String,
+}
+
+/// A view the app always offers, above whatever the user has saved: one of the
+/// questions asked every morning, each written as a query somebody could have
+/// typed themselves.
+///
+/// A built-in is not kept in the session file, cannot be deleted, and cannot be
+/// saved over. It carries only a query and a sort — the columns, the row
+/// density, and the search order stay as the user has them, because a view
+/// answering a question has no business rearranging the table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuiltinView {
+    pub name: &'static str,
+    pub query: &'static str,
+    pub sort_field: SortField,
+    pub sort_direction: SortDirection,
+}
+
+/// The five built-in views, in the order the overlay lists them. All but
+/// `Stale` take the table's default order, newest change first; `Stale` turns
+/// it around, so the item nobody has touched for longest is the first row.
+pub const BUILTIN_VIEWS: [BuiltinView; 5] = [
+    BuiltinView {
+        name: "Mine",
+        query: "assignee:@me",
+        sort_field: SortField::Changed,
+        sort_direction: SortDirection::Descending,
+    },
+    BuiltinView {
+        name: "Unassigned",
+        query: "assignee:@none",
+        sort_field: SortField::Changed,
+        sort_direction: SortDirection::Descending,
+    },
+    BuiltinView {
+        name: "Doing",
+        query: "state:doing",
+        sort_field: SortField::Changed,
+        sort_direction: SortDirection::Descending,
+    },
+    BuiltinView {
+        name: "Stale",
+        query: "changed:>14d state:@open",
+        sort_field: SortField::Changed,
+        sort_direction: SortDirection::Ascending,
+    },
+    BuiltinView {
+        name: "Current sprint",
+        query: "iteration:@current",
+        sort_field: SortField::Changed,
+        sort_direction: SortDirection::Descending,
+    },
+];
+
+/// The built-in a name belongs to. A built-in owns its name: one cannot be
+/// saved over, and a stored view carrying the name — from a session written
+/// before the built-ins existed — is dropped on load rather than listed a
+/// second time under the same heading.
+#[must_use]
+fn builtin_named(name: &str) -> Option<&'static BuiltinView> {
+    BUILTIN_VIEWS
+        .iter()
+        .find(|view| view.name.eq_ignore_ascii_case(name.trim()))
+}
+
+/// What one line of the views overlay is. The headings are shown but cannot be
+/// loaded, so the cursor steps over them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ViewRowKind {
+    Heading,
+    /// An index into [`BUILTIN_VIEWS`].
+    Builtin(usize),
+    /// An index into the views the user has saved.
+    Saved(usize),
+}
+
+/// One line of the views overlay, ready to paint: the built-ins under their
+/// heading, then whatever the user has saved under theirs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ViewRow {
+    pub kind: ViewRowKind,
+    /// The heading's text, or the view's name.
+    pub label: String,
+    /// The query the view loads, and empty for a heading.
+    pub query: String,
+    /// Whether this is the view the table is showing.
+    pub active: bool,
+}
+
+impl ViewRow {
+    #[must_use]
+    pub const fn is_heading(&self) -> bool {
+        matches!(self.kind, ViewRowKind::Heading)
+    }
+
+    fn heading(label: &str) -> Self {
+        Self {
+            kind: ViewRowKind::Heading,
+            label: label.to_owned(),
+            query: String::new(),
+            active: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1214,6 +1318,18 @@ impl App {
         parse_query(self.query.text())
     }
 
+    /// What the query's sentinels stand for right now: who is signed in and
+    /// which sprint contains today, beside the clock its relative date bounds
+    /// are measured back from. Built fresh for every pass over the rows, so a
+    /// saved `assignee:@me` follows the name and `iteration:@current` follows
+    /// the sprint rather than whatever either was when the view was written.
+    #[must_use]
+    pub fn match_context(&self) -> MatchContext {
+        MatchContext::now()
+            .with_me(self.me.clone())
+            .with_current_iteration(self.current_iteration())
+    }
+
     #[must_use]
     pub fn fuzzy_query(&self) -> String {
         self.parsed_query().fuzzy
@@ -1238,9 +1354,13 @@ impl App {
     #[must_use]
     pub fn facets_for(&self, field: FilterField) -> Vec<FacetValue> {
         let filters = self.parsed_query().filters;
-        facet_values(self.tickets(), &filters, field, |ticket| {
-            self.bookmarks.contains(&ticket.key)
-        })
+        facet_values(
+            self.tickets(),
+            &filters,
+            field,
+            |ticket| self.bookmarks.contains(&ticket.key),
+            &self.match_context(),
+        )
     }
 
     pub fn toggle_filter(&mut self, field: FilterField, value: &str) {
@@ -1339,6 +1459,48 @@ impl App {
         &self.views
     }
 
+    /// Every line the views overlay shows: the built-ins under a `Built-in`
+    /// heading, then the user's own under `Saved`, which is left out entirely
+    /// when they have saved none.
+    #[must_use]
+    pub fn view_rows(&self) -> Vec<ViewRow> {
+        let active = |name: &str| self.active_view.as_deref() == Some(name);
+        let mut rows = vec![ViewRow::heading("Built-in")];
+        rows.extend(
+            BUILTIN_VIEWS
+                .iter()
+                .enumerate()
+                .map(|(index, view)| ViewRow {
+                    kind: ViewRowKind::Builtin(index),
+                    label: view.name.to_owned(),
+                    query: view.query.to_owned(),
+                    active: active(view.name),
+                }),
+        );
+        if !self.views.is_empty() {
+            rows.push(ViewRow::heading("Saved"));
+            rows.extend(self.views.iter().enumerate().map(|(index, view)| ViewRow {
+                kind: ViewRowKind::Saved(index),
+                label: view.name.clone(),
+                query: view.query.clone(),
+                active: active(&view.name),
+            }));
+        }
+        rows
+    }
+
+    /// Whether `d` and the overlay's Delete control have anything to act on:
+    /// only a view the user saved can be deleted.
+    #[must_use]
+    pub fn can_delete_focused_view(&self) -> bool {
+        matches!(
+            self.view_rows()
+                .get(self.views_overlay.index)
+                .map(|row| row.kind),
+            Some(ViewRowKind::Saved(_))
+        )
+    }
+
     #[must_use]
     pub fn palette_commands(&self) -> Vec<Command> {
         matching_commands(self.palette.query.text())
@@ -1355,9 +1517,13 @@ impl App {
     #[must_use]
     pub fn current_facets(&self) -> Vec<FacetValue> {
         let filters = self.parsed_query().filters;
-        facet_values(self.tickets(), &filters, self.facet_field(), |ticket| {
-            self.bookmarks.contains(&ticket.key)
-        })
+        facet_values(
+            self.tickets(),
+            &filters,
+            self.facet_field(),
+            |ticket| self.bookmarks.contains(&ticket.key),
+            &self.match_context(),
+        )
     }
 
     pub fn configure_database(&mut self, path: PathBuf, signature: u128) {
@@ -2757,8 +2923,14 @@ impl App {
             PointerTarget::SubmitPrompt => return self.submit_prompt(),
             PointerTarget::CancelPrompt => self.close_prompt(),
             PointerTarget::ViewRow { index } => {
-                self.views_overlay.index = index;
-                self.apply_view_at(index);
+                if self
+                    .view_rows()
+                    .get(index)
+                    .is_some_and(|row| !row.is_heading())
+                {
+                    self.views_overlay.index = index;
+                    self.apply_view_at(index);
+                }
             }
             PointerTarget::SaveView => {
                 if self.views_overlay.naming.is_some() {
@@ -3174,12 +3346,14 @@ impl App {
 
     fn apply_filters(&mut self) {
         let filters = self.parsed_query().filters;
+        let context = self.match_context();
         let bookmarks = self.bookmarks.clone();
         let tickets = Arc::clone(&self.tickets);
         self.visible.retain(|entry| {
-            filters.matches(
+            filters.matches_in(
                 &tickets[entry.ticket_index],
                 bookmarks.contains(&tickets[entry.ticket_index].key),
+                &context,
             )
         });
     }
@@ -3403,6 +3577,7 @@ impl App {
 
     fn open_views(&mut self) {
         self.views_overlay = ViewsOverlay::default();
+        self.focus_view(0);
         self.mode = AppMode::Views;
     }
 
@@ -4494,14 +4669,8 @@ impl App {
         }
         match key.code {
             KeyCode::Esc | KeyCode::Char('V') => self.mode = AppMode::Browse,
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.focus_view(self.views_overlay.index.saturating_sub(1));
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if !self.views.is_empty() {
-                    self.focus_view((self.views_overlay.index + 1).min(self.views.len() - 1));
-                }
-            }
+            KeyCode::Up | KeyCode::Char('k') => self.move_view_focus(false),
+            KeyCode::Down | KeyCode::Char('j') => self.move_view_focus(true),
             KeyCode::Enter => self.apply_view_at(self.views_overlay.index),
             KeyCode::Char('n') => self.views_overlay.naming = Some(TextInput::default()),
             KeyCode::Char('d') | KeyCode::Delete => self.delete_view_at(self.views_overlay.index),
@@ -4510,12 +4679,52 @@ impl App {
         AppAction::None
     }
 
+    /// Puts the cursor on a row, stepping past a heading to the view under it,
+    /// and onto the last view when the index runs off the end. There is always
+    /// somewhere to land: the built-ins are never empty.
     fn focus_view(&mut self, index: usize) {
+        let rows = self.view_rows();
+        let loadable = |from: usize| {
+            rows.iter()
+                .enumerate()
+                .skip(from)
+                .find(|(_, row)| !row.is_heading())
+                .map(|(index, _)| index)
+        };
+        let index = loadable(index)
+            .or_else(|| rows.iter().rposition(|row: &ViewRow| !row.is_heading()))
+            .unwrap_or_default();
         self.views_overlay.index = index;
         self.views_overlay.scroll.ensure_visible(index);
     }
 
+    /// Moves the cursor one row on or back, skipping the headings, and stays
+    /// put at either end of the list.
+    fn move_view_focus(&mut self, forward: bool) {
+        let current = self.views_overlay.index;
+        let loadable: Vec<usize> = self
+            .view_rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| !row.is_heading())
+            .map(|(index, _)| index)
+            .collect();
+        let next = if forward {
+            loadable.into_iter().find(|index| *index > current)
+        } else {
+            loadable.into_iter().rev().find(|index| *index < current)
+        };
+        if let Some(next) = next {
+            self.focus_view(next);
+        }
+    }
+
     fn save_view(&mut self, name: String) {
+        if let Some(builtin) = builtin_named(&name) {
+            let name = builtin.name;
+            self.set_status(format!("'{name}' is a built-in view; choose another name"));
+            return;
+        }
         let view = NamedView {
             name: name.clone(),
             query: self.query.text().to_owned(),
@@ -4540,7 +4749,29 @@ impl App {
         self.set_status(format!("Saved view '{name}'"));
     }
 
+    /// Loads the view on one row of the overlay, whichever kind it is. A
+    /// heading loads nothing.
     fn apply_view_at(&mut self, index: usize) {
+        match self.view_rows().get(index).map(|row| row.kind) {
+            Some(ViewRowKind::Builtin(builtin)) => self.apply_builtin_view(BUILTIN_VIEWS[builtin]),
+            Some(ViewRowKind::Saved(saved)) => self.apply_saved_view(saved),
+            Some(ViewRowKind::Heading) | None => {}
+        }
+    }
+
+    /// A built-in sets the query and the sort and leaves the rest of the table
+    /// alone, so loading one never rearranges the columns somebody has set up.
+    fn apply_builtin_view(&mut self, view: BuiltinView) {
+        self.active_view = Some(view.name.to_owned());
+        self.sort_field = view.sort_field;
+        self.sort_direction = view.sort_direction;
+        self.session_dirty = true;
+        self.set_query(view.query.to_owned());
+        self.mode = AppMode::Browse;
+        self.set_status(format!("Loaded view '{}'", view.name));
+    }
+
+    fn apply_saved_view(&mut self, index: usize) {
         let Some(view) = self.views.get(index).cloned() else {
             return;
         };
@@ -4557,18 +4788,20 @@ impl App {
     }
 
     fn delete_view_at(&mut self, index: usize) {
-        if index >= self.views.len() {
-            return;
-        }
-        let removed = self.views.remove(index);
+        let saved = match self.view_rows().get(index).map(|row| row.kind) {
+            Some(ViewRowKind::Saved(saved)) => saved,
+            Some(ViewRowKind::Builtin(builtin)) => {
+                let name = BUILTIN_VIEWS[builtin].name;
+                self.set_status(format!("'{name}' is a built-in view and cannot be deleted"));
+                return;
+            }
+            Some(ViewRowKind::Heading) | None => return,
+        };
+        let removed = self.views.remove(saved);
         if self.active_view.as_deref() == Some(removed.name.as_str()) {
             self.active_view = None;
         }
-        if !self.views.is_empty() {
-            self.views_overlay.index = self.views_overlay.index.min(self.views.len() - 1);
-        } else {
-            self.views_overlay.index = 0;
-        }
+        self.focus_view(index);
         self.session_dirty = true;
         self.set_status(format!("Deleted view '{}'", removed.name));
     }
@@ -4710,7 +4943,11 @@ impl App {
             .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
         self.bookmarks = session.bookmarks.iter().map(TicketKey::from).collect();
         self.recent = session.recent.iter().map(TicketKey::from).collect();
-        self.views = session.views;
+        self.views = session
+            .views
+            .into_iter()
+            .filter(|view| builtin_named(&view.name).is_none())
+            .collect();
         self.active_view = session.active_view;
         let selected = session.selected.as_ref().map(TicketKey::from);
         if session.query.is_empty() {
@@ -5141,11 +5378,361 @@ mod tests {
         app.set_query(String::new());
         app.set_sort(SortField::Changed, SortDirection::Descending);
 
-        app.apply_view_at(0);
+        app.apply_view_at(view_row(&app, "Active"));
 
         assert_eq!(app.query(), "state:active");
         assert_eq!(app.sort_field, SortField::Title);
         assert_eq!(app.active_view.as_deref(), Some("Active"));
+    }
+
+    /// A workspace holding one work item for each daily question: mine and
+    /// moving, nobody's, two that have gone quiet, one finished long ago, and
+    /// one more planned into the sprint running today.
+    fn views_app() -> App {
+        let today = Timestamp::now().calendar_date();
+        let row = |id: i64,
+                   title: &str,
+                   state: &str,
+                   assignee: Option<&str>,
+                   iteration: &str,
+                   changed: &str| Ticket {
+            state: state.into(),
+            assigned_to: assignee.map(str::to_owned),
+            iteration_path: iteration.into(),
+            ..ticket(id, title, changed)
+        };
+        let sprint = "development\\Sprint 1";
+        let quarter = "development\\Q3";
+        let mut app = App::new(vec![
+            row(
+                1,
+                "Mine and moving",
+                "Doing",
+                Some("Avery Chen"),
+                sprint,
+                &format!("{today}T09:00:00Z"),
+            ),
+            row(
+                2,
+                "Nobody has this",
+                "To Do",
+                None,
+                quarter,
+                &format!("{today}T08:00:00Z"),
+            ),
+            row(
+                3,
+                "Gone quiet",
+                "To Do",
+                Some("Jordan Patel"),
+                quarter,
+                "2020-01-01T00:00:00Z",
+            ),
+            row(
+                4,
+                "Quieter still",
+                "To Do",
+                Some("Jordan Patel"),
+                quarter,
+                "2019-01-01T00:00:00Z",
+            ),
+            row(
+                5,
+                "Finished long ago",
+                "Done",
+                Some("Avery Chen"),
+                quarter,
+                "2018-01-01T00:00:00Z",
+            ),
+            row(
+                6,
+                "Also this sprint",
+                "To Do",
+                Some("Jordan Patel"),
+                sprint,
+                &format!("{today}T07:00:00Z"),
+            ),
+        ]);
+        app.set_me(Some("Avery Chen".into()));
+        app.set_classification_nodes(classification_trees(), None);
+        app
+    }
+
+    /// Where a view sits in the overlay, which is not its position among the
+    /// user's own views: the built-ins and the headings are counted too.
+    fn view_row(app: &App, name: &str) -> usize {
+        app.view_rows()
+            .iter()
+            .position(|row| !row.is_heading() && row.label == name)
+            .unwrap_or_else(|| panic!("no view named {name}"))
+    }
+
+    fn visible_ids(app: &App) -> Vec<i64> {
+        app.visible_tickets().map(|ticket| ticket.key.id).collect()
+    }
+
+    #[test]
+    fn the_views_overlay_lists_the_built_ins_above_whatever_the_user_saved() {
+        let mut app = views_app();
+
+        let rows = app.view_rows();
+        let listed: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|row| (row.label.as_str(), row.query.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("Built-in", ""),
+                ("Mine", "assignee:@me"),
+                ("Unassigned", "assignee:@none"),
+                ("Doing", "state:doing"),
+                ("Stale", "changed:>14d state:@open"),
+                ("Current sprint", "iteration:@current"),
+            ]
+        );
+        assert!(rows[0].is_heading());
+        assert!(
+            rows[1..].iter().all(|row| !row.is_heading()),
+            "with nothing saved there is no second heading to show"
+        );
+
+        app.set_query("tag:rust".into());
+        app.save_view("Rust work".into());
+
+        let rows = app.view_rows();
+        assert_eq!(rows.len(), 8);
+        assert!(rows[6].is_heading());
+        assert_eq!(rows[6].label, "Saved");
+        assert_eq!(rows[7].label, "Rust work");
+        assert!(rows[7].active, "the view just saved is the one on screen");
+    }
+
+    #[test]
+    fn each_built_in_view_yields_the_rows_its_question_asks_for() {
+        let mut app = views_app();
+        let load = |app: &mut App, name: &str| {
+            app.apply_view_at(view_row(app, name));
+            visible_ids(app)
+        };
+
+        assert_eq!(load(&mut app, "Mine"), vec![1, 5]);
+        assert_eq!(load(&mut app, "Unassigned"), vec![2]);
+        assert_eq!(load(&mut app, "Doing"), vec![1]);
+        assert_eq!(load(&mut app, "Current sprint"), vec![1, 6]);
+
+        assert_eq!(app.active_view.as_deref(), Some("Current sprint"));
+        assert_eq!(app.query(), "iteration:@current");
+        assert_eq!(
+            app.mode,
+            AppMode::Browse,
+            "loading a view closes the overlay"
+        );
+    }
+
+    #[test]
+    fn the_stale_view_leaves_out_finished_work_and_puts_the_quietest_row_first() {
+        let mut app = views_app();
+
+        app.apply_view_at(view_row(&app, "Stale"));
+
+        assert_eq!(app.query(), "changed:>14d state:@open");
+        assert_eq!(
+            (app.sort_field, app.sort_direction),
+            (SortField::Changed, SortDirection::Ascending),
+            "the one built-in that turns the default order around"
+        );
+        assert_eq!(
+            visible_ids(&app),
+            vec![4, 3],
+            "the longest untouched row leads, and the Done row nobody has \
+             touched since 2018 is not waiting on anybody"
+        );
+    }
+
+    #[test]
+    fn a_built_in_view_cannot_be_saved_over_or_deleted() {
+        let mut app = views_app();
+        app.set_query("tag:rust".into());
+
+        app.save_view("mine".into());
+
+        assert!(app.views().is_empty(), "a built-in owns its name");
+        assert_eq!(app.view_rows().len(), 6, "and no second Mine is listed");
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("'Mine' is a built-in view; choose another name")
+        );
+
+        app.delete_view_at(view_row(&app, "Mine"));
+
+        assert_eq!(app.view_rows().len(), 6);
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("'Mine' is a built-in view and cannot be deleted")
+        );
+    }
+
+    #[test]
+    fn the_views_cursor_opens_on_the_first_built_in_and_steps_over_the_headings() {
+        let mut app = views_app();
+        app.set_query("tag:rust".into());
+        app.save_view("Rust work".into());
+
+        app.open_views();
+        assert_eq!(
+            app.views_overlay.index, 1,
+            "row zero is the Built-in heading"
+        );
+
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(app.views_overlay.index, 5, "the last built-in");
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            app.views_overlay.index, 7,
+            "the Saved heading is stepped over"
+        );
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.views_overlay.index, 7, "and the list stops at its end");
+        assert!(app.can_delete_focused_view(), "a saved view can be deleted");
+
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.views_overlay.index, 5);
+        assert!(!app.can_delete_focused_view(), "a built-in cannot");
+    }
+
+    /// `TICKET_TUI_ME` is resolved against the last sync's display name by
+    /// `resolve_me` before the app is told who it is, so a different name here
+    /// is exactly what the override produces.
+    #[test]
+    fn the_mine_view_follows_the_name_the_session_is_signed_in_under() {
+        let mut app = views_app();
+        app.apply_view_at(view_row(&app, "Mine"));
+        assert_eq!(visible_ids(&app), vec![1, 5]);
+
+        app.set_me(Some("Jordan Patel".into()));
+        app.show_all(None);
+        assert_eq!(
+            visible_ids(&app),
+            vec![6, 3, 4],
+            "the saved query is unchanged; the name under it is not"
+        );
+
+        app.set_me(None);
+        app.show_all(None);
+        assert!(
+            visible_ids(&app).is_empty(),
+            "with nobody signed in @me is nobody rather than everybody"
+        );
+    }
+
+    #[test]
+    fn the_current_sprint_view_follows_the_iteration_dates_rather_than_a_written_path() {
+        let mut app = views_app();
+        app.apply_view_at(view_row(&app, "Current sprint"));
+
+        assert_eq!(
+            app.current_iteration(),
+            Some("development\\Sprint 1".to_owned())
+        );
+        assert_eq!(visible_ids(&app), vec![1, 6]);
+
+        let today =
+            Timestamp::parse(&format!("{}T00:00:00Z", Timestamp::now().calendar_date())).unwrap();
+        let rolled_over: Vec<ClassificationNode> = classification_trees()
+            .into_iter()
+            .map(|node| {
+                let current = node.path == "development\\Q3";
+                ClassificationNode {
+                    start_date: current.then_some(today),
+                    finish_date: current.then_some(today),
+                    ..node
+                }
+            })
+            .collect();
+        app.set_classification_nodes(rolled_over, None);
+        app.show_all(None);
+        assert_eq!(
+            visible_ids(&app),
+            vec![2, 3, 4, 5],
+            "the same saved query follows the sprint over its rollover"
+        );
+
+        app.set_classification_nodes(Vec::new(), None);
+        app.show_all(None);
+        assert!(
+            visible_ids(&app).is_empty(),
+            "with no sprint scheduled @current is no sprint at all"
+        );
+    }
+
+    #[test]
+    fn sentinels_come_back_from_the_session_file_as_the_chips_they_were_typed_as() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tickets.session.json");
+        let mut app = views_app();
+        app.set_query("assignee:@me iteration:@current".into());
+        app.save_view("My sprint".into());
+        session::save(&path, &app.snapshot_session()).unwrap();
+
+        let mut restored = views_app();
+        restored.restore_session(session::load(&path).unwrap());
+
+        assert_eq!(restored.query(), "assignee:@me iteration:@current");
+        assert_eq!(restored.views()[0].name, "My sprint");
+        assert_eq!(restored.views()[0].query, "assignee:@me iteration:@current");
+        let labels: Vec<String> = restored
+            .filter_tokens()
+            .iter()
+            .map(FilterToken::chip_label)
+            .collect();
+        assert_eq!(labels, vec!["assignee:@me", "iteration:@current"]);
+
+        let context = restored.agent_context();
+        assert_eq!(context.search.query, "assignee:@me iteration:@current");
+        assert_eq!(
+            context.search.filters,
+            vec!["assignee:@me", "iteration:@current"],
+            "an agent reads the sentinels as typed and the me field beside them"
+        );
+        assert_eq!(context.me.as_deref(), Some("Avery Chen"));
+        assert_eq!(
+            visible_ids(&restored),
+            vec![1],
+            "and the query still means me, in this sprint"
+        );
+    }
+
+    #[test]
+    fn a_stored_view_never_takes_a_name_a_built_in_owns() {
+        let mut app = views_app();
+
+        app.restore_session(Session {
+            views: vec![NamedView {
+                name: "Mine".into(),
+                query: "tag:rust".into(),
+                sort_field: SortField::Changed,
+                sort_direction: SortDirection::Descending,
+                search_order: SearchOrder::Relevance,
+                row_density: RowDensity::Compact,
+                columns: Vec::new(),
+                auto_hide: true,
+            }],
+            ..Session::default()
+        });
+
+        assert!(app.views().is_empty());
+        assert_eq!(
+            app.view_rows()
+                .iter()
+                .filter(|row| row.label == "Mine")
+                .count(),
+            1,
+            "a session written before the built-ins existed lists Mine once"
+        );
+        assert_eq!(app.view_rows()[1].query, "assignee:@me");
     }
 
     #[test]

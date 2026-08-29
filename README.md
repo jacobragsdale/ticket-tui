@@ -613,7 +613,7 @@ against the server.
 | `+` | Open the full filter overlay for extra fields |
 | `w` | Show or hide (`Space`), reorder (`J`/`K`), and resize (`<`/`>`) columns |
 | `p` / `:` | Open the command palette |
-| `V` | Open named views; `n` saves, `Enter` loads, `d` deletes |
+| `V` | Open views: five built-in ones and your own; `n` saves, `Enter` loads, `d` deletes |
 | `e` | Open the Edit menu of field editors; `Enter` opens the one chosen |
 | `S` | Change the selected work item's state, or every checked one; `Enter` applies, `Esc` cancels |
 | `a` | Change who the selected work item is assigned to, or every checked one; type to filter, `Enter` assigns |
@@ -689,7 +689,19 @@ midnight, so `created:>2026-08-01` is everything raised since the start of
 August. Relative windows are measured as the filter runs, so a view saved as
 `changed:<7d` still means the last seven days tomorrow, and the `+` overlay
 offers 24h, 7d, 14d, and 30d presets for both fields, where a date has no list
-of values to check off. Active filters appear as removable chips. The command palette copies
+of values to check off.
+
+Four values are written with a leading `@` and stand for something the app
+works out as the filter runs rather than when the query is typed:
+`assignee:@me` is whoever the last sync signed in as, `assignee:@none` is the
+work nobody owns, `iteration:@current` is the sprint whose dates contain today,
+and `state:@open` is anything the workflow has not finished with, read by state
+category so it holds whatever the process template calls its states. They can
+be typed straight into the search box, they are stored and shown as written,
+and a sentinel the app cannot fill in — nobody signed in, no sprint scheduled —
+matches nothing rather than everything. `TICKET_TUI_ME` sets who `@me` is for
+anyone whose profile name differs from the name their work items are assigned
+to. Active filters appear as removable chips. The command palette copies
 IDs, URLs, titles, Markdown links, or summaries, edits the title, priority,
 tags, iteration, area, or description, leaves a comment, and exports the
 selection as JSON or CSV. Press `i` for database path, row count, freshness, and the last
@@ -713,6 +725,17 @@ foregrounds; hovered controls reverse instead. Setting the standard `NO_COLOR`
 environment variable selects the monochrome theme, where weight carries the same
 distinctions: badges keep their brackets, finished rows dim instead of fading,
 state glyphs and your own work items go bold, and a hovered row reverses.
+
+`V` opens the views. Five built-in ones are listed under a **Built-in**
+heading, above whatever you have saved: **Mine** (`assignee:@me`),
+**Unassigned** (`assignee:@none`), **Doing** (`state:doing`), **Stale**
+(`changed:>14d state:@open`, oldest first, leaving out work that is finished),
+and **Current sprint** (`iteration:@current`). A built-in sets the query and
+the sort and leaves the columns and the row density as you have them; it is
+never written to the session file, cannot be deleted, and owns its name, so
+saving a view called `Mine` is refused. `n` saves the current query, sort,
+columns, and density under a name of your own, `Enter` loads the view under the
+cursor, and `d` deletes one you saved.
 
 Changed dates use compact relative labels, and exact UTC timestamps remain
 available in details. Press `c` to switch between compact and comfortable row
