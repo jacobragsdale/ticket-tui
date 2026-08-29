@@ -310,6 +310,32 @@ impl AzureClient {
         parse_work_item(&item, &self.config)
     }
 
+    /// Move one work item under a different parent, or out from under the one
+    /// it has when `new_parent` is `None`, answering with Azure DevOps's own
+    /// copy of what it stored.
+    ///
+    /// A parent is not a field but an entry in the work item's relations array,
+    /// and taking one off means naming the index it sits at — which is only
+    /// knowable from a copy read now. So the work item is fetched with its
+    /// links, the document is built against exactly what came back, and the
+    /// `test` on `/rev` at the head of it refuses the write if anything moved
+    /// in between. One request writes both halves of the move, so there is no
+    /// state in which the work item has been detached but not re-filed.
+    pub fn reparent_work_item(
+        &self,
+        id: i64,
+        new_parent: Option<i64>,
+    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        let url = format!(
+            "{}/_apis/wit/workitems/{id}?$expand=relations&api-version={API_VERSION}",
+            self.config.base_url()
+        );
+        let current = self.get(&url)?;
+        let document = reparent_document(&current, new_parent, &self.config)?;
+        let item = self.send(&url, Request::Patch(&document))?;
+        parse_work_item(&item, &self.config)
+    }
+
     /// Add a work item to the project, answering with Azure DevOps's own copy
     /// of what it stored. `fields` are the operations that set its fields —
     /// [`crate::edit::set_field`] builds one each — and `parent` is the work
@@ -1061,6 +1087,72 @@ pub fn create_document(fields: &[Value], parent: Option<i64>, config: &AzureConf
         }));
     }
     document
+}
+
+/// The link type a parent is held under, on the child's side of it.
+const PARENT_REL: &str = "System.LinkTypes.Hierarchy-Reverse";
+
+/// The JSON Patch document that moves one work item between parents, built
+/// against `item` — the copy of the work item just read, links and all.
+///
+/// The three kinds of operation go in one document so the move is one write:
+///
+/// * `test /rev` leads, so a work item somebody else changed between the read
+///   and this write is refused rather than patched against stale indices.
+/// * `remove /relations/{index}` takes the parent link off. A relation can only
+///   be removed by its position in the array, so the index is the one it holds
+///   in `item` as it was just read. Any further ones are removed in descending
+///   order, because each removal shifts everything after it down by one.
+/// * `add /relations/-` appends the new parent, which is why it comes last: an
+///   append cannot move an index the removes above it still need.
+///
+/// A document that would neither remove nor add anything is not a move at all,
+/// and is refused here rather than sent.
+fn reparent_document(
+    item: &Value,
+    new_parent: Option<i64>,
+    config: &AzureConfig,
+) -> Result<Vec<Value>> {
+    let id = item.get("id").and_then(Value::as_i64);
+    let revision = item
+        .get("rev")
+        .and_then(Value::as_i64)
+        .with_context(|| format!("work item {id:?} came back without a revision to test"))?;
+    let held: Vec<usize> = item
+        .get("relations")
+        .and_then(Value::as_array)
+        .map(|relations| {
+            relations
+                .iter()
+                .enumerate()
+                .filter(|(_, relation)| {
+                    relation.get("rel").and_then(Value::as_str) == Some(PARENT_REL)
+                })
+                .map(|(index, _)| index)
+                .collect()
+        })
+        .unwrap_or_default();
+    if held.is_empty() && new_parent.is_none() {
+        bail!(
+            "work item {} has no parent to remove",
+            id.unwrap_or_default()
+        );
+    }
+    let mut document = vec![crate::edit::revision_test(revision)];
+    for index in held.into_iter().rev() {
+        document.push(json!({"op": "remove", "path": format!("/relations/{index}")}));
+    }
+    if let Some(parent) = new_parent {
+        document.push(json!({
+            "op": "add",
+            "path": "/relations/-",
+            "value": {
+                "rel": PARENT_REL,
+                "url": format!("{}/_apis/wit/workItems/{parent}", config.base_url()),
+            },
+        }));
+    }
+    Ok(document)
 }
 
 /// The offerable types in one `/_apis/wit/workitemtypes` response: everything
@@ -2064,6 +2156,135 @@ mod tests {
         assert_eq!(
             relations[0].to.id, 613,
             "the link reads back as the parent it named"
+        );
+    }
+
+    /// A work item as `$expand=relations` reports it, with the links given.
+    fn with_relations(revision: i64, relations: Vec<Value>) -> Value {
+        json!({"id": 613, "rev": revision, "fields": {}, "relations": relations})
+    }
+
+    fn parent_relation(id: i64) -> Value {
+        json!({
+            "rel": "System.LinkTypes.Hierarchy-Reverse",
+            "url": format!("https://dev.azure.com/demo/_apis/wit/workItems/{id}"),
+        })
+    }
+
+    fn related_relation(id: i64) -> Value {
+        json!({
+            "rel": "System.LinkTypes.Related",
+            "url": format!("https://dev.azure.com/demo/_apis/wit/workItems/{id}"),
+        })
+    }
+
+    #[test]
+    fn filing_a_work_item_under_its_first_parent_only_appends_a_link() {
+        let item = with_relations(4, vec![related_relation(700)]);
+
+        let document = reparent_document(&item, Some(11), &config()).unwrap();
+
+        assert_eq!(
+            document,
+            vec![
+                json!({"op": "test", "path": "/rev", "value": 4}),
+                json!({
+                    "op": "add",
+                    "path": "/relations/-",
+                    "value": {
+                        "rel": "System.LinkTypes.Hierarchy-Reverse",
+                        "url": "https://dev.azure.com/demo/_apis/wit/workItems/11",
+                    },
+                }),
+            ],
+            "with no parent held there is nothing to remove, and the related link is left alone"
+        );
+    }
+
+    #[test]
+    fn moving_a_work_item_between_parents_removes_by_index_then_appends_in_one_document() {
+        let item = with_relations(
+            9,
+            vec![
+                related_relation(700),
+                parent_relation(11),
+                related_relation(800),
+            ],
+        );
+
+        let document = reparent_document(&item, Some(22), &config()).unwrap();
+
+        assert_eq!(
+            document,
+            vec![
+                json!({"op": "test", "path": "/rev", "value": 9}),
+                json!({"op": "remove", "path": "/relations/1"}),
+                json!({
+                    "op": "add",
+                    "path": "/relations/-",
+                    "value": {
+                        "rel": "System.LinkTypes.Hierarchy-Reverse",
+                        "url": "https://dev.azure.com/demo/_apis/wit/workItems/22",
+                    },
+                }),
+            ],
+            "the revision test leads, the removal names the index the link sits at in the copy \
+             just read, and the append comes last so it cannot shift that index"
+        );
+    }
+
+    #[test]
+    fn detaching_a_work_item_removes_its_parent_link_and_adds_nothing() {
+        let item = with_relations(2, vec![parent_relation(11), related_relation(700)]);
+
+        let document = reparent_document(&item, None, &config()).unwrap();
+
+        assert_eq!(
+            document,
+            vec![
+                json!({"op": "test", "path": "/rev", "value": 2}),
+                json!({"op": "remove", "path": "/relations/0"}),
+            ],
+            "nothing is appended for a work item that is to hang under nothing"
+        );
+    }
+
+    #[test]
+    fn a_work_item_with_no_parent_cannot_have_one_removed() {
+        let item = with_relations(1, vec![related_relation(700)]);
+
+        let error =
+            reparent_document(&item, None, &config()).expect_err("there is no link to take off");
+
+        assert!(
+            format!("{error:#}").contains("no parent to remove"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn several_parent_links_are_removed_from_the_last_one_back() {
+        // Azure DevOps allows a work item one parent, so this only happens to
+        // data that is already wrong; removing back to front is what keeps the
+        // second index from meaning something else once the first is gone.
+        let item = with_relations(
+            3,
+            vec![
+                parent_relation(11),
+                related_relation(700),
+                parent_relation(12),
+            ],
+        );
+
+        let document = reparent_document(&item, None, &config()).unwrap();
+
+        assert_eq!(
+            document,
+            vec![
+                json!({"op": "test", "path": "/rev", "value": 3}),
+                json!({"op": "remove", "path": "/relations/2"}),
+                json!({"op": "remove", "path": "/relations/0"}),
+            ]
         );
     }
 

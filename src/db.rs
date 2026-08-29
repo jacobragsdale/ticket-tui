@@ -517,6 +517,42 @@ impl SqliteTicketRepository {
             .with_context(|| format!("failed to store work item {}", ticket.key.id))
     }
 
+    /// Writes one work item that has just been moved between parents, and the
+    /// links leading out of it, leaving every other row alone.
+    ///
+    /// A hierarchy link is stored twice — once from the child, once from the
+    /// parent — and Azure DevOps answers a move with the child alone, so the
+    /// parent it left is never mentioned in `relations`. Clearing the child
+    /// links pointing at it is what takes it out of the old family; the child's
+    /// own parent link, which `relations` carries, is what puts it in the new
+    /// one. Both happen in the same transaction, so no reader ever sees the
+    /// work item in two families or in none.
+    pub fn reparent(&mut self, ticket: &Ticket, relations: &[RelationRecord]) -> Result<()> {
+        self.write_reparent(ticket, relations)
+            .with_context(|| format!("failed to move work item {}", ticket.key.id))
+    }
+
+    fn write_reparent(&mut self, ticket: &Ticket, relations: &[RelationRecord]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        insert_ticket(&transaction, ticket)?;
+        transaction
+            .execute(
+                "DELETE FROM work_item_relations
+                 WHERE organization = ?1 AND (from_id = ?2 OR (to_id = ?2 AND kind = ?3))",
+                params![
+                    ticket.key.organization,
+                    ticket.key.id,
+                    RelationKind::Child.as_str()
+                ],
+            )
+            .context("failed to clear the work item's hierarchy links")?;
+        for relation in relations {
+            insert_relation(&transaction, relation)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Writes a batch of work items, the links leading out of them, and the
     /// comments and history read for them, in one transaction, leaving every
     /// other row alone. This is how an incremental pull lands: only what
@@ -660,16 +696,7 @@ impl SqliteTicketRepository {
                 .context("failed to clear the work item's relations")?;
         }
         for relation in relations {
-            transaction.execute(
-                "INSERT OR REPLACE INTO work_item_relations (organization, from_id, to_id, kind)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    relation.from.organization,
-                    relation.from.id,
-                    relation.to.id,
-                    relation.kind.as_str()
-                ],
-            )?;
+            insert_relation(&transaction, relation)?;
         }
         // After the work items: a fresh row carries `details_rev = 0`, and it
         // is this that lifts it to the revision the details were read at.
@@ -884,6 +911,20 @@ fn insert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
     Ok(())
 }
 
+fn insert_relation(transaction: &Transaction<'_>, relation: &RelationRecord) -> Result<()> {
+    transaction.execute(
+        "INSERT OR REPLACE INTO work_item_relations (organization, from_id, to_id, kind)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            relation.from.organization,
+            relation.from.id,
+            relation.to.id,
+            relation.kind.as_str()
+        ],
+    )?;
+    Ok(())
+}
+
 fn insert_comment(transaction: &Transaction<'_>, comment: &CommentRecord) -> Result<()> {
     transaction.execute(
         "INSERT OR REPLACE INTO work_item_comments
@@ -1085,6 +1126,63 @@ mod tests {
                 .as_deref(),
             Some("Avery Chen"),
             "the signed-in name outlives a reopen"
+        );
+    }
+
+    #[test]
+    fn reparent_writes_the_new_link_and_clears_the_one_the_old_parent_held() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+        let relation = |from: &Ticket, to: &Ticket, kind| RelationRecord {
+            from: from.key.clone(),
+            to: to.key.clone(),
+            kind,
+        };
+        // The two halves a pull writes for one hierarchy link, and a related
+        // link on the old parent that has nothing to do with the family.
+        let graph = TicketGraph {
+            relations: vec![
+                relation(&ticket(3), &ticket(1), RelationKind::Parent),
+                relation(&ticket(1), &ticket(3), RelationKind::Child),
+                relation(&ticket(1), &ticket(2), RelationKind::Related),
+            ],
+            ..TicketGraph::default()
+        };
+        repository
+            .replace_all(&[ticket(1), ticket(2), ticket(3)], &graph)
+            .unwrap();
+
+        let mut moved = ticket(3);
+        moved.revision = 7;
+        repository
+            .reparent(
+                &moved,
+                &[relation(&ticket(3), &ticket(2), RelationKind::Parent)],
+            )
+            .unwrap();
+
+        let stored = repository.load_graph().unwrap();
+        assert_eq!(stored.parents_of(&ticket(3).key), vec![ticket(2).key]);
+        assert!(
+            stored.children_of(&ticket(1).key).is_empty(),
+            "the child link the old parent held is gone, not merely overwritten on the child"
+        );
+        assert!(
+            stored
+                .relations
+                .contains(&relation(&ticket(1), &ticket(2), RelationKind::Related)),
+            "a link that is not a hierarchy link is left alone"
+        );
+        assert_eq!(
+            repository
+                .load_all()
+                .unwrap()
+                .iter()
+                .find(|held| held.key.id == 3)
+                .map(|held| held.revision),
+            Some(7),
+            "the row takes the revision the move came back with"
         );
     }
 

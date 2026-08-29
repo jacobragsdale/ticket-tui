@@ -16,6 +16,8 @@ pub enum CommandId {
     EditAssignee,
     EditIteration,
     EditArea,
+    SetParent,
+    RemoveParent,
     EditDescription,
     AddComment,
     NewWorkItem,
@@ -194,6 +196,18 @@ pub const COMMANDS: &[Command] = &[
         title: "Change area",
         keys: &[],
         help: "Move it in the area tree",
+    },
+    Command {
+        id: CommandId::SetParent,
+        title: "Set parent\u{2026}",
+        keys: &[],
+        help: "File it under another work item",
+    },
+    Command {
+        id: CommandId::RemoveParent,
+        title: "Remove parent",
+        keys: &[],
+        help: "Detach it from its family",
     },
     Command {
         id: CommandId::EditDescription,
@@ -381,6 +395,15 @@ pub struct EditMenuEntry {
     pub command: CommandId,
 }
 
+/// The one row the Edit menu does not always offer: taking a work item out of
+/// its family only reads as a choice when it is in one, so this follows
+/// `Set parent\u{2026}` when the work item has a parent and is left out when it
+/// has none.
+pub const REMOVE_PARENT_ROW: EditMenuEntry = EditMenuEntry {
+    label: "Remove parent",
+    command: CommandId::RemoveParent,
+};
+
 pub const EDIT_MENU: &[EditMenuEntry] = &[
     EditMenuEntry {
         label: "State",
@@ -409,6 +432,10 @@ pub const EDIT_MENU: &[EditMenuEntry] = &[
     EditMenuEntry {
         label: "Area",
         command: CommandId::EditArea,
+    },
+    EditMenuEntry {
+        label: "Set parent\u{2026}",
+        command: CommandId::SetParent,
     },
     EditMenuEntry {
         label: "Description",

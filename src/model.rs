@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -456,6 +456,55 @@ impl TicketGraph {
     #[must_use]
     pub fn children_of(&self, key: &TicketKey) -> Vec<TicketKey> {
         related_keys(self, key, FamilyDirection::Child)
+    }
+
+    /// Every work item under one, however deep: its children, their children,
+    /// and so on. A graph that already holds a cycle — two work items each
+    /// listed as the other's parent, which a half-applied write elsewhere could
+    /// leave behind — is walked once and no further, so this always ends.
+    #[must_use]
+    pub fn descendants_of(&self, key: &TicketKey) -> Vec<TicketKey> {
+        let mut found = Vec::new();
+        let mut seen = HashSet::from([key.clone()]);
+        let mut queue = VecDeque::from([key.clone()]);
+        while let Some(next) = queue.pop_front() {
+            for child in self.children_of(&next) {
+                if seen.insert(child.clone()) {
+                    queue.push_back(child.clone());
+                    found.push(child);
+                }
+            }
+        }
+        found
+    }
+
+    /// Moves one work item under a different parent, or out from under the one
+    /// it had when `parent` is `None`.
+    ///
+    /// A hierarchy link is held twice — the child names its parent, and the
+    /// parent names its child — because that is how Azure DevOps reports it on
+    /// each of the two work items. Both sides are rewritten here, so the family
+    /// tree, the child progress, and everything else read from the graph agree
+    /// the moment a reparent is made optimistically, and again if it is put
+    /// back.
+    pub fn reparent(&mut self, child: &TicketKey, parent: Option<&TicketKey>) {
+        self.relations.retain(|relation| {
+            !(relation.from == *child && relation.kind == RelationKind::Parent)
+                && !(relation.to == *child && relation.kind == RelationKind::Child)
+        });
+        let Some(parent) = parent else {
+            return;
+        };
+        self.relations.push(RelationRecord {
+            from: child.clone(),
+            to: parent.clone(),
+            kind: RelationKind::Parent,
+        });
+        self.relations.push(RelationRecord {
+            from: parent.clone(),
+            to: child.clone(),
+            kind: RelationKind::Child,
+        });
     }
 
     #[must_use]
@@ -1153,6 +1202,79 @@ mod tests {
                 "either edge direction projects the same tree"
             );
         }
+    }
+
+    #[test]
+    fn descendants_reach_every_level_and_stop_on_a_graph_that_already_loops() {
+        let graph = TicketGraph {
+            relations: vec![
+                relation(2, 1, RelationKind::Parent),
+                relation(1, 3, RelationKind::Child),
+                relation(4, 2, RelationKind::Parent),
+                relation(9, 8, RelationKind::Parent),
+            ],
+            ..TicketGraph::default()
+        };
+
+        let mut below = graph.descendants_of(&key(1));
+        below.sort_by_key(|found| found.id);
+        assert_eq!(
+            below,
+            vec![key(2), key(3), key(4)],
+            "children reached either way, and their children under them"
+        );
+        assert!(
+            graph.descendants_of(&key(4)).is_empty(),
+            "a leaf has nothing below it"
+        );
+
+        let looping = TicketGraph {
+            relations: vec![
+                relation(2, 1, RelationKind::Parent),
+                relation(1, 2, RelationKind::Parent),
+            ],
+            ..TicketGraph::default()
+        };
+        assert_eq!(
+            looping.descendants_of(&key(1)),
+            vec![key(2)],
+            "a cycle already in the data is walked once and no further"
+        );
+    }
+
+    #[test]
+    fn reparenting_rewrites_both_halves_of_the_hierarchy_link() {
+        let mut graph = TicketGraph {
+            relations: vec![
+                relation(3, 1, RelationKind::Parent),
+                relation(1, 3, RelationKind::Child),
+                relation(3, 9, RelationKind::Related),
+            ],
+            ..TicketGraph::default()
+        };
+
+        graph.reparent(&key(3), Some(&key(2)));
+
+        assert_eq!(graph.parents_of(&key(3)), vec![key(2)]);
+        assert!(
+            graph.children_of(&key(1)).is_empty(),
+            "the parent it left stops naming it, which no single-sided write would do"
+        );
+        assert_eq!(graph.children_of(&key(2)), vec![key(3)]);
+        assert_eq!(
+            graph.relations_from(&key(3)).len(),
+            2,
+            "the related link is not a hierarchy link and is left alone"
+        );
+
+        graph.reparent(&key(3), None);
+
+        assert!(graph.parents_of(&key(3)).is_empty());
+        assert!(graph.children_of(&key(2)).is_empty());
+        assert_eq!(
+            graph.relations_from(&key(3)),
+            vec![&relation(3, 9, RelationKind::Related)]
+        );
     }
 
     fn ids_of(entries: &[FamilyTreeEntry]) -> Vec<i64> {

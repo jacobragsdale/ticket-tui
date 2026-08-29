@@ -29,8 +29,8 @@ use ticket_tui::markdown;
 use ticket_tui::model::{Ticket, TicketGraph, TicketKey};
 use ticket_tui::session;
 use ticket_tui::sync::{
-    self, AzureConnector, DetailsOutcome, PullOrigin, SyncEvent, SyncHandle, SyncMode, SyncOutcome,
-    SyncRequest, SyncScheduler,
+    self, AzureConnector, DetailsOutcome, PullOrigin, ReparentRejection, SyncEvent, SyncHandle,
+    SyncMode, SyncOutcome, SyncRequest, SyncScheduler,
 };
 use ticket_tui::timestamp::Timestamp;
 use url::Url;
@@ -659,6 +659,7 @@ fn handle_action(
         AppAction::FetchClassificationNodes => send_classification_nodes(runtime),
         AppAction::FetchWorkItemTypes => send_work_item_types(runtime),
         AppAction::Comment { key, text } => start_comment(app, runtime, key, text),
+        AppAction::Reparent { key, new_parent } => start_reparent(app, runtime, key, new_parent),
         AppAction::Create {
             work_item_type,
             patch,
@@ -979,6 +980,36 @@ fn start_create(
     app.reject_create(&error);
 }
 
+/// Hands one move to the sync worker. The graph already shows it, so a worker
+/// that is gone puts both halves of the old link back here rather than leaving
+/// a family tree on screen that nothing in Azure DevOps agrees with.
+fn start_reparent(
+    app: &mut App,
+    runtime: &mut SyncRuntime,
+    key: TicketKey,
+    new_parent: Option<i64>,
+) {
+    let sent = runtime.worker.as_ref().map(|worker| {
+        worker.send(SyncRequest::Reparent {
+            key: key.clone(),
+            new_parent,
+        })
+    });
+    let error = match sent {
+        Some(Ok(())) => return,
+        Some(Err(error)) => format!("{error:#}"),
+        None => runtime
+            .offline_reason
+            .clone()
+            .unwrap_or_else(|| "Azure DevOps is not configured".to_owned()),
+    };
+    app.reject_reparent(&ReparentRejection {
+        key,
+        conflict: false,
+        message: error,
+    });
+}
+
 fn send_pull(app: &mut App, runtime: &mut SyncRuntime, origin: PullOrigin) {
     let sent = runtime
         .worker
@@ -1141,6 +1172,26 @@ fn poll_sync(
                 }
                 Err(rejection) => app.reject_create(&rejection.message),
             },
+            // The worker rewrote both halves of this work item's hierarchy
+            // link itself, so the signature moves with them and the watcher
+            // below leaves the file alone.
+            SyncEvent::Reparented(result) => match *result {
+                Ok(applied) => {
+                    app.apply_reparent(applied);
+                    app.configure_database(
+                        repository.path().to_path_buf(),
+                        db::data_signature(repository.path()),
+                    );
+                }
+                Err(rejection) => {
+                    // A stale copy is worth a pull for the same reason an edit
+                    // is: the family the picker was built from has moved on.
+                    if rejection.conflict {
+                        start_sync(app, runtime);
+                    }
+                    app.reject_reparent(&rejection);
+                }
+            },
             SyncEvent::Stopped => {
                 runtime.stop(app, "the Azure DevOps sync worker stopped");
             }
@@ -1164,6 +1215,7 @@ fn poll_watch(
         || app.edits_pending()
         || app.comments_pending()
         || app.creates_pending()
+        || app.reparents_pending()
         || app.details_pending.is_some()
     {
         return false;

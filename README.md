@@ -453,11 +453,12 @@ In Progress, Resolved, Completed, Removed — then by name, so it opens instantl
 on a database that has never reached Azure DevOps.
 
 The Edit menu's remaining rows are the edits that would otherwise mean opening a
-browser. Title, Priority, Tags, Iteration, Area, Description, and Add comment
-have no key of their own; they are reached through `e`, or by name in the
-command palette as `Edit title`, `Edit priority`, `Edit tags`,
-`Change iteration`, `Change area`, `Edit description`, and `Add comment`.
-Assignee is reached the same way, and also directly with `a`.
+browser. Title, Priority, Tags, Iteration, Area, Set parent, Remove parent,
+Description, and Add comment have no key of their own; they are reached through
+`e`, or by name in the command palette as `Edit title`, `Edit priority`,
+`Edit tags`, `Change iteration`, `Change area`, `Set parent…`,
+`Remove parent`, `Edit description`, and `Add comment`. Assignee is reached the
+same way, and also directly with `a`.
 
 **Title** opens a one-line field prefilled with the title, edited with the same
 keys as the named-view editor — `←`/`→`, `Home`/`End`, `Ctrl-W`, `Ctrl-U`, and
@@ -573,6 +574,66 @@ notice is taken off again before anything is compared or converted, so leaving
 it in place changes nothing. Everything else goes down the usual path:
 `System.Description` is written with a revision test like any other field, and
 the details pane shows the new description before the network answers.
+
+**Set parent** files the work item under another one, and is how a ticket filed
+under the wrong Epic is moved without opening a browser. It opens a picker over
+every work item the database holds, each row reading `#613 Issue Fix ticket
+search`; typing filters on the id and the title at once, so `613` and
+`dispatcher` both find the same row, and the parent it hangs under now opens
+under the cursor and is a no-op if chosen again.
+
+The work item itself and everything below it are left out of the list. A work
+item cannot be its own ancestor, so offering a descendant could only ever earn a
+refusal; leaving them out makes a cycle something the picker cannot ask for
+rather than something Azure DevOps has to catch. Azure DevOps still catches the
+one case the picker cannot see — a family that moved in the browser since the
+last pull — and that refusal is reported in its own words with the move put
+back.
+
+**Remove parent** takes the work item out of its family and leaves it hanging
+under nothing. It is the one Edit menu row that is not always there: it appears
+directly under `Set parent…` when the work item has a parent, and is absent when
+it has none, so the menu never offers a removal there is nothing to remove.
+
+A parent is not a field, so neither is written like one. It is an entry in the
+work item's `relations` array, and Azure DevOps removes a relation by the
+position it holds in that array — which only a copy read now knows. So the
+worker reads the work item with `GET /_apis/wit/workitems/<id>?$expand=relations`
+and builds one patch document against exactly what came back:
+
+```json
+[
+  {"op": "test",   "path": "/rev", "value": 9},
+  {"op": "remove", "path": "/relations/1"},
+  {"op": "add",    "path": "/relations/-",
+   "value": {"rel": "System.LinkTypes.Hierarchy-Reverse",
+             "url": "https://dev.azure.com/<org>/_apis/wit/workItems/22"}}
+]
+```
+
+The revision test leads, so a work item somebody else changed between the read
+and the write is refused rather than patched against indices that have moved.
+The removal names the index the parent link sits at in the copy just read. The
+append comes last, because appending cannot shift an index the removal above it
+still needs. Setting a first parent sends only the test and the append; removing
+one sends only the test and the removal. All of it is one `PATCH`, so there is
+no moment in which the work item has been detached but not re-filed.
+
+The move is optimistic in both directions. A hierarchy link is held twice — the
+child names its parent, the parent names its child — so both halves are
+rewritten the moment the choice is made: the family tree redraws under the new
+parent, the epic the work item left stops listing it, and the child progress of
+both parents is recounted before anything reaches the network. The status line
+reads `Moving #613 under #22…` while it is out and `Moved #613 under #22` when
+it lands, at which point the graph settles on the links Azure DevOps sent back
+rather than on the guess. A refusal puts both halves and both ratios back and
+says why: `#613 not moved: TF201036: adding this link would create a circular
+relationship`. One move per work item is in flight at a time.
+
+SQLite is written the same way. `work_item_relations` holds both halves, and
+Azure DevOps answers a move with the moved work item alone, so the child link
+the old parent still held is cleared in the same transaction that writes the new
+parent link — no reader ever sees the work item in two families or in none.
 
 **Add comment** is the last Edit menu row, and `Add comment` in the palette. It
 opens a one-line box — empty, because there is nothing to edit, only something
