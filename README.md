@@ -286,9 +286,10 @@ In Progress, Resolved, Completed, Removed — then by name, so it opens instantl
 on a database that has never reached Azure DevOps.
 
 The Edit menu's remaining rows are the edits that would otherwise mean opening a
-browser. Title, Priority, and Tags have no key of their own; they are reached
-through `e`, or by name in the command palette as `Edit title`, `Edit priority`,
-and `Edit tags`. Assignee is reached the same way, and also directly with `a`.
+browser. Title, Priority, Tags, Iteration, and Area have no key of their own;
+they are reached through `e`, or by name in the command palette as `Edit title`,
+`Edit priority`, `Edit tags`, `Change iteration`, and `Change area`. Assignee is
+reached the same way, and also directly with `a`.
 
 **Title** opens a one-line field prefilled with the title, edited with the same
 keys as the named-view editor — `←`/`→`, `Home`/`End`, `Ctrl-W`, `Ctrl-U`, and
@@ -338,6 +339,32 @@ next run the picker is complete the moment it opens. Teams that cannot be read
 are passed over in silence: nothing is logged and nothing is said, because the
 list the database gave is enough on its own.
 
+**Iteration** and **Area** open the project's classification trees as indented
+rows, two spaces a level, each row naming the leaf with the rest of the path
+implied by the indent. The node the work item sits in is marked and under the
+cursor; type to narrow the tree, `↑`/`↓` to move, `Enter` to move the
+work item, `Esc` to change nothing. Choosing the node it is already in closes
+without a write. An iteration row also carries the days it runs between —
+`Aug 25 – Sep 5` — and the one containing today (UTC) is marked `current`.
+
+`Enter` writes the full backslash path — `development\Sprint 1`, not
+`Sprint 1` — to `System.IterationPath` or `System.AreaPath`. The Iteration and
+Area table columns go on showing only the leaf, and the `iteration:` and `area:`
+search filters go on matching it.
+
+These pickers never wait for the network either. Both trees come from one
+request — `GET /<project>/_apis/wit/classificationnodes?$depth=10` — read once a
+run, the first time either picker is opened, and merged into the open list where
+it stands. The value a work item's field carries is not the `path` each node
+reports (`\development\Iteration\Sprint 1`), so it is rebuilt from the names
+on the way down: the project root, then the descendants, without the `Iteration`
+or `Area` segment that only separates the two trees. The result is cached in the
+`classification_nodes` table, and a cache under an hour old is used as it
+stands, so a picker opened soon after a previous run touches the network for
+nothing at all. Before anything is cached, and whenever the trees cannot be
+read, both pickers list the distinct iteration and area paths the work items in
+the database already carry, which is every sprint actually in use.
+
 ## Controls
 
 | Input | Action |
@@ -364,7 +391,7 @@ list the database gave is enough on its own.
 | `e` | Open the Edit menu of field editors; `Enter` opens the one chosen |
 | `S` | Change the selected work item's state; `Enter` applies, `Esc` cancels |
 | `a` | Change who the selected work item is assigned to; type to filter, `Enter` assigns |
-| `e` → Title/Priority/Tags | Edit the title, priority, or tags; also `Edit title`, `Edit priority`, `Edit tags`, and `Change assignee` in the palette |
+| `e` → Title/Priority/Tags/Iteration/Area | Edit the title, priority, tags, iteration, or area; also `Edit title`, `Edit priority`, `Edit tags`, `Change iteration`, `Change area`, and `Change assignee` in the palette |
 | `m` | Bookmark or unbookmark the selected ticket |
 | `Space` | Toggle ticket multi-select |
 | `y` | Copy selected (or current) ticket IDs |
@@ -406,8 +433,8 @@ assignee:"Avery Chen" priority:1 tag:rust`, plus `project:`, `area:`, and
 `iteration:`. Values in the same field are combined with OR; different fields
 are combined with AND. `is:bookmarked` limits the table to locally bookmarked
 tickets. Active filters appear as removable chips. The command palette copies
-IDs, URLs, titles, Markdown links, or summaries, edits the title, priority, or
-tags, and exports the selection as JSON or CSV. Press `i` for database path, row count, freshness, and the last
+IDs, URLs, titles, Markdown links, or summaries, edits the title, priority,
+tags, iteration, or area, and exports the selection as JSON or CSV. Press `i` for database path, row count, freshness, and the last
 sync. A database another process writes reloads automatically; the table title
 shows `Stale` until that reload finishes, and `Syncing…`, `Synced 2m ago`, or
 `Sync failed` for the pulls from Azure DevOps.
@@ -479,6 +506,18 @@ startup so the next run's picker is complete before any network call. Like
 `sync_meta` it describes the project rather than its work items, so a pull
 leaves it alone; it is rewritten whole when the teams are read.
 
+The `classification_nodes` table holds what the iteration and area pickers
+offer: `kind` (`area` or `iteration`), `path` — the value a work item's field
+carries, such as `development\Sprint 1` — `depth`, the level the row is
+indented to, `start_date` and `finish_date`, an iteration's schedule as RFC 3339
+UTC timestamps or null, and `position`, the order the trees were flattened in,
+keyed on `(kind, path)`. `sync_meta` carries `classification_nodes_fetched_at`
+beside it, the RFC 3339 UTC time the trees were last read; a cache younger than
+an hour is used as it stands rather than fetched again. Like `sync_meta` the
+table describes the project's plan rather than its work items, so a pull leaves
+it alone; both trees are rewritten whole when they are read, so a deleted sprint
+stops being offered.
+
 The `work_item_type_states` table holds what the state picker offers:
 `work_item_type`, `name`, `category` (`Proposed`, `InProgress`, `Resolved`,
 `Completed`, or `Removed`), and `position`, the order the process template lists
@@ -487,7 +526,7 @@ the project's process rather than its work items, so a pull leaves it alone; a
 type is rewritten whole when its states are fetched, so a retired state stops
 being offered.
 
-The database carries `PRAGMA user_version = 9`. Because Azure DevOps is the
+The database carries `PRAGMA user_version = 10`. Because Azure DevOps is the
 record of truth, there are no migrations: a database at any other version has
 its tables dropped and recreated at startup, and a pull runs immediately to
 refill it, whatever `--refresh` says. Deleting the file has the same effect. The

@@ -34,6 +34,7 @@ pub enum ScrollSurface {
     StatePicker,
     PriorityPicker,
     AssigneePicker,
+    NodePicker,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,6 +47,8 @@ pub enum TextEditor {
     Prompt,
     /// The assignee picker's filter field.
     Assignee,
+    /// The iteration or area picker's filter field.
+    Node,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,6 +125,12 @@ pub enum PointerTarget {
     },
     /// The filter field of the assignee picker.
     AssigneeQuery,
+    /// One node of the iteration or area picker.
+    NodeOption {
+        index: usize,
+    },
+    /// The filter field of the iteration or area picker.
+    NodeQuery,
     /// The text field of the title or tags prompt.
     PromptInput,
     SubmitPrompt,
