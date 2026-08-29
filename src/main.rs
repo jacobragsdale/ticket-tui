@@ -133,6 +133,9 @@ fn run() -> Result<()> {
             ..TicketGraph::default()
         };
         let count = repository.replace_all(&batch.tickets, &graph)?;
+        if let Some(display_name) = client.current_user_display_name()? {
+            repository.set_meta(db::ME_DISPLAY_NAME_KEY, &display_name)?;
+        }
         sync_status = Some(format!(
             "Synced {count} work items from {}/{}",
             client.config().organization,
@@ -144,6 +147,10 @@ fn run() -> Result<()> {
     let cache_is_empty = tickets.is_empty();
     let mut app = App::new(tickets);
     app.set_workspace_graph(graph);
+    app.set_me(resolve_me(
+        repository.meta(db::ME_DISPLAY_NAME_KEY)?,
+        std::env::var("TICKET_TUI_ME").ok(),
+    ));
     app.configure_database(
         repository.path().to_path_buf(),
         db::data_signature(repository.path()),
@@ -171,6 +178,17 @@ fn run() -> Result<()> {
         eprintln!("warning: could not remove agent context: {error:#}");
     }
     result
+}
+
+/// Who "mine" means: the display name the last sync recorded, overridden by
+/// `TICKET_TUI_ME` for anyone whose profile name differs from the name their
+/// work items are assigned to. Blank values count as unset.
+fn resolve_me(stored: Option<String>, env: Option<String>) -> Option<String> {
+    [env, stored]
+        .into_iter()
+        .flatten()
+        .map(|name| name.trim().to_owned())
+        .find(|name| !name.is_empty())
 }
 
 fn run_terminal(
@@ -560,6 +578,30 @@ mod tests {
         write_mouse_pointer_shape(&mut output, MousePointerShape::Default).unwrap();
 
         assert_eq!(output, b"\x1b]22;pointer\x1b\\\x1b]22;\x1b\\");
+    }
+
+    #[test]
+    fn the_environment_overrides_the_display_name_recorded_by_the_last_sync() {
+        assert_eq!(
+            resolve_me(Some("Jacob Ragsdale".into()), None).as_deref(),
+            Some("Jacob Ragsdale")
+        );
+        assert_eq!(
+            resolve_me(Some("Jacob Ragsdale".into()), Some("  Avery Chen ".into())).as_deref(),
+            Some("Avery Chen"),
+            "TICKET_TUI_ME wins over the cached profile name"
+        );
+        assert_eq!(
+            resolve_me(Some("Jacob Ragsdale".into()), Some("   ".into())).as_deref(),
+            Some("Jacob Ragsdale"),
+            "a blank override is not an override"
+        );
+        assert_eq!(
+            resolve_me(None, Some("Avery Chen".into())).as_deref(),
+            Some("Avery Chen")
+        );
+        assert_eq!(resolve_me(None, None), None);
+        assert_eq!(resolve_me(Some(String::new()), None), None);
     }
 
     #[test]

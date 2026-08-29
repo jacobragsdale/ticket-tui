@@ -18,6 +18,9 @@ const API_VERSION: &str = "7.1";
 /// Largest id batch the work items endpoint accepts.
 const BATCH_SIZE: usize = 200;
 const BODY_LIMIT: u64 = 64 * 1024 * 1024;
+/// Profiles live on the identity host, not on `dev.azure.com/{org}`.
+const PROFILE_URL: &str =
+    "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AzureConfig {
@@ -166,6 +169,17 @@ impl AzureClient {
         Ok(batch)
     }
 
+    /// Display name of the signed-in user, used to mark their own work items.
+    /// The profile host is separate from the work-item host and may be blocked
+    /// or unavailable, so a failure yields `None` rather than sinking the sync.
+    pub fn current_user_display_name(&self) -> Result<Option<String>> {
+        Ok(self
+            .get(PROFILE_URL)
+            .ok()
+            .as_ref()
+            .and_then(profile_display_name))
+    }
+
     fn query_ids(&self) -> Result<Vec<i64>> {
         let url = format!(
             "{}/{}/_apis/wit/wiql?api-version={API_VERSION}",
@@ -212,6 +226,16 @@ impl AzureClient {
             .with_context(|| format!("POST {url} failed"))?;
         read_json(response, url)
     }
+}
+
+/// Pull `displayName` out of a `/_apis/profile/profiles/me` document.
+fn profile_display_name(profile: &Value) -> Option<String> {
+    profile
+        .get("displayName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
 }
 
 fn read_json(mut response: ureq::http::Response<ureq::Body>, url: &str) -> Result<Value> {
@@ -529,6 +553,21 @@ mod tests {
         assert_eq!(relations[0].kind, RelationKind::Parent);
         assert_eq!(relations[0].to.id, 11);
         assert_eq!(relations[1].kind, RelationKind::Related);
+    }
+
+    #[test]
+    fn profile_documents_yield_a_display_name_when_one_is_present() {
+        assert_eq!(
+            profile_display_name(&json!({
+                "displayName": "Jacob Ragsdale",
+                "emailAddress": "jacob@example.com"
+            }))
+            .as_deref(),
+            Some("Jacob Ragsdale")
+        );
+        assert_eq!(profile_display_name(&json!({"displayName": "  "})), None);
+        assert_eq!(profile_display_name(&json!({"id": "abc"})), None);
+        assert_eq!(profile_display_name(&json!("Jacob")), None);
     }
 
     #[test]

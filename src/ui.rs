@@ -412,11 +412,18 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let checked = app.is_row_selected(&ticket.key);
         let mut cells = vec![Cell::from(row_marker_line(checked, bookmarked))];
         let tone = RowTone::of(&ticket.state);
-        cells.extend(
-            columns
-                .iter()
-                .map(|column| table_cell(ticket, column.id, now, density, tone, &mut highlighter)),
-        );
+        let mine = app.is_mine(ticket);
+        cells.extend(columns.iter().map(|column| {
+            table_cell(
+                ticket,
+                column.id,
+                now,
+                density,
+                tone,
+                mine,
+                &mut highlighter,
+            )
+        }));
         Row::new(cells).height(row_height)
     });
     let table = Table::new(rows, constraints.clone())
@@ -619,7 +626,11 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if family.has_family() {
         metadata_lines.push(family_breadcrumb_line(app, &family));
     }
-    metadata_lines.push(ticket_assignment_line(&ticket, &mut highlighter));
+    metadata_lines.push(ticket_assignment_line(
+        &ticket,
+        app.is_mine(&ticket),
+        &mut highlighter,
+    ));
     metadata_lines.push(tags_field_line(&ticket.tags, &mut highlighter));
     metadata_lines.push(field_line(
         "Project / Revision",
@@ -2110,6 +2121,7 @@ fn table_cell(
     now: OffsetDateTime,
     density: RowDensity,
     tone: RowTone,
+    mine: bool,
     highlighter: &mut QueryHighlighter,
 ) -> Cell<'static> {
     let plain = tone.apply(Style::default());
@@ -2132,17 +2144,13 @@ fn table_cell(
         SortField::State => {
             highlight_searchable(&ticket.state, state_style(&ticket.state), highlighter)
         }
-        SortField::Assignee => {
-            let (text, searchable) = ticket.assigned_to.as_deref().map_or_else(
-                || ("Unassigned".to_owned(), false),
-                |name| (name.to_owned(), true),
-            );
-            if searchable {
-                highlight_searchable(&text, plain, highlighter)
-            } else {
-                Line::styled(text, tone.apply(Style::default().fg(theme().muted)))
+        SortField::Assignee => match ticket.assigned_to.as_deref() {
+            Some(name) if mine => {
+                highlight_searchable(name, tone.apply(assigned_to_me_style()), highlighter)
             }
-        }
+            Some(name) => highlight_searchable(name, plain, highlighter),
+            None => Line::styled("Unassigned", tone.apply(Style::default().fg(theme().muted))),
+        },
         SortField::Priority => Line::from(
             ticket
                 .priority
@@ -2364,18 +2372,26 @@ fn ticket_identity_line(ticket: &Ticket, highlighter: &mut QueryHighlighter) -> 
     Line::from(spans)
 }
 
-fn ticket_assignment_line(ticket: &Ticket, highlighter: &mut QueryHighlighter) -> Line<'static> {
+/// The signed-in user's own work. Bold carries the emphasis where NO_COLOR
+/// resets the accent, so "mine" reads either way.
+fn assigned_to_me_style() -> Style {
+    Style::default()
+        .fg(theme().accent)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn ticket_assignment_line(
+    ticket: &Ticket,
+    mine: bool,
+    highlighter: &mut QueryHighlighter,
+) -> Line<'static> {
     let priority = ticket
         .priority
         .map_or_else(|| "—".into(), |priority| priority.to_string());
-    let assignee = ticket
-        .assigned_to
-        .clone()
-        .unwrap_or_else(|| "Unassigned".into());
-    let assignee_line = if ticket.assigned_to.is_some() {
-        highlight_searchable(&assignee, Style::default(), highlighter)
-    } else {
-        Line::styled(assignee, Style::default().fg(theme().muted))
+    let assignee_line = match ticket.assigned_to.as_deref() {
+        Some(name) if mine => highlight_searchable(name, assigned_to_me_style(), highlighter),
+        Some(name) => highlight_searchable(name, Style::default(), highlighter),
+        None => Line::styled("Unassigned", Style::default().fg(theme().muted)),
     };
     let mut spans = vec![Span::styled(
         "Assignee / Priority: ",
@@ -3159,6 +3175,72 @@ mod tests {
             assert_eq!(selected_fg, theme().muted);
             assert_eq!(selected_bg, theme().selected_background);
         }
+    }
+
+    #[test]
+    fn my_own_work_items_stand_out_in_the_assignee_column() {
+        let mut mine = ticket_at(10_002, "Mine", "Issue", "To Do", "2026-03-02T00:00:00Z");
+        // Azure DevOps is inconsistent about casing; "mine" should survive it.
+        mine.assigned_to = Some("avery chen".into());
+        let mut theirs = ticket_at(10_003, "Theirs", "Issue", "To Do", "2026-03-01T00:00:00Z");
+        theirs.assigned_to = Some("Jordan Patel".into());
+        let mut app = App::new(vec![
+            ticket_at(10_001, "Selected", "Issue", "To Do", "2026-03-03T00:00:00Z"),
+            mine,
+            theirs,
+        ]);
+        app.set_me(Some("Avery Chen".into()));
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let assignee_x = column_x(&app, SortField::Assignee);
+        // Row 0 is selected, and the selection highlight bolds it either way.
+        let body = app.hit_regions.table_body.expect("table body");
+        let (mine_fg, _, mine_modifier) = painted_cell(&terminal, assignee_x, body.y + 1);
+        let (their_fg, _, their_modifier) = painted_cell(&terminal, assignee_x, body.y + 2);
+
+        assert!(
+            mine_modifier.contains(Modifier::BOLD),
+            "my own assignee cell should be bold"
+        );
+        assert!(
+            !their_modifier.contains(Modifier::BOLD),
+            "someone else's assignee cell should stay plain"
+        );
+        assert_eq!(mine_fg, theme().accent);
+        if theme().accent != Color::Reset {
+            assert_ne!(their_fg, theme().accent);
+        }
+    }
+
+    #[test]
+    fn the_details_assignee_marks_my_own_work_and_still_shows_search_matches() {
+        let ticket = ticket();
+        let mut highlighter = QueryHighlighter::new("");
+        let mine = ticket_assignment_line(&ticket, true, &mut highlighter);
+        let theirs = ticket_assignment_line(&ticket, false, &mut highlighter);
+
+        assert_eq!(mine.spans[1].content, "Avery Chen");
+        assert_eq!(mine.spans[1].style.fg, Some(theme().accent));
+        assert!(mine.spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(theirs.spans[1].content, "Avery Chen");
+        assert!(!theirs.spans[1].style.add_modifier.contains(Modifier::BOLD));
+
+        let mut highlighter = QueryHighlighter::new("chen");
+        let matched = ticket_assignment_line(&ticket, true, &mut highlighter);
+        let name: String = matched.spans[1..]
+            .iter()
+            .take_while(|span| span.content.as_ref() != " · ")
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(name, "Avery Chen");
+        assert!(
+            matched.spans[1..].iter().any(|span| {
+                span.style.add_modifier.contains(Modifier::UNDERLINED)
+                    && span.content.contains("Chen")
+            }),
+            "the search match must still show through the mine styling: {matched:?}"
+        );
     }
 
     #[test]

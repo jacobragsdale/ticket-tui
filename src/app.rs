@@ -256,6 +256,9 @@ pub struct App {
     pub database_path: PathBuf,
     pub stale: bool,
     pub data_signature: u128,
+    /// Display name of the signed-in Azure DevOps user, so their own work
+    /// items can stand out. `None` until a sync records one.
+    me: Option<String>,
 }
 
 impl App {
@@ -314,6 +317,7 @@ impl App {
             database_path: PathBuf::new(),
             stale: false,
             data_signature: 0,
+            me: None,
         };
         app.show_all(None);
         app
@@ -364,6 +368,7 @@ impl App {
             .collect();
         AgentContext {
             database_path: self.database_path.display().to_string(),
+            me: self.me.clone(),
             mode: mode_name(self.mode).into(),
             focus: focus_name(self.focus).into(),
             screen: if self.narrow_details {
@@ -484,6 +489,29 @@ impl App {
     #[must_use]
     pub fn is_row_selected(&self, key: &TicketKey) -> bool {
         self.selected_keys.contains(key)
+    }
+
+    pub fn set_me(&mut self, me: Option<String>) {
+        self.me = me;
+    }
+
+    #[must_use]
+    pub fn me(&self) -> Option<&str> {
+        self.me.as_deref()
+    }
+
+    /// Whether a work item is assigned to the signed-in user. Azure DevOps
+    /// echoes display names back with inconsistent casing, so compare loosely.
+    #[must_use]
+    pub fn is_mine(&self, ticket: &Ticket) -> bool {
+        match (self.me.as_deref(), ticket.assigned_to.as_deref()) {
+            (Some(me), Some(assignee)) => me
+                .trim()
+                .chars()
+                .flat_map(char::to_lowercase)
+                .eq(assignee.trim().chars().flat_map(char::to_lowercase)),
+            _ => false,
+        }
     }
 
     #[must_use]
@@ -2509,6 +2537,30 @@ mod tests {
         assert!(context.selected_ticket.as_ref().unwrap().checked);
         assert_eq!(context.checked_tickets.len(), 1);
         assert_eq!(context.checked_tickets[0].id, 3);
+    }
+
+    #[test]
+    fn my_own_work_items_are_recognised_whatever_the_casing() {
+        let mut app = App::new(vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+        ]);
+        let mut mine = app.tickets()[0].clone();
+        mine.assigned_to = Some("  avery CHEN ".into());
+        let mut theirs = app.tickets()[1].clone();
+        theirs.assigned_to = Some("Jordan Patel".into());
+        let mut unassigned = app.tickets()[1].clone();
+        unassigned.assigned_to = None;
+
+        assert!(!app.is_mine(&mine), "nobody is \"me\" until a name is set");
+
+        app.set_me(Some("Avery Chen".into()));
+
+        assert_eq!(app.me(), Some("Avery Chen"));
+        assert!(app.is_mine(&mine));
+        assert!(!app.is_mine(&theirs));
+        assert!(!app.is_mine(&unassigned));
+        assert_eq!(app.agent_context().me.as_deref(), Some("Avery Chen"));
     }
 
     #[test]

@@ -14,6 +14,9 @@ pub const SCHEMA_VERSION: u8 = 1;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct AgentContext {
     pub database_path: String,
+    /// Display name of the signed-in Azure DevOps user, or `null` when the
+    /// last sync could not read a profile.
+    pub me: Option<String>,
     pub mode: String,
     pub focus: String,
     pub screen: String,
@@ -145,6 +148,7 @@ mod tests {
     fn context(database_path: String) -> AgentContext {
         AgentContext {
             database_path,
+            me: Some("Jacob Ragsdale".into()),
             mode: "browse".into(),
             focus: "tickets".into(),
             screen: "workspace".into(),
@@ -193,6 +197,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(first_json["schema_version"], SCHEMA_VERSION);
         assert_eq!(first_json["database_path"], "first.sqlite3");
+        assert_eq!(first_json["me"], "Jacob Ragsdale");
         assert_eq!(first_json["search"]["order"], "relevance");
         assert_eq!(first_json["sort"]["field"], "changed");
         assert_eq!(first_json["sort"]["direction"], "desc");
@@ -200,11 +205,13 @@ mod tests {
         assert!(first_json["process_id"].as_u64().is_some());
         assert!(first_json["updated_at"].as_str().is_some());
 
-        let second = context("second.sqlite3".into());
+        let mut second = context("second.sqlite3".into());
+        second.me = None;
         save(&path, &second).unwrap();
         let second_json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(second_json["database_path"], "second.sqlite3");
+        assert!(second_json["me"].is_null());
         assert!(!temporary_path(&path).exists());
 
         remove(&path).unwrap();
