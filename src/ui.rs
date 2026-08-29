@@ -2222,10 +2222,13 @@ fn table_cell(
                 highlighter,
             ))
         }
-        // The state cell keeps its own colour: it is what marks the row done.
-        SortField::State => {
-            highlight_searchable(&ticket.state, state_style(&ticket.state), highlighter)
-        }
+        // Finished rows recede whole: the state cell fades with the rest of
+        // the row rather than staying bright against muted neighbours.
+        SortField::State => highlight_searchable(
+            &ticket.state,
+            tone.apply(state_style(&ticket.state)),
+            highlighter,
+        ),
         SortField::Assignee => match ticket.assigned_to.as_deref() {
             Some(name) if mine => {
                 highlight_searchable(name, tone.apply(assigned_to_me_style()), highlighter)
@@ -3238,7 +3241,13 @@ mod tests {
         ]);
         if theme() != &Theme::new(true) {
             // NO_COLOR renders every colour as Reset, so only compare palettes.
-            assert_distinct_and_legible(&column_cell_colors(&mut app, SortField::State, 3));
+            let states = column_cell_colors(&mut app, SortField::State, 3);
+            assert_distinct_and_legible(&states[..2]);
+            assert_eq!(
+                states[2],
+                theme().muted,
+                "the done state should fade with its row"
+            );
             let mut open = App::new(vec![
                 ticket_at(10_001, "Alpha", "Epic", "To Do", "2026-03-03T00:00:00Z"),
                 ticket_at(10_002, "Beta", "Issue", "To Do", "2026-03-02T00:00:00Z"),
@@ -3266,18 +3275,22 @@ mod tests {
                 "open rows must stay undimmed"
             );
             assert!(
-                !state_modifier.contains(Modifier::DIM),
-                "the state cell keeps its own weight"
+                state_modifier.contains(Modifier::DIM),
+                "the done state cell should dim with its row"
             );
         } else {
             assert_eq!(done_fg, theme().muted, "the done title should be muted");
             assert_ne!(open_fg, theme().muted, "the open title should stay bright");
             assert_eq!(
                 state_fg,
-                state_color(StateCategory::Completed),
-                "the state cell keeps its own colour"
+                theme().muted,
+                "the done state cell should fade with its row"
             );
         }
+        assert!(
+            !state_modifier.contains(Modifier::BOLD),
+            "the faded state cell drops the weight open work keeps"
+        );
 
         // The row highlight is painted over the faded cells, so a selected done
         // row stays readable.
