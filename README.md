@@ -196,8 +196,43 @@ colour in the Assignee column and in the details pane. Set `TICKET_TUI_ME` to
 override the stored name, for anyone whose profile name differs from the name
 their work items are assigned to.
 
-Comments and revision history are not synced yet: their tables exist and the
-details pane renders them when present, but nothing fills them.
+Comments and revision history come down per work item rather than with the
+project, from two more endpoints:
+
+```
+GET <org>/<project>/_apis/wit/workItems/<id>/comments?api-version=7.1-preview.4
+GET <org>/_apis/wit/workItems/<id>/updates?api-version=7.1
+```
+
+Comment bodies are flattened from HTML the same way descriptions are. Revisions
+keep only the changes a person reads a history for — state, assignee, title,
+iteration, area, priority, tags, and reason — so a revision that moved nothing
+but the revision number, the changed date, the comment count, or the watermark
+is dropped whole, and an identity is stored as the name it displays under.
+Azure DevOps stamps the newest revision's `revisedDate` with `9999-01-01`
+instead of a date, because nothing has revised it yet; that revision's own
+`System.ChangedDate` stands in.
+
+An incremental pull reads both for every work item it found changed, in the
+same transaction that stores the work item itself: something that just moved is
+something somebody is about to look at. A full pull does not — two more
+requests per work item is a price only a handful of changes can pay — so
+whatever it left unread is read lazily instead.
+
+Each row carries `details_rev`, the revision its stored comments and history
+belong to. When the selection rests for 300 ms on a work item whose
+`details_rev` is behind its `revision`, that one work item is read. Scrolling
+reads nothing, because the trigger is the selection settling rather than the
+selection changing; one request is out at a time; and a work item that could
+not be read is reported once and never asked about again. The details pane
+shows `Loading comments and history…` where the history is about to appear, and
+when the answer arrives only that work item's comments and history change —
+nothing else is reloaded and no other row moves. An accepted edit sets
+`details_rev` back to zero, because the copy Azure DevOps sent back is a new
+revision whose history has not been read.
+
+The history renders one line per change — `2h ago · Jacob Ragsdale · State: To
+Do → Doing`, with the exact UTC instant beside it — oldest revision first.
 
 ## Editing
 
@@ -420,10 +455,14 @@ The `work_items` table stores these columns:
 | `description` | Plain-text detail content |
 | `created_at`, `changed_at` | UTC RFC 3339 timestamps |
 | `web_url` | HTTPS browser URL for the work item |
+| `details_rev` | Revision whose comments and history are stored, `0` for none |
 
 The primary key is `(organization, work_item_id)`. Tags use Azure DevOps-style
 semicolon separation. The `work_item_relations`, `work_item_comments`, and
-`work_item_history` tables hold the graph around each work item. The `sync_meta`
+`work_item_history` tables hold the graph around each work item: links from
+every pull, and comments and revision history for every work item whose
+`details_rev` says they have been read. A work item the project stops listing
+takes all three with it. The `sync_meta`
 key/value table describes the sync itself rather than the work items, so a full
 pull clears the other tables but leaves it alone. Two keys live there:
 `me_display_name`, the signed-in display name that marks your own work items,
@@ -448,7 +487,7 @@ the project's process rather than its work items, so a pull leaves it alone; a
 type is rewritten whole when its states are fetched, so a retired state stops
 being offered.
 
-The database carries `PRAGMA user_version = 8`. Because Azure DevOps is the
+The database carries `PRAGMA user_version = 9`. Because Azure DevOps is the
 record of truth, there are no migrations: a database at any other version has
 its tables dropped and recreated at startup, and a pull runs immediately to
 refill it, whatever `--refresh` says. Deleting the file has the same effect. The
