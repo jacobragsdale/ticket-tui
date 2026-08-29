@@ -746,6 +746,13 @@ impl AzureClient {
 
     /// Starts one pipeline on one branch, answering with the run it made.
     pub fn start_run(&self, pipeline_id: i64, branch: &str) -> Result<Run> {
+        // Either spelling: the picker hands over `main`, the command line
+        // hands over `refs/heads/main`, and neither wants a second prefix.
+        let ref_name = if branch.starts_with("refs/") {
+            branch.to_owned()
+        } else {
+            format!("refs/heads/{branch}")
+        };
         let id = pipeline_id.to_string();
         let segments = [
             self.config.project.as_str(),
@@ -759,7 +766,7 @@ impl AzureClient {
         let body = serde_json::json!({
             "resources": {
                 "repositories": {
-                    "self": { "refName": format!("refs/heads/{branch}") }
+                    "self": { "refName": ref_name }
                 }
             }
         });
