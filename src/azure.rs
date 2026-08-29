@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::classification::{self, ClassificationNode};
+use crate::html::html_to_text;
 use crate::model::{
     CommentRecord, HistoryRecord, Identity, RelationKind, RelationRecord, StateCategory,
     StateOption, Ticket, TicketKey, WorkItemDetails,
@@ -808,6 +809,7 @@ pub fn parse_work_item(
         description: text("System.Description")
             .map(|html| html_to_text(&html))
             .unwrap_or_default(),
+        description_html: text("System.Description").unwrap_or_default(),
         created_at: timestamp("System.CreatedDate")?,
         changed_at: timestamp("System.ChangedDate")?,
         web_url: config.work_item_url(id),
@@ -1027,59 +1029,6 @@ fn relation_kind(rel: &str) -> Option<RelationKind> {
     })
 }
 
-/// Reduce Azure DevOps rich text to readable terminal text. Block elements
-/// become line breaks, list items get a bullet, every other tag is dropped,
-/// and the common entities are decoded.
-#[must_use]
-pub fn html_to_text(html: &str) -> String {
-    let mut output = String::with_capacity(html.len());
-    let mut rest = html;
-    while let Some(start) = rest.find('<') {
-        output.push_str(&rest[..start]);
-        let Some(end) = rest[start..].find('>') else {
-            output.push_str(&rest[start..]);
-            rest = "";
-            break;
-        };
-        let tag = rest[start + 1..start + end]
-            .trim()
-            .trim_start_matches('/')
-            .split(|character: char| character.is_whitespace() || character == '/')
-            .next()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let closing = rest[start + 1..].starts_with('/');
-        match tag.as_str() {
-            "br" => output.push('\n'),
-            "li" if !closing => {
-                if !output.is_empty() && !output.ends_with('\n') {
-                    output.push('\n');
-                }
-                output.push_str("• ");
-            }
-            "p" | "div" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "ul" | "ol"
-            | "blockquote" | "pre" | "table"
-                if closing =>
-            {
-                output.push('\n');
-            }
-            _ => {}
-        }
-        rest = &rest[start + end + 1..];
-    }
-    output.push_str(rest);
-    let decoded = output
-        .replace("&nbsp;", " ")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&");
-    let mut lines: Vec<&str> = decoded.lines().map(str::trim_end).collect();
-    lines.dedup_by(|current, previous| current.is_empty() && previous.is_empty());
-    lines.join("\n").trim().to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1130,7 +1079,11 @@ mod tests {
         assert_eq!(ticket.assigned_to.as_deref(), Some("Jacob Ragsdale"));
         assert_eq!(ticket.priority, Some(2));
         assert_eq!(ticket.tags, vec!["tech-debt", "azure"]);
-        assert_eq!(ticket.description, "First line\n• one\n• two");
+        assert_eq!(ticket.description, "First line\n\n• one\n• two");
+        assert_eq!(
+            ticket.description_html, "<p>First&nbsp;line</p><ul><li>one</li><li>two</li></ul>",
+            "the editor gets the document Azure DevOps stored, not the reading of it"
+        );
         assert_eq!(
             ticket.changed_at,
             crate::timestamp::ts("2026-05-16T20:19:36.133Z")

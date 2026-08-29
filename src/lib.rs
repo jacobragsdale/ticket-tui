@@ -8,6 +8,7 @@ pub mod db;
 pub mod edit;
 pub mod export;
 pub mod filter;
+pub mod html;
 pub mod model;
 pub mod pointer;
 pub mod search;

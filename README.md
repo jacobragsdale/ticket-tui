@@ -173,9 +173,23 @@ Fields map onto the cache as follows:
 | `assigned_to` | `System.AssignedTo` display name, falling back to the unique name |
 | `priority` | `Microsoft.VSTS.Common.Priority` |
 | `tags` | `System.Tags`, split on `;` |
-| `description` | `System.Description` HTML flattened to plain text |
+| `description` | `System.Description` rendered as plain text |
+| `description_html` | `System.Description` exactly as Azure DevOps stores it |
 | `created_at`, `changed_at` | `System.CreatedDate` and `System.ChangedDate` |
 | `web_url` | `https://dev.azure.com/<org>/<project>/_workitems/edit/<id>` |
+
+Descriptions are written in a browser rich-text editor, so both readings are
+kept: `description` is what the details pane draws, and `description_html` is
+the document an edit hands back. The rendering keeps the structure a reader
+needs and drops the rest. `<ul>` items keep their bullet and `<ol>` items are
+numbered, nested lists indent two spaces per level, headings and paragraphs are
+separated by one blank line at most, `<a href>` renders as `text (url)`,
+`<code>` outside a `<pre>` is wrapped in backticks, a `<pre>` keeps its
+whitespace, a table renders one row per line with cells joined by ` | `, an
+image becomes `[image: alt]`, and `<hr>` becomes `───`. Bold, italics, spans,
+and every unrecognised tag are transparent: the text survives, the markup does
+not. Numeric entities and the names the editor emits are decoded, and markup
+that never closes is rendered as the text it looks like rather than dropped.
 
 Hierarchy links become parent and child relations; related, predecessor,
 successor, and duplicate links are stored as themselves. Other link types, such
@@ -204,7 +218,8 @@ GET <org>/<project>/_apis/wit/workItems/<id>/comments?api-version=7.1-preview.4
 GET <org>/_apis/wit/workItems/<id>/updates?api-version=7.1
 ```
 
-Comment bodies are flattened from HTML the same way descriptions are. Revisions
+Comment bodies are rendered from HTML the same way descriptions are, though
+only the text is stored: a comment is read, not edited. Revisions
 keep only the changes a person reads a history for — state, assignee, title,
 iteration, area, priority, tags, and reason — so a revision that moved nothing
 but the revision number, the changed date, the comment count, or the watermark
@@ -479,7 +494,8 @@ The `work_items` table stores these columns:
 | `work_item_type`, `title`, `state`, `reason` | Core work-item fields |
 | `assigned_to`, `priority` | Ownership and priority |
 | `area_path`, `iteration_path`, `tags` | Planning metadata |
-| `description` | Plain-text detail content |
+| `description` | Detail content, rendered as plain text |
+| `description_html` | The same field as Azure DevOps stores it |
 | `created_at`, `changed_at` | UTC RFC 3339 timestamps |
 | `web_url` | HTTPS browser URL for the work item |
 | `details_rev` | Revision whose comments and history are stored, `0` for none |
@@ -526,7 +542,7 @@ the project's process rather than its work items, so a pull leaves it alone; a
 type is rewritten whole when its states are fetched, so a retired state stops
 being offered.
 
-The database carries `PRAGMA user_version = 10`. Because Azure DevOps is the
+The database carries `PRAGMA user_version = 11`. Because Azure DevOps is the
 record of truth, there are no migrations: a database at any other version has
 its tables dropped and recreated at startup, and a pull runs immediately to
 refill it, whatever `--refresh` says. Deleting the file has the same effect. The

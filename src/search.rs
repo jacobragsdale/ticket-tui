@@ -265,6 +265,7 @@ mod tests {
             iteration_path: "Atlas\\Sprint 1".into(),
             tags: vec!["rust".into()],
             description: description.into(),
+            description_html: String::new(),
             created_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
             changed_at: crate::timestamp::ts("2026-01-02T00:00:00Z"),
             web_url: format!("https://dev.azure.com/demo/atlas/_workitems/edit/{id}"),
