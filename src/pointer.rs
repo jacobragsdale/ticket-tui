@@ -28,6 +28,8 @@ pub enum ScrollSurface {
     Columns,
     Palette,
     Views,
+    /// The grid and tallies of the sprint summary overlay.
+    Sprint,
     FacetMenu,
     Sort,
     EditMenu,
@@ -161,6 +163,11 @@ pub enum PointerTarget {
     },
     PaletteQuery,
     ViewRow {
+        index: usize,
+    },
+    /// One row of the sprint summary grid, which clicking filters the table
+    /// down to.
+    SummaryRow {
         index: usize,
     },
     /// One field editor in the Edit menu.

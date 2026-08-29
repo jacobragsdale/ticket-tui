@@ -40,6 +40,7 @@ use crate::pointer::{
 pub use crate::pointer::{EditableField, HitRegions, OverlayAnchor, PointerTarget};
 use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
 use crate::session::{self, NamedView, Session};
+use crate::sprint::{self, SprintSummary, SummaryRow, SummaryRowKind};
 use crate::sync::{ReparentApplied, ReparentRejection};
 use crate::text_input::TextInput;
 use crate::timestamp::Timestamp;
@@ -56,6 +57,9 @@ pub enum AppMode {
     Palette,
     Views,
     Info,
+    /// The read-only board for one iteration: who has how much, and how much
+    /// of it is finished.
+    Sprint,
     Facets,
     /// The list of field editors `e` opens.
     Edit,
@@ -1099,6 +1103,33 @@ pub struct ViewsOverlay {
     pub scroll: ScrollState,
 }
 
+/// What the sprint summary overlay is looking at.
+///
+/// The iteration is held here rather than read afresh each frame because
+/// `\u{2190}`/`\u{2192}` walk away from the one the overlay opened on, and the
+/// counts themselves are recomputed from the work items every time they are
+/// asked for, so nothing here can go stale behind a sync.
+#[derive(Clone, Debug, Default)]
+pub struct SprintOverlay {
+    /// The iteration path being counted, and `None` when there was none to
+    /// open on.
+    pub iteration: Option<String>,
+    /// Which line the cursor is on, as an index into the overlay's rows.
+    pub index: usize,
+    pub scroll: ScrollState,
+}
+
+/// What the sprint summary says when it has no iteration to count: no sprint
+/// is scheduled around today and no row is selected to borrow one from. Split
+/// across lines here rather than wrapped at paint time, so it sits inside the
+/// overlay whatever the terminal is doing.
+const NO_SPRINT_NOTICE: [&str; 4] = [
+    "No sprint to summarise.",
+    "",
+    "No iteration is scheduled around today,",
+    "and no work item is selected.",
+];
+
 /// An edit waiting on Azure DevOps. `original` is the row as it was before the
 /// change, restored if the write is refused; applying `edit` to it gives back
 /// the optimistic copy the table is showing, which is how a pull that lands
@@ -1539,6 +1570,7 @@ pub struct App {
     pub column_overlay: ColumnOverlay,
     pub palette: PaletteState,
     pub views_overlay: ViewsOverlay,
+    pub sprint_overlay: SprintOverlay,
     pub facet_bar: FacetBar,
     pub edit_menu: EditMenu,
     pub state_picker: StatePicker,
@@ -1764,6 +1796,7 @@ impl App {
             column_overlay: ColumnOverlay::default(),
             palette: PaletteState::default(),
             views_overlay: ViewsOverlay::default(),
+            sprint_overlay: SprintOverlay::default(),
             facet_bar: FacetBar::default(),
             edit_menu: EditMenu::default(),
             state_picker: StatePicker::default(),
@@ -3188,6 +3221,7 @@ impl App {
             ScrollSurface::Columns => self.column_overlay.scroll,
             ScrollSurface::Palette => self.palette.scroll,
             ScrollSurface::Views => self.views_overlay.scroll,
+            ScrollSurface::Sprint => self.sprint_overlay.scroll,
             ScrollSurface::FacetMenu => self.facet_bar.scroll,
             ScrollSurface::EditMenu => self.edit_menu.scroll,
             ScrollSurface::StatePicker => self.state_picker.scroll,
@@ -3213,6 +3247,7 @@ impl App {
             ScrollSurface::Columns => &mut self.column_overlay.scroll,
             ScrollSurface::Palette => &mut self.palette.scroll,
             ScrollSurface::Views => &mut self.views_overlay.scroll,
+            ScrollSurface::Sprint => &mut self.sprint_overlay.scroll,
             ScrollSurface::FacetMenu => &mut self.facet_bar.scroll,
             ScrollSurface::EditMenu => &mut self.edit_menu.scroll,
             ScrollSurface::StatePicker => &mut self.state_picker.scroll,
@@ -3314,6 +3349,10 @@ impl App {
                 ) {
                     self.mode = AppMode::Browse;
                 }
+                AppAction::None
+            }
+            AppMode::Sprint => {
+                self.handle_sprint_key(key);
                 AppAction::None
             }
             AppMode::Facets => {
@@ -3830,6 +3869,16 @@ impl App {
                 {
                     self.views_overlay.index = index;
                     self.apply_view_at(index);
+                }
+            }
+            PointerTarget::SummaryRow { index } => {
+                if self
+                    .summary_rows()
+                    .get(index)
+                    .is_some_and(SummaryRow::is_selectable)
+                {
+                    self.sprint_overlay.index = index;
+                    self.apply_summary_row(index);
                 }
             }
             PointerTarget::SaveView => {
@@ -6638,6 +6687,10 @@ impl App {
                 self.history_forward();
                 AppAction::None
             }
+            CommandId::SprintSummary => {
+                self.open_sprint_summary();
+                AppAction::None
+            }
             CommandId::DatabaseInfo => {
                 self.mode = AppMode::Info;
                 AppAction::None
@@ -6819,6 +6872,207 @@ impl App {
         self.set_status(format!("Deleted view '{}'", removed.name));
     }
 
+    /// The iteration the sprint summary counts: the sprint the project is in,
+    /// falling back to the one the selected work item is planned into.
+    ///
+    /// The fallback is not a nicety. `current_iteration` reads the dates on
+    /// the iteration tree and nothing else, so on a project whose sprints were
+    /// never given a start and a finish — which is most of them, early on —
+    /// nothing is ever current and the selected row is the only thing saying
+    /// which sprint was meant.
+    #[must_use]
+    pub fn summary_iteration(&self) -> Option<String> {
+        self.current_iteration()
+            .or_else(|| {
+                self.selected_ticket()
+                    .map(|ticket| ticket.iteration_path.clone())
+            })
+            .map(|path| path.trim().to_owned())
+            .filter(|path| !path.is_empty())
+    }
+
+    /// Counts the iteration the overlay is on, and nothing at all when it
+    /// opened on none.
+    ///
+    /// The counts are taken over [`Self::tickets`] — every work item on file —
+    /// rather than over the visible rows. The table hides finished work by
+    /// default, so a summary reading the table would report a Done column that
+    /// never filled up and a sprint that never finished.
+    #[must_use]
+    pub fn sprint_summary(&self) -> Option<SprintSummary> {
+        let iteration = self.sprint_overlay.iteration.as_deref()?;
+        Some(sprint::summarize(
+            self.tickets(),
+            iteration,
+            self.stale_days(),
+            Timestamp::now(),
+        ))
+    }
+
+    /// The lines the overlay paints. One opened with no sprint to count says
+    /// as much, rather than painting an empty grid.
+    #[must_use]
+    pub fn summary_rows(&self) -> Vec<SummaryRow> {
+        self.sprint_summary().map_or_else(
+            || {
+                NO_SPRINT_NOTICE
+                    .iter()
+                    .copied()
+                    .map(SummaryRow::note)
+                    .collect()
+            },
+            |summary| summary.rows(),
+        )
+    }
+
+    /// What the overlay's title bar names, which is the sprint rather than the
+    /// path it hangs off: `Sprint 1`, not `development\Sprint 1`.
+    #[must_use]
+    pub fn summary_title(&self) -> String {
+        self.sprint_overlay.iteration.as_deref().map_or_else(
+            || " Sprint summary ".to_owned(),
+            |iteration| format!(" Sprint summary \u{b7} {} ", path_leaf(iteration)),
+        )
+    }
+
+    fn open_sprint_summary(&mut self) {
+        self.sprint_overlay.iteration = self.summary_iteration();
+        self.sprint_overlay.scroll.scroll_to(0);
+        self.focus_summary_row(0);
+        self.mode = AppMode::Sprint;
+    }
+
+    fn handle_sprint_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = AppMode::Browse,
+            KeyCode::Up | KeyCode::Char('k') => self.move_summary_focus(false),
+            KeyCode::Down | KeyCode::Char('j') => self.move_summary_focus(true),
+            KeyCode::Left | KeyCode::Char('h') => self.step_summary_iteration(-1),
+            KeyCode::Right | KeyCode::Char('l') => self.step_summary_iteration(1),
+            KeyCode::Enter => self.apply_summary_row(self.sprint_overlay.index),
+            _ => {}
+        }
+    }
+
+    /// Puts the cursor on the first row at or after `index` that `Enter` can
+    /// do something with, and on the top line when there is none.
+    fn focus_summary_row(&mut self, index: usize) {
+        let landing = self
+            .summary_rows()
+            .iter()
+            .enumerate()
+            .skip(index)
+            .find(|(_, row)| row.is_selectable())
+            .map_or(0, |(index, _)| index);
+        self.sprint_overlay.index = landing;
+        self.sprint_overlay.scroll.ensure_visible(landing);
+    }
+
+    /// Moves the cursor one grid row on or back, stepping over the headings
+    /// and the tallies, and staying put at either end of the grid.
+    fn move_summary_focus(&mut self, forward: bool) {
+        let current = self.sprint_overlay.index;
+        let selectable: Vec<usize> = self
+            .summary_rows()
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.is_selectable())
+            .map(|(index, _)| index)
+            .collect();
+        let next = if forward {
+            selectable.into_iter().find(|index| *index > current)
+        } else {
+            selectable.into_iter().rev().find(|index| *index < current)
+        };
+        if let Some(next) = next {
+            self.sprint_overlay.index = next;
+            self.sprint_overlay.scroll.ensure_visible(next);
+        }
+    }
+
+    /// The iterations `\u{2190}`/`\u{2192}` step between: the cached iteration
+    /// tree without its roots, since a project root is somewhere to file work
+    /// rather than a sprint. Empty until the trees have been fetched, which is
+    /// what leaves the two keys doing nothing.
+    fn summary_iterations(&self) -> Vec<&str> {
+        self.classification_nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Iteration && node.depth > 0)
+            .map(|node| node.path.as_str())
+            .collect()
+    }
+
+    /// Moves the overlay onto the previous or next cached iteration, stopping
+    /// at either end of the tree rather than wrapping round it. An iteration
+    /// the tree does not hold — a work item planned into a node fetched since —
+    /// starts from whichever end the key points at.
+    fn step_summary_iteration(&mut self, delta: isize) {
+        let iterations = self.summary_iterations();
+        let Some(last) = iterations.len().checked_sub(1) else {
+            return;
+        };
+        let at = self
+            .sprint_overlay
+            .iteration
+            .as_deref()
+            .and_then(|current| {
+                iterations
+                    .iter()
+                    .position(|node| node.eq_ignore_ascii_case(current))
+            });
+        let next = match at {
+            Some(index) => index.saturating_add_signed(delta).min(last),
+            None if delta < 0 => last,
+            None => 0,
+        };
+        let next = iterations[next].to_owned();
+        if self.sprint_overlay.iteration.as_deref() == Some(next.as_str()) {
+            return;
+        }
+        self.sprint_overlay.iteration = Some(next);
+        self.sprint_overlay.scroll.scroll_to(0);
+        self.focus_summary_row(0);
+    }
+
+    /// `Enter` on a grid row: the table is filtered to that person's work in
+    /// this iteration and the overlay closes, so the rows it counted are
+    /// there to look at. The Total row asks for the iteration alone.
+    ///
+    /// The iteration goes into the query as its leaf — `Sprint 1` rather than
+    /// `development\Sprint 1` — which is both what the `iteration:` filter
+    /// matches a path's last segment on and what the table, the chips, and the
+    /// picker all call it.
+    fn apply_summary_row(&mut self, index: usize) {
+        let Some(summary) = self.sprint_summary() else {
+            return;
+        };
+        let assignee = match summary.rows().get(index).map(|row| row.kind) {
+            Some(SummaryRowKind::Assignee(row)) => {
+                let Some(counts) = summary.assignees.get(row) else {
+                    return;
+                };
+                Some(counts.name.clone())
+            }
+            Some(SummaryRowKind::Total) => None,
+            Some(SummaryRowKind::Heading | SummaryRowKind::Note | SummaryRowKind::Blank) | None => {
+                return;
+            }
+        };
+        let leaf = path_leaf(&summary.iteration).to_owned();
+        let mut filters = FilterSet::default();
+        filters.insert(FilterField::Iteration, leaf.clone());
+        if let Some(assignee) = assignee.clone() {
+            filters.insert(FilterField::Assignee, assignee);
+        }
+        self.active_view = None;
+        self.set_query(format_query(&filters, ""));
+        self.mode = AppMode::Browse;
+        self.set_status(match assignee {
+            Some(name) => format!("{name} in {leaf}"),
+            None => format!("All work in {leaf}"),
+        });
+    }
+
     fn toggle_bookmark(&mut self) {
         let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
             return;
@@ -6992,6 +7246,7 @@ const fn mode_name(mode: AppMode) -> &'static str {
         AppMode::Palette => "palette",
         AppMode::Views => "views",
         AppMode::Info => "info",
+        AppMode::Sprint => "sprint",
         AppMode::Facets => "facets",
         AppMode::Edit => "edit",
         AppMode::StatePicker => "state-picker",
@@ -11710,6 +11965,140 @@ mod tests {
         );
     }
 
+    /// A sprint of seven work items — two people and one pile nobody owns,
+    /// spread across the three board columns — with an eighth parked in the
+    /// quarter beside it. One open item and one finished item have sat
+    /// untouched since January, so the stale rule has something to bite on and
+    /// something to leave alone.
+    fn sprint_tickets() -> Vec<Ticket> {
+        let planned =
+            |id: i64, state: &str, assignee: Option<&str>, node: &str, changed: &str| Ticket {
+                state: state.into(),
+                assigned_to: assignee.map(Into::into),
+                iteration_path: node.into(),
+                ..ticket(id, "Sprint work", changed)
+            };
+        let sprint = "development\\Sprint 1";
+        vec![
+            planned(1, "To Do", Some("Avery"), sprint, "2026-08-28T00:00:00Z"),
+            planned(2, "Doing", Some("Avery"), sprint, "2026-08-27T00:00:00Z"),
+            planned(3, "Done", Some("Avery"), sprint, "2026-08-26T00:00:00Z"),
+            planned(4, "Done", Some("Avery"), sprint, "2026-08-25T00:00:00Z"),
+            planned(5, "To Do", Some("Blake"), sprint, "2026-08-24T00:00:00Z"),
+            planned(6, "Done", Some("Blake"), sprint, "2026-01-06T00:00:00Z"),
+            planned(7, "To Do", None, sprint, "2026-01-05T00:00:00Z"),
+            planned(
+                8,
+                "Doing",
+                Some("Avery"),
+                "development\\Q3",
+                "2026-08-22T00:00:00Z",
+            ),
+        ]
+    }
+
+    /// The sprint above with no iteration tree cached, which is the state a
+    /// project whose sprints carry no dates is always in.
+    fn sprint_app() -> App {
+        App::new(sprint_tickets())
+    }
+
+    /// What the cursor is sitting on in the open sprint summary.
+    fn summary_cursor(app: &App) -> SummaryRowKind {
+        app.summary_rows()[app.sprint_overlay.index].kind
+    }
+
+    #[test]
+    fn the_sprint_summary_counts_every_row_including_the_finished_ones_the_table_hides() {
+        let mut app = sprint_app();
+        assert!(app.finished_hidden(), "the table leaves finished work out");
+        assert_eq!(
+            visible_ids(&app),
+            vec![1, 2, 5, 8, 7],
+            "the three Done rows are off the table"
+        );
+
+        app.run_command(CommandId::SprintSummary);
+
+        assert_eq!(app.mode, AppMode::Sprint);
+        let summary = app
+            .sprint_summary()
+            .expect("the selected row names a sprint");
+        assert_eq!(summary.iteration, "development\\Sprint 1");
+        let grid: Vec<(&str, [usize; 3], usize)> = summary
+            .assignees
+            .iter()
+            .map(|row| (row.name.as_str(), row.counts, row.total()))
+            .collect();
+        assert_eq!(
+            grid,
+            vec![
+                ("Avery", [1, 1, 2], 4),
+                ("Blake", [1, 0, 1], 2),
+                ("Unassigned", [1, 0, 0], 1),
+            ],
+            "the Done column is filled from every work item on file, not from the five \
+             rows the table is showing"
+        );
+        assert_eq!(summary.total.counts, [3, 1, 3], "and so is the Total row");
+        assert_eq!(
+            summary.items(),
+            7,
+            "the work item in Q3 is another sprint's"
+        );
+        assert_eq!(summary.types, vec![("Task".to_owned(), 7)]);
+        assert_eq!(summary.done_percent(), 43);
+    }
+
+    #[test]
+    fn the_summary_stale_figure_is_the_one_the_changed_column_paints() {
+        let mut app = sprint_app();
+        app.run_command(CommandId::SprintSummary);
+        let now = Timestamp::now();
+
+        let summary = app.sprint_summary().expect("a sprint to count");
+
+        assert_eq!(
+            summary.stale,
+            app.tickets()
+                .iter()
+                .filter(|ticket| ticket.iteration_path == summary.iteration)
+                .filter(|ticket| is_stale(ticket, app.stale_days(), now))
+                .count(),
+            "the summary and the highlight ask the same question of the same rows"
+        );
+        assert_eq!(
+            summary.stale, 1,
+            "the open work item nobody has touched since January, and never the \
+             finished one beside it"
+        );
+    }
+
+    #[test]
+    fn the_summary_falls_back_to_the_sprint_the_selected_row_is_planned_into() {
+        let mut app = sprint_app();
+        assert_eq!(
+            app.current_iteration(),
+            None,
+            "no iteration is scheduled, which is every project whose sprints carry no dates"
+        );
+
+        app.select_row(3);
+        assert_eq!(app.selected_ticket().map(|ticket| ticket.key.id), Some(8));
+        app.run_command(CommandId::SprintSummary);
+
+        assert_eq!(
+            app.sprint_overlay.iteration.as_deref(),
+            Some("development\\Q3")
+        );
+        assert_eq!(app.sprint_summary().expect("a sprint").items(), 1);
+        assert_eq!(
+            app.summary_title(),
+            " Sprint summary \u{b7} Q3 ",
+            "the title names the sprint, not the path it hangs off"
+        );
+    }
+
     #[test]
     fn deleting_a_child_leaves_its_parent_counting_the_children_it_still_has() {
         let mut app = deleting_app();
@@ -11730,6 +12119,66 @@ mod tests {
             progress_of(&app, 3),
             None,
             "and the work item that went has no ratio at all"
+        );
+    }
+
+    #[test]
+    fn the_summary_says_so_when_there_is_no_sprint_and_no_row_to_borrow_one_from() {
+        let mut app = App::new(vec![]);
+
+        app.run_command(CommandId::SprintSummary);
+
+        assert_eq!(app.mode, AppMode::Sprint, "the overlay opens either way");
+        assert_eq!(app.sprint_overlay.iteration, None);
+        assert!(app.sprint_summary().is_none());
+        assert_eq!(
+            app.summary_rows()
+                .iter()
+                .map(|row| row.text.clone())
+                .collect::<Vec<_>>(),
+            NO_SPRINT_NOTICE.map(str::to_owned).to_vec(),
+            "it explains itself rather than painting an empty grid"
+        );
+        assert_eq!(app.summary_title(), " Sprint summary ");
+
+        press(&mut app, KeyCode::Right);
+        assert_eq!(
+            app.sprint_overlay.iteration, None,
+            "with no tree cached there is nowhere to step to"
+        );
+        assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
+        assert_eq!(app.mode, AppMode::Sprint, "and nothing to filter to");
+        assert!(app.query().is_empty());
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, AppMode::Browse);
+    }
+
+    #[test]
+    fn the_summary_cursor_opens_on_the_first_grid_row_and_steps_over_the_rest() {
+        let mut app = sprint_app();
+        app.run_command(CommandId::SprintSummary);
+
+        assert_eq!(
+            summary_cursor(&app),
+            SummaryRowKind::Assignee(0),
+            "the column headings are read, not landed on"
+        );
+        press(&mut app, KeyCode::Up);
+        assert_eq!(
+            summary_cursor(&app),
+            SummaryRowKind::Assignee(0),
+            "and there is nowhere above them to go"
+        );
+
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        assert_eq!(summary_cursor(&app), SummaryRowKind::Total);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            summary_cursor(&app),
+            SummaryRowKind::Total,
+            "the by-type tally and the headline are read too"
         );
     }
 
@@ -11802,6 +12251,33 @@ mod tests {
             app.notification(),
             Some(("Deleted 2 tickets", NotificationLevel::Info)),
             "the whole change speaks once, when the last answer is in"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_grid_row_filters_the_table_to_that_persons_sprint_work() {
+        let mut app = sprint_app();
+        app.run_command(CommandId::SprintSummary);
+        assert_eq!(summary_cursor(&app), SummaryRowKind::Assignee(0));
+
+        press(&mut app, KeyCode::Enter);
+
+        assert_eq!(
+            app.mode,
+            AppMode::Browse,
+            "the overlay closes so the rows it counted are there to look at"
+        );
+        assert_eq!(app.query(), "assignee:Avery iteration:\"Sprint 1\"");
+        assert_eq!(visible_ids(&app), vec![1, 2]);
+        assert_eq!(
+            app.hidden_finished(),
+            2,
+            "the summary counted Avery's two finished items; the table's own rule \
+             holds them back, and the chip over the table says how many"
+        );
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Avery in Sprint 1")
         );
     }
 
@@ -11896,6 +12372,81 @@ mod tests {
             app.family_cursor,
             Some(family_key(4)),
             "the family cursor follows the selection rather than the work item that went"
+        );
+    }
+
+    #[test]
+    fn enter_on_the_unassigned_row_asks_for_the_work_nobody_owns() {
+        let mut app = sprint_app();
+        app.run_command(CommandId::SprintSummary);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(summary_cursor(&app), SummaryRowKind::Assignee(2));
+
+        press(&mut app, KeyCode::Enter);
+
+        assert_eq!(app.query(), "assignee:Unassigned iteration:\"Sprint 1\"");
+        assert_eq!(visible_ids(&app), vec![7]);
+    }
+
+    #[test]
+    fn enter_on_the_total_row_asks_for_the_whole_sprint() {
+        let mut app = sprint_app();
+        app.run_command(CommandId::SprintSummary);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(summary_cursor(&app), SummaryRowKind::Total);
+
+        press(&mut app, KeyCode::Enter);
+
+        assert_eq!(app.query(), "iteration:\"Sprint 1\"", "nobody's name on it");
+        assert_eq!(visible_ids(&app), vec![1, 2, 5, 7]);
+    }
+
+    #[test]
+    fn left_and_right_walk_the_cached_iterations_and_stop_at_either_end() {
+        let mut app = sprint_app();
+        app.set_classification_nodes(classification_trees(), None);
+        app.select_row(3);
+        assert_eq!(app.selected_ticket().map(|ticket| ticket.key.id), Some(8));
+
+        app.run_command(CommandId::SprintSummary);
+        assert_eq!(
+            app.sprint_overlay.iteration.as_deref(),
+            Some("development\\Sprint 1"),
+            "a scheduled sprint wins over the one the selected row sits in"
+        );
+
+        press(&mut app, KeyCode::Right);
+        assert_eq!(
+            app.sprint_overlay.iteration.as_deref(),
+            Some("development\\Q3")
+        );
+        assert_eq!(
+            app.sprint_summary().expect("a sprint").items(),
+            1,
+            "and the grid follows the step"
+        );
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(
+            app.sprint_overlay.iteration.as_deref(),
+            Some("development\\Q3\\Sprint 7")
+        );
+        press(&mut app, KeyCode::Right);
+        assert_eq!(
+            app.sprint_overlay.iteration.as_deref(),
+            Some("development\\Q3\\Sprint 7"),
+            "the last one is the last one, rather than wrapping round"
+        );
+
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Char('h'));
+        }
+        assert_eq!(
+            app.sprint_overlay.iteration.as_deref(),
+            Some("development\\Sprint 1"),
+            "and the project root is somewhere to file work, not a sprint to stop on"
         );
     }
 }
