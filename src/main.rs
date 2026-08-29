@@ -27,6 +27,7 @@ use ticket_tui::sync::{
     self, AzureConnector, DetailsOutcome, PullOrigin, SyncEvent, SyncHandle, SyncMode, SyncOutcome,
     SyncRequest, SyncScheduler,
 };
+use ticket_tui::timestamp::Timestamp;
 use url::Url;
 
 #[derive(Debug, Parser)]
@@ -285,6 +286,12 @@ fn run() -> Result<()> {
     app.set_workspace_graph(graph);
     app.set_state_catalog(repository.load_type_states()?);
     app.set_identities(repository.load_identities()?);
+    app.set_classification_nodes(
+        repository.load_classification_nodes()?,
+        repository
+            .meta(db::CLASSIFICATION_FETCHED_KEY)?
+            .and_then(|raw| Timestamp::parse(&raw).ok()),
+    );
     app.set_me(resolve_me(
         repository.meta(db::ME_DISPLAY_NAME_KEY)?,
         std::env::var("TICKET_TUI_ME").ok(),
@@ -525,6 +532,7 @@ fn handle_action(
         AppAction::Sync => start_sync(app, runtime),
         AppAction::Edit(request) => start_edit(app, runtime, request),
         AppAction::FetchIdentities => send_identities(runtime),
+        AppAction::FetchClassificationNodes => send_classification_nodes(runtime),
         AppAction::Comment { key, text } => start_comment(app, runtime, key, text),
         AppAction::OpenUrl(raw_url) => match open_https_url(&raw_url, opener) {
             Ok(()) => app.set_status(format!("Opened {raw_url}")),
@@ -673,6 +681,15 @@ fn send_identities(runtime: &SyncRuntime) {
     }
 }
 
+/// Asks the worker for the project's iteration and area trees. Like the team
+/// members, the pickers are already open over what the database holds, so a
+/// worker that is gone is not worth a word.
+fn send_classification_nodes(runtime: &SyncRuntime) {
+    if let Some(worker) = runtime.worker.as_ref() {
+        drop(worker.send(SyncRequest::ClassificationNodes));
+    }
+}
+
 fn send_pull(app: &mut App, runtime: &mut SyncRuntime, origin: PullOrigin) {
     let sent = runtime
         .worker
@@ -796,6 +813,7 @@ fn poll_sync(
                 }
                 Err(rejection) => app.reject_comment(&rejection.key, &rejection.message),
             },
+            SyncEvent::ClassificationNodes(nodes) => app.merge_classification_nodes(nodes),
             SyncEvent::Stopped => {
                 runtime.stop(app, "the Azure DevOps sync worker stopped");
             }

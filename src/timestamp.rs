@@ -32,6 +32,12 @@ impl Timestamp {
         instant: OffsetDateTime::UNIX_EPOCH,
     };
 
+    /// The current instant, in UTC.
+    #[must_use]
+    pub fn now() -> Self {
+        Self::from_offset_date_time(OffsetDateTime::now_utc())
+    }
+
     #[must_use]
     pub fn from_offset_date_time(instant: OffsetDateTime) -> Self {
         Self {
@@ -72,6 +78,30 @@ impl Timestamp {
         self.instant
             .format(&Rfc3339)
             .unwrap_or_else(|_| self.calendar_date())
+    }
+
+    /// The UTC calendar day this instant falls on, which is what an iteration's
+    /// start and finish dates are compared against: a sprint finishing on
+    /// `2026-09-05T00:00:00Z` still runs for the whole of September 5th.
+    #[must_use]
+    pub const fn date(self) -> Date {
+        self.instant.date()
+    }
+
+    /// The compact day an iteration's date range reads in, such as `Aug 25`.
+    #[must_use]
+    pub fn calendar_day(self) -> String {
+        self.instant
+            .format(CALENDAR_DAY)
+            .unwrap_or_else(|_| self.calendar_date())
+    }
+
+    /// Whole seconds from this instant to `later`, and zero when `later` is not
+    /// after it. This is how a cache's age is measured against the clock
+    /// without either side needing to reach for `time` itself.
+    #[must_use]
+    pub fn seconds_until(self, later: Self) -> i64 {
+        (later.instant - self.instant).whole_seconds().max(0)
     }
 
     #[must_use]

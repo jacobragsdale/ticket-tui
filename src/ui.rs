@@ -192,6 +192,7 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::PriorityPicker => render_priority_picker(frame, app),
         AppMode::Prompt => render_prompt(frame, app),
         AppMode::AssigneePicker => render_assignee_picker(frame, app),
+        AppMode::NodePicker => render_node_picker(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
 }
@@ -936,6 +937,9 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 .map_or("Enter save  Esc cancel", |prompt| prompt.field.hint()),
             AppMode::AssigneePicker => {
                 "Type to filter  \u{2191}\u{2193} select  Enter assign  Esc cancel"
+            }
+            AppMode::NodePicker => {
+                "Type to filter  \u{2191}\u{2193} select  Enter move  Esc cancel"
             }
             AppMode::Browse if app.focus == Focus::Family => "↑↓ move  Enter select  Tab details",
             AppMode::Browse if app.focus == Focus::Details => {
@@ -1833,6 +1837,96 @@ fn render_assignee_picker(frame: &mut Frame<'_>, app: &mut App) {
             rows,
             row_hit_width: None,
             target: &|index| PointerTarget::AssigneeOption { index },
+            decorate: None,
+        },
+    );
+}
+
+/// The iteration or area picker: the project's tree as indented rows, the leaf
+/// of each named and the rest of the path implied by the indent, with the node
+/// the work item sits in already marked and under the cursor. An iteration row
+/// carries the days it runs between, and the one containing today says
+/// `current`.
+fn render_node_picker(frame: &mut Frame<'_>, app: &mut App) {
+    let rows_data = app.node_matches();
+    let current = app.node_picker.current.clone();
+    let kind = app.node_picker.kind;
+    let height = u16::try_from(rows_data.len().saturating_add(3))
+        .unwrap_or(u16::MAX)
+        .clamp(5, 20);
+    let area = centered_rect(frame.area(), 56, height);
+    frame.render_widget(Clear, area);
+    let title = format!(" {} \u{b7} #{} ", kind.label(), app.node_picker.id);
+    let inner = render_modal_frame(frame, app, area, &title);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
+    let query_area = chunks[0];
+    let query = if app.node_picker.query.is_empty() {
+        Line::styled(
+            format!("Filter {}\u{2026}", kind.label().to_lowercase()),
+            Style::default().fg(theme().muted),
+        )
+    } else {
+        Line::from(app.node_picker.query.text().to_owned())
+    };
+    frame.render_widget(
+        Paragraph::new(query).style(Style::default().fg(theme().text)),
+        query_area,
+    );
+    app.hit_regions.push(region(
+        query_area,
+        PointerTarget::NodeQuery,
+        PointerLayer::Modal,
+        Some(SelectableSurface::Overlay),
+        None,
+    ));
+    capture_selectable(frame, app, SelectableSurface::Overlay, query_area, false);
+    let cursor_x = query_area.x.saturating_add(
+        u16::try_from(app.node_picker.query.cursor())
+            .unwrap_or(u16::MAX)
+            .min(query_area.width.saturating_sub(1)),
+    );
+    frame.set_cursor_position((cursor_x, query_area.y));
+    let selected = app.node_picker.index;
+    let rows: Vec<Line> = rows_data
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let marker = if index == selected { "\u{203a}" } else { " " };
+            let here = if row.path == current { "\u{2022}" } else { " " };
+            let mut spans = vec![
+                Span::raw(format!("{marker}{here} {}", row.indent())),
+                Span::styled(row.leaf().to_owned(), Style::default().fg(theme().text)),
+            ];
+            if let Some(dates) = row.dates.as_deref() {
+                spans.push(Span::styled(
+                    format!("  {dates}"),
+                    Style::default().fg(theme().muted),
+                ));
+            }
+            if row.current_period {
+                spans.push(Span::styled(
+                    " current",
+                    Style::default()
+                        .fg(theme().accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: chunks[1],
+            surface: ScrollSurface::NodePicker,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: false,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::NodeOption { index },
             decorate: None,
         },
     );
@@ -4108,7 +4202,11 @@ mod tests {
         app.enable_sync();
         app.set_table_viewport(1);
         app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-        for _ in 0..5 {
+        let row = crate::command::EDIT_MENU
+            .iter()
+            .position(|entry| entry.command == crate::command::CommandId::AddComment)
+            .expect("the Edit menu offers a comment row");
+        for _ in 0..row {
             app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -4591,6 +4689,106 @@ mod tests {
         };
         assert_eq!(app.mode, AppMode::Browse);
         assert_eq!(request.edit.value_text(), "Priya Nair");
+    }
+
+    #[test]
+    fn the_iteration_picker_renders_an_indented_tree_with_dates_and_the_current_sprint() {
+        use crate::classification::{ClassificationNode, NodeKind};
+        use crate::timestamp::Timestamp;
+
+        let mut item = ticket_at(
+            10_001,
+            "Fix ticket search",
+            "Issue",
+            "To Do",
+            "2026-03-03T00:00:00Z",
+        );
+        item.iteration_path = "development\\Q3".into();
+        let mut app = App::new(vec![item]);
+        app.enable_sync();
+        let today = Timestamp::now().calendar_date();
+        let day = || Timestamp::parse(&format!("{today}T00:00:00Z")).ok();
+        app.set_classification_nodes(
+            vec![
+                ClassificationNode::new(NodeKind::Iteration, "development", 0),
+                ClassificationNode {
+                    start_date: day(),
+                    finish_date: day(),
+                    ..ClassificationNode::new(NodeKind::Iteration, "development\\Sprint 1", 1)
+                },
+                ClassificationNode::new(NodeKind::Iteration, "development\\Q3", 1),
+                ClassificationNode::new(NodeKind::Iteration, "development\\Q3\\Sprint 7", 2),
+            ],
+            None,
+        );
+
+        // The Edit menu's Iteration row, which is the sixth.
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        for _ in 0..5 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::NodePicker);
+
+        let picker = render_text(90, 24, &mut app);
+        assert!(picker.contains("Iteration \u{b7} #10001"), "{picker}");
+        assert!(picker.contains("Filter iteration"), "{picker}");
+        assert!(
+            picker.contains("  Sprint 1"),
+            "a child is indented under its root: {picker}"
+        );
+        assert!(
+            picker.contains("    Sprint 7"),
+            "and a grandchild twice over: {picker}"
+        );
+        assert!(
+            picker.contains("current"),
+            "the sprint containing today is marked: {picker}"
+        );
+        assert!(
+            picker.contains(&Timestamp::now().calendar_day()),
+            "a scheduled sprint shows the days it runs between: {picker}"
+        );
+        assert!(
+            picker.contains("Enter move"),
+            "the footer explains the picker: {picker}"
+        );
+        assert_eq!(clickable_nodes(&app), 4, "one row a node");
+
+        // Typing narrows the tree, and the row left is still clickable.
+        app.handle_key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE));
+        let filtered = render_text(90, 24, &mut app);
+        assert!(filtered.contains("Sprint 7"), "{filtered}");
+        assert_eq!(clickable_nodes(&app), 1, "{filtered}");
+
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::NodeOption { index: 0 }))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("the node left should be clickable");
+        let crate::app::AppAction::Edit(request) = click(&mut app, x, y) else {
+            panic!("clicking another node should dispatch an edit");
+        };
+        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(
+            request.edit.value_text(),
+            "development\\Q3\\Sprint 7",
+            "the write carries the full path even though the row showed the leaf"
+        );
+    }
+
+    /// How many nodes the picker last painted, counted from the rows a click
+    /// can land on.
+    fn clickable_nodes(app: &App) -> usize {
+        (0..)
+            .take_while(|index| {
+                app.hit_regions
+                    .find_target(|target| {
+                        matches!(target, PointerTarget::NodeOption { index: at } if at == index)
+                    })
+                    .is_some()
+            })
+            .count()
     }
 
     #[test]

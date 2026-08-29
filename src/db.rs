@@ -8,13 +8,14 @@ use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
+use crate::classification::{ClassificationNode, NodeKind};
 use crate::model::{
     CommentRecord, DetailsUpdate, HistoryRecord, Identity, RelationKind, RelationRecord,
     StateCatalog, StateCategory, StateOption, Ticket, TicketGraph, TicketKey,
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -25,6 +26,12 @@ pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
 /// DevOps's own timestamps do not.
 pub const WATERMARK_KEY: &str = "watermark_changed_at";
 
+/// `sync_meta` key holding when the project's classification nodes were last
+/// read. The iteration and area pickers open from the cached trees and only ask
+/// Azure DevOps again once this is an hour old, so a run that follows another
+/// closely never touches the network for them at all.
+pub const CLASSIFICATION_FETCHED_KEY: &str = "classification_nodes_fetched_at";
+
 /// SQLite is a disposable cache of Azure DevOps, so any database that is not at
 /// the current schema version is dropped and recreated instead of migrated.
 const RESET_SCHEMA: &str = r"
@@ -34,6 +41,7 @@ DROP TABLE IF EXISTS work_item_comments;
 DROP TABLE IF EXISTS work_item_history;
 DROP TABLE IF EXISTS work_item_type_states;
 DROP TABLE IF EXISTS identities;
+DROP TABLE IF EXISTS classification_nodes;
 DROP TABLE IF EXISTS sync_meta;
 CREATE TABLE work_items (
     organization   TEXT NOT NULL,
@@ -98,14 +106,24 @@ CREATE TABLE identities (
     display_name TEXT PRIMARY KEY,
     unique_name  TEXT
 );
+CREATE TABLE classification_nodes (
+    kind        TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    depth       INTEGER NOT NULL,
+    start_date  TEXT,
+    finish_date TEXT,
+    position    INTEGER NOT NULL,
+    PRIMARY KEY (kind, path)
+);
 CREATE TABLE sync_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 ";
 
-/// `sync_meta`, `work_item_type_states`, and `identities` are deliberately
-/// absent: they describe the sync, the project's process, and the people in it,
+/// `sync_meta`, `work_item_type_states`, `identities`, and
+/// `classification_nodes` are deliberately absent: they describe the sync, the
+/// project's process, the people in it, and the trees its work is planned into,
 /// not the work items a pull replaces.
 const CLEAR_CACHE: &str = "DELETE FROM work_items;
 DELETE FROM work_item_relations;
@@ -345,6 +363,68 @@ impl SqliteTicketRepository {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to load identities")
+    }
+
+    /// Records both classification trees as the last fetch flattened them, in
+    /// that order, so the pickers redraw the tree without walking it again.
+    /// They are written whole, so a sprint deleted from the process stops being
+    /// offered.
+    pub fn replace_classification_nodes(&mut self, nodes: &[ClassificationNode]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM classification_nodes", [])?;
+        for (position, node) in nodes.iter().enumerate() {
+            transaction.execute(
+                "INSERT OR REPLACE INTO classification_nodes
+                    (kind, path, depth, start_date, finish_date, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    node.kind.as_str(),
+                    node.path,
+                    i64::try_from(node.depth).unwrap_or(i64::MAX),
+                    node.start_date.map(Timestamp::to_rfc3339),
+                    node.finish_date.map(Timestamp::to_rfc3339),
+                    i64::try_from(position).unwrap_or(i64::MAX)
+                ],
+            )?;
+        }
+        transaction
+            .commit()
+            .context("failed to store the project's classification nodes")
+    }
+
+    /// Both trees as the last fetch flattened them, in that order.
+    pub fn load_classification_nodes(&self) -> Result<Vec<ClassificationNode>> {
+        let mut statement = self.connection.prepare(
+            "SELECT kind, path, depth, start_date, finish_date FROM classification_nodes
+             ORDER BY position",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        let mut nodes = Vec::new();
+        for row in rows {
+            let (kind, path, depth, start, finish) =
+                row.context("failed to load the classification nodes")?;
+            // A kind the current build does not know is a row from another
+            // schema, which is no use to either picker.
+            let Some(kind) = NodeKind::parse(&kind) else {
+                continue;
+            };
+            nodes.push(ClassificationNode {
+                kind,
+                path,
+                depth: usize::try_from(depth).unwrap_or_default(),
+                start_date: start.as_deref().and_then(|raw| Timestamp::parse(raw).ok()),
+                finish_date: finish.as_deref().and_then(|raw| Timestamp::parse(raw).ok()),
+            });
+        }
+        Ok(nodes)
     }
 
     /// Replaces the cached work items and their graph with a freshly pulled set.
