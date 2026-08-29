@@ -11,7 +11,9 @@ use ratatui::widgets::{
 };
 use time::OffsetDateTime;
 
-use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder};
+use crate::app::{
+    App, AppMode, DividerOrientation, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder,
+};
 use crate::filter::{FacetTarget, FilterField};
 use crate::model::{
     FamilySnapshot, FamilyTreeEntry, SortDirection, SortField, StateCategory, Ticket, TicketKey,
@@ -306,22 +308,91 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
 fn render_content(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width >= WIDE_BREAKPOINT {
-        let panes = Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)])
-            .spacing(1)
-            .split(area);
+        app.set_content_layout(area, Some(DividerOrientation::Vertical));
+        let panes = Layout::horizontal([
+            Constraint::Percentage(app.pane_split_wide),
+            Constraint::Fill(1),
+        ])
+        .spacing(1)
+        .split(area);
         render_table(frame, app, panes[0]);
         render_details(frame, app, panes[1]);
+        render_divider(frame, app, panes[0], panes[1], DividerOrientation::Vertical);
     } else if area.width >= NARROW_BREAKPOINT {
-        let panes = Layout::vertical([Constraint::Percentage(56), Constraint::Percentage(44)])
-            .spacing(1)
-            .split(area);
+        app.set_content_layout(area, Some(DividerOrientation::Horizontal));
+        let panes = Layout::vertical([
+            Constraint::Percentage(app.pane_split_stacked),
+            Constraint::Fill(1),
+        ])
+        .spacing(1)
+        .split(area);
         render_table(frame, app, panes[0]);
         render_details(frame, app, panes[1]);
-    } else if app.narrow_details {
-        render_details(frame, app, area);
+        render_divider(
+            frame,
+            app,
+            panes[0],
+            panes[1],
+            DividerOrientation::Horizontal,
+        );
     } else {
-        render_table(frame, app, area);
+        app.set_content_layout(area, None);
+        if app.narrow_details {
+            render_details(frame, app, area);
+        } else {
+            render_table(frame, app, area);
+        }
     }
+}
+
+/// Paints the gap the layout leaves between the panes and registers it as the
+/// draggable divider. Hovering reverses it through the usual hover pass.
+fn render_divider(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    first: Rect,
+    second: Rect,
+    orientation: DividerOrientation,
+) {
+    let Some(rect) = divider_rect(first, second, orientation) else {
+        return;
+    };
+    let glyph = match orientation {
+        DividerOrientation::Vertical => "\u{2502}",
+        DividerOrientation::Horizontal => "\u{2500}",
+    };
+    let style = Style::default().fg(theme().muted);
+    let row = glyph.repeat(usize::from(rect.width));
+    let lines: Vec<Line<'_>> = (0..rect.height)
+        .map(|_| Line::styled(row.clone(), style))
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), rect);
+    app.hit_regions.push(region(
+        rect,
+        PointerTarget::PaneDivider,
+        PointerLayer::Base,
+        None,
+        None,
+    ));
+}
+
+/// The cells the layout left between two panes, if any.
+fn divider_rect(first: Rect, second: Rect, orientation: DividerOrientation) -> Option<Rect> {
+    let rect = match orientation {
+        DividerOrientation::Vertical => Rect {
+            x: first.right(),
+            y: first.y,
+            width: second.x.checked_sub(first.right())?,
+            height: first.height,
+        },
+        DividerOrientation::Horizontal => Rect {
+            x: first.x,
+            y: first.bottom(),
+            width: first.width,
+            height: second.y.checked_sub(first.bottom())?,
+        },
+    };
+    (rect.width > 0 && rect.height > 0).then_some(rect)
 }
 
 fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -991,6 +1062,7 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  Click           Activate buttons, rows, links, headers, and checkboxes"),
         Line::from("  Drag            Select visible text and copy it on release"),
         Line::from("  Scrollbar       Click the track or drag the thumb"),
+        Line::from("  Divider         Drag between panes to resize"),
         Line::from("  Paste           Insert into search, palette, and view-name fields"),
         Line::from(""),
         Line::styled(
@@ -4333,6 +4405,145 @@ mod tests {
         click(&mut app, x, y);
         assert_eq!(app.mode, AppMode::Palette);
         assert_eq!(app.palette.query.text(), "copy");
+    }
+
+    fn divider(app: &App) -> Rect {
+        app.hit_regions
+            .find_target(|target| matches!(target, PointerTarget::PaneDivider))
+            .expect("pane divider")
+            .rect
+    }
+
+    fn drag(app: &mut App, from: (u16, u16), to: (u16, u16)) -> crate::app::AppAction {
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            from.0,
+            from.1,
+        ));
+        app.handle_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), to.0, to.1));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), to.0, to.1))
+            .action
+    }
+
+    #[test]
+    fn dragging_the_divider_widens_the_tickets_pane_side_by_side() {
+        let mut app = App::new(vec![ticket()]);
+        render_text(130, 30, &mut app);
+        let before = divider(&app);
+        assert_eq!(before.width, 1, "the wide layout leaves a one-cell gap");
+        assert_eq!(app.pane_split_wide, 62);
+
+        app.session_dirty = false;
+        let action = drag(
+            &mut app,
+            (before.x, before.y + 2),
+            (before.x + 15, before.y + 2),
+        );
+
+        assert!(matches!(action, crate::app::AppAction::None));
+        assert!(app.selection().is_none(), "the divider selects no text");
+        assert!(app.pane_split_wide > 62);
+        assert!(app.session_dirty, "a finished drag is worth persisting");
+
+        render_text(130, 30, &mut app);
+        let after = divider(&app);
+        assert!(
+            after.x > before.x,
+            "divider moved from {} to {}",
+            before.x,
+            after.x
+        );
+    }
+
+    #[test]
+    fn dragging_the_divider_grows_the_tickets_pane_when_stacked() {
+        let mut app = App::new(vec![ticket()]);
+        render_text(90, 30, &mut app);
+        let before = divider(&app);
+        assert_eq!(before.height, 1, "the stacked layout leaves a one-row gap");
+        assert_eq!(app.pane_split_stacked, 56);
+
+        let action = drag(
+            &mut app,
+            (before.x + 5, before.y),
+            (before.x + 5, before.y + 3),
+        );
+
+        assert!(matches!(action, crate::app::AppAction::None));
+        assert!(app.pane_split_stacked > 56);
+
+        render_text(90, 30, &mut app);
+        let after = divider(&app);
+        assert!(
+            after.y > before.y,
+            "divider moved from {} to {}",
+            before.y,
+            after.y
+        );
+    }
+
+    #[test]
+    fn hovering_the_divider_highlights_it() {
+        let mut app = App::new(vec![ticket()]);
+        let screen = render_text(130, 30, &mut app);
+        let rect = divider(&app);
+        let row = screen
+            .lines()
+            .nth(usize::from(rect.y + 1))
+            .expect("divider row");
+        assert_eq!(
+            row.chars().nth(usize::from(rect.x)),
+            Some('\u{2502}'),
+            "the gap between the panes is drawn as a divider"
+        );
+        assert!(
+            app.hit_regions.resolve_scroll(rect.x, rect.y + 1).is_none(),
+            "the wheel over the divider scrolls nothing"
+        );
+
+        app.handle_mouse(mouse(MouseEventKind::Moved, rect.x, rect.y + 1));
+        assert_eq!(app.hovered(), Some(&PointerTarget::PaneDivider));
+
+        let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert!(
+            terminal.backend().buffer()[(rect.x, rect.y + 1)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "the hovered divider is painted reversed"
+        );
+    }
+
+    #[test]
+    fn the_divider_stops_before_either_pane_gets_too_small() {
+        let mut app = App::new(vec![ticket()]);
+        render_text(130, 30, &mut app);
+        let start = divider(&app);
+
+        drag(&mut app, (start.x, start.y), (0, start.y));
+        assert!((20..=80).contains(&app.pane_split_wide));
+        render_text(130, 30, &mut app);
+        let leftmost = divider(&app);
+        let content = app.content_area();
+        assert!(
+            leftmost.x - content.x >= 40,
+            "tickets pane kept {} columns",
+            leftmost.x - content.x
+        );
+
+        drag(&mut app, (leftmost.x, leftmost.y), (129, leftmost.y));
+        assert!((20..=80).contains(&app.pane_split_wide));
+        render_text(130, 30, &mut app);
+        let rightmost = divider(&app);
+        assert!(
+            rightmost.x > leftmost.x,
+            "dragging right still moves the divider"
+        );
+        assert!(
+            content.right() - rightmost.right() >= 30,
+            "details pane kept {} columns",
+            content.right() - rightmost.right()
+        );
     }
 
     #[test]

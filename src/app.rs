@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 
 use crate::agent_context::{
@@ -44,6 +45,28 @@ pub enum AppMode {
     Views,
     Info,
     Facets,
+}
+
+/// Percentage of the workspace given to the tickets pane when the panes sit
+/// side by side, and when they are stacked.
+pub const DEFAULT_PANE_SPLIT_WIDE: u16 = 62;
+pub const DEFAULT_PANE_SPLIT_STACKED: u16 = 56;
+/// Safety rails for a stored or dragged split, applied on top of the cell
+/// minimums below.
+const MIN_SPLIT_PERCENT: u16 = 20;
+const MAX_SPLIT_PERCENT: u16 = 80;
+/// Cells each pane keeps while the divider is dragged.
+const MIN_TICKETS_COLUMNS: u16 = 40;
+const MIN_DETAILS_COLUMNS: u16 = 30;
+const MIN_PANE_ROWS: u16 = 6;
+
+/// Which way the draggable pane divider runs in the current layout.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DividerOrientation {
+    /// A column between the tickets and details panes (wide layout).
+    Vertical,
+    /// A row between the stacked tickets and details panes.
+    Horizontal,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -233,6 +256,10 @@ pub struct App {
     pub help: ScrollState,
     pub sort: ScrollState,
     pub narrow_details: bool,
+    pub pane_split_wide: u16,
+    pub pane_split_stacked: u16,
+    content_area: Rect,
+    divider: Option<DividerOrientation>,
     pub reload_pending: bool,
     pub should_quit: bool,
     pub session_dirty: bool,
@@ -291,6 +318,10 @@ impl App {
             help: ScrollState::default(),
             sort: ScrollState::default(),
             narrow_details: false,
+            pane_split_wide: DEFAULT_PANE_SPLIT_WIDE,
+            pane_split_stacked: DEFAULT_PANE_SPLIT_STACKED,
+            content_area: Rect::ZERO,
+            divider: None,
             reload_pending: false,
             should_quit: false,
             session_dirty: false,
@@ -925,7 +956,10 @@ impl App {
 
     pub fn handle_resize(&mut self) {
         self.pointer.clear_selection();
-        if matches!(self.pointer.drag(), DragKind::Text | DragKind::Cancelled) {
+        if matches!(
+            self.pointer.drag(),
+            DragKind::Text | DragKind::Cancelled | DragKind::Divider
+        ) {
             self.pointer.set_drag(DragKind::Cancelled);
         }
     }
@@ -1101,6 +1135,10 @@ impl App {
                 PointerTarget::ScrollbarThumb { surface } => Some(surface),
                 _ => None,
             };
+            let selectable = match region.target {
+                PointerTarget::PaneDivider => None,
+                _ => selectable,
+            };
             self.pointer.hover = Some(region.target.clone());
             self.pointer
                 .begin_press(region.target, column, row, selectable, scrollbar);
@@ -1132,9 +1170,20 @@ impl App {
                 self.update_text_drag(column, row);
                 PointerUpdate::none(true)
             }
+            DragKind::Divider => {
+                self.drag_divider(column, row);
+                PointerUpdate::none(true)
+            }
             DragKind::Cancelled => PointerUpdate::none(hover_changed),
             DragKind::None => {
-                if let Some(surface) = self.pointer.press_scrollbar() {
+                if matches!(
+                    self.pointer.press_target(),
+                    Some(PointerTarget::PaneDivider)
+                ) {
+                    self.pointer.set_drag(DragKind::Divider);
+                    self.drag_divider(column, row);
+                    PointerUpdate::none(true)
+                } else if let Some(surface) = self.pointer.press_scrollbar() {
                     let grab = self.scrollbar_grab(surface, self.pointer.press_origin());
                     self.pointer.set_drag(DragKind::Scrollbar { surface, grab });
                     self.drag_scrollbar(surface, row, grab);
@@ -1180,6 +1229,10 @@ impl App {
                         });
                     }
                 }
+                PointerUpdate::none(true)
+            }
+            DragKind::Divider => {
+                self.session_dirty = true;
                 PointerUpdate::none(true)
             }
             DragKind::Scrollbar { .. } | DragKind::Cancelled => PointerUpdate::none(true),
@@ -1378,6 +1431,7 @@ impl App {
                 self.scroll_surface(surface, if page_down { step } else { -step });
             }
             PointerTarget::ScrollbarThumb { .. } => {}
+            PointerTarget::PaneDivider => {}
         }
         AppAction::None
     }
@@ -1495,6 +1549,50 @@ impl App {
 
     fn scroll_surface(&mut self, surface: ScrollSurface, delta: i32) -> bool {
         self.scroll_state_mut(surface).scroll_by(delta)
+    }
+
+    /// Records the workspace the panes were last split inside, and which way the
+    /// divider runs there. The narrow layout passes `None`: it has no divider.
+    pub const fn set_content_layout(&mut self, area: Rect, divider: Option<DividerOrientation>) {
+        self.content_area = area;
+        self.divider = divider;
+    }
+
+    #[must_use]
+    pub const fn content_area(&self) -> Rect {
+        self.content_area
+    }
+
+    #[must_use]
+    pub const fn divider_orientation(&self) -> Option<DividerOrientation> {
+        self.divider
+    }
+
+    /// Moves the divider under the pointer: the tickets pane keeps everything up
+    /// to the pointer, the details pane the rest.
+    fn drag_divider(&mut self, column: u16, row: u16) {
+        match self.divider {
+            Some(DividerOrientation::Vertical) => {
+                let span = self.content_area.width;
+                let cells = column.saturating_sub(self.content_area.x);
+                self.pane_split_wide =
+                    split_percent(cells, span, MIN_TICKETS_COLUMNS, MIN_DETAILS_COLUMNS);
+            }
+            Some(DividerOrientation::Horizontal) => {
+                let span = self.content_area.height;
+                let cells = row.saturating_sub(self.content_area.y);
+                self.pane_split_stacked = split_percent(cells, span, MIN_PANE_ROWS, MIN_PANE_ROWS);
+            }
+            None => {}
+        }
+    }
+
+    /// Restores the built-in split for both layouts.
+    fn reset_pane_split(&mut self) {
+        self.pane_split_wide = DEFAULT_PANE_SPLIT_WIDE;
+        self.pane_split_stacked = DEFAULT_PANE_SPLIT_STACKED;
+        self.session_dirty = true;
+        self.set_status("Reset pane split");
     }
 
     fn move_focused(&mut self, delta: isize) {
@@ -2162,6 +2260,10 @@ impl App {
                 self.should_quit = true;
                 AppAction::None
             }
+            CommandId::ResetPaneSplit => {
+                self.reset_pane_split();
+                AppAction::None
+            }
         }
     }
 
@@ -2387,6 +2489,8 @@ impl App {
             selected: self
                 .selected_ticket()
                 .map(|ticket| session::SessionKey::from(&ticket.key)),
+            pane_split_wide: self.pane_split_wide,
+            pane_split_stacked: self.pane_split_stacked,
         }
     }
 
@@ -2396,6 +2500,12 @@ impl App {
         self.search_order = session.search_order;
         self.row_density = session.row_density;
         self.layout = TableLayout::from_session_columns(&session.columns, session.auto_hide);
+        self.pane_split_wide = session
+            .pane_split_wide
+            .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
+        self.pane_split_stacked = session
+            .pane_split_stacked
+            .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
         self.bookmarks = session.bookmarks.iter().map(TicketKey::from).collect();
         self.recent = session.recent.iter().map(TicketKey::from).collect();
         self.views = session.views;
@@ -2434,6 +2544,25 @@ const fn focus_name(focus: Focus) -> &'static str {
         Focus::Family => "family",
         Focus::Details => "details",
     }
+}
+
+/// Turns a divider position, measured in cells from the start of the workspace,
+/// into a percentage for the first pane. The clamp keeps `first_min` cells for
+/// that pane and `second_min` cells plus the one-cell divider for the other,
+/// then holds the result inside the 20..=80 safety rails.
+fn split_percent(cells: u16, span: u16, first_min: u16, second_min: u16) -> u16 {
+    if span == 0 {
+        return MIN_SPLIT_PERCENT;
+    }
+    let span = u32::from(span);
+    let low = (u32::from(first_min) * 100)
+        .div_ceil(span)
+        .clamp(u32::from(MIN_SPLIT_PERCENT), u32::from(MAX_SPLIT_PERCENT));
+    let high = (span.saturating_sub(u32::from(second_min) + 1) * 100 / span)
+        .min(u32::from(MAX_SPLIT_PERCENT))
+        .max(low);
+    let percent = u32::from(cells) * 100 / span;
+    u16::try_from(percent.clamp(low, high)).unwrap_or(MIN_SPLIT_PERCENT)
 }
 
 fn clamp_pos_to_snapshot(
@@ -3093,5 +3222,91 @@ mod tests {
         app.focus = Focus::Family;
         press(&mut app, KeyCode::Down);
         assert!(!app.session_dirty);
+    }
+
+    #[test]
+    fn clicking_the_pane_divider_neither_acts_nor_selects_text() {
+        let mut app = App::new(vec![ticket(1, "One", "2026-01-02T00:00:00Z")]);
+        let rect = Rect {
+            x: 60,
+            y: 5,
+            width: 1,
+            height: 10,
+        };
+        app.set_content_layout(
+            Rect {
+                x: 0,
+                y: 4,
+                width: 130,
+                height: 20,
+            },
+            Some(DividerOrientation::Vertical),
+        );
+        // A selectable pane sits under the divider; pressing the divider must
+        // still not start a selection in it.
+        app.hit_regions.push(pointer::region(
+            Rect {
+                x: 0,
+                y: 4,
+                width: 130,
+                height: 20,
+            },
+            PointerTarget::FocusDetails,
+            pointer::PointerLayer::Base,
+            Some(SelectableSurface::Details),
+            None,
+        ));
+        app.hit_regions.push(pointer::region(
+            rect,
+            PointerTarget::PaneDivider,
+            pointer::PointerLayer::Base,
+            None,
+            None,
+        ));
+        app.session_dirty = false;
+
+        let point = |kind| MouseEvent {
+            kind,
+            column: rect.x,
+            row: rect.y + 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(point(MouseEventKind::Down(MouseButton::Left)));
+        let update = app.handle_mouse(point(MouseEventKind::Up(MouseButton::Left)));
+
+        assert!(matches!(update.action, AppAction::None));
+        assert!(app.selection().is_none(), "a divider press selects no text");
+        assert_eq!(app.pane_split_wide, DEFAULT_PANE_SPLIT_WIDE);
+        assert!(!app.session_dirty, "a press with no drag changes nothing");
+    }
+
+    #[test]
+    fn resetting_the_pane_split_restores_the_defaults() {
+        let mut app = App::new(vec![ticket(1, "One", "2026-01-02T00:00:00Z")]);
+        app.pane_split_wide = 75;
+        app.pane_split_stacked = 30;
+        app.session_dirty = false;
+
+        app.run_command(CommandId::ResetPaneSplit);
+
+        assert_eq!(app.pane_split_wide, DEFAULT_PANE_SPLIT_WIDE);
+        assert_eq!(app.pane_split_stacked, DEFAULT_PANE_SPLIT_STACKED);
+        assert!(app.session_dirty);
+    }
+
+    #[test]
+    fn the_split_survives_a_session_round_trip() {
+        let mut app = App::new(vec![ticket(1, "One", "2026-01-02T00:00:00Z")]);
+        app.pane_split_wide = 71;
+        app.pane_split_stacked = 45;
+
+        let session = app.snapshot_session();
+        assert_eq!(session.pane_split_wide, 71);
+        assert_eq!(session.pane_split_stacked, 45);
+
+        let mut restored = App::new(vec![ticket(1, "One", "2026-01-02T00:00:00Z")]);
+        restored.restore_session(session);
+        assert_eq!(restored.pane_split_wide, 71);
+        assert_eq!(restored.pane_split_stacked, 45);
     }
 }

@@ -14,7 +14,9 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use ticket_tui::agent_context::{self, AgentContext};
-use ticket_tui::app::{App, AppAction, CopiedContent, PointerTarget, PreparedTickets};
+use ticket_tui::app::{
+    App, AppAction, CopiedContent, DividerOrientation, PointerTarget, PreparedTickets,
+};
 use ticket_tui::azure::{AzureClient, AzureConfig};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
 use ticket_tui::model::TicketGraph;
@@ -344,6 +346,8 @@ fn copy_to_clipboard(text: &str) -> Result<()> {
 enum MousePointerShape {
     Default,
     Link,
+    ColResize,
+    RowResize,
 }
 
 impl MousePointerShape {
@@ -351,12 +355,14 @@ impl MousePointerShape {
         match self {
             Self::Default => b"\x1b]22;\x1b\\",
             Self::Link => b"\x1b]22;pointer\x1b\\",
+            Self::ColResize => b"\x1b]22;col-resize\x1b\\",
+            Self::RowResize => b"\x1b]22;row-resize\x1b\\",
         }
     }
 }
 
 fn sync_mouse_pointer(app: &App, current: &mut MousePointerShape) {
-    let desired = mouse_pointer_for_hover(app.hovered());
+    let desired = mouse_pointer_for_hover(app.hovered(), app.divider_orientation());
     if desired == *current {
         return;
     }
@@ -365,11 +371,19 @@ fn sync_mouse_pointer(app: &App, current: &mut MousePointerShape) {
     }
 }
 
-fn mouse_pointer_for_hover(target: Option<&PointerTarget>) -> MousePointerShape {
+fn mouse_pointer_for_hover(
+    target: Option<&PointerTarget>,
+    divider: Option<DividerOrientation>,
+) -> MousePointerShape {
     match target {
         Some(PointerTarget::OpenTicket { .. } | PointerTarget::OpenSelectedUrl) => {
             MousePointerShape::Link
         }
+        Some(PointerTarget::PaneDivider) => match divider {
+            Some(DividerOrientation::Vertical) => MousePointerShape::ColResize,
+            Some(DividerOrientation::Horizontal) => MousePointerShape::RowResize,
+            None => MousePointerShape::Default,
+        },
         _ => MousePointerShape::Default,
     }
 }
@@ -561,23 +575,47 @@ mod tests {
     #[test]
     fn mouse_pointer_sequences_set_and_reset_link_hover() {
         assert_eq!(
-            mouse_pointer_for_hover(Some(&PointerTarget::OpenSelectedUrl)),
+            mouse_pointer_for_hover(Some(&PointerTarget::OpenSelectedUrl), None),
             MousePointerShape::Link
         );
         assert_eq!(
-            mouse_pointer_for_hover(Some(&PointerTarget::OpenTicket { index: 0 })),
+            mouse_pointer_for_hover(Some(&PointerTarget::OpenTicket { index: 0 }), None),
             MousePointerShape::Link
         );
         assert_eq!(
-            mouse_pointer_for_hover(Some(&PointerTarget::TableRow { index: 0 })),
+            mouse_pointer_for_hover(Some(&PointerTarget::TableRow { index: 0 }), None),
             MousePointerShape::Default
+        );
+        assert_eq!(
+            mouse_pointer_for_hover(
+                Some(&PointerTarget::PaneDivider),
+                Some(DividerOrientation::Vertical)
+            ),
+            MousePointerShape::ColResize
+        );
+        assert_eq!(
+            mouse_pointer_for_hover(
+                Some(&PointerTarget::PaneDivider),
+                Some(DividerOrientation::Horizontal)
+            ),
+            MousePointerShape::RowResize
+        );
+        assert_eq!(
+            mouse_pointer_for_hover(Some(&PointerTarget::PaneDivider), None),
+            MousePointerShape::Default,
+            "the narrow layout has no divider to resize"
         );
 
         let mut output = Vec::new();
         write_mouse_pointer_shape(&mut output, MousePointerShape::Link).unwrap();
+        write_mouse_pointer_shape(&mut output, MousePointerShape::ColResize).unwrap();
+        write_mouse_pointer_shape(&mut output, MousePointerShape::RowResize).unwrap();
         write_mouse_pointer_shape(&mut output, MousePointerShape::Default).unwrap();
 
-        assert_eq!(output, b"\x1b]22;pointer\x1b\\\x1b]22;\x1b\\");
+        assert_eq!(
+            output,
+            b"\x1b]22;pointer\x1b\\\x1b]22;col-resize\x1b\\\x1b]22;row-resize\x1b\\\x1b]22;\x1b\\"
+        );
     }
 
     #[test]
