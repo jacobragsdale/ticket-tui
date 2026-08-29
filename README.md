@@ -603,6 +603,7 @@ first multi-field overlay in the app — over whatever is on screen:
 │   Title *     Back off on throttling                             │
 │   Parent      none — a work item id                              │
 │   Iteration   development\Sprint 1                             ▾ │
+│   Area        development\Platform                             ▾ │
 │   Assignee    Jacob Ragsdale                                   ▾ │
 │   Priority    2                                                  │
 │   Tags        sync; infra                                        │
@@ -611,12 +612,12 @@ first multi-field overlay in the app — over whatever is on screen:
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-`↑`/`↓` and `Tab`/`Shift-Tab` move between fields, wrapping at both ends. Three
+`↑`/`↓` and `Tab`/`Shift-Tab` move between fields, wrapping at both ends. Four
 of them are chosen from a list rather than typed — the `▾` says which — and
 `Enter` on one opens the same picker the Edit menu opens over a work item: the
-work item types the project's process offers, the iteration tree, and the
-assignee list, each writing its choice back into the field and returning to the
-form. `Enter` on a typed field moves on to the next one; submitting is
+work item types the project's process offers, the iteration and area trees, and
+the assignee list, each writing its choice back into the field and returning to
+the form. `Enter` on a typed field moves on to the next one; submitting is
 deliberately not bound to it, so a stray `Enter` halfway down the form never
 files a half-typed work item. `Ctrl-S` or `[Create]` files it, `Esc` or
 `[Cancel]` closes it. Clicking a field focuses it and puts the caret where the
@@ -629,10 +630,10 @@ cached in `work_item_types` for the next run — less the ones the process has
 disabled and the ones it keeps in its hidden category, which are the code review
 and feedback requests nobody files by hand. Before that fetch lands the picker
 offers every type the database already holds a work item of, so the form never
-waits for the network. **Iteration** starts where the selected work item sits,
-falling back to the sprint the project is in, because new work almost always
-joins the work beside it. **Parent** is a work item id, left empty for work that
-hangs under nothing.
+waits for the network. **Iteration** and **Area** start where the selected work
+item sits, the iteration falling back to the sprint the project is in, because
+new work almost always joins the work beside it. **Parent** is a work item id,
+left empty for work that hangs under nothing.
 
 **Type** and **Title** are required; the rest are optional and are left off the
 document when empty. A refusal that can be made before the network is made
@@ -674,13 +675,52 @@ answers a frame or two later.
 A refusal writes nothing at all and reopens the form with everything still in
 it, so the reason can be answered where it was caused:
 `Work item not created: TF401320: rule error`. One create is in flight at a
-time; `n` while one is out says `A work item is already being created`.
+time; `n` or `N` while one is out says `A work item is already being created`.
 
 `Esc` keeps the draft. The form closes, the table comes back, and the next `n`
 brings the form back exactly as it was — every field and the cursor with them —
 so closing it to go and read something is not the same as retyping it. The draft
 lives in memory for the session only: the session file records how the table is
 arranged, not a half-typed work item, so it is gone at quit.
+
+Breaking an Epic into Issues or an Issue into Tasks is the commonest thing
+anybody files, and none of it is worth retyping, so `N` — or the Edit menu's
+**New child** row, or `New child` in the palette — opens the same form already
+knowing what it is filing:
+
+```
+┌ New child of #595 ────────────────────────────────────────── [×] ┐
+│ › Type *      Issue                                            ▾ │
+│   Title *     Cache the work item types                          │
+│   Parent      #595 Tech debt and architecture foundation         │
+│   Iteration   development\Sprint 1                             ▾ │
+│   Area        development\Platform                             ▾ │
+│   Assignee    nobody                                           ▾ │
+│   Priority    unset — 1 to 4                                     │
+│   Tags        semicolon separated                                │
+│                                                                  │
+│ [Create]  [Cancel]                                               │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Type** is the type the parent's own type breaks down into. The project's
+process answers that where it can — the types come back in the order the process
+lists them, so the one after the parent's is what sits under it — and where the
+list has not been read yet, the Basic process's own breakdown does: an Epic into
+Issues, an Issue into Tasks, and a Task into more Tasks. A type with nothing
+obvious under it keeps its own, because a child of the same type is always
+defensible and an empty Type field never is. **Parent** is fixed: it reads as
+the work item rather than as its id, takes nothing typed at it, and opens no
+picker. **Iteration** and **Area** are the parent's, because a child is planned
+beside its parent unless somebody moves it — both are still pickers, so moving
+it is one `Enter` away.
+
+Everything else about the form is the same: the same required fields, the same
+refusals, the same `Ctrl-S`. The draft `Esc` keeps is kept per parent, so a
+child half typed under one work item is never offered under another, and neither
+`n` nor `N` ever opens what the other was left holding. When the create lands
+the child appears under its parent in the family tree at once, because the copy
+Azure DevOps stored comes back carrying the link.
 
 ## Controls
 
@@ -712,6 +752,7 @@ arranged, not a half-typed work item, so it is gone at quit.
 | `e` → Description | Edit the description in `$VISUAL`/`$EDITOR`/`vi` as Markdown; also `Edit description` in the palette |
 | `e` → Add comment | Leave a one-line comment on the selected work item; also `Add comment` in the palette |
 | `n` | Open the new work item form; `↑`/`↓` or `Tab` moves between fields, `Enter` opens a field's picker, `Ctrl-S` creates, `Esc` keeps the draft |
+| `N` | Open the same form as a child of the selected work item: the type it breaks down into, the parent fixed, the area and iteration inherited; also `New child` in the Edit menu and the palette |
 | `u` | Undo the last edit, putting the value back; a bulk change goes back under one press |
 | `m` | Bookmark or unbookmark the selected ticket |
 | `Space` | Toggle ticket multi-select; two or more make `S`, `a`, and Iteration bulk edits |

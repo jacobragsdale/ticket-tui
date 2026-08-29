@@ -2209,13 +2209,13 @@ fn render_form(frame: &mut Frame<'_>, app: &mut App) {
         } else {
             Style::default().fg(theme().text)
         };
-        let value = if field.value().is_empty() {
+        let value = if field.shown().is_empty() {
             Span::styled(
                 field.placeholder.to_owned(),
                 Style::default().fg(theme().muted),
             )
         } else {
-            Span::styled(field.value().to_owned(), value_style)
+            Span::styled(field.shown().to_owned(), value_style)
         };
         let mut spans = vec![
             Span::raw(if focused { "\u{203a} " } else { "  " }),
@@ -5325,6 +5325,7 @@ mod tests {
             "Title *",
             "Parent",
             "Iteration",
+            "Area",
             "Assignee",
             "Priority",
             "Tags",
@@ -5401,6 +5402,32 @@ mod tests {
         click(&mut app, x, y);
         assert_eq!(app.mode, AppMode::Browse);
         assert!(app.form.is_none());
+    }
+
+    #[test]
+    fn the_child_form_names_the_parent_it_is_filing_under_rather_than_its_id() {
+        let mut app = App::new(vec![ticket_at(
+            595,
+            "Tech debt and architecture foundation",
+            "Epic",
+            "To Do",
+            "2026-03-03T00:00:00Z",
+        )]);
+        app.enable_sync();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+        assert_eq!(app.mode, AppMode::Form);
+
+        let form = render_text(90, 24, &mut app);
+        assert!(form.contains("New child of #595"), "{form}");
+        assert!(
+            form.contains("#595 Tech debt and architecture foundation"),
+            "the parent row reads as the work item: {form}"
+        );
+        assert!(
+            form.contains("Issue"),
+            "an Epic breaks down into Issues: {form}"
+        );
     }
 
     #[test]
