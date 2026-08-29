@@ -11,6 +11,7 @@ pub(crate) fn render(
     frame: &mut Frame<'_>,
     screen: &mut PullRequestsScreen,
     shell: &mut Shell,
+    work_item_titles: &[(i64, String)],
     area: Rect,
 ) {
     let chip_height = u16::from(screen.closed_hidden() && screen.hidden_closed(shell) > 0);
@@ -25,7 +26,7 @@ pub(crate) fn render(
     if chip_height > 0 {
         render_closed_chip(frame, screen, shell, sections[1]);
     }
-    render_content(frame, screen, shell, sections[2]);
+    render_content(frame, screen, shell, work_item_titles, sections[2]);
     render_footer(frame, screen, shell, sections[3]);
     match screen.mode {
         PrMode::Complete => render_complete_form(frame, screen, shell),
@@ -187,6 +188,7 @@ fn render_content(
     frame: &mut Frame<'_>,
     screen: &mut PullRequestsScreen,
     shell: &mut Shell,
+    work_item_titles: &[(i64, String)],
     area: Rect,
 ) {
     let split = if area.width >= WIDE_BREAKPOINT {
@@ -196,7 +198,7 @@ fn render_content(
     };
     render_table(frame, screen, shell, split[0]);
     if split.len() > 1 {
-        render_details(frame, screen, shell, split[1]);
+        render_details(frame, screen, shell, work_item_titles, split[1]);
     }
 }
 
@@ -317,6 +319,7 @@ fn render_details(
     frame: &mut Frame<'_>,
     screen: &mut PullRequestsScreen,
     shell: &mut Shell,
+    work_item_titles: &[(i64, String)],
     area: Rect,
 ) {
     let block = focused_block(" Pull request ", shell.focus == Focus::Details);
@@ -330,7 +333,15 @@ fn render_details(
         );
         return;
     };
-    let jumps = screen.jumps(shell);
+    // Work-item lines read as the work items tab has them when the database
+    // holds the row, and as bare ids when it does not.
+    let titles = |id: i64| {
+        work_item_titles
+            .iter()
+            .find(|(held, _)| *held == id)
+            .map(|(_, title)| title.clone())
+    };
+    let jumps = screen.jumps(shell, &titles);
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -400,7 +411,7 @@ fn render_details(
     for (label, jump) in &jumps {
         let what = match jump {
             Jump::Repo(_) => "Repository",
-            Jump::WorkItems(_) => "Work items",
+            Jump::WorkItems(_) => "Work item",
             _ => "Build",
         };
         lines.push(Line::from(vec![

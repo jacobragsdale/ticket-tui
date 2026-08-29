@@ -355,6 +355,13 @@ impl App {
         let pipelines = snapshot.pipelines.clone();
         let runs = snapshot.runs.clone();
         let pull_requests = snapshot.pull_requests.clone();
+        self.shell.set_work_item_titles(
+            snapshot
+                .tickets
+                .iter()
+                .map(|ticket| (ticket.key.id, ticket.title.clone()))
+                .collect(),
+        );
         self.work_items
             .replace_prepared_tickets(&mut self.shell, snapshot);
         self.pipelines.set_pipelines(pipelines, runs, &self.shell);

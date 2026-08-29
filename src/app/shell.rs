@@ -163,6 +163,9 @@ pub struct Shell {
     /// reads these: a pull request, a run and an artifact link all name a
     /// repository by its GUID.
     pub(crate) repos: Vec<Repo>,
+    /// What each work item is called, by id, so the tabs that only carry ids
+    /// — a pull request's linked items, a run's — can name them.
+    pub(crate) work_item_titles: Vec<(i64, String)>,
     /// What the pipeline watcher is doing, as the database overlay reports
     /// it. `None` for a run with no watcher at all.
     pub(crate) watch_state: Option<String>,
@@ -220,6 +223,7 @@ impl Default for Shell {
             data_signature: 0,
             sync_pending: false,
             repos: Vec::new(),
+            work_item_titles: Vec::new(),
             watch_state: None,
             history: Vec::new(),
             future: Vec::new(),
@@ -237,6 +241,26 @@ impl Default for Shell {
 }
 
 impl Shell {
+    /// What the work items on file are called, for the tabs that name them by
+    /// id.
+    pub fn set_work_item_titles(&mut self, titles: Vec<(i64, String)>) {
+        self.work_item_titles = titles;
+    }
+
+    #[must_use]
+    pub fn work_item_titles(&self) -> &[(i64, String)] {
+        &self.work_item_titles
+    }
+
+    /// What one work item is called, when the database holds it.
+    #[must_use]
+    pub fn work_item_title(&self, id: i64) -> Option<&str> {
+        self.work_item_titles
+            .iter()
+            .find(|(held, _)| *held == id)
+            .map(|(_, title)| title.as_str())
+    }
+
     /// What the watcher is doing, for the database overlay.
     pub fn set_watch_state(&mut self, state: Option<String>) {
         self.watch_state = state;

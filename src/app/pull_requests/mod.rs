@@ -559,23 +559,29 @@ impl PullRequestsScreen {
             .map_or(AppAction::None, AppAction::OpenUrl)
     }
 
-    /// Where the details pane's references point: the repository, the branches
-    /// and the work items the pull request closes.
+    /// Where the details pane's references point: the repository, the work
+    /// items it closes — one line each, named from the work-item rows when the
+    /// database holds them — and the build that gates it.
     #[must_use]
-    pub fn jumps(&self, shell: &Shell) -> Vec<(String, Jump)> {
+    pub fn jumps(
+        &self,
+        shell: &Shell,
+        titles: &dyn Fn(i64) -> Option<String>,
+    ) -> Vec<(String, Jump)> {
         let Some(row) = self.selected(shell) else {
             return Vec::new();
         };
         let mut jumps = vec![(row.repo.clone(), Jump::Repo(row.repo.clone()))];
-        if !row.request.work_items.is_empty() {
-            let label = row
-                .request
-                .work_items
-                .iter()
-                .map(|id| format!("#{id}"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            jumps.push((label, Jump::WorkItems(row.request.work_items.clone())));
+        for id in &row.request.work_items {
+            let label =
+                titles(*id).map_or_else(|| format!("#{id}"), |title| format!("#{id}  {title}"));
+            jumps.push((label, Jump::WorkItems(vec![*id])));
+        }
+        if row.request.work_items.len() > 1 {
+            jumps.push((
+                format!("All {} work items", row.request.work_items.len()),
+                Jump::WorkItems(row.request.work_items.clone()),
+            ));
         }
         if let Some(run) = row.request.build.as_ref().and_then(|build| build.run_id) {
             jumps.push((format!("Run {run}"), Jump::Run(run)));
@@ -890,6 +896,9 @@ impl Screen for PullRequestsScreen {
     }
 
     fn render(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
-        crate::ui::pull_requests::render(frame, self, shell, area);
+        // What the linked work items are called comes from the shell, which
+        // is where every tab reads what another tab's rows are named.
+        let titles = shell.work_item_titles().to_vec();
+        crate::ui::pull_requests::render(frame, self, shell, &titles, area);
     }
 }

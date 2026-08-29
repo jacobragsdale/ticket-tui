@@ -945,10 +945,11 @@ requests are left off the table behind the same chip finished work items use.
 
 The details pane holds the title and status, the author and both branches, the
 description as text, the Reviewers with each vote and whether it is required, a
-Related section that follows the repository, the work items it closes and the
-build that gates it, the Completion settings, and the buttons `[Approve]
-[Suggest] [Wait] [Reject] [Complete] [Abandon]` — drawn muted until #676 and
-#677 wire them.
+Related section, the Discussion, the Completion settings and the buttons
+`[Approve] [Suggest] [Wait] [Reject] [Complete] [Abandon]`. Related follows the
+repository, one line per work item the pull request closes — named as the work
+items tab has them when the database holds the row — and the run that gates it,
+each a click away and `[` back again.
 
 `C` opens a small form — merge strategy (squash by default, merge commit, or
 rebase), delete the source branch, complete the linked work items — and `Enter`

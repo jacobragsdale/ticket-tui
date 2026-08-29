@@ -1,6 +1,6 @@
 use super::*;
-use crate::app::TabId;
 use crate::app::pull_requests::tests::pull_requests_app;
+use crate::app::{Jump, TabId};
 
 fn tab_text(width: u16, height: u16, app: &mut App) -> String {
     app.select_tab(TabId::PullRequests);
@@ -112,4 +112,40 @@ fn the_details_pane_follows_a_pull_request_to_its_work_items() {
     click(&mut app, work_items.x + 16, work_items.y);
     assert_eq!(app.tab, TabId::WorkItems);
     assert_eq!(app.work_items.query(), "id:10001");
+}
+
+#[test]
+fn a_pull_request_follows_its_work_items_by_name_and_its_build_run() {
+    let mut app = pull_requests_app();
+    app.shell
+        .set_work_item_titles(vec![(10_001, "Split the files".to_owned())]);
+    tab_text(160, 50, &mut app);
+    app.pull_requests.cursor.focus(2);
+    render_text(160, 50, &mut app);
+
+    let text = render_text(160, 50, &mut app);
+    assert!(
+        text.contains("#10001  Split the files"),
+        "a linked work item reads as the work items tab has it: {text}"
+    );
+
+    let work_item = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::Follow(Jump::WorkItems(_))))
+        .expect("the work item line is a jump")
+        .rect;
+    click(&mut app, work_item.x + 16, work_item.y);
+    assert_eq!(app.tab, TabId::WorkItems);
+    assert_eq!(app.work_items.query(), "id:10001");
+
+    // Back, then follow the build to the run that gates it.
+    app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+    render_text(160, 50, &mut app);
+    let build = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::Follow(Jump::Run(_))));
+    assert!(build.is_some(), "the build line is a jump too");
 }
