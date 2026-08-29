@@ -1,7 +1,11 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandId {
+    Search,
     Palette,
     Filters,
+    MoreFilters,
     Columns,
     Views,
     Sort,
@@ -9,6 +13,7 @@ pub enum CommandId {
     Reload,
     Open,
     ToggleDensity,
+    ToggleDetails,
     ToggleSearchOrder,
     ToggleBookmark,
     CopyId,
@@ -28,155 +33,288 @@ pub enum CommandId {
     ResetPaneSplit,
 }
 
+/// A single binding: the key code plus the modifiers crossterm reports with it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Key {
+    pub code: KeyCode,
+    pub modifiers: KeyModifiers,
+}
+
+impl Key {
+    /// Human readable binding, e.g. `s`, `Ctrl-C`, or `Space`.
+    #[must_use]
+    pub fn label(self) -> String {
+        let base = match self.code {
+            KeyCode::Char(' ') => "Space".to_owned(),
+            KeyCode::Char(ch) => ch.to_string(),
+            KeyCode::Enter => "Enter".to_owned(),
+            KeyCode::Esc => "Esc".to_owned(),
+            KeyCode::Tab => "Tab".to_owned(),
+            other => format!("{other:?}"),
+        };
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            format!("Ctrl-{}", base.to_ascii_uppercase())
+        } else {
+            base
+        }
+    }
+}
+
+#[must_use]
+pub const fn key(ch: char) -> Key {
+    Key {
+        code: KeyCode::Char(ch),
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+#[must_use]
+pub const fn ctrl(ch: char) -> Key {
+    Key {
+        code: KeyCode::Char(ch),
+        modifiers: KeyModifiers::CONTROL,
+    }
+}
+
+/// One action, defined once: its palette title, its bindings, and its help text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Command {
     pub id: CommandId,
     pub title: &'static str,
-    pub hint: &'static str,
+    pub keys: &'static [Key],
+    pub help: &'static str,
 }
 
-pub const COMMANDS: [Command; 26] = [
+impl Command {
+    /// Bindings joined for display, e.g. `p / :`. Empty when the command has none.
+    #[must_use]
+    pub fn key_label(&self) -> String {
+        self.keys
+            .iter()
+            .map(|key| key.label())
+            .collect::<Vec<_>>()
+            .join(" / ")
+    }
+
+    /// Whether the command palette offers this command.
+    #[must_use]
+    pub const fn in_palette(&self) -> bool {
+        !matches!(self.id, CommandId::Search)
+    }
+}
+
+pub const COMMANDS: &[Command] = &[
+    Command {
+        id: CommandId::Search,
+        title: "Search tickets",
+        keys: &[key('/')],
+        help: "Core ticket fields",
+    },
     Command {
         id: CommandId::Filters,
         title: "Open filter bar",
-        hint: "f",
+        keys: &[key('f')],
+        help: "Space toggles values",
+    },
+    Command {
+        id: CommandId::MoreFilters,
+        title: "More filters",
+        keys: &[key('+')],
+        help: "Priority, project, area…",
     },
     Command {
         id: CommandId::Columns,
         title: "Configure columns",
-        hint: "w",
+        keys: &[key('w')],
+        help: "Show, hide, reorder",
     },
     Command {
         id: CommandId::Views,
         title: "Named views",
-        hint: "V",
+        keys: &[key('V')],
+        help: "Save and restore",
     },
     Command {
         id: CommandId::SaveView,
         title: "Save current view",
-        hint: "",
+        keys: &[],
+        help: "",
     },
     Command {
         id: CommandId::Sort,
         title: "Sort tickets",
-        hint: "s",
+        keys: &[key('s')],
+        help: "Choose field and direction",
     },
     Command {
         id: CommandId::ToggleDensity,
         title: "Toggle row density",
-        hint: "c",
+        keys: &[key('c')],
+        help: "",
+    },
+    Command {
+        id: CommandId::ToggleDetails,
+        title: "Toggle details pane",
+        keys: &[key('d')],
+        help: "Below 70 columns",
     },
     Command {
         id: CommandId::ToggleSearchOrder,
         title: "Toggle search order",
-        hint: "v",
+        keys: &[key('v')],
+        help: "Relevance or fields",
     },
     Command {
         id: CommandId::Open,
         title: "Open ticket in browser",
-        hint: "o",
+        keys: &[key('o')],
+        help: "",
     },
     Command {
         id: CommandId::ToggleBookmark,
         title: "Toggle bookmark",
-        hint: "m",
+        keys: &[key('m')],
+        help: "",
     },
     Command {
         id: CommandId::HistoryBack,
         title: "Back to previous ticket",
-        hint: "[",
+        keys: &[key('[')],
+        help: "",
     },
     Command {
         id: CommandId::HistoryForward,
         title: "Forward to next ticket",
-        hint: "]",
+        keys: &[key(']')],
+        help: "",
     },
     Command {
         id: CommandId::CopyId,
         title: "Copy ID",
-        hint: "y",
+        keys: &[key('y')],
+        help: "Selected or current tickets",
     },
     Command {
         id: CommandId::CopyUrl,
         title: "Copy URL",
-        hint: "",
+        keys: &[],
+        help: "",
     },
     Command {
         id: CommandId::CopyTitle,
         title: "Copy title",
-        hint: "",
+        keys: &[],
+        help: "",
     },
     Command {
         id: CommandId::CopyMarkdown,
         title: "Copy Markdown link",
-        hint: "",
+        keys: &[],
+        help: "",
     },
     Command {
         id: CommandId::CopySummary,
         title: "Copy summary",
-        hint: "",
+        keys: &[],
+        help: "",
     },
     Command {
         id: CommandId::ExportJson,
         title: "Export selected as JSON",
-        hint: "",
+        keys: &[],
+        help: "",
     },
     Command {
         id: CommandId::ExportCsv,
         title: "Export selected as CSV",
-        hint: "",
+        keys: &[],
+        help: "",
     },
     Command {
         id: CommandId::SelectAll,
         title: "Select all visible",
-        hint: "",
+        keys: &[],
+        help: "",
     },
     Command {
         id: CommandId::ClearSelection,
         title: "Clear selection",
-        hint: "",
+        keys: &[],
+        help: "",
     },
     Command {
         id: CommandId::DatabaseInfo,
         title: "Database info",
-        hint: "i",
+        keys: &[key('i')],
+        help: "Path, counts, freshness",
     },
     Command {
         id: CommandId::Reload,
         title: "Reload tickets",
-        hint: "r",
+        keys: &[key('r')],
+        help: "Re-read the SQLite cache",
     },
     Command {
         id: CommandId::Help,
         title: "Help",
-        hint: "?",
+        keys: &[key('?')],
+        help: "",
     },
     Command {
         id: CommandId::Palette,
         title: "Command palette",
-        hint: "p",
+        keys: &[key('p'), key(':')],
+        help: "",
     },
     Command {
         id: CommandId::Quit,
         title: "Quit",
-        hint: "q",
+        keys: &[key('q'), ctrl('c')],
+        help: "",
     },
     Command {
         id: CommandId::ResetPaneSplit,
         title: "Reset pane split",
-        hint: "",
+        keys: &[],
+        help: "Restore the 62/56 layout",
     },
 ];
+
+/// crossterm reports SHIFT alongside the uppercase character it produced, so drop
+/// it before comparing a pressed key against the bindings.
+fn normalized_modifiers(event: KeyEvent) -> KeyModifiers {
+    if matches!(event.code, KeyCode::Char(ch) if ch.is_uppercase()) {
+        event.modifiers.difference(KeyModifiers::SHIFT)
+    } else {
+        event.modifiers
+    }
+}
+
+#[must_use]
+pub fn command_for_key(event: KeyEvent) -> Option<CommandId> {
+    let modifiers = normalized_modifiers(event);
+    COMMANDS
+        .iter()
+        .find(|command| {
+            command
+                .keys
+                .iter()
+                .any(|bound| bound.code == event.code && bound.modifiers == modifiers)
+        })
+        .map(|command| command.id)
+}
 
 #[must_use]
 pub fn matching_commands(query: &str) -> Vec<Command> {
     let query = query.trim().to_ascii_lowercase();
     COMMANDS
-        .into_iter()
+        .iter()
+        .copied()
+        .filter(Command::in_palette)
         .filter(|command| {
             query.is_empty()
                 || command.title.to_ascii_lowercase().contains(&query)
-                || command.hint.to_ascii_lowercase().contains(&query)
+                || command.key_label().to_ascii_lowercase().contains(&query)
         })
         .collect()
 }
@@ -184,6 +322,10 @@ pub fn matching_commands(query: &str) -> Vec<Command> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn press(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
+    }
 
     #[test]
     fn palette_filters_commands_by_title() {
@@ -198,5 +340,78 @@ mod tests {
                 .iter()
                 .any(|command| command.id == CommandId::Reload)
         );
+    }
+
+    #[test]
+    fn palette_hides_commands_that_only_work_from_browse_mode() {
+        assert!(
+            !matching_commands("")
+                .iter()
+                .any(|command| command.id == CommandId::Search)
+        );
+    }
+
+    #[test]
+    fn keys_resolve_to_their_command() {
+        assert_eq!(
+            command_for_key(press(KeyCode::Char('s'), KeyModifiers::NONE)),
+            Some(CommandId::Sort)
+        );
+        assert_eq!(
+            command_for_key(press(KeyCode::Char(':'), KeyModifiers::NONE)),
+            Some(CommandId::Palette)
+        );
+        assert_eq!(
+            command_for_key(press(KeyCode::Char('p'), KeyModifiers::NONE)),
+            Some(CommandId::Palette)
+        );
+        assert_eq!(
+            command_for_key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            Some(CommandId::Quit)
+        );
+        assert_eq!(
+            command_for_key(press(KeyCode::Char('c'), KeyModifiers::NONE)),
+            Some(CommandId::ToggleDensity)
+        );
+        assert_eq!(
+            command_for_key(press(KeyCode::Char('V'), KeyModifiers::SHIFT)),
+            Some(CommandId::Views)
+        );
+        assert_eq!(
+            command_for_key(press(KeyCode::Char('S'), KeyModifiers::SHIFT)),
+            None
+        );
+        assert_eq!(
+            command_for_key(press(KeyCode::Tab, KeyModifiers::NONE)),
+            None
+        );
+    }
+
+    #[test]
+    fn bound_commands_have_labels_and_unique_keys() {
+        let mut bound: Vec<Key> = Vec::new();
+        for command in COMMANDS {
+            if command.keys.is_empty() {
+                assert!(command.key_label().is_empty(), "{:?}", command.id);
+                continue;
+            }
+            assert!(!command.key_label().is_empty(), "{:?}", command.id);
+            for key in command.keys {
+                assert!(!key.label().is_empty(), "{:?}", command.id);
+                assert!(!bound.contains(key), "duplicate binding {}", key.label());
+                bound.push(*key);
+            }
+        }
+    }
+
+    #[test]
+    fn labels_render_modifiers_and_alternatives() {
+        assert_eq!(key('s').label(), "s");
+        assert_eq!(ctrl('c').label(), "Ctrl-C");
+        let palette = COMMANDS
+            .iter()
+            .find(|command| command.id == CommandId::Palette)
+            .expect("palette command");
+        assert_eq!(palette.key_label(), "p / :");
     }
 }

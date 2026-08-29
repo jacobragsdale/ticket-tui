@@ -14,6 +14,7 @@ use time::OffsetDateTime;
 use crate::app::{
     App, AppMode, DividerOrientation, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder,
 };
+use crate::command::COMMANDS;
 use crate::filter::{FacetTarget, FilterField};
 use crate::model::{
     FamilySnapshot, FamilyTreeEntry, SortDirection, SortField, StateCategory, Ticket, TicketKey,
@@ -1017,15 +1018,15 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
     let height = frame.area().height.saturating_sub(2).min(18);
     let area = centered_rect(frame.area(), 62, height);
     frame.render_widget(Clear, area);
-    let help = Text::from(vec![
+    let mut lines = vec![
         Line::styled("Navigation", Style::default().add_modifier(Modifier::BOLD)),
-        Line::from("  ↑/↓, j/k       Move ticket, family row, or details"),
+        Line::from("  ↑/↓, j/k        Move ticket, family row, or details"),
         Line::from("  PgUp/PgDn       Move ten rows or a family page"),
         Line::from("  Home/End        First/last ticket, family row, or line"),
         Line::from("  Tab             Toggle tickets / details focus"),
-        Line::from("  d               Toggle details below 70 columns"),
-        Line::from("  c               Toggle compact / comfortable rows"),
-        Line::from("  [ / ]           Recently viewed back / forward"),
+        Line::from("  Enter           Select family cursor, or open from details"),
+        Line::from("  Space           Toggle ticket multi-select"),
+        Line::from("  Esc             Clear active search or selection"),
         Line::from(""),
         Line::styled(
             "Search and filters",
@@ -1036,26 +1037,25 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  Ctrl-W/Ctrl-U   Delete word / clear query"),
         Line::from("  Ctrl-P/Ctrl-N   Previous / next completed query"),
         Line::from("  state:active    Structured filters in the query"),
-        Line::from("  f               Focus the filter bar; Space toggles values"),
-        Line::from("  +               More filters (priority, project, area…)"),
         Line::from("  Paste           Insert sanitized text"),
         Line::from(""),
         Line::styled("Actions", Style::default().add_modifier(Modifier::BOLD)),
-        Line::from("  /               Search core ticket fields"),
-        Line::from("  p / :           Command palette"),
-        Line::from("  s               Choose field and direction"),
-        Line::from("  w               Show, hide, reorder, resize columns"),
-        Line::from("  V               Save and restore named views"),
-        Line::from("  v               Toggle relevance / field order"),
-        Line::from("  m               Bookmark the selected ticket"),
-        Line::from("  Space           Toggle ticket multi-select"),
-        Line::from("  y               Copy selected IDs"),
-        Line::from("  i               Database path, freshness, and counts"),
-        Line::from("  Enter           Select family cursor, or open from details"),
-        Line::from("  o               Open selected ticket in browser"),
-        Line::from("  r               Reload tickets from SQLite"),
-        Line::from("  Esc             Clear active search or selection"),
-        Line::from("  q / Ctrl-C      Quit"),
+    ];
+    // The bound commands describe themselves; the palette lists the rest.
+    lines.extend(
+        COMMANDS
+            .iter()
+            .filter(|command| !command.keys.is_empty())
+            .map(|command| {
+                let detail = if command.help.is_empty() {
+                    command.title.to_owned()
+                } else {
+                    format!("{} — {}", command.title, command.help)
+                };
+                Line::from(format!("  {:<15} {detail}", command.key_label()))
+            }),
+    );
+    lines.extend([
         Line::from(""),
         Line::styled("Mouse", Style::default().add_modifier(Modifier::BOLD)),
         Line::from("  Wheel           Scroll the hovered table, details, help, or overlay"),
@@ -1070,6 +1070,7 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
             Style::default().fg(theme().muted),
         ),
     ]);
+    let help = Text::from(lines);
     let block = Block::default()
         .title(" Help ")
         .title(Line::from("[×]").right_aligned())
@@ -1588,7 +1589,11 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
         .enumerate()
         .map(|(index, command)| {
             let marker = if index == selected { "›" } else { " " };
-            Line::from(format!("{marker} {:<28} {}", command.title, command.hint))
+            Line::from(format!(
+                "{marker} {:<28} {}",
+                command.title,
+                command.key_label()
+            ))
         })
         .collect();
     render_list_overlay(
@@ -3017,6 +3022,32 @@ mod tests {
                 || scrolled_help.contains("Wheel")
                 || scrolled_help.contains("Press ? or Esc to close")
         );
+    }
+
+    #[test]
+    fn help_documents_every_bound_command() {
+        let mut app = App::new(Vec::new());
+        app.mode = AppMode::Help;
+        let mut help = String::new();
+        for _ in 0..40 {
+            help.push_str(&render_text(90, 24, &mut app));
+            if app.help.offset >= app.help.max_offset() {
+                break;
+            }
+            app.help.scroll_by(4);
+        }
+        for command in COMMANDS.iter().filter(|command| !command.keys.is_empty()) {
+            assert!(
+                help.contains(command.title),
+                "help is missing {}",
+                command.title
+            );
+            assert!(
+                help.contains(&command.key_label()),
+                "help is missing the {} binding",
+                command.title
+            );
+        }
     }
 
     #[test]

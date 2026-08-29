@@ -12,7 +12,7 @@ use crate::agent_context::{
     AgentContext, SearchContext, SortContext, TicketContext, TicketReference, TicketsContext,
 };
 use crate::columns::TableLayout;
-use crate::command::{Command, CommandId, matching_commands};
+use crate::command::{Command, CommandId, command_for_key, matching_commands};
 use crate::export;
 pub use crate::filter::FacetTarget;
 use crate::filter::{
@@ -898,9 +898,11 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.should_quit = true;
-            return AppAction::None;
+        // Ctrl-C quits from every mode; other bindings only apply in browse mode.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && command_for_key(key) == Some(CommandId::Quit)
+        {
+            return self.run_command(CommandId::Quit);
         }
 
         match self.mode {
@@ -965,40 +967,9 @@ impl App {
     }
 
     fn handle_browse_key(&mut self, key: KeyEvent) -> AppAction {
+        // Navigation keys depend on the focused pane; everything else is a command.
         match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Char('/') => self.begin_search(),
-            KeyCode::Char('s') => {
-                self.sort_draft = SortDraft {
-                    field_index: SortField::ALL
-                        .iter()
-                        .position(|field| *field == self.sort_field)
-                        .unwrap_or_default(),
-                    direction: self.sort_direction,
-                };
-                self.mode = AppMode::Sort;
-            }
-            KeyCode::Char('?') => {
-                self.help.scroll_to(0);
-                self.mode = AppMode::Help;
-            }
-            KeyCode::Char('r') => return AppAction::Reload,
-            KeyCode::Char('v') if !self.fuzzy_query().is_empty() => self.toggle_search_order(),
-            KeyCode::Char('V') => self.open_views(),
-            KeyCode::Char('c') => self.toggle_row_density(),
-            KeyCode::Char('d') => self.toggle_narrow_details(),
-            KeyCode::Char('f') => self.open_facets(0),
-            KeyCode::Char('+') => self.open_filters(),
-            KeyCode::Char('w') => self.open_columns(),
-            KeyCode::Char('p') | KeyCode::Char(':') => self.open_palette(),
-            KeyCode::Char('i') => {
-                self.mode = AppMode::Info;
-            }
-            KeyCode::Char('m') => self.toggle_bookmark(),
-            KeyCode::Char('y') => return self.copy_with(CopiedContent::Id, export::copy_ids),
             KeyCode::Char(' ') if self.focus != Focus::Family => self.toggle_row_selection(),
-            KeyCode::Char('[') => self.history_back(),
-            KeyCode::Char(']') => self.history_forward(),
             KeyCode::Tab => self.toggle_focus(),
             KeyCode::Down | KeyCode::Char('j') => self.move_focused(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_focused(-1),
@@ -1032,13 +1003,13 @@ impl App {
                     return self.open_selected();
                 }
             },
-            KeyCode::Char('o') => {
-                self.record_history();
-                return self.open_selected();
-            }
             KeyCode::Esc if !self.query.is_empty() => self.set_query(String::new()),
             KeyCode::Esc if !self.selected_keys.is_empty() => self.selected_keys.clear(),
-            _ => {}
+            _ => {
+                if let Some(id) = command_for_key(key) {
+                    return self.run_command(id);
+                }
+            }
         }
         AppAction::None
     }
@@ -1262,11 +1233,8 @@ impl App {
                 self.place_caret(TextEditor::Search, column, row);
             }
             PointerTarget::ClearQuery => self.set_query(String::new()),
-            PointerTarget::OpenPalette => self.open_palette(),
-            PointerTarget::OpenHelp => {
-                self.help.scroll_to(0);
-                self.mode = AppMode::Help;
-            }
+            PointerTarget::OpenPalette => return self.run_command(CommandId::Palette),
+            PointerTarget::OpenHelp => return self.run_command(CommandId::Help),
             PointerTarget::CopyActions => self.open_copy_actions(),
             PointerTarget::CloseOverlay => self.close_overlay(),
             PointerTarget::NarrowTickets => {
@@ -1454,7 +1422,7 @@ impl App {
     }
 
     fn open_copy_actions(&mut self) {
-        self.open_palette();
+        self.run_command(CommandId::Palette);
         self.palette.query = TextInput::new("copy");
     }
 
@@ -2165,12 +2133,20 @@ impl App {
 
     fn run_command(&mut self, id: CommandId) -> AppAction {
         match id {
+            CommandId::Search => {
+                self.begin_search();
+                AppAction::None
+            }
             CommandId::Palette => {
                 self.open_palette();
                 AppAction::None
             }
             CommandId::Filters => {
                 self.open_facets(0);
+                AppAction::None
+            }
+            CommandId::MoreFilters => {
+                self.open_filters();
                 AppAction::None
             }
             CommandId::Columns => {
@@ -2212,8 +2188,14 @@ impl App {
                 self.toggle_row_density();
                 AppAction::None
             }
+            CommandId::ToggleDetails => {
+                self.toggle_narrow_details();
+                AppAction::None
+            }
             CommandId::ToggleSearchOrder => {
-                self.toggle_search_order();
+                if !self.fuzzy_query().is_empty() {
+                    self.toggle_search_order();
+                }
                 AppAction::None
             }
             CommandId::ToggleBookmark => {
@@ -2973,6 +2955,42 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.row_density, RowDensity::Comfortable);
         assert_eq!(app.mode, AppMode::Browse);
+    }
+
+    #[test]
+    fn every_bound_key_runs_its_command_from_browse_mode() {
+        for command in crate::command::COMMANDS
+            .iter()
+            .filter(|command| !command.keys.is_empty())
+        {
+            for key in command.keys {
+                let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+                app.handle_key(KeyEvent::new(key.code, key.modifiers));
+                let expected = match command.id {
+                    CommandId::Sort => Some(AppMode::Sort),
+                    CommandId::Help => Some(AppMode::Help),
+                    CommandId::Views => Some(AppMode::Views),
+                    CommandId::Columns => Some(AppMode::Columns),
+                    CommandId::Palette => Some(AppMode::Palette),
+                    CommandId::DatabaseInfo => Some(AppMode::Info),
+                    CommandId::Search => Some(AppMode::Search),
+                    CommandId::Filters => Some(AppMode::Facets),
+                    CommandId::MoreFilters => Some(AppMode::Filter),
+                    _ => None,
+                };
+                if let Some(mode) = expected {
+                    assert_eq!(app.mode, mode, "{:?} via {}", command.id, key.label());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn toggling_search_order_needs_a_fuzzy_query() {
+        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+        let order = app.search_order;
+        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(app.search_order, order);
     }
 
     #[test]
