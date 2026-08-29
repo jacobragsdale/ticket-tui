@@ -7,6 +7,8 @@ use serde::Serialize;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::model::{RowDensity, SearchOrder, SortDirection, SortField};
+
 pub const SCHEMA_VERSION: u8 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -32,14 +34,14 @@ pub struct SearchContext {
     pub fuzzy_text: String,
     pub filters: Vec<String>,
     pub pending: bool,
-    pub order: String,
+    pub order: SearchOrder,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SortContext {
-    pub field: String,
-    pub direction: String,
-    pub row_density: String,
+    pub field: SortField,
+    pub direction: SortDirection,
+    pub row_density: RowDensity,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -154,12 +156,12 @@ mod tests {
                 fuzzy_text: String::new(),
                 filters: Vec::new(),
                 pending: false,
-                order: "relevance".into(),
+                order: SearchOrder::Relevance,
             },
             sort: SortContext {
-                field: "changed".into(),
-                direction: "desc".into(),
-                row_density: "compact".into(),
+                field: SortField::Changed,
+                direction: SortDirection::Descending,
+                row_density: RowDensity::Compact,
             },
             tickets: TicketsContext {
                 total_count: 0,
@@ -193,6 +195,10 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(first_json["schema_version"], SCHEMA_VERSION);
         assert_eq!(first_json["database_path"], "first.sqlite3");
+        assert_eq!(first_json["search"]["order"], "relevance");
+        assert_eq!(first_json["sort"]["field"], "changed");
+        assert_eq!(first_json["sort"]["direction"], "desc");
+        assert_eq!(first_json["sort"]["row_density"], "compact");
         assert!(first_json["process_id"].as_u64().is_some());
         assert!(first_json["updated_at"].as_str().is_some());
 

@@ -2,6 +2,8 @@ use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::timestamp::Timestamp;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -47,7 +49,8 @@ impl Ticket {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SortField {
     #[default]
     Changed,
@@ -593,7 +596,8 @@ impl fmt::Display for SortField {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SearchOrder {
     #[default]
     Relevance,
@@ -618,7 +622,8 @@ impl SearchOrder {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RowDensity {
     #[default]
     Compact,
@@ -651,10 +656,12 @@ impl RowDensity {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SortDirection {
+    #[serde(rename = "asc")]
     Ascending,
     #[default]
+    #[serde(rename = "desc")]
     Descending,
 }
 

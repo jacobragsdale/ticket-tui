@@ -1,6 +1,7 @@
 use ratatui::layout::Constraint;
 
 use crate::model::SortField;
+use crate::session::SessionColumn;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ColumnConfig {
@@ -91,6 +92,45 @@ impl Default for TableLayout {
 }
 
 impl TableLayout {
+    #[must_use]
+    pub fn to_session_columns(&self) -> Vec<SessionColumn> {
+        self.columns
+            .iter()
+            .map(|column| SessionColumn {
+                id: column.id,
+                visible: column.visible,
+                width: column.width,
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn from_session_columns(columns: &[SessionColumn], auto_hide: Option<bool>) -> Self {
+        let mut layout = Self::default();
+        if columns.is_empty() {
+            if let Some(auto_hide) = auto_hide {
+                layout.auto_hide = auto_hide;
+            }
+            return layout;
+        }
+        let mut restored: Vec<ColumnConfig> = columns
+            .iter()
+            .map(|column| ColumnConfig {
+                id: column.id,
+                visible: column.visible,
+                width: column.width,
+            })
+            .collect();
+        for default in &layout.columns {
+            if !restored.iter().any(|column| column.id == default.id) {
+                restored.push(*default);
+            }
+        }
+        layout.columns = restored;
+        layout.auto_hide = auto_hide.unwrap_or(false);
+        layout
+    }
+
     #[must_use]
     pub fn visible_columns(&self, inner_width: u16) -> Vec<ColumnConfig> {
         let mut columns: Vec<_> = self

@@ -432,12 +432,12 @@ impl App {
                     .map(|token| token.chip_label())
                     .collect(),
                 pending: self.search_pending,
-                order: session::encode_search_order(self.search_order).into(),
+                order: self.search_order,
             },
             sort: SortContext {
-                field: session::encode_sort_field(self.sort_field).into(),
-                direction: session::encode_direction(self.sort_direction).into(),
-                row_density: session::encode_density(self.row_density).into(),
+                field: self.sort_field,
+                direction: self.sort_direction,
+                row_density: self.row_density,
             },
             tickets: TicketsContext {
                 total_count: self.tickets.len(),
@@ -2722,11 +2722,11 @@ impl App {
         let view = NamedView {
             name: name.clone(),
             query: self.query.clone(),
-            sort_field: session::encode_sort_field(self.sort_field).to_owned(),
-            sort_direction: session::encode_direction(self.sort_direction).to_owned(),
-            search_order: session::encode_search_order(self.search_order).to_owned(),
-            row_density: session::encode_density(self.row_density).to_owned(),
-            columns: session::encode_layout(&self.layout),
+            sort_field: self.sort_field,
+            sort_direction: self.sort_direction,
+            search_order: self.search_order,
+            row_density: self.row_density,
+            columns: self.layout.to_session_columns(),
             auto_hide: self.layout.auto_hide,
         };
         if let Some(existing) = self
@@ -2748,11 +2748,11 @@ impl App {
             return;
         };
         self.active_view = Some(view.name.clone());
-        self.sort_field = session::decode_sort_field(&view.sort_field).unwrap_or(self.sort_field);
-        self.sort_direction = session::decode_direction(&view.sort_direction);
-        self.search_order = session::decode_search_order(&view.search_order);
-        self.row_density = session::decode_density(&view.row_density);
-        self.layout = session::decode_layout(&view.columns, Some(view.auto_hide));
+        self.sort_field = view.sort_field;
+        self.sort_direction = view.sort_direction;
+        self.search_order = view.search_order;
+        self.row_density = view.row_density;
+        self.layout = TableLayout::from_session_columns(&view.columns, Some(view.auto_hide));
         self.session_dirty = true;
         self.set_query(view.query);
         self.mode = AppMode::Browse;
@@ -2877,11 +2877,11 @@ impl App {
     pub fn snapshot_session(&self) -> Session {
         Session {
             query: self.query.clone(),
-            sort_field: session::encode_sort_field(self.sort_field).to_owned(),
-            sort_direction: session::encode_direction(self.sort_direction).to_owned(),
-            search_order: session::encode_search_order(self.search_order).to_owned(),
-            row_density: session::encode_density(self.row_density).to_owned(),
-            columns: session::encode_layout(&self.layout),
+            sort_field: self.sort_field,
+            sort_direction: self.sort_direction,
+            search_order: self.search_order,
+            row_density: self.row_density,
+            columns: self.layout.to_session_columns(),
             auto_hide: Some(self.layout.auto_hide),
             bookmarks: self
                 .bookmarks
@@ -2898,12 +2898,11 @@ impl App {
     }
 
     pub fn restore_session(&mut self, session: Session) {
-        self.sort_field =
-            session::decode_sort_field(&session.sort_field).unwrap_or(self.sort_field);
-        self.sort_direction = session::decode_direction(&session.sort_direction);
-        self.search_order = session::decode_search_order(&session.search_order);
-        self.row_density = session::decode_density(&session.row_density);
-        self.layout = session::decode_layout(&session.columns, session.auto_hide);
+        self.sort_field = session.sort_field;
+        self.sort_direction = session.sort_direction;
+        self.search_order = session.search_order;
+        self.row_density = session.row_density;
+        self.layout = TableLayout::from_session_columns(&session.columns, session.auto_hide);
         self.bookmarks = session.bookmarks.iter().map(TicketKey::from).collect();
         self.recent = session.recent.iter().map(TicketKey::from).collect();
         self.views = session.views;
