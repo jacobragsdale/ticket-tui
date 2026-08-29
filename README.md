@@ -934,6 +934,25 @@ follows on `Enter` or a click; one this database does not hold says so rather
 than opening an empty screen. The walk is remembered in the session file, and a
 file written before the tabs becomes the first cross-tab history.
 
+## Repos
+
+Tab `2` lists the project's repositories: `Name · Default branch · PRs ·
+Pipelines · Local`. The counts are the active pull requests and the pipelines
+that build each one; a repository the project has disabled stays on the table,
+faded, so a link naming it still resolves. The Local column says what is on
+this machine — `main ✓` clean, `feat/x *` dirty, `main ↑2 ↓1` ahead and behind,
+`—` not cloned — which #670 fills in.
+
+The details pane carries the name and project, the default branch and size, the
+three URLs (each copies what it says on click, and `y` copies the ssh one), the
+local copy and where it is, and what is open against the repository: its active
+pull requests and the pipelines that build it, each a jump. `[Clone]`, or
+`[Fetch]` and `[Pull]` where there is a clone, are drawn muted until #671 and
+#672 wire them. `o` opens the repository's page, and so does clicking its name.
+
+Its grammar: `name:`, `branch:`, `local:` (`cloned`, `dirty`, `ahead`,
+`behind`, `missing`) and `disabled:`.
+
 ## Pull requests
 
 Tab `3` is the review queue: `ID · Title · Repo · Source → Target · Author ·

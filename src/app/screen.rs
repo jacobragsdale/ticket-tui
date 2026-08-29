@@ -109,7 +109,9 @@ pub trait Screen {
                     surface.is_some_and(|surface| self.scroll_state_mut(surface).scroll_by(delta));
                 PointerUpdate::none(moved)
             }
-            MouseEventKind::Down(MouseButton::Left) => {
+            // Acted on release rather than press, the way the work items
+            // screen does it: a press that moves away is not a click.
+            MouseEventKind::Up(MouseButton::Left) => {
                 let Some(target) = shell
                     .hit_regions
                     .resolve(mouse.column, mouse.row)

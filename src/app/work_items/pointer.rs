@@ -387,7 +387,8 @@ impl WorkItemsScreen {
             // out of; its family rows are Follow targets.
             PointerTarget::SelectTab { .. }
             | PointerTarget::TreeRow { .. }
-            | PointerTarget::ApprovalRow { .. } => {}
+            | PointerTarget::ApprovalRow { .. }
+            | PointerTarget::CopyText(_) => {}
             PointerTarget::DismissOverlay => self.close_overlay(shell),
             PointerTarget::PromptInput => {
                 self.place_caret(shell, TextEditor::Prompt, column, row);

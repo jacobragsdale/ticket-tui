@@ -446,6 +446,12 @@ impl PipelinesScreen {
         self.watched.clone()
     }
 
+    /// The project's pipelines, for the tabs that name them.
+    #[must_use]
+    pub fn pipelines(&self) -> &[Pipeline] {
+        &self.pipelines
+    }
+
     /// The runs still going, which is what the watcher is asked to follow.
     #[must_use]
     pub fn live_run_ids(&self) -> Vec<i64> {

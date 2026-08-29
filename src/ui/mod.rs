@@ -34,6 +34,7 @@ mod overlays;
 mod pickers;
 pub(crate) mod pipelines;
 pub(crate) mod pull_requests;
+pub(crate) mod repos;
 mod table;
 #[cfg(test)]
 mod tests;

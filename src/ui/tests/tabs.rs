@@ -66,7 +66,7 @@ fn the_number_keys_switch_tabs_and_the_screens_keep_their_own_state() {
     assert_eq!(app.tab, TabId::Repos);
 
     let text = render_text(110, 30, &mut app);
-    assert!(text.contains("Repos — coming in #669"), "{text}");
+    assert!(text.contains("Repos 0"), "{text}");
     assert!(
         !text.contains("Fix ticket search"),
         "the work items screen is not painted while another tab is showing"
@@ -162,8 +162,20 @@ fn the_history_walks_back_and_forward_across_tabs() {
     let mut app = App::new(vec![ticket(), second]);
     render_text(110, 30, &mut app);
 
-    // Two work items, then somewhere on another tab, the way that tab's
-    // screen will record it once it has rows of its own.
+    // Two work items, then somewhere on another tab. The repository has to be
+    // on file for the jump back to it to land.
+    app.shell.set_repos(vec![crate::model::Repo {
+        id: "aaa-111".into(),
+        name: "ticket-tui".into(),
+        project: "atlas".into(),
+        default_branch: Some("refs/heads/main".into()),
+        remote_url: String::new(),
+        ssh_url: String::new(),
+        web_url: String::new(),
+        is_disabled: false,
+        size: None,
+    }]);
+    app.repos.set_repos(&app.shell);
     app.work_items.select_row(&mut app.shell, 0);
     app.work_items.record_visit(&mut app.shell);
     app.work_items.select_row(&mut app.shell, 1);

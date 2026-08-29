@@ -197,6 +197,9 @@ pub enum PointerTarget {
     },
     /// The filter field of the assignee picker.
     AssigneeQuery,
+    /// A line that copies what it says when it is clicked: a repository's
+    /// URLs today.
+    CopyText(String),
     /// One approval in the approvals overlay.
     ApprovalRow {
         index: usize,

@@ -767,6 +767,19 @@ fn a_runs_details_follow_its_repository_its_pull_request_and_the_work_items_it_b
     assert!(text.contains("Pull request: !42"), "{text}");
     assert!(text.contains("#10001 #10002"), "{text}");
 
+    // The repository has to be on file for the jump to land on it.
+    app.shell.set_repos(vec![crate::model::Repo {
+        id: "aaa-111".into(),
+        name: "ticket-tui".into(),
+        project: "atlas".into(),
+        default_branch: Some("refs/heads/main".into()),
+        remote_url: String::new(),
+        ssh_url: String::new(),
+        web_url: String::new(),
+        is_disabled: false,
+        size: None,
+    }]);
+    app.repos.set_repos(&app.shell);
     // Following the repository takes the Repos tab, and `[` comes back.
     let repo = app
         .shell

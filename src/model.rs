@@ -657,6 +657,41 @@ impl PullRequest {
     }
 }
 
+/// What one repository looks like on this machine.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalRepo {
+    /// Where the clone is.
+    pub path: std::path::PathBuf,
+    /// The branch it is on, or the detached head's short id.
+    pub branch: String,
+    /// Whether anything is uncommitted.
+    pub dirty: bool,
+    pub ahead: u32,
+    pub behind: u32,
+    /// What a git command is doing to it right now, which the Local column
+    /// says in place of the status.
+    pub busy: Option<GitJob>,
+}
+
+/// What the local-repos thread is doing to one clone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GitJob {
+    Cloning,
+    Fetching,
+    Pulling,
+}
+
+impl GitJob {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Cloning => "cloning\u{2026}",
+            Self::Fetching => "fetching\u{2026}",
+            Self::Pulling => "pulling\u{2026}",
+        }
+    }
+}
+
 /// Somewhere worth going, wherever it lives. The shell resolves one by
 /// switching to the tab that holds it and asking that screen to select it, so
 /// a work item's pull request and a run's branch are one keystroke apart.

@@ -51,6 +51,7 @@ pub mod cursor;
 pub mod pipelines;
 mod placeholder;
 pub mod pull_requests;
+pub mod repos;
 mod screen;
 pub mod shell;
 pub mod work_items;
@@ -59,6 +60,7 @@ pub use cursor::ListCursor;
 pub use pipelines::PipelinesScreen;
 pub use placeholder::PlaceholderScreen;
 pub use pull_requests::PullRequestsScreen;
+pub use repos::ReposScreen;
 pub use screen::{Screen, TabId};
 pub use shell::{
     DEFAULT_PANE_SPLIT_STACKED, DEFAULT_PANE_SPLIT_WIDE, DividerOrientation, Focus,
@@ -220,7 +222,7 @@ pub struct App {
     /// while another is showing.
     pub tab: TabId,
     pub work_items: WorkItemsScreen,
-    pub repos: PlaceholderScreen,
+    pub repos: ReposScreen,
     pub pull_requests: PullRequestsScreen,
     pub pipelines: PipelinesScreen,
 }
@@ -234,7 +236,7 @@ impl App {
             shell,
             tab: TabId::WorkItems,
             work_items,
-            repos: PlaceholderScreen::new(TabId::Repos, "#669"),
+            repos: ReposScreen::default(),
             pull_requests: PullRequestsScreen::default(),
             pipelines: PipelinesScreen::default(),
         }
@@ -366,7 +368,25 @@ impl App {
             .replace_prepared_tickets(&mut self.shell, snapshot);
         self.pipelines.set_pipelines(pipelines, runs, &self.shell);
         self.pull_requests
-            .set_pull_requests(pull_requests, &self.shell);
+            .set_pull_requests(pull_requests.clone(), &self.shell);
+        self.repos.set_repos(&self.shell);
+        self.repos.set_related(
+            pull_requests
+                .iter()
+                .filter(|request| !request.status.is_closed())
+                .map(|request| (request.repo_id.clone(), request.id, request.title.clone()))
+                .collect(),
+            self.pipelines
+                .pipelines()
+                .iter()
+                .filter_map(|pipeline| {
+                    pipeline
+                        .repo_id
+                        .as_ref()
+                        .map(|repo| (repo.clone(), pipeline.id, pipeline.name.clone()))
+                })
+                .collect(),
+        );
     }
 
     /// The whole session: which tab was showing, each tab's slice, and what
@@ -456,7 +476,7 @@ impl App {
     /// it answers with is the shell's, not something a screen reports. A click
     /// on the tab bar never reaches a screen — the bar is the shell's.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> PointerUpdate {
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
             && let Some(region) = self.shell.hit_regions.resolve(mouse.column, mouse.row)
             && let PointerTarget::SelectTab { index } = region.target
             && let Some(tab) = TabId::ALL.get(index).copied()
