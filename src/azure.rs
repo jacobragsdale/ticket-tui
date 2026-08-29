@@ -334,7 +334,7 @@ impl AzureClient {
     /// the category Azure DevOps assigned it rather than one guessed from its
     /// name, so a custom state is still coloured correctly.
     pub fn fetch_work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>> {
-        let url = self.work_item_type_states_url(work_item_type)?;
+        let url = self.work_item_type_url(&["workitemtypes", work_item_type, "states"])?;
         let response = self.get(&url)?;
         let states = response
             .get("value")
@@ -354,6 +354,28 @@ impl AzureClient {
                 Some(StateOption::new(name, category))
             })
             .collect())
+    }
+
+    /// Every work item type the project's process offers, in the order the
+    /// process lists them, which is the order the new-work-item form offers
+    /// them. The types nobody files by hand are left out: one the process has
+    /// disabled, and one it keeps in its hidden category — the code review and
+    /// feedback requests Azure DevOps files for itself. A hidden category that
+    /// cannot be read excludes nothing rather than sinking the fetch, because
+    /// a list with a few oddities in it is better than no list at all.
+    pub fn fetch_work_item_types(&self) -> Result<Vec<String>> {
+        let url = self.work_item_type_url(&["workitemtypes"])?;
+        let response = self.get(&url)?;
+        let hidden = self.hidden_work_item_types().unwrap_or_default();
+        work_item_type_names(&response, &hidden)
+    }
+
+    /// The types the process template keeps out of the way, which is a category
+    /// of its own rather than a flag on each type.
+    fn hidden_work_item_types(&self) -> Result<Vec<String>> {
+        let url =
+            self.work_item_type_url(&["workitemtypecategories", "Microsoft.HiddenCategory"])?;
+        Ok(hidden_type_names(&self.get(&url)?))
     }
 
     /// One work item's discussion and the revisions behind it, which is what
@@ -531,22 +553,19 @@ impl AzureClient {
         Ok(url.into())
     }
 
-    /// A work item type is a path segment and its name has spaces in it — `User
-    /// Story`, `Product Backlog Item` — so the URL is assembled rather than
-    /// formatted.
-    fn work_item_type_states_url(&self, work_item_type: &str) -> Result<String> {
+    /// A `{project}/_apis/wit/...` URL. The segments are assembled rather than
+    /// formatted because a work item type is one of them and its name has
+    /// spaces in it — `User Story`, `Product Backlog Item`.
+    fn work_item_type_url(&self, tail: &[&str]) -> Result<String> {
         let mut url = Url::parse(&self.config.base_url())
             .with_context(|| format!("invalid Azure DevOps URL {}", self.config.base_url()))?;
-        url.path_segments_mut()
-            .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?
-            .extend([
-                self.config.project.as_str(),
-                "_apis",
-                "wit",
-                "workitemtypes",
-                work_item_type,
-                "states",
-            ]);
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?;
+            segments.extend([self.config.project.as_str(), "_apis", "wit"]);
+            segments.extend(tail);
+        }
         url.set_query(Some(&format!("api-version={API_VERSION}")));
         Ok(url.into())
     }
@@ -1044,6 +1063,38 @@ pub fn create_document(fields: &[Value], parent: Option<i64>, config: &AzureConf
     document
 }
 
+/// The offerable types in one `/_apis/wit/workitemtypes` response: everything
+/// the process has not disabled, less the ones `hidden` names.
+fn work_item_type_names(response: &Value, hidden: &[String]) -> Result<Vec<String>> {
+    let types = response
+        .get("value")
+        .and_then(Value::as_array)
+        .context("work item types response has no value array")?;
+    Ok(types
+        .iter()
+        .filter(|item| item.get("isDisabled").and_then(Value::as_bool) != Some(true))
+        .filter_map(|item| {
+            let name = item.get("name").and_then(Value::as_str)?.trim();
+            (!name.is_empty() && !hidden.iter().any(|skip| skip == name)).then(|| name.to_owned())
+        })
+        .collect())
+}
+
+/// The types one `/_apis/wit/workitemtypecategories/...` response holds. A
+/// response that names none excludes none.
+fn hidden_type_names(response: &Value) -> Vec<String> {
+    response
+        .get("workItemTypes")
+        .and_then(Value::as_array)
+        .map(|types| {
+            types
+                .iter()
+                .filter_map(|item| Some(item.get("name")?.as_str()?.trim().to_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Map one `/_apis/wit/workitems` entry onto a ticket and its relations.
 pub fn parse_work_item(
     item: &Value,
@@ -1343,6 +1394,36 @@ mod tests {
             project: "development".into(),
             scope: None,
         }
+    }
+
+    #[test]
+    fn the_offerable_work_item_types_leave_out_the_disabled_and_the_hidden_ones() {
+        let response = json!({
+            "value": [
+                {"name": "Epic"},
+                {"name": "Issue"},
+                {"name": "Task"},
+                {"name": "Code Review Request"},
+                {"name": "Retired", "isDisabled": true},
+                {"name": "  "},
+            ],
+        });
+        let hidden = hidden_type_names(&json!({
+            "workItemTypes": [{"name": "Code Review Request"}, {"name": "Feedback Request"}],
+        }));
+
+        assert_eq!(hidden, ["Code Review Request", "Feedback Request"]);
+        assert_eq!(
+            work_item_type_names(&response, &hidden).unwrap(),
+            ["Epic", "Issue", "Task"],
+            "the order the process listed them, less what nobody files by hand"
+        );
+        assert!(
+            work_item_type_names(&response, &hidden_type_names(&json!({})))
+                .unwrap()
+                .contains(&"Code Review Request".to_owned()),
+            "a hidden category that could not be read excludes nothing"
+        );
     }
 
     #[test]

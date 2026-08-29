@@ -35,6 +35,9 @@ pub enum ScrollSurface {
     PriorityPicker,
     AssigneePicker,
     NodePicker,
+    TypePicker,
+    /// The field list of an open form.
+    Form,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -49,6 +52,8 @@ pub enum TextEditor {
     Assignee,
     /// The iteration or area picker's filter field.
     Node,
+    /// The focused text field of an open form.
+    Form,
 }
 
 /// One value on the details pane that can be edited by clicking it. Each names
@@ -177,6 +182,17 @@ pub enum PointerTarget {
     },
     /// The filter field of the iteration or area picker.
     NodeQuery,
+    /// One field of an open form, which focusing is what clicking it does.
+    FormField {
+        index: usize,
+    },
+    /// One work item type in the type picker.
+    TypeOption {
+        index: usize,
+    },
+    /// A form's `[Create]` and `[Cancel]` buttons.
+    SubmitForm,
+    CancelForm,
     /// One editable value on the details pane, which opens its editor as a
     /// dropdown anchored under it.
     EditField {

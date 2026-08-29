@@ -18,6 +18,7 @@ pub enum CommandId {
     EditArea,
     EditDescription,
     AddComment,
+    NewWorkItem,
     UndoEdit,
     Sort,
     Help,
@@ -204,6 +205,12 @@ pub const COMMANDS: &[Command] = &[
         title: "Add comment",
         keys: &[],
         help: "One line on the discussion",
+    },
+    Command {
+        id: CommandId::NewWorkItem,
+        title: "New work item",
+        keys: &[key('n')],
+        help: "Ctrl-S creates it",
     },
     Command {
         id: CommandId::UndoEdit,

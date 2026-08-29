@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -56,6 +56,7 @@ DROP TABLE IF EXISTS work_item_relations;
 DROP TABLE IF EXISTS work_item_comments;
 DROP TABLE IF EXISTS work_item_history;
 DROP TABLE IF EXISTS work_item_type_states;
+DROP TABLE IF EXISTS work_item_types;
 DROP TABLE IF EXISTS identities;
 DROP TABLE IF EXISTS classification_nodes;
 DROP TABLE IF EXISTS sync_meta;
@@ -119,6 +120,10 @@ CREATE TABLE work_item_type_states (
     position       INTEGER NOT NULL,
     PRIMARY KEY (work_item_type, name)
 );
+CREATE TABLE work_item_types (
+    name     TEXT PRIMARY KEY,
+    position INTEGER NOT NULL
+);
 CREATE TABLE identities (
     display_name TEXT PRIMARY KEY,
     unique_name  TEXT
@@ -138,7 +143,7 @@ CREATE TABLE sync_meta (
 );
 ";
 
-/// `sync_meta`, `work_item_type_states`, `identities`, and
+/// `sync_meta`, `work_item_type_states`, `work_item_types`, `identities`, and
 /// `classification_nodes` are deliberately absent: they describe the sync, the
 /// project's process, the people in it, and the trees its work is planned into,
 /// not the work items a pull replaces.
@@ -351,6 +356,33 @@ impl SqliteTicketRepository {
             catalog.insert(work_item_type, states);
         }
         Ok(catalog)
+    }
+
+    /// Records the work item types the project's process offers, in the order
+    /// Azure DevOps listed them. The list is written whole, so a type retired
+    /// from the process stops being offered.
+    pub fn replace_work_item_types(&mut self, types: &[String]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM work_item_types", [])?;
+        for (position, name) in types.iter().enumerate() {
+            transaction.execute(
+                "INSERT OR REPLACE INTO work_item_types (name, position) VALUES (?1, ?2)",
+                params![name, i64::try_from(position).unwrap_or(i64::MAX)],
+            )?;
+        }
+        transaction
+            .commit()
+            .context("failed to store the project's work item types")
+    }
+
+    /// Every work item type the last fetch found, in the order it found them.
+    pub fn load_work_item_types(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT name FROM work_item_types ORDER BY position")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load work item types")
     }
 
     /// Records the people the project's teams hold, so the assignee picker can
@@ -1223,6 +1255,43 @@ mod tests {
             repository.load_type_states().unwrap().states_for("Issue"),
             renamed,
             "a type is rewritten whole, so a retired state stops being offered"
+        );
+    }
+
+    #[test]
+    fn the_work_item_types_survive_a_pull_and_are_rewritten_whole() {
+        let directory = tempdir().unwrap();
+        let mut repository =
+            SqliteTicketRepository::open(directory.path().join("t.sqlite3")).unwrap();
+        assert!(
+            repository.load_work_item_types().unwrap().is_empty(),
+            "a fresh database knows no types, which is what the form falls back for"
+        );
+
+        let types = vec!["Epic".to_owned(), "Issue".to_owned(), "Task".to_owned()];
+        repository.replace_work_item_types(&types).unwrap();
+        assert_eq!(
+            repository.load_work_item_types().unwrap(),
+            types,
+            "the process template's own order is kept"
+        );
+
+        repository
+            .replace_all(&[ticket(1)], &TicketGraph::default())
+            .unwrap();
+        assert_eq!(
+            repository.load_work_item_types().unwrap(),
+            types,
+            "a pull replaces work items, not the types the process offers"
+        );
+
+        repository
+            .replace_work_item_types(&["Issue".to_owned()])
+            .unwrap();
+        assert_eq!(
+            repository.load_work_item_types().unwrap(),
+            ["Issue"],
+            "the list is rewritten whole, so a retired type stops being offered"
         );
     }
 

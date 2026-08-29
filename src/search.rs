@@ -110,6 +110,16 @@ impl SearchEngine {
         }
     }
 
+    /// Indexes one work item that has just joined the rows, leaving the rest
+    /// of the documents as they are. A creation adds one row to the end, and
+    /// rebuilding every document to follow it would be wasted work.
+    pub fn push_document(&mut self, ticket_index: usize, ticket: &Ticket) {
+        Arc::make_mut(&mut self.documents).push(SearchDocument {
+            ticket_index,
+            text: ticket.searchable_text().into(),
+        });
+    }
+
     pub fn submit(&mut self, query: &str) -> u64 {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;

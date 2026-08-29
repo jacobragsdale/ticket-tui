@@ -16,6 +16,7 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+use serde_json::Value;
 use ticket_tui::agent_context::{self, AgentContext};
 use ticket_tui::app::{
     App, AppAction, CopiedContent, DividerOrientation, PointerTarget, PreparedTickets, SyncTarget,
@@ -300,6 +301,7 @@ fn run() -> Result<()> {
     app.set_workspace_graph(graph);
     app.set_state_catalog(repository.load_type_states()?);
     app.set_identities(repository.load_identities()?);
+    app.set_work_item_types(repository.load_work_item_types()?);
     app.set_classification_nodes(
         repository.load_classification_nodes()?,
         repository
@@ -625,7 +627,13 @@ fn handle_action(
         }
         AppAction::FetchIdentities => send_identities(runtime),
         AppAction::FetchClassificationNodes => send_classification_nodes(runtime),
+        AppAction::FetchWorkItemTypes => send_work_item_types(runtime),
         AppAction::Comment { key, text } => start_comment(app, runtime, key, text),
+        AppAction::Create {
+            work_item_type,
+            patch,
+            parent,
+        } => start_create(app, runtime, work_item_type, patch, parent),
         AppAction::EditDescription { key, html } => {
             edit_description(app, runtime, &key, &html);
             return true;
@@ -903,6 +911,44 @@ fn send_classification_nodes(runtime: &SyncRuntime) {
     }
 }
 
+/// Asks the worker for the project's work item types. The form is already open
+/// over the types the database holds, so a worker that is gone changes nothing
+/// and says nothing.
+fn send_work_item_types(runtime: &SyncRuntime) {
+    if let Some(worker) = runtime.worker.as_ref() {
+        drop(worker.send(SyncRequest::WorkItemTypes));
+    }
+}
+
+/// Hands one new work item to the sync worker. Nothing appears in the table
+/// until Azure DevOps has stored it, so a worker that is gone only has to say
+/// the work item was not created — and the form comes back with everything
+/// still in it.
+fn start_create(
+    app: &mut App,
+    runtime: &mut SyncRuntime,
+    work_item_type: String,
+    patch: Vec<Value>,
+    parent: Option<i64>,
+) {
+    let sent = runtime.worker.as_ref().map(|worker| {
+        worker.send(SyncRequest::Create {
+            work_item_type,
+            patch,
+            parent,
+        })
+    });
+    let error = match sent {
+        Some(Ok(())) => return,
+        Some(Err(error)) => format!("{error:#}"),
+        None => runtime
+            .offline_reason
+            .clone()
+            .unwrap_or_else(|| "Azure DevOps is not configured".to_owned()),
+    };
+    app.reject_create(&error);
+}
+
 fn send_pull(app: &mut App, runtime: &mut SyncRuntime, origin: PullOrigin) {
     let sent = runtime
         .worker
@@ -1052,6 +1098,19 @@ fn poll_sync(
                 Err(rejection) => app.reject_comment(&rejection.key, &rejection.message),
             },
             SyncEvent::ClassificationNodes(nodes) => app.merge_classification_nodes(nodes),
+            SyncEvent::WorkItemTypes(types) => app.merge_work_item_types(types),
+            // The worker stored this work item itself, so the signature moves
+            // with it and the watcher below leaves the file alone.
+            SyncEvent::Created(result) => match *result {
+                Ok(created) => {
+                    app.apply_created(created.ticket, created.relations);
+                    app.configure_database(
+                        repository.path().to_path_buf(),
+                        db::data_signature(repository.path()),
+                    );
+                }
+                Err(rejection) => app.reject_create(&rejection.message),
+            },
             SyncEvent::Stopped => {
                 runtime.stop(app, "the Azure DevOps sync worker stopped");
             }
@@ -1074,6 +1133,7 @@ fn poll_watch(
         || app.sync_pending
         || app.edits_pending()
         || app.comments_pending()
+        || app.creates_pending()
         || app.details_pending.is_some()
     {
         return false;
@@ -1292,12 +1352,12 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serde_json::Value;
     use tempfile::tempdir;
-    use ticket_tui::app::NotificationLevel;
+    use ticket_tui::app::{AppMode, FormFieldId, NotificationLevel};
     use ticket_tui::azure::{RequestRejected, SyncBatch, Throttled};
     use ticket_tui::edit::FieldEdit;
     use ticket_tui::model::{
-        CommentRecord, HistoryRecord, RelationRecord, StateOption, Ticket, TicketGraph, TicketKey,
-        WorkItemDetails,
+        CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateOption, Ticket,
+        TicketGraph, TicketKey, WorkItemDetails,
     };
     use ticket_tui::sync::{SourceConnector, WorkItemSource};
     use ticket_tui::timestamp::Timestamp;
@@ -1322,6 +1382,9 @@ mod tests {
         details: Option<(i64, WorkItemDetails)>,
         /// The comment a post answers with, if this fake takes comments at all.
         comment: Option<CommentRecord>,
+        /// The work item a create answers with, and the links that come with
+        /// it, if this fake creates work items at all.
+        creation: Option<(Ticket, Vec<RelationRecord>)>,
         /// The wait every pull is turned away with, for a project Azure DevOps
         /// is shedding load from.
         throttle: Option<Duration>,
@@ -1337,6 +1400,7 @@ mod tests {
                 quiet: false,
                 details: None,
                 comment: None,
+                creation: None,
                 throttle: None,
             }
         }
@@ -1390,6 +1454,14 @@ mod tests {
         fn commenting(comment: CommentRecord) -> Self {
             Self {
                 comment: Some(comment),
+                ..Self::returning(Vec::new())
+            }
+        }
+
+        /// Accepts the next create and answers with `ticket` and its links.
+        fn creating(ticket: Ticket, relations: Vec<RelationRecord>) -> Self {
+            Self {
+                creation: Some((ticket, relations)),
                 ..Self::returning(Vec::new())
             }
         }
@@ -1458,6 +1530,24 @@ mod tests {
                 Some(ticket) => Ok((ticket.clone(), Vec::new())),
                 None => bail!("the fake source was not given a stored copy of #{id}"),
             }
+        }
+
+        fn create_work_item(
+            &self,
+            _work_item_type: &str,
+            _fields: &[Value],
+            _parent: Option<i64>,
+        ) -> Result<(Ticket, Vec<RelationRecord>)> {
+            if let Some((status, message)) = &self.refusal {
+                return Err(anyhow::Error::new(RequestRejected::new(
+                    *status,
+                    "https://dev.azure.com/example-org/atlas/_apis/wit/workitems/$Issue".to_owned(),
+                    message.clone(),
+                )));
+            }
+            self.creation
+                .clone()
+                .context("the fake source was not given a work item to create")
         }
 
         /// The state picker is fed from the database, so these tests never need
@@ -1543,6 +1633,20 @@ mod tests {
     ) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while app.comments_pending() {
+            poll_sync(app, repository, runtime);
+            assert!(Instant::now() < deadline, "the sync worker timed out");
+            thread::yield_now();
+        }
+    }
+
+    /// Pumps the event loop's sync polling until the create in flight answers.
+    fn await_create(
+        app: &mut App,
+        repository: &mut SqliteTicketRepository,
+        runtime: &mut SyncRuntime,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.creates_pending() {
             poll_sync(app, repository, runtime);
             assert!(Instant::now() < deadline, "the sync worker timed out");
             thread::yield_now();
@@ -1982,6 +2086,95 @@ mod tests {
         assert_eq!(app.activity_label(), None);
         assert!(offline_status(true).contains("ticket-tui sync"));
         assert!(offline_status(false).contains("offline"));
+    }
+
+    #[test]
+    fn a_filed_work_item_reaches_the_table_and_a_refused_one_reopens_the_form() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let mut filed = ticket(4);
+        filed.work_item_type = "Issue".into();
+        filed.title = "Honour Retry-After".into();
+        let parent = TicketKey {
+            organization: "example-org".into(),
+            id: 3,
+        };
+        let (mut app, mut repository, mut runtime) = synced_app(
+            &path,
+            FakeAzure::creating(
+                filed.clone(),
+                vec![RelationRecord {
+                    from: filed.key.clone(),
+                    to: parent.clone(),
+                    kind: RelationKind::Parent,
+                }],
+            ),
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Form);
+        app.form
+            .as_mut()
+            .expect("the form is open")
+            .set_value(FormFieldId::Title, "Honour Retry-After");
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(matches!(action, AppAction::Create { .. }));
+
+        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Creating Issue\u{2026}")
+        );
+        assert_eq!(app.tickets().len(), 3, "nothing shows until it is stored");
+        await_create(&mut app, &mut repository, &mut runtime);
+
+        assert_eq!(app.tickets().len(), 4);
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.key.id),
+            Some(4),
+            "the table selects the work item that was just filed"
+        );
+        assert_eq!(app.family_of(&filed.key).ancestors, vec![parent.clone()]);
+        assert_eq!(app.family_of(&parent).children, vec![filed.key.clone()]);
+        assert!(
+            repository
+                .load_all()
+                .unwrap()
+                .iter()
+                .any(|ticket| ticket.key.id == 4),
+            "the worker wrote it to SQLite on the way through"
+        );
+        assert!(
+            !poll_watch(&mut app, &repository, &mut ReloadEngine::default()),
+            "our own write is not another writer to reload behind"
+        );
+
+        let (mut app, mut repository, mut runtime) = synced_app(
+            &path,
+            FakeAzure::refusing(400, "TF401320: rule error", Vec::new()),
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        app.form
+            .as_mut()
+            .expect("the form is open")
+            .set_value(FormFieldId::Title, "Honour Retry-After");
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        await_create(&mut app, &mut repository, &mut runtime);
+
+        assert_eq!(
+            app.mode,
+            AppMode::Form,
+            "the form comes back to be answered"
+        );
+        assert_eq!(
+            app.form.as_ref().unwrap().value(FormFieldId::Title),
+            "Honour Retry-After",
+            "with everything still in it"
+        );
+        let (message, level) = app.notification().expect("the refusal is reported");
+        assert!(message.contains("TF401320: rule error"), "{message}");
+        assert_eq!(level, NotificationLevel::Error);
     }
 
     #[test]

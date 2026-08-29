@@ -72,6 +72,17 @@ pub enum SyncRequest {
     /// Leave one comment on one work item. `text` is what was typed, as plain
     /// text; the worker turns it into the rich text Azure DevOps stores.
     Comment { key: TicketKey, text: String },
+    /// Read the work item types the project's process offers, for the Type
+    /// field of the new-work-item form. Asked for once a session, the first
+    /// time that form opens.
+    WorkItemTypes,
+    /// Add one work item to the project. `patch` sets its fields and nothing
+    /// else: the parent travels as a link, which the client appends.
+    Create {
+        work_item_type: String,
+        patch: Vec<Value>,
+        parent: Option<i64>,
+    },
 }
 
 /// What the sync thread sends back.
@@ -105,8 +116,30 @@ pub enum SyncEvent {
     /// One comment landed and is already written to SQLite, or was refused and
     /// nothing was written at all.
     Commented(Box<Result<CommentRecord, CommentRejection>>),
+    /// The work item types the project's process offers, already stored. Empty
+    /// when they could not be read, which is not worth reporting: the type
+    /// picker already offers every type the database has seen.
+    WorkItemTypes(Vec<String>),
+    /// One work item was created and is already written to SQLite, or was
+    /// refused and nothing was written at all.
+    Created(Box<Result<CreatedWorkItem, CreateRejection>>),
     /// The worker thread is gone and no further events will arrive.
     Stopped,
+}
+
+/// A work item Azure DevOps stored, as the answer to a create came back: the
+/// row and the links it carries, both already written to SQLite.
+#[derive(Clone, Debug)]
+pub struct CreatedWorkItem {
+    pub ticket: Ticket,
+    pub relations: Vec<RelationRecord>,
+}
+
+/// A work item that was never created. It names nothing, because there is no
+/// id to name: only what Azure DevOps said is left to report.
+#[derive(Clone, Debug)]
+pub struct CreateRejection {
+    pub message: String,
 }
 
 /// How one details request ended. A failure names the work item it was for, so
@@ -202,6 +235,12 @@ pub trait WorkItemSource {
     /// The states one work item type allows, which is what the state picker
     /// offers once a pull has cached them.
     fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>>;
+    /// Every work item type the project's process offers, which the Type field
+    /// of the new-work-item form lists. A source that cannot read them answers
+    /// with none, and the form falls back to the types the rows already carry.
+    fn work_item_types(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
     /// One work item's comments and revision history. A source that cannot
     /// read them answers with none, which leaves the details pane showing what
     /// the work item itself says and nothing more.
@@ -268,6 +307,10 @@ impl WorkItemSource for AzureClient {
 
     fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>> {
         self.fetch_work_item_type_states(work_item_type)
+    }
+
+    fn work_item_types(&self) -> Result<Vec<String>> {
+        self.fetch_work_item_types()
     }
 
     fn fetch_details(&self, id: i64) -> Result<WorkItemDetails> {
@@ -451,6 +494,17 @@ fn work(
             SyncRequest::Comment { key, text } => {
                 SyncEvent::Commented(Box::new(worker.comment(key, &text, events)))
             }
+            SyncRequest::WorkItemTypes => SyncEvent::WorkItemTypes(worker.work_item_types(events)),
+            SyncRequest::Create {
+                work_item_type,
+                patch,
+                parent,
+            } => SyncEvent::Created(Box::new(worker.create(
+                &work_item_type,
+                &patch,
+                parent,
+                events,
+            ))),
         };
         if events.send(event).is_err() {
             break;
@@ -708,6 +762,58 @@ impl Worker {
         };
         self.repository()?.insert_comment(&comment)?;
         Ok(comment)
+    }
+
+    /// Reads the work item types the project's process offers and stores them
+    /// for the next session, answering with what was stored. Like the team
+    /// members, a failure answers with nothing and says nothing: the form
+    /// already offers every type the database has a work item of.
+    fn work_item_types(&mut self, events: &Sender<SyncEvent>) -> Vec<String> {
+        let types = match self.source(events) {
+            Ok(source) => source.work_item_types().unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        if types.is_empty() {
+            return types;
+        }
+        if let Ok(repository) = self.repository() {
+            drop(repository.replace_work_item_types(&types));
+        }
+        types
+    }
+
+    /// Adds one work item and stores it, answering with the copy Azure DevOps
+    /// kept. Nothing is written locally unless the create landed, so a refusal
+    /// leaves the project exactly as it was and there is no half-made row to
+    /// clean up.
+    fn create(
+        &mut self,
+        work_item_type: &str,
+        patch: &[Value],
+        parent: Option<i64>,
+        events: &Sender<SyncEvent>,
+    ) -> Result<CreatedWorkItem, CreateRejection> {
+        self.awaiting_throttle(|worker| worker.try_create(work_item_type, patch, parent, events))
+            .map_err(|error| CreateRejection {
+                message: format!("{error:#}"),
+            })
+    }
+
+    /// The links come back with the work item — the create URL asks for them —
+    /// so the parent it was filed under is stored with it rather than waiting
+    /// on the next pull to notice.
+    fn try_create(
+        &mut self,
+        work_item_type: &str,
+        patch: &[Value],
+        parent: Option<i64>,
+        events: &Sender<SyncEvent>,
+    ) -> Result<CreatedWorkItem> {
+        let (ticket, relations) =
+            self.source(events)?
+                .create_work_item(work_item_type, patch, parent)?;
+        self.repository()?.upsert(&ticket, &relations)?;
+        Ok(CreatedWorkItem { ticket, relations })
     }
 
     /// Reads both classification trees and stores them for the next session,
@@ -1127,6 +1233,10 @@ mod tests {
     /// One write the worker made: the work item id, and the document it sent.
     type SentPatch = (i64, Vec<Value>);
 
+    /// One create the worker made: the type, the operations that set its
+    /// fields, and the parent it was filed under.
+    type Creation = (String, Vec<Value>, Option<i64>);
+
     /// A scripted stand-in for Azure DevOps: each pull takes the next result, and
     /// a write answers with the stored copy or with the refusal it was given.
     #[derive(Clone, Default)]
@@ -1175,6 +1285,12 @@ mod tests {
         comment: Option<CommentRecord>,
         /// Every comment body posted, with the work item it was posted on.
         posted: Arc<Mutex<Vec<(i64, String)>>>,
+        /// The types this source says the project's process offers, or `None`
+        /// for one that cannot read them.
+        work_item_types: Option<Vec<String>>,
+        /// Every create the worker sent: the type, the field operations, and
+        /// the parent it named.
+        created: Arc<Mutex<Vec<Creation>>>,
         /// What this source pulls, for the tests about recording it. `None`
         /// stands in for a source that does not know, which is what leaves
         /// every other test's database free of sync scope rows.
@@ -1234,6 +1350,13 @@ mod tests {
         fn commenting(self, comment: CommentRecord) -> Self {
             Self {
                 comment: Some(comment),
+                ..self
+            }
+        }
+
+        fn with_types(self, types: Vec<&str>) -> Self {
+            Self {
+                work_item_types: Some(types.into_iter().map(ToOwned::to_owned).collect()),
                 ..self
             }
         }
@@ -1362,6 +1485,34 @@ mod tests {
                 .get(work_item_type)
                 .cloned()
                 .with_context(|| format!("no states for {work_item_type}"))
+        }
+
+        fn work_item_types(&self) -> Result<Vec<String>> {
+            self.work_item_types
+                .clone()
+                .context("the fake source cannot list work item types")
+        }
+
+        fn create_work_item(
+            &self,
+            work_item_type: &str,
+            fields: &[Value],
+            parent: Option<i64>,
+        ) -> Result<(Ticket, Vec<RelationRecord>)> {
+            self.created
+                .lock()
+                .unwrap()
+                .push((work_item_type.to_owned(), fields.to_vec(), parent));
+            if let Some((status, message)) = &self.refusal {
+                return Err(anyhow::Error::new(RequestRejected::new(
+                    *status,
+                    "https://dev.azure.com/demo/atlas/_apis/wit/workitems/$Issue".to_owned(),
+                    message.clone(),
+                )));
+            }
+            self.stored
+                .clone()
+                .context("the fake source was not given a stored copy")
         }
 
         fn post_comment(&self, id: i64, html: &str) -> Result<CommentRecord> {
@@ -2355,11 +2506,181 @@ mod tests {
                 | SyncEvent::Details(_)
                 | SyncEvent::Identities(_)
                 | SyncEvent::ClassificationNodes(_)
+                | SyncEvent::WorkItemTypes(_)
+                | SyncEvent::Created(_)
                 | SyncEvent::Commented(_) => continue,
                 SyncEvent::Stopped => panic!("the worker stopped early"),
             }
         }
         assert_eq!(seen, ["edit", "pull"], "requests are answered in order");
+    }
+
+    /// The answer to the next create, past the display name the first connect
+    /// reports.
+    fn created(handle: &SyncHandle) -> Result<CreatedWorkItem, CreateRejection> {
+        loop {
+            match next_event(handle) {
+                SyncEvent::Created(result) => return *result,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected a create to finish, got {other:?}"),
+            }
+        }
+    }
+
+    /// The types the next work item types request answers with.
+    fn fetched_types(handle: &SyncHandle) -> Vec<String> {
+        loop {
+            match next_event(handle) {
+                SyncEvent::WorkItemTypes(types) => return types,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected the work item types, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_created_work_item_is_stored_with_its_links_before_it_is_reported() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let mut child = ticket(42, "Honour Retry-After");
+        child.work_item_type = "Issue".into();
+        let parent = TicketKey {
+            organization: "demo".into(),
+            id: 1,
+        };
+        let source = FakeSource::storing(
+            child.clone(),
+            vec![RelationRecord {
+                from: child.key.clone(),
+                to: parent.clone(),
+                kind: RelationKind::Parent,
+            }],
+        );
+        let sent = Arc::clone(&source.created);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+        let fields = vec![crate::edit::set_field(
+            crate::edit::TITLE_FIELD,
+            "Honour Retry-After",
+        )];
+
+        handle
+            .send(SyncRequest::Create {
+                work_item_type: "Issue".into(),
+                patch: fields.clone(),
+                parent: Some(1),
+            })
+            .unwrap();
+        let created = created(&handle).expect("the create was accepted");
+
+        assert_eq!(created.ticket.key.id, 42);
+        assert_eq!(
+            sent.lock().unwrap().clone(),
+            vec![("Issue".to_owned(), fields, Some(1))],
+            "the type, the field operations, and the parent all travel as they were given"
+        );
+
+        let repository = SqliteTicketRepository::open_existing(&path).unwrap();
+        let stored = repository.load_all().unwrap();
+        assert!(
+            stored.iter().any(|ticket| ticket.key.id == 42),
+            "the work item is in SQLite before the main thread hears about it"
+        );
+        let graph = repository.load_graph().unwrap();
+        assert_eq!(
+            graph.parents_of(&created.ticket.key),
+            vec![parent.clone()],
+            "the child knows its parent"
+        );
+        assert_eq!(
+            graph.children_of(&parent),
+            vec![created.ticket.key],
+            "and the parent knows its child"
+        );
+    }
+
+    #[test]
+    fn a_refused_create_writes_nothing_and_reports_what_azure_devops_said() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let handle = SyncHandle::spawn(
+            path.clone(),
+            Box::new(FakeSource::refusing(400, "TF401320: rule error")),
+        )
+        .unwrap();
+
+        handle
+            .send(SyncRequest::Create {
+                work_item_type: "Issue".into(),
+                patch: Vec::new(),
+                parent: None,
+            })
+            .unwrap();
+        let rejection = created(&handle).expect_err("the create was refused");
+
+        assert!(
+            rejection.message.contains("TF401320: rule error"),
+            "the refusal travels as it came: {}",
+            rejection.message
+        );
+        assert_eq!(
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .load_all()
+                .unwrap()
+                .len(),
+            1,
+            "nothing was written for a work item that was never created"
+        );
+    }
+
+    #[test]
+    fn the_work_item_types_are_read_once_and_cached_for_the_next_session() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let handle = SyncHandle::spawn(
+            path.clone(),
+            Box::new(
+                FakeSource::with(vec![Ok(SyncBatch::default())]).with_types(vec!["Epic", "Issue"]),
+            ),
+        )
+        .unwrap();
+
+        handle.send(SyncRequest::WorkItemTypes).unwrap();
+
+        assert_eq!(fetched_types(&handle), ["Epic", "Issue"]);
+        assert_eq!(
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .load_work_item_types()
+                .unwrap(),
+            ["Epic", "Issue"],
+            "stored in the order the process listed them, for the next run"
+        );
+    }
+
+    #[test]
+    fn a_source_that_cannot_list_the_work_item_types_says_nothing_and_stores_nothing() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let handle = SyncHandle::spawn(
+            path.clone(),
+            Box::new(FakeSource::with(vec![Ok(SyncBatch::default())])),
+        )
+        .unwrap();
+
+        handle.send(SyncRequest::WorkItemTypes).unwrap();
+
+        assert!(
+            fetched_types(&handle).is_empty(),
+            "an endpoint nobody asked for is not worth a toast"
+        );
+        assert!(
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .load_work_item_types()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
