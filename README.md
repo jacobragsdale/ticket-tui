@@ -698,6 +698,60 @@ so closing it to go and read something is not the same as retyping it. The draft
 lives in memory for the session only: the session file records how the table is
 arranged, not a half-typed work item, so it is gone at quit.
 
+## Sprint summary
+
+**Sprint summary** in the command palette — no default key — opens a read-only
+board for one iteration, worked out from the work items already in memory, so it
+opens instantly and reads the same offline as it does after a pull:
+
+```
+┌ Sprint summary · Sprint 1 ──────────────[×]┐
+│  Assignee      To Do  Doing   Done  Total  │
+│› Avery Chen        3      2      4      9  │
+│  Blake Ford        2      1      6      9  │
+│  Unassigned        4      0      1      5  │
+│  Total             9      3     11     23  │
+│                                            │
+│  By type                                   │
+│  Task                                  14  │
+│  Bug                                    6  │
+│  User Story                             3  │
+│                                            │
+│  23 items · 11 done (48%) · 4 stale        │
+└────────────────────────────────────────────┘
+```
+
+The grid has one row per person, a row for the work nobody owns, and a Total
+row. Its columns are the three stations a board has, and work is put under them
+by Azure DevOps state *category* rather than by state name, so `To Do`/`Doing`/
+`Done`, `New`/`Active`/`Closed`, and every other process template's spelling
+land in the same three columns. Resolved counts as in flight: somebody is still
+waiting on work that is only ready for test.
+
+**The counts are taken over every work item on file, not over the rows the
+table is showing.** The table hides finished work by default, and a sprint
+summary that inherited that would report a Done column that never filled up.
+The `4 stale` figure is the same rule the Changed column paints — see
+[Stale-item highlighting](#stale-item-highlighting) — rather than a second
+definition of old.
+
+`↑`/`↓` (or `j`/`k`) move between the grid rows, stepping over the headings and
+the tallies. `Enter` filters the table to that row and closes the overlay:
+`assignee:"Avery Chen" iteration:"Sprint 1"` for a person, and the iteration
+alone for the Total row. The table's own finished rule still applies to what
+comes back, so the `Finished hidden ×` chip may say the summary counted more
+than the table is listing; its `×` puts them back.
+
+`←`/`→` (or `h`/`l`) step to the previous or next iteration once the
+classification trees have been fetched, stopping at either end rather than
+wrapping, and skipping the project root — somewhere to file work, not a sprint.
+
+Which iteration the overlay opens on is the sprint the project is in: the
+deepest iteration whose start and finish dates contain today. A project whose
+sprints carry no dates has no current iteration at all, so the overlay falls
+back to the one the selected work item is planned into. With neither — nothing
+scheduled and no row selected — it says so rather than painting an empty grid.
+
 ## Controls
 
 | Input | Action |
@@ -833,12 +887,13 @@ with it — means exactly what it says rather than being applied twice. The tabl
 title counts what is on the table over the whole database, so the rows left out
 are the difference between the two; `i` says how many they are. The details
 pane and the family tree reach a hidden work item as they always did: a parent
-or child that is finished is still shown there.
+or child that is finished is still shown there, and the
+[sprint summary](#sprint-summary) counts it.
 
 The command palette copies
 IDs, URLs, titles, Markdown links, or summaries, edits the title, priority,
 tags, iteration, area, or description, leaves a comment, shows or hides finished
-tickets, and exports the
+tickets, opens the [sprint summary](#sprint-summary), and exports the
 selection as JSON or CSV. Press `i` for database path, row counts, how many
 finished rows are hidden, freshness, and the last
 sync. A database another process writes reloads automatically; the table title
@@ -903,7 +958,9 @@ query language already takes, so a flagged row is precisely a row `changed:>14d
 state:@open` lists — the built-in **Stale** view. An item last touched exactly
 fourteen days ago has not crossed the threshold; one touched a moment before
 that has. Change it with `--stale-days`, `TICKET_TUI_STALE_DAYS`, or **Set
-stale threshold** in the palette, which remembers what it was given.
+stale threshold** in the palette, which remembers what it was given. The
+[sprint summary](#sprint-summary)'s stale figure counts by the same rule and
+moves with the same threshold.
 
 ## Database reference
 

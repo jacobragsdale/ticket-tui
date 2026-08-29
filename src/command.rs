@@ -41,6 +41,7 @@ pub enum CommandId {
     HistoryBack,
     HistoryForward,
     SaveView,
+    SprintSummary,
     DatabaseInfo,
     Quit,
     ResetPaneSplit,
@@ -335,6 +336,12 @@ pub const COMMANDS: &[Command] = &[
         title: "Clear selection",
         keys: &[],
         help: "",
+    },
+    Command {
+        id: CommandId::SprintSummary,
+        title: "Sprint summary",
+        keys: &[],
+        help: "Who has what this iteration",
     },
     Command {
         id: CommandId::DatabaseInfo,

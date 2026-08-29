@@ -26,6 +26,7 @@ use crate::pointer::{
     SelectableSnapshot, SelectableSurface, ThumbGeometry, region,
 };
 use crate::search::QueryHighlighter;
+use crate::sprint::{SummaryRow, SummaryRowKind};
 use crate::timestamp::Timestamp;
 
 const WIDE_BREAKPOINT: u16 = 110;
@@ -35,6 +36,15 @@ const NARROW_BREAKPOINT: u16 = 70;
 /// fewest rows it is worth opening in: two for the frame and one for a row.
 const ANCHORED_MIN_WIDTH: u16 = 24;
 const ANCHORED_MIN_HEIGHT: u16 = 3;
+
+/// What the sprint summary needs around its widest line: the cursor marker,
+/// the two borders, the scrollbar column, and a space to breathe.
+const SPRINT_OVERLAY_CHROME: usize = 6;
+/// Wide enough for the title bar however small the grid is, narrow enough to
+/// leave the table either side of it, and never taller than a short terminal.
+const SPRINT_OVERLAY_MIN_WIDTH: u16 = 42;
+const SPRINT_OVERLAY_MAX_WIDTH: u16 = 72;
+const SPRINT_OVERLAY_MAX_HEIGHT: u16 = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Theme {
@@ -211,6 +221,7 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::Palette => render_palette(frame, app),
         AppMode::Views => render_views_overlay(frame, app),
         AppMode::Info => render_info_overlay(frame, app),
+        AppMode::Sprint => render_sprint_overlay(frame, app),
         AppMode::Facets => render_facet_menu(frame, app),
         AppMode::Edit => render_edit_menu(frame, app),
         AppMode::StatePicker => render_state_picker(frame, app),
@@ -1028,6 +1039,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             }
             AppMode::Views => "↑↓ choose  Enter load  n save  d delete  Esc close",
             AppMode::Info => "Esc/i close",
+            AppMode::Sprint => "↑↓/jk row  ←→/hl sprint  Enter filter  Esc close",
             AppMode::Edit => "\u{2191}\u{2193}/jk choose  Enter open  Esc close",
             AppMode::StatePicker | AppMode::PriorityPicker => {
                 "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel"
@@ -2460,6 +2472,86 @@ fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
     );
 }
 
+/// The sprint summary: the per-assignee grid, the by-type tally under it, and
+/// the headline, all painted through the same list helper the other overlays
+/// use so the scrollbar and the hit regions come for free.
+fn render_sprint_overlay(frame: &mut Frame<'_>, app: &mut App) {
+    let summary = app.summary_rows();
+    // Cut to the grid rather than fixed: a one-person sprint should not open a
+    // half-empty box, and a whole team still gets its scrollbar.
+    let widest = summary
+        .iter()
+        .map(|row| row.text.chars().count())
+        .max()
+        .unwrap_or_default()
+        .saturating_add(SPRINT_OVERLAY_CHROME);
+    let area = centered_rect(
+        frame.area(),
+        u16::try_from(widest)
+            .unwrap_or(u16::MAX)
+            .clamp(SPRINT_OVERLAY_MIN_WIDTH, SPRINT_OVERLAY_MAX_WIDTH),
+        u16::try_from(summary.len().saturating_add(2))
+            .unwrap_or(u16::MAX)
+            .min(SPRINT_OVERLAY_MAX_HEIGHT),
+    );
+    frame.render_widget(Clear, area);
+    let title = app.summary_title();
+    let inner = render_modal_frame(frame, app, area, &title);
+    // An overlay with no grid — an empty sprint, or none to count — has nothing
+    // for the cursor to sit on, so nothing is highlighted rather than the first
+    // line of an explanation being lit up as though it were a row.
+    let selected = summary
+        .get(app.sprint_overlay.index)
+        .filter(|row| row.is_selectable())
+        .map_or(usize::MAX, |_| app.sprint_overlay.index);
+    let rows: Vec<Line> = summary
+        .iter()
+        .enumerate()
+        .map(|(index, row)| summary_line(row, index == selected))
+        .collect();
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: inner,
+            surface: ScrollSurface::Sprint,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: false,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::SummaryRow { index },
+            decorate: None,
+        },
+    );
+}
+
+/// One line of the sprint summary. The grid rows carry the cursor marker and
+/// the headings and tallies are indented past where it would sit, so the
+/// columns line up down the whole overlay.
+fn summary_line(row: &SummaryRow, selected: bool) -> Line<'static> {
+    let marker = if selected { "\u{203a}" } else { " " };
+    match row.kind {
+        SummaryRowKind::Blank => Line::default(),
+        SummaryRowKind::Heading => Line::from(Span::styled(
+            format!("  {}", row.text),
+            Style::default()
+                .fg(theme().muted)
+                .add_modifier(Modifier::BOLD),
+        )),
+        SummaryRowKind::Note => Line::from(Span::styled(
+            format!("  {}", row.text),
+            Style::default().fg(theme().muted),
+        )),
+        SummaryRowKind::Total => Line::from(Span::styled(
+            format!("{marker} {}", row.text),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        SummaryRowKind::Assignee(_) => Line::from(format!("{marker} {}", row.text)),
+    }
+}
+
 fn link_line(text: String) -> Line<'static> {
     terminate_underline(Line::from(Span::styled(
         text,
@@ -3711,6 +3803,7 @@ fn row_like(target: &PointerTarget) -> bool {
             | PointerTarget::FilterRow { .. }
             | PointerTarget::PaletteCommand { .. }
             | PointerTarget::ViewRow { .. }
+            | PointerTarget::SummaryRow { .. }
             | PointerTarget::SortChoose(_)
             | PointerTarget::ColumnToggle { .. }
     )
@@ -6790,6 +6883,67 @@ mod tests {
         assert!(
             screen.contains("\u{203a}  Mine"),
             "the cursor opens on the first built-in rather than on its heading:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn the_sprint_summary_draws_its_grid_and_a_clicked_row_filters_the_table() {
+        let mut app = App::new(vec![
+            ticket_at(1, "Search", "Bug", "To Do", "2026-08-28T00:00:00Z"),
+            ticket_at(2, "Cache", "Task", "Done", "2026-08-27T00:00:00Z"),
+        ]);
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        for character in "sprint summary".chars() {
+            app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Sprint, "the palette has no key for it");
+
+        let screen = render_text(100, 30, &mut app);
+        for needle in [
+            "Sprint summary \u{b7} Sprint 1",
+            "Assignee",
+            "To Do",
+            "Doing",
+            "Done",
+            "Total",
+            "Avery Chen",
+            "By type",
+            "2 items \u{b7} 1 done (50%)",
+        ] {
+            assert!(
+                screen.contains(needle),
+                "{needle} should be on screen:\n{screen}"
+            );
+        }
+        assert!(
+            screen.contains("\u{203a} Avery Chen"),
+            "the cursor opens on the first person rather than on the headings:\n{screen}"
+        );
+
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::SummaryRow { index: 1 }))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("each grid row is clickable");
+        click(&mut app, x, y);
+
+        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(
+            app.query(),
+            "assignee:\"Avery Chen\" iteration:\"Sprint 1\""
+        );
+
+        let mut empty = App::new(vec![]);
+        empty.mode = AppMode::Sprint;
+        let screen = render_text(100, 30, &mut empty);
+        assert!(
+            screen.contains("No sprint to summarise."),
+            "an overlay with no sprint to count explains itself:\n{screen}"
+        );
+        assert!(
+            !screen.contains("Assignee      To Do"),
+            "and paints no grid at all:\n{screen}"
         );
     }
 }
