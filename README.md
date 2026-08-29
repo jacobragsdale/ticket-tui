@@ -355,7 +355,9 @@ pane opens that field's editor where the value is, as a dropdown anchored under
 it — one click, not two — and `Enter` does the same for the value under the
 pointer while the details pane is focused, with the link line still opening the
 work item. The keyboard opens the same editors centred, and both paths run the
-same command and write the same edit; only the placement differs.
+same command and write the same edit; only the placement differs. The
+description is the exception: it is long-form, so no dropdown could hold it and
+it is reached from the Edit menu or the palette instead.
 
 `e` opens the Edit menu, which lists the fields that can be changed; `S`
 (capital, because `s` is the sort menu) skips it and opens the state picker
@@ -467,8 +469,8 @@ with exit status: 1`, and nothing is written.
 
 The file is Markdown, not HTML: paragraphs separated by a blank line, `- `
 bullets and `1.` numbers indented two spaces a level, `[text](url)` links,
-backtick `code`, ``` fenced blocks for `<pre>`, `#` headings, `**bold**`, and
-`---` rules. Saving converts it back the way it came, so a description that
+backtick `code`, triple-backtick fenced blocks for `<pre>`, `#` headings,
+`**bold**`, and `---` rules. Saving converts it back the way it came, so a description that
 goes out and comes back untouched reads exactly as it did. A file that comes
 back byte for byte as it was written is not an edit at all: nothing is sent and
 the status line says `#613 description unchanged`. An emptied file clears the
