@@ -1197,11 +1197,22 @@ The details pane is one scrolling document rather than a pinned heading over a
 scrolling body. Its heading — title, ID / Type / State, the family breadcrumb,
 assignee and priority, tags, project and revision, child progress, and the
 work-item URL — scrolls away with everything under it, in this order: the
-family tree, Planning, Description, History, and Comments. The scrollbar
+family tree, Related, Planning, Description, History, and Comments. The scrollbar
 therefore measures the whole pane and its thumb reaches the bottom, `End` lands
 on the last comment, and a field value stays clickable wherever the scroll has
 carried it. Moving the family cursor scrolls the tree back into view when the
 heading has pushed it below the fold.
+
+Related lists what the work item was worked on with, from the `ArtifactLink`
+relations Azure DevOps stores: its pull requests, the commits that named it, and
+the builds it went out in. A pull request or build this database holds is named
+and follows on `Enter` or a click — `!42  Split the files · completed`,
+`Build 20260829.4 ✓` — and one it does not hold says so rather than pretending,
+because there is nothing here to open. A commit reads as its short sha and the
+repository it is in: nothing in this app shows a diff, and `o` still opens the
+work item in the browser. The section is left out entirely for a work item with
+no such links, and the agent context lists the same links on the selected work
+item, each saying whether the database holds it.
 
 A work item with children reports how far they have got. The heading reads
 `Children: 3/7 done` with a six-cell bar beside it, every family-tree row that
@@ -1383,11 +1394,12 @@ The `work_items` table stores these columns:
 | `details_rev` | Revision whose comments and history are stored, `0` for none |
 
 The primary key is `(organization, work_item_id)`. Tags use Azure DevOps-style
-semicolon separation. The `work_item_relations`, `work_item_comments`, and
-`work_item_history` tables hold the graph around each work item: links from
-every pull, and comments and revision history for every work item whose
-`details_rev` says they have been read. A work item the project stops listing
-takes all three with it. The `sync_meta`
+semicolon separation. The `work_item_relations`, `work_item_artifact_links`,
+`work_item_comments`, and `work_item_history` tables hold the graph around each
+work item: links to other work items and to the pull requests, commits and
+builds it was worked on with, both from every pull, and comments and revision
+history for every work item whose `details_rev` says they have been read. A work
+item the project stops listing takes all four with it. The `sync_meta`
 key/value table describes the sync itself rather than the work items, so a full
 pull clears the other tables but leaves it alone. These keys live there, beside
 the `classification_nodes_fetched_at` below:
@@ -1443,7 +1455,7 @@ dropped on the way in. Like `sync_meta` it describes the project's process
 rather than its work items, so a pull leaves it alone; it is rewritten whole
 when the types are read, so a retired type stops being offered.
 
-The database carries `PRAGMA user_version = 12`. Because Azure DevOps is the
+The database carries `PRAGMA user_version = 17`. Because Azure DevOps is the
 record of truth, there are no migrations: a database at any other version has
 its tables dropped and recreated at startup, and a pull runs immediately to
 refill it, whatever `--refresh` says. Deleting the file has the same effect. The

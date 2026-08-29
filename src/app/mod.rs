@@ -29,9 +29,10 @@ use crate::filter::{
 };
 pub use crate::model::Jump;
 use crate::model::{
-    CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity,
-    RelationKind, RelationRecord, Repo, SortDirection, SortField, StateCatalog, StateCategory,
-    StateOption, Ticket, TicketGraph, TicketKey, compare_tickets, path_leaf, same_text,
+    ArtifactLink, CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord,
+    Identity, RelationKind, RelationRecord, Repo, SortDirection, SortField, StateCatalog,
+    StateCategory, StateOption, Ticket, TicketGraph, TicketKey, compare_tickets, path_leaf,
+    same_text,
 };
 pub use crate::model::{RowDensity, SearchOrder};
 use crate::pointer::{
@@ -376,6 +377,15 @@ impl App {
                 .tickets
                 .iter()
                 .map(|ticket| (ticket.key.id, ticket.title.clone()))
+                .collect(),
+        );
+        self.shell.set_artifact_labels(
+            pull_requests
+                .iter()
+                .map(|request| (request.id, request.title.clone(), request.status))
+                .collect(),
+            runs.iter()
+                .map(|run| (run.id, run.build_number.clone(), run.status, run.result))
                 .collect(),
         );
         self.work_items

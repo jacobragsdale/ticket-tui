@@ -1,6 +1,8 @@
 //! The JSON context file agents read.
 
 use super::*;
+use crate::agent_context::ArtifactContext;
+use crate::model::ArtifactKind;
 
 impl WorkItemsScreen {
     #[must_use]
@@ -74,9 +76,10 @@ impl WorkItemsScreen {
                 viewport_size: self.table.viewport,
                 visible_rows,
             },
-            selected_ticket: self
-                .selected_ticket()
-                .map(|ticket| self.ticket_context(ticket)),
+            selected_ticket: self.selected_ticket().map(|ticket| TicketContext {
+                related: self.artifact_contexts(&ticket.key, shell),
+                ..self.ticket_context(ticket)
+            }),
             checked_tickets,
             family_cursor: self.family_cursor.as_ref().map(|key| TicketReference {
                 organization: key.organization.clone(),
@@ -123,6 +126,27 @@ impl WorkItemsScreen {
             web_url: ticket.web_url.clone(),
             bookmarked: self.bookmarks.contains(&ticket.key),
             checked: self.selected_keys.contains(&ticket.key),
+            related: Vec::new(),
         }
+    }
+
+    /// One work item's artifact links, saying for each whether this database
+    /// holds the thing it points at.
+    fn artifact_contexts(&self, key: &TicketKey, shell: &Shell) -> Vec<ArtifactContext> {
+        self.artifacts_for(key)
+            .into_iter()
+            .map(|artifact| ArtifactContext {
+                kind: artifact.kind.as_str().to_owned(),
+                name: artifact.name.clone(),
+                repo: artifact.kind.repo_id().map(|id| shell.repo_name(id)),
+                target: artifact.kind.target(),
+                in_database: match &artifact.kind {
+                    ArtifactKind::PullRequest { id, .. } => shell.pull_request_label(*id).is_some(),
+                    ArtifactKind::Build(id) => shell.run_label(*id).is_some(),
+                    // Nothing in this app shows a commit.
+                    ArtifactKind::Commit { .. } => false,
+                },
+            })
+            .collect()
     }
 }

@@ -72,6 +72,8 @@ pub(super) fn render_details(
     let mut lines: Vec<Line> = Vec::new();
     let mut family_hits: Vec<FamilyHit> = Vec::new();
     let mut line_links: Vec<(u16, TicketKey)> = Vec::new();
+    // The artifact lines that go somewhere: the line and where.
+    let mut artifact_links: Vec<(u16, Jump)> = Vec::new();
     // Every click target is a line of the one paragraph, so each is recorded
     // against its logical line and placed once the scroll offset is known.
     let mut field_hits: Vec<(u16, EditableField, u16, u16)> = Vec::new();
@@ -143,6 +145,22 @@ pub(super) fn render_details(
             lines.push(family_member_line(
                 "  also ", parent, related, false, is_cursor, width,
             ));
+        }
+        lines.push(Line::default());
+    }
+
+    // What the work item was worked on with. A link the database holds is a
+    // jump; one it does not is a plain line, because there is nothing here to
+    // open — `o` still opens the work item, and the browser has the rest.
+    let artifacts = screen.artifacts_for(&ticket.key);
+    if !artifacts.is_empty() {
+        lines.push(section_line("Related"));
+        for artifact in &artifacts {
+            let (line, jump) = artifact_line(artifact, shell);
+            if let (Ok(index), Some(jump)) = (u16::try_from(lines.len()), jump.clone()) {
+                artifact_links.push((index, jump));
+            }
+            lines.push(line);
         }
         lines.push(Line::default());
     }
@@ -234,6 +252,7 @@ pub(super) fn render_details(
         .map(|(line, ..)| *line)
         .chain(family_hits.iter().map(|hit| hit.line))
         .chain(line_links.iter().map(|(line, _)| *line))
+        .chain(artifact_links.iter().map(|(line, _)| *line))
         .chain(url_line)
         .max();
     let rows = last_hit.map_or_else(Vec::new, |last| {
@@ -285,6 +304,17 @@ pub(super) fn render_details(
             shell.hit_regions.push(region(
                 Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
                 PointerTarget::Follow(Jump::WorkItem(key)),
+                PointerLayer::Base,
+                Some(SelectableSurface::Details),
+                Some(ScrollSurface::Details),
+            ));
+        }
+    }
+    for (logical, jump) in artifact_links {
+        if let Some(y) = row_of(logical) {
+            shell.hit_regions.push(region(
+                Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
+                PointerTarget::Follow(jump),
                 PointerLayer::Base,
                 Some(SelectableSurface::Details),
                 Some(ScrollSurface::Details),
@@ -901,6 +931,79 @@ pub(super) fn history_line(entry: &HistoryRecord, now: OffsetDateTime) -> Line<'
             Style::default().fg(theme().muted),
         ),
     ])
+}
+
+/// One artifact link as the Related section draws it, and where it goes.
+///
+/// A pull request or a build the database holds is named and underlined; one
+/// it does not hold reads as its number alone, in the muted style, because
+/// nothing here can show it. A commit is never a jump — there is no commit
+/// screen — so it reads as its short sha and the repository it is in.
+fn artifact_line(artifact: &ArtifactLink, shell: &Shell) -> (Line<'static>, Option<Jump>) {
+    let muted = Style::default().fg(theme().muted);
+    let link = Style::default()
+        .fg(theme().link)
+        .add_modifier(Modifier::UNDERLINED);
+    let label = |text: String| Span::styled(format!("  {text:<14}"), muted);
+    match &artifact.kind {
+        ArtifactKind::PullRequest { repo_id, id } => match shell.pull_request_label(*id) {
+            Some((title, status)) => (
+                terminate_underline(Line::from(vec![
+                    label("Pull request".to_owned()),
+                    Span::styled(format!("!{id}  {title}"), link),
+                    Span::styled(format!("  \u{00b7} {}", status.as_str()), muted),
+                ])),
+                Some(Jump::PullRequest {
+                    repo: shell.repo_name(repo_id),
+                    id: *id,
+                }),
+            ),
+            None => (
+                Line::from(vec![
+                    label("Pull request".to_owned()),
+                    Span::styled(format!("!{id}  not in this database"), muted),
+                ]),
+                None,
+            ),
+        },
+        ArtifactKind::Build(id) => match shell.run_label(*id) {
+            Some((number, status, result)) => (
+                terminate_underline(Line::from(vec![
+                    label("Build".to_owned()),
+                    Span::styled(format!("Build {number}"), link),
+                    Span::styled(
+                        format!(
+                            "  {}",
+                            crate::app::pipelines::rows::run_glyph(status, result)
+                        ),
+                        muted,
+                    ),
+                ])),
+                Some(Jump::Run(*id)),
+            ),
+            None => (
+                Line::from(vec![
+                    label("Build".to_owned()),
+                    Span::styled(format!("Build {id} \u{2014} not in this database"), muted),
+                ]),
+                None,
+            ),
+        },
+        // A commit has no screen of its own, so it says what it is and where.
+        ArtifactKind::Commit { repo_id, sha } => (
+            Line::from(vec![
+                label("Commit".to_owned()),
+                Span::raw(short_sha(sha)),
+                Span::styled(format!("  in {}", shell.repo_name(repo_id)), muted),
+            ]),
+            None,
+        ),
+    }
+}
+
+/// The seven characters a git log reads by.
+fn short_sha(sha: &str) -> String {
+    sha.chars().take(7).collect()
 }
 
 pub(super) fn section_line(title: &'static str) -> Line<'static> {

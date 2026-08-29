@@ -443,10 +443,10 @@ fn apply_edits(
     edits: &[FieldEdit],
 ) -> Result<Ticket> {
     let document = edit_document(repository.revision_of(key)?, edits);
-    let (ticket, relations) = source
+    let (ticket, relations, artifacts) = source
         .patch_work_item(key.id, &document)
         .map_err(|error| conflict_advice(error, key.id))?;
-    repository.upsert(&ticket, &relations)?;
+    repository.upsert(&ticket, &relations, &artifacts)?;
     Ok(ticket)
 }
 
@@ -648,9 +648,9 @@ fn create_work_item(
     args: &CreateArgs,
     edits: &[FieldEdit],
 ) -> Result<Ticket> {
-    let (ticket, relations) =
+    let (ticket, relations, artifacts) =
         source.create_work_item(args.work_item_type.trim(), &patch_ops(edits), args.parent)?;
-    repository.upsert(&ticket, &relations)?;
+    repository.upsert(&ticket, &relations, &artifacts)?;
     Ok(ticket)
 }
 
@@ -841,7 +841,7 @@ mod tests {
     use super::*;
     use crate::azure::{SyncBatch, create_document};
     use crate::edit;
-    use crate::model::{RelationRecord, StateOption};
+    use crate::model::{StateOption, StoredWorkItem};
     use crate::timestamp::ts;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -950,7 +950,7 @@ mod tests {
             }
         }
 
-        fn answer(&self, id: i64, document: &[Value]) -> Result<(Ticket, Vec<RelationRecord>)> {
+        fn answer(&self, id: i64, document: &[Value]) -> Result<StoredWorkItem> {
             self.sent.lock().unwrap().push((id, document.to_vec()));
             if let Some((status, message)) = &self.refusal {
                 return Err(anyhow::Error::new(azure::RequestRejected::new(
@@ -961,7 +961,7 @@ mod tests {
             }
             self.stored
                 .clone()
-                .map(|ticket| (ticket, Vec::new()))
+                .map(|ticket| (ticket, Vec::new(), Vec::new()))
                 .context("the fake source was not given a stored copy")
         }
 
@@ -988,11 +988,7 @@ mod tests {
             Ok(None)
         }
 
-        fn patch_work_item(
-            &self,
-            id: i64,
-            patch: &[Value],
-        ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<StoredWorkItem> {
             self.answer(id, patch)
         }
 
@@ -1001,7 +997,7 @@ mod tests {
             work_item_type: &str,
             fields: &[Value],
             parent: Option<i64>,
-        ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        ) -> Result<StoredWorkItem> {
             self.created
                 .lock()
                 .unwrap()
@@ -1350,7 +1346,7 @@ mod tests {
     fn an_edit_leads_with_the_revision_the_database_holds_and_stores_what_came_back() {
         let (_directory, mut repository) = repository();
         let stored = ticket(613, "Edit dispatcher", "To Do", Some("Avery Chen"));
-        repository.upsert(&stored, &[]).unwrap();
+        repository.upsert(&stored, &[], &[]).unwrap();
         let key = stored.key.clone();
         let source = FakeSource::storing(Ticket {
             revision: 5,
@@ -1417,7 +1413,7 @@ mod tests {
     fn a_refused_edit_reports_what_azure_devops_said_and_a_conflict_says_what_to_do_about_it() {
         let (_directory, mut repository) = repository();
         let stored = ticket(613, "Edit dispatcher", "To Do", Some("Avery Chen"));
-        repository.upsert(&stored, &[]).unwrap();
+        repository.upsert(&stored, &[], &[]).unwrap();
         let key = stored.key.clone();
         let edits = vec![FieldEdit::state("Doing")];
 
@@ -1640,7 +1636,7 @@ mod tests {
     fn a_posted_comment_lands_on_the_work_item_the_request_named() {
         let (_directory, mut repository) = repository();
         let stored = ticket(613, "Edit dispatcher", "Doing", None);
-        repository.upsert(&stored, &[]).unwrap();
+        repository.upsert(&stored, &[], &[]).unwrap();
         let source = FakeSource::default();
 
         let comment =

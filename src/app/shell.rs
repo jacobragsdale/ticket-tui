@@ -2,6 +2,7 @@
 //! notification, the layout, and what the sync worker is doing.
 
 use super::*;
+use crate::model::{PrStatus, RunResult, RunStatus};
 use work_items::clamp_pos_to_snapshot;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -169,6 +170,12 @@ pub struct Shell {
     /// What each work item is called, by id, so the tabs that only carry ids
     /// — a pull request's linked items, a run's — can name them.
     pub(crate) work_item_titles: Vec<(i64, String)>,
+    /// What each pull request and run is called, for the work items tab, whose
+    /// artifact links hold nothing but ids. Filled from the same snapshot the
+    /// other tabs draw, so a link names what the database holds and says
+    /// nothing about what it does not.
+    pub(crate) pull_request_labels: Vec<(i64, String, PrStatus)>,
+    pub(crate) run_labels: Vec<(i64, String, RunStatus, Option<RunResult>)>,
     /// What the pipeline watcher is doing, as the database overlay reports
     /// it. `None` for a run with no watcher at all.
     pub(crate) watch_state: Option<String>,
@@ -228,6 +235,8 @@ impl Default for Shell {
             repos: Vec::new(),
             workspace: None,
             work_item_titles: Vec::new(),
+            pull_request_labels: Vec::new(),
+            run_labels: Vec::new(),
             watch_state: None,
             history: Vec::new(),
             future: Vec::new(),
@@ -254,6 +263,36 @@ impl Shell {
     #[must_use]
     pub fn work_item_titles(&self) -> &[(i64, String)] {
         &self.work_item_titles
+    }
+
+    /// What the pull requests and runs the artifact links point at are called.
+    /// Both come from the snapshot every tab draws, so a link to something the
+    /// database does not hold simply finds nothing here.
+    pub fn set_artifact_labels(
+        &mut self,
+        pull_requests: Vec<(i64, String, PrStatus)>,
+        runs: Vec<(i64, String, RunStatus, Option<RunResult>)>,
+    ) {
+        self.pull_request_labels = pull_requests;
+        self.run_labels = runs;
+    }
+
+    /// One pull request's title and status, when the database holds it.
+    #[must_use]
+    pub fn pull_request_label(&self, id: i64) -> Option<(&str, PrStatus)> {
+        self.pull_request_labels
+            .iter()
+            .find(|(held, _, _)| *held == id)
+            .map(|(_, title, status)| (title.as_str(), *status))
+    }
+
+    /// One run's build number and how it went, when the database holds it.
+    #[must_use]
+    pub fn run_label(&self, id: i64) -> Option<(&str, RunStatus, Option<RunResult>)> {
+        self.run_labels
+            .iter()
+            .find(|(held, ..)| *held == id)
+            .map(|(_, number, status, result)| (number.as_str(), *status, *result))
     }
 
     /// What one work item is called, when the database holds it.

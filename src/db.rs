@@ -10,13 +10,13 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::classification::{ClassificationNode, NodeKind};
 use crate::model::{
-    CommentRecord, DetailsUpdate, HistoryRecord, Identity, Pipeline, PrBuild, PrReviewer, PrStatus,
-    PrThread, PullRequest, RelationKind, RelationRecord, Repo, Run, RunResult, RunStatus,
-    StateCatalog, StateCategory, StateOption, Ticket, TicketGraph, TicketKey,
+    ArtifactKind, ArtifactLink, CommentRecord, DetailsUpdate, HistoryRecord, Identity, Pipeline,
+    PrBuild, PrReviewer, PrStatus, PrThread, PullRequest, RelationKind, RelationRecord, Repo, Run,
+    RunResult, RunStatus, StateCatalog, StateCategory, StateOption, Ticket, TicketGraph, TicketKey,
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 16;
+const SCHEMA_VERSION: i64 = 17;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -65,6 +65,7 @@ pub const CLASSIFICATION_FETCHED_KEY: &str = "classification_nodes_fetched_at";
 const RESET_SCHEMA: &str = r"
 DROP TABLE IF EXISTS work_items;
 DROP TABLE IF EXISTS work_item_relations;
+DROP TABLE IF EXISTS work_item_artifact_links;
 DROP TABLE IF EXISTS work_item_comments;
 DROP TABLE IF EXISTS work_item_history;
 DROP TABLE IF EXISTS work_item_type_states;
@@ -111,6 +112,15 @@ CREATE TABLE work_item_relations (
     to_id        INTEGER NOT NULL,
     kind         TEXT NOT NULL,
     PRIMARY KEY (organization, from_id, to_id, kind)
+);
+CREATE TABLE work_item_artifact_links (
+    organization TEXT NOT NULL,
+    work_item_id INTEGER NOT NULL,
+    kind         TEXT NOT NULL,
+    repo_id      TEXT NOT NULL DEFAULT '',
+    target       TEXT NOT NULL,
+    name         TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (organization, work_item_id, kind, repo_id, target)
 );
 CREATE TABLE work_item_comments (
     organization TEXT NOT NULL,
@@ -249,6 +259,7 @@ CREATE TABLE sync_meta (
 /// not the work items a pull replaces.
 const CLEAR_CACHE: &str = "DELETE FROM work_items;
 DELETE FROM work_item_relations;
+DELETE FROM work_item_artifact_links;
 DELETE FROM work_item_comments;
 DELETE FROM work_item_history;";
 
@@ -361,6 +372,7 @@ impl SqliteTicketRepository {
     pub fn load_graph(&self) -> Result<TicketGraph> {
         Ok(TicketGraph {
             relations: self.load_relations()?,
+            artifacts: self.load_artifact_links()?,
             comments: self.load_comments()?,
             history: self.load_history()?,
         })
@@ -966,6 +978,9 @@ impl SqliteTicketRepository {
         for relation in &graph.relations {
             insert_relation(&transaction, relation)?;
         }
+        for artifact in &graph.artifacts {
+            insert_artifact_link(&transaction, artifact)?;
+        }
         for comment in &graph.comments {
             insert_comment(&transaction, comment)?;
         }
@@ -980,8 +995,13 @@ impl SqliteTicketRepository {
     /// other row alone. An edit that Azure DevOps accepted lands this way: it
     /// changed one record, so replacing the whole database would throw away
     /// everything else the last pull brought.
-    pub fn upsert(&mut self, ticket: &Ticket, relations: &[RelationRecord]) -> Result<()> {
-        self.write_upserts(slice::from_ref(ticket), relations, &[])
+    pub fn upsert(
+        &mut self,
+        ticket: &Ticket,
+        relations: &[RelationRecord],
+        artifacts: &[ArtifactLink],
+    ) -> Result<()> {
+        self.write_upserts(slice::from_ref(ticket), relations, artifacts, &[])
             .with_context(|| format!("failed to store work item {}", ticket.key.id))
     }
 
@@ -1031,9 +1051,10 @@ impl SqliteTicketRepository {
         &mut self,
         tickets: &[Ticket],
         relations: &[RelationRecord],
+        artifacts: &[ArtifactLink],
         details: &[DetailsUpdate],
     ) -> Result<()> {
-        self.write_upserts(tickets, relations, details)
+        self.write_upserts(tickets, relations, artifacts, details)
             .with_context(|| format!("failed to store {} changed work items", tickets.len()))
     }
 
@@ -1151,6 +1172,7 @@ impl SqliteTicketRepository {
         &mut self,
         tickets: &[Ticket],
         relations: &[RelationRecord],
+        artifacts: &[ArtifactLink],
         details: &[DetailsUpdate],
     ) -> Result<()> {
         let transaction = self.connection.transaction()?;
@@ -1162,9 +1184,19 @@ impl SqliteTicketRepository {
                     params![ticket.key.organization, ticket.key.id],
                 )
                 .context("failed to clear the work item's relations")?;
+            transaction
+                .execute(
+                    "DELETE FROM work_item_artifact_links
+                     WHERE organization = ?1 AND work_item_id = ?2",
+                    params![ticket.key.organization, ticket.key.id],
+                )
+                .context("failed to clear the work item's artifact links")?;
         }
         for relation in relations {
             insert_relation(&transaction, relation)?;
+        }
+        for artifact in artifacts {
+            insert_artifact_link(&transaction, artifact)?;
         }
         // After the work items: a fresh row carries `details_rev = 0`, and it
         // is this that lifts it to the revision the details were read at.
@@ -1194,6 +1226,36 @@ impl SqliteTicketRepository {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to load relations")
+    }
+
+    /// Every artifact link on file. A row whose kind or target no longer
+    /// reads is dropped rather than guessed at: the next full pull rewrites it.
+    fn load_artifact_links(&self) -> Result<Vec<ArtifactLink>> {
+        let mut statement = self.connection.prepare(
+            "SELECT organization, work_item_id, kind, repo_id, target, name
+             FROM work_item_artifact_links",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let organization: String = row.get(0)?;
+            let id: i64 = row.get(1)?;
+            let kind: String = row.get(2)?;
+            let repo_id: String = row.get(3)?;
+            let target: String = row.get(4)?;
+            let name: String = row.get(5)?;
+            Ok(
+                ArtifactKind::from_parts(&kind, &repo_id, &target).map(|kind| ArtifactLink {
+                    work_item: TicketKey { organization, id },
+                    kind,
+                    name,
+                }),
+            )
+        })?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load artifact links")?
+            .into_iter()
+            .flatten()
+            .collect())
     }
 
     fn load_comments(&self) -> Result<Vec<CommentRecord>> {
@@ -1376,6 +1438,10 @@ fn forget_work_item(transaction: &Transaction<'_>, organization: &str, id: i64) 
         params![organization, id],
     )?;
     transaction.execute(
+        "DELETE FROM work_item_artifact_links WHERE organization = ?1 AND work_item_id = ?2",
+        params![organization, id],
+    )?;
+    transaction.execute(
         "DELETE FROM work_item_comments WHERE organization = ?1 AND work_item_id = ?2",
         params![organization, id],
     )?;
@@ -1429,6 +1495,23 @@ fn insert_relation(transaction: &Transaction<'_>, relation: &RelationRecord) -> 
             relation.from.id,
             relation.to.id,
             relation.kind.as_str()
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_artifact_link(transaction: &Transaction<'_>, artifact: &ArtifactLink) -> Result<()> {
+    transaction.execute(
+        "INSERT OR REPLACE INTO work_item_artifact_links
+            (organization, work_item_id, kind, repo_id, target, name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            artifact.work_item.organization,
+            artifact.work_item.id,
+            artifact.kind.as_str(),
+            artifact.kind.repo_id().unwrap_or_default(),
+            artifact.kind.target(),
+            artifact.name
         ],
     )?;
     Ok(())
@@ -1563,6 +1646,90 @@ mod tests {
         );
     }
 
+    /// One of each kind, on the same work item.
+    fn artifacts(key: &TicketKey) -> Vec<ArtifactLink> {
+        vec![
+            ArtifactLink {
+                work_item: key.clone(),
+                kind: ArtifactKind::PullRequest {
+                    repo_id: "aaa-111".into(),
+                    id: 42,
+                },
+                name: "Pull Request".into(),
+            },
+            ArtifactLink {
+                work_item: key.clone(),
+                kind: ArtifactKind::Commit {
+                    repo_id: "aaa-111".into(),
+                    sha: "abc1234def5678".into(),
+                },
+                name: "Fixed in Commit".into(),
+            },
+            ArtifactLink {
+                work_item: key.clone(),
+                kind: ArtifactKind::Build(14),
+                name: "Integrated in build".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn artifact_links_round_trip_and_a_rewrite_replaces_only_their_own_work_item() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+        let (one, two) = (ticket(1), ticket(2));
+        let graph = TicketGraph {
+            artifacts: artifacts(&one.key)
+                .into_iter()
+                .chain(std::iter::once(ArtifactLink {
+                    work_item: two.key.clone(),
+                    kind: ArtifactKind::Build(15),
+                    name: "Integrated in build".into(),
+                }))
+                .collect(),
+            ..TicketGraph::default()
+        };
+        repository
+            .replace_all(&[one.clone(), two.clone()], &graph)
+            .unwrap();
+
+        let stored = repository.load_graph().unwrap();
+        assert_eq!(
+            stored.artifacts_for(&one.key),
+            artifacts(&one.key).iter().collect::<Vec<_>>(),
+            "each kind comes back as it went in"
+        );
+
+        // An edit rewrites one work item's links and leaves the rest alone.
+        repository
+            .upsert(
+                &one,
+                &[],
+                &[ArtifactLink {
+                    work_item: one.key.clone(),
+                    kind: ArtifactKind::Build(16),
+                    name: "Integrated in build".into(),
+                }],
+            )
+            .unwrap();
+        let stored = repository.load_graph().unwrap();
+        assert_eq!(
+            stored
+                .artifacts_for(&one.key)
+                .iter()
+                .map(|artifact| artifact.kind.clone())
+                .collect::<Vec<_>>(),
+            [ArtifactKind::Build(16)],
+            "what the write brought back is all that is left"
+        );
+        assert_eq!(
+            stored.artifacts_for(&two.key).len(),
+            1,
+            "and the other work item still has its own"
+        );
+    }
+
     #[test]
     fn replace_all_round_trips_tickets_and_relations_without_touching_sync_meta() {
         let directory = tempdir().unwrap();
@@ -1570,6 +1737,7 @@ mod tests {
         let mut repository = SqliteTicketRepository::open(&path).unwrap();
         let tickets = vec![ticket(1), ticket(2)];
         let graph = TicketGraph {
+            artifacts: Vec::new(),
             relations: vec![RelationRecord {
                 from: tickets[1].key.clone(),
                 to: tickets[0].key.clone(),
@@ -1724,6 +1892,7 @@ mod tests {
             .upsert(
                 &edited,
                 &[relation(&ticket(1), &ticket(3), RelationKind::Related)],
+                &[],
             )
             .unwrap();
 
@@ -1746,7 +1915,7 @@ mod tests {
 
         let mut fresh = ticket(9);
         fresh.title = "Written by an edit".into();
-        repository.upsert(&fresh, &[]).unwrap();
+        repository.upsert(&fresh, &[], &[]).unwrap();
         assert_eq!(repository.load_all().unwrap().len(), 3);
         assert_eq!(
             repository

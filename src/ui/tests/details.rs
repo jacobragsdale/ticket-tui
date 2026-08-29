@@ -64,6 +64,7 @@ fn details_render_relationships_history_and_comments() {
     app.work_items.set_workspace_graph(
         &mut app.shell,
         TicketGraph {
+            artifacts: Vec::new(),
             relations: vec![RelationRecord {
                 from: item.key.clone(),
                 to: TicketKey {
@@ -128,6 +129,7 @@ fn a_comment_just_posted_shows_at_the_head_of_the_discussion() {
     app.work_items.set_workspace_graph(
         &mut app.shell,
         TicketGraph {
+            artifacts: Vec::new(),
             comments: vec![CommentRecord {
                 ticket: item.key.clone(),
                 comment_id: 1,
@@ -958,6 +960,7 @@ fn end_scrolls_past_the_description_to_the_last_comment() {
     app.work_items.set_workspace_graph(
         &mut app.shell,
         TicketGraph {
+            artifacts: Vec::new(),
             relations: Vec::new(),
             comments: vec![CommentRecord {
                 ticket: item.key,
@@ -982,5 +985,94 @@ fn end_scrolls_past_the_description_to_the_last_comment() {
     assert!(
         text.contains("The very last word"),
         "End reaches the last comment"
+    );
+}
+
+#[test]
+fn the_related_section_names_what_the_work_item_was_worked_on_with() {
+    use crate::model::{ArtifactKind, ArtifactLink, PrStatus, RunResult, RunStatus};
+
+    let item = ticket();
+    let mut app = App::new(vec![item.clone()]);
+    app.shell.narrow_details = true;
+    app.shell.set_repos(vec![crate::app::repos::tests::repo(
+        "aaa-111",
+        "ticket-tui",
+        false,
+    )]);
+    // What the other tabs hold, which is what a link can be named from.
+    app.shell.set_artifact_labels(
+        vec![(42, "Split the files".to_owned(), PrStatus::Completed)],
+        vec![(
+            14,
+            "20260829.4".to_owned(),
+            RunStatus::Completed,
+            Some(RunResult::Succeeded),
+        )],
+    );
+    let artifact = |kind| ArtifactLink {
+        work_item: item.key.clone(),
+        kind,
+        name: "Pull Request".to_owned(),
+    };
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            artifacts: vec![
+                artifact(ArtifactKind::PullRequest {
+                    repo_id: "aaa-111".into(),
+                    id: 42,
+                }),
+                artifact(ArtifactKind::Commit {
+                    repo_id: "aaa-111".into(),
+                    sha: "abc1234def5678".into(),
+                }),
+                artifact(ArtifactKind::Build(14)),
+                // One the database does not hold.
+                artifact(ArtifactKind::PullRequest {
+                    repo_id: "aaa-111".into(),
+                    id: 99,
+                }),
+            ],
+            ..TicketGraph::default()
+        },
+    );
+
+    let text = render_text(120, 44, &mut app);
+
+    assert!(text.contains("Related"), "{text}");
+    assert!(text.contains("!42  Split the files"), "{text}");
+    assert!(text.contains("completed"), "the status reads too: {text}");
+    assert!(text.contains("Build 20260829.4"), "{text}");
+    assert!(
+        text.contains("abc1234") && text.contains("in ticket-tui"),
+        "a commit is its short sha and where it is: {text}"
+    );
+    assert!(
+        text.contains("!99  not in this database"),
+        "and one nothing here holds says so rather than pretending: {text}"
+    );
+
+    // The pull request and the build follow; the commit and the missing one
+    // are not click targets at all.
+    let follows = |wanted: Jump| {
+        app.shell
+            .hit_regions
+            .find_target(
+                move |target| matches!(target, PointerTarget::Follow(jump) if *jump == wanted),
+            )
+            .is_some()
+    };
+    assert!(follows(Jump::PullRequest {
+        repo: "ticket-tui".to_owned(),
+        id: 42
+    }));
+    assert!(follows(Jump::Run(14)));
+    assert!(
+        !follows(Jump::PullRequest {
+            repo: "ticket-tui".to_owned(),
+            id: 99
+        }),
+        "nothing points at what the database does not hold"
     );
 }

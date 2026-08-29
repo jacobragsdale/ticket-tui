@@ -166,3 +166,62 @@ fn pending_edits_are_published_while_in_flight_and_gone_once_answered() {
         "a refused edit is no longer in flight either"
     );
 }
+
+#[test]
+fn the_context_lists_what_the_selected_work_item_was_worked_on_with() {
+    use crate::model::{ArtifactKind, ArtifactLink, PrStatus, TicketGraph};
+
+    let mut app = App::new(vec![ticket(1, "Alpha", "2026-01-01T00:00:00Z")]);
+    let key = app.work_items.tickets()[0].key.clone();
+    app.shell.set_repos(vec![crate::app::repos::tests::repo(
+        "aaa-111", "atlas", false,
+    )]);
+    app.shell.set_artifact_labels(
+        vec![(42, "Split the files".to_owned(), PrStatus::Active)],
+        Vec::new(),
+    );
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            artifacts: vec![
+                ArtifactLink {
+                    work_item: key.clone(),
+                    kind: ArtifactKind::PullRequest {
+                        repo_id: "aaa-111".into(),
+                        id: 42,
+                    },
+                    name: "Pull Request".into(),
+                },
+                ArtifactLink {
+                    work_item: key,
+                    kind: ArtifactKind::Build(14),
+                    name: "Integrated in build".into(),
+                },
+            ],
+            ..TicketGraph::default()
+        },
+    );
+
+    let context = app.work_items.agent_context(&app.shell);
+    let related = &context.selected_ticket.as_ref().unwrap().related;
+
+    assert_eq!(related.len(), 2);
+    assert_eq!(related[0].kind, "pull_request");
+    assert_eq!(related[0].target, "42");
+    assert_eq!(related[0].repo.as_deref(), Some("atlas"));
+    assert!(
+        related[0].in_database,
+        "an agent is told what it can ask this app for"
+    );
+    assert!(
+        !related[1].in_database,
+        "and what it cannot: no run 14 is on file"
+    );
+    assert!(
+        context
+            .checked_tickets
+            .iter()
+            .all(|ticket| ticket.related.is_empty()),
+        "the list of checked work items stays a list"
+    );
+}

@@ -940,6 +940,92 @@ pub struct RelationRecord {
     pub kind: RelationKind,
 }
 
+/// One work item as Azure DevOps answered with it: the row, the links leading
+/// out of it, and what it was worked on with. Every write that stores a work
+/// item hands back all three, because storing the row replaces all three.
+pub type StoredWorkItem = (Ticket, Vec<RelationRecord>, Vec<ArtifactLink>);
+
+/// A link from one work item to something that is not a work item: the pull
+/// request that carried it, a commit that named it, a build it went out in.
+/// Azure DevOps stores these as `ArtifactLink` relations with a `vstfs:///`
+/// URL, which is what [`ArtifactKind`] is parsed from.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ArtifactLink {
+    pub work_item: TicketKey,
+    pub kind: ArtifactKind,
+    /// What Azure DevOps calls the link — "Pull Request", "Fixed in Commit",
+    /// "Integrated in build" — which is the only clue to why it is there.
+    pub name: String,
+}
+
+/// What the far end of an [`ArtifactLink`] is. Repositories are named by the
+/// GUID the repos table holds, so a link resolves to a name without a request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ArtifactKind {
+    PullRequest { repo_id: String, id: i64 },
+    Commit { repo_id: String, sha: String },
+    Build(i64),
+}
+
+impl ArtifactKind {
+    /// The word the details pane puts in front of the link.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::PullRequest { .. } => "Pull request",
+            Self::Commit { .. } => "Commit",
+            Self::Build(_) => "Build",
+        }
+    }
+
+    /// How the row is stored, which is also how a stored row is read back.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::PullRequest { .. } => "pull_request",
+            Self::Commit { .. } => "commit",
+            Self::Build(_) => "build",
+        }
+    }
+
+    /// The repository it belongs to, for the kinds that have one.
+    #[must_use]
+    pub fn repo_id(&self) -> Option<&str> {
+        match self {
+            Self::PullRequest { repo_id, .. } | Self::Commit { repo_id, .. } => Some(repo_id),
+            Self::Build(_) => None,
+        }
+    }
+
+    /// A commit is named by its sha and the other two by a number, so one
+    /// column stores either.
+    #[must_use]
+    pub fn target(&self) -> String {
+        match self {
+            Self::PullRequest { id, .. } | Self::Build(id) => id.to_string(),
+            Self::Commit { sha, .. } => sha.clone(),
+        }
+    }
+
+    /// Reads back what [`ArtifactKind::as_str`] and [`ArtifactKind::target`]
+    /// stored. An unknown kind, or a target that will not parse, is dropped.
+    #[must_use]
+    pub fn from_parts(kind: &str, repo_id: &str, target: &str) -> Option<Self> {
+        match kind {
+            "pull_request" => Some(Self::PullRequest {
+                repo_id: repo_id.to_owned(),
+                id: target.parse().ok()?,
+            }),
+            "commit" => Some(Self::Commit {
+                repo_id: repo_id.to_owned(),
+                sha: target.to_owned(),
+            }),
+            "build" => Some(Self::Build(target.parse().ok()?)),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommentRecord {
     pub ticket: TicketKey,
@@ -963,6 +1049,9 @@ pub struct HistoryRecord {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TicketGraph {
     pub relations: Vec<RelationRecord>,
+    /// What each work item was worked on with: its pull requests, the commits
+    /// that named it, and the builds it went out in.
+    pub artifacts: Vec<ArtifactLink>,
     pub comments: Vec<CommentRecord>,
     pub history: Vec<HistoryRecord>,
 }
@@ -1043,6 +1132,16 @@ impl TicketGraph {
         self.history.retain(|entry| entry.ticket != *key);
         self.comments.extend(details.comments);
         self.history.extend(details.history);
+    }
+
+    /// What one work item was worked on with, in the order Azure DevOps
+    /// listed the links.
+    #[must_use]
+    pub fn artifacts_for(&self, key: &TicketKey) -> Vec<&ArtifactLink> {
+        self.artifacts
+            .iter()
+            .filter(|artifact| artifact.work_item == *key)
+            .collect()
     }
 
     #[must_use]

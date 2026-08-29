@@ -17,9 +17,10 @@ use url::Url;
 use crate::classification::{self, ClassificationNode};
 use crate::html::html_to_text;
 use crate::model::{
-    Approval, CommentRecord, HistoryRecord, Identity, Issue, Pipeline, PrBuild, PrReviewer,
-    PrStatus, PrThread, PullRequest, RelationKind, RelationRecord, Repo, Run, RunResult, RunStatus,
-    StateCategory, StateOption, Ticket, TicketKey, TimelineKind, TimelineRecord, WorkItemDetails,
+    Approval, ArtifactKind, ArtifactLink, CommentRecord, HistoryRecord, Identity, Issue, Pipeline,
+    PrBuild, PrReviewer, PrStatus, PrThread, PullRequest, RelationKind, RelationRecord, Repo, Run,
+    RunResult, RunStatus, StateCategory, StateOption, StoredWorkItem, Ticket, TicketKey,
+    TimelineKind, TimelineRecord, WorkItemDetails,
 };
 use crate::timestamp::Timestamp;
 
@@ -221,6 +222,8 @@ pub struct AzureClient {
 pub struct SyncBatch {
     pub tickets: Vec<Ticket>,
     pub relations: Vec<RelationRecord>,
+    /// What each of them was worked on with: pull requests, commits, builds.
+    pub artifacts: Vec<ArtifactLink>,
 }
 
 impl AzureClient {
@@ -285,9 +288,10 @@ impl AzureClient {
                 .and_then(Value::as_array)
                 .context("work item batch response has no value array")?;
             for item in items {
-                let (ticket, relations) = parse_work_item(item, &self.config)?;
+                let (ticket, relations, artifacts) = parse_work_item(item, &self.config)?;
                 batch.tickets.push(ticket);
                 batch.relations.extend(relations);
+                batch.artifacts.extend(artifacts);
             }
         }
         Ok(batch)
@@ -297,11 +301,7 @@ impl AzureClient {
     /// DevOps's own copy of what it stored. The document decides whether the
     /// write is safe: [`crate::edit::EditRequest`] leads with a revision test,
     /// so a work item that moved on is refused rather than overwritten.
-    pub fn update_work_item(
-        &self,
-        id: i64,
-        patch: &[Value],
-    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+    pub fn update_work_item(&self, id: i64, patch: &[Value]) -> Result<StoredWorkItem> {
         // Without `$expand=relations` the answer carries no links at all, and
         // the row's relations would be replaced with nothing.
         let url = format!(
@@ -323,11 +323,7 @@ impl AzureClient {
     /// `test` on `/rev` at the head of it refuses the write if anything moved
     /// in between. One request writes both halves of the move, so there is no
     /// state in which the work item has been detached but not re-filed.
-    pub fn reparent_work_item(
-        &self,
-        id: i64,
-        new_parent: Option<i64>,
-    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+    pub fn reparent_work_item(&self, id: i64, new_parent: Option<i64>) -> Result<StoredWorkItem> {
         let url = format!(
             "{}/_apis/wit/workitems/{id}?$expand=relations&api-version={API_VERSION}",
             self.config.base_url()
@@ -350,7 +346,7 @@ impl AzureClient {
         work_item_type: &str,
         fields: &[Value],
         parent: Option<i64>,
-    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+    ) -> Result<StoredWorkItem> {
         let document = create_document(fields, parent, &self.config);
         let url = self.create_work_item_url(work_item_type)?;
         let item = self.send(&url, Request::PostPatch(&document))?;
@@ -1995,7 +1991,7 @@ fn hidden_type_names(response: &Value) -> Vec<String> {
 pub fn parse_work_item(
     item: &Value,
     config: &AzureConfig,
-) -> Result<(Ticket, Vec<RelationRecord>)> {
+) -> Result<(Ticket, Vec<RelationRecord>, Vec<ArtifactLink>)> {
     let id = item
         .get("id")
         .and_then(Value::as_i64)
@@ -2078,7 +2074,32 @@ pub fn parse_work_item(
                 .collect()
         })
         .unwrap_or_default();
-    Ok((ticket, relations))
+    let artifacts = item
+        .get("relations")
+        .and_then(Value::as_array)
+        .map(|relations| {
+            relations
+                .iter()
+                .filter(|relation| {
+                    relation.get("rel").and_then(Value::as_str) == Some("ArtifactLink")
+                })
+                .filter_map(|relation| {
+                    let kind = artifact_kind(relation.get("url")?.as_str()?)?;
+                    Some(ArtifactLink {
+                        work_item: key.clone(),
+                        kind,
+                        name: relation
+                            .get("attributes")
+                            .and_then(|attributes| attributes.get("name"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((ticket, relations, artifacts))
 }
 
 /// The rich text one typed comment is posted as. Azure DevOps stores a comment
@@ -2266,6 +2287,46 @@ fn trimmed(identity: &Value, field: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// What one `vstfs:///` artifact URL points at. The three shapes Azure DevOps
+/// writes are `vstfs:///Git/PullRequestId/{project}%2F{repo}%2F{id}`,
+/// `vstfs:///Git/Commit/{project}%2F{repo}%2F{sha}` and
+/// `vstfs:///Build/Build/{id}`; anything else — a wiki page, a test result, a
+/// storyboard — is not something this app can show, so it is left out.
+fn artifact_kind(url: &str) -> Option<ArtifactKind> {
+    let rest = url.strip_prefix("vstfs:///")?;
+    let (tool, rest) = rest.split_once('/')?;
+    let (artifact, id) = rest.split_once('/')?;
+    // The separators inside the id are percent-encoded, in either case.
+    let parts: Vec<String> = id
+        .split('/')
+        .flat_map(|part| part.split("%2F"))
+        .flat_map(|part| part.split("%2f"))
+        .map(|part| part.to_owned())
+        .collect();
+    match (tool, artifact) {
+        ("Git", "PullRequestId") => {
+            let [_project, repo_id, id] = parts.as_slice() else {
+                return None;
+            };
+            Some(ArtifactKind::PullRequest {
+                repo_id: repo_id.clone(),
+                id: id.parse().ok()?,
+            })
+        }
+        ("Git", "Commit") => {
+            let [_project, repo_id, sha] = parts.as_slice() else {
+                return None;
+            };
+            Some(ArtifactKind::Commit {
+                repo_id: repo_id.clone(),
+                sha: sha.clone(),
+            })
+        }
+        ("Build", "Build") => Some(ArtifactKind::Build(parts.first()?.parse().ok()?)),
+        _ => None,
+    }
+}
+
 fn relation_kind(rel: &str) -> Option<RelationKind> {
     Some(match rel {
         "System.LinkTypes.Hierarchy-Reverse" => RelationKind::Parent,
@@ -2404,7 +2465,7 @@ mod tests {
                 {"rel": "AttachedFile", "url": "https://dev.azure.com/demo/x/_apis/wit/attachments/abc"}
             ]
         });
-        let (ticket, relations) = parse_work_item(&item, &config()).unwrap();
+        let (ticket, relations, _) = parse_work_item(&item, &config()).unwrap();
         assert_eq!(ticket.key.id, 12);
         assert_eq!(ticket.key.organization, "demo");
         assert_eq!(ticket.assigned_to.as_deref(), Some("Jacob Ragsdale"));
@@ -2946,7 +3007,7 @@ mod tests {
             }),
             "the parent travels as a link on the organization, not as a field"
         );
-        let (_, relations) = parse_work_item(
+        let (_, relations, _) = parse_work_item(
             &json!({
                 "id": 700,
                 "rev": 1,
@@ -3121,5 +3182,94 @@ mod tests {
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foo"), "Zm9v");
         assert_eq!(base64(b":pat"), "OnBhdA==");
+    }
+    #[test]
+    fn a_work_item_keeps_the_pull_requests_commits_and_builds_it_names() {
+        let item = json!({
+            "id": 690,
+            "rev": 4,
+            "fields": {
+                "System.Title": "Artifact links",
+                "System.WorkItemType": "Issue",
+                "System.State": "Doing",
+                "System.AreaPath": "development",
+                "System.IterationPath": "development",
+                "System.CreatedDate": "2026-08-29T17:15:41.317Z",
+                "System.ChangedDate": "2026-08-29T20:09:27.67Z"
+            },
+            "relations": [
+                {
+                    "rel": "System.LinkTypes.Hierarchy-Reverse",
+                    "url": "https://dev.azure.com/demo/_apis/wit/workItems/660"
+                },
+                {
+                    "rel": "ArtifactLink",
+                    "url": "vstfs:///Git/PullRequestId/atlas%2Faaa-111%2F42",
+                    "attributes": { "name": "Pull Request" }
+                },
+                {
+                    "rel": "ArtifactLink",
+                    "url": "vstfs:///Git/Commit/atlas%2Faaa-111%2Fabc1234def5678",
+                    "attributes": { "name": "Fixed in Commit" }
+                },
+                {
+                    "rel": "ArtifactLink",
+                    "url": "vstfs:///Build/Build/14",
+                    "attributes": { "name": "Integrated in build" }
+                },
+                {
+                    "rel": "ArtifactLink",
+                    "url": "vstfs:///Wiki/WikiPage/atlas%2Fwiki%2FHome",
+                    "attributes": { "name": "Wiki Page" }
+                }
+            ]
+        });
+
+        let (_, relations, artifacts) = parse_work_item(&item, &config()).unwrap();
+
+        assert_eq!(relations.len(), 1, "the hierarchy link is not an artifact");
+        assert_eq!(
+            artifacts
+                .iter()
+                .map(|artifact| artifact.kind.clone())
+                .collect::<Vec<_>>(),
+            [
+                ArtifactKind::PullRequest {
+                    repo_id: "aaa-111".to_owned(),
+                    id: 42
+                },
+                ArtifactKind::Commit {
+                    repo_id: "aaa-111".to_owned(),
+                    sha: "abc1234def5678".to_owned()
+                },
+                ArtifactKind::Build(14),
+            ],
+            "and a wiki page is not something this app can show"
+        );
+        assert_eq!(artifacts[0].name, "Pull Request");
+        assert_eq!(artifacts[2].work_item.id, 690);
+    }
+
+    #[test]
+    fn an_artifact_url_reads_whichever_way_it_is_written() {
+        assert_eq!(
+            artifact_kind("vstfs:///Git/PullRequestId/atlas%2faaa-111%2f7"),
+            Some(ArtifactKind::PullRequest {
+                repo_id: "aaa-111".to_owned(),
+                id: 7
+            }),
+            "the encoding is written in either case"
+        );
+        assert_eq!(
+            artifact_kind("vstfs:///Git/PullRequestId/atlas/aaa-111/7"),
+            Some(ArtifactKind::PullRequest {
+                repo_id: "aaa-111".to_owned(),
+                id: 7
+            }),
+            "and sometimes not at all"
+        );
+        assert_eq!(artifact_kind("vstfs:///Build/Build/nine"), None);
+        assert_eq!(artifact_kind("vstfs:///Git/PullRequestId/atlas%2F7"), None);
+        assert_eq!(artifact_kind("https://dev.azure.com/demo"), None);
     }
 }

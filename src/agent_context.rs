@@ -120,6 +120,25 @@ pub struct TicketContext {
     pub web_url: String,
     pub bookmarked: bool,
     pub checked: bool,
+    /// What the work item was worked on with: its pull requests, the commits
+    /// that named it, the builds it went out in. Carried on the selected work
+    /// item only — the checked ones are a list, not a reading — and left out
+    /// of the document entirely when there is nothing to say.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<ArtifactContext>,
+}
+
+/// One artifact link, as an agent reads it. `target` is the pull request or
+/// build number, or the commit sha; `in_database` says whether this app can
+/// show it, which is what tells an agent whether a `ticket-tui` command will
+/// find it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ArtifactContext {
+    pub kind: String,
+    pub name: String,
+    pub repo: Option<String>,
+    pub target: String,
+    pub in_database: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

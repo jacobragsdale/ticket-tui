@@ -1711,8 +1711,8 @@ mod tests {
     use ticket_tui::azure::{RequestRejected, SyncBatch, Throttled};
     use ticket_tui::edit::FieldEdit;
     use ticket_tui::model::{
-        CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateOption, Ticket,
-        TicketGraph, TicketKey, WorkItemDetails,
+        CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateOption, StoredWorkItem,
+        Ticket, TicketGraph, TicketKey, WorkItemDetails,
     };
     use ticket_tui::sync::{PulledExtras, SourceConnector, WorkItemSource};
     use ticket_tui::timestamp::Timestamp;
@@ -1743,7 +1743,7 @@ mod tests {
         comment: Option<CommentRecord>,
         /// The work item a create answers with, and the links that come with
         /// it, if this fake creates work items at all.
-        creation: Option<(Ticket, Vec<RelationRecord>)>,
+        creation: Option<StoredWorkItem>,
         /// The wait every pull is turned away with, for a project Azure DevOps
         /// is shedding load from.
         throttle: Option<Duration>,
@@ -1820,7 +1820,7 @@ mod tests {
         /// Accepts the next create and answers with `ticket` and its links.
         fn creating(ticket: Ticket, relations: Vec<RelationRecord>) -> Self {
             Self {
-                creation: Some((ticket, relations)),
+                creation: Some((ticket, relations, Vec::new())),
                 ..Self::returning(Vec::new())
             }
         }
@@ -1849,6 +1849,7 @@ mod tests {
                 None => Ok(SyncBatch {
                     tickets: self.tickets.clone(),
                     relations: Vec::new(),
+                    artifacts: Vec::new(),
                 }),
             }
         }
@@ -1873,11 +1874,7 @@ mod tests {
             Ok(None)
         }
 
-        fn patch_work_item(
-            &self,
-            id: i64,
-            _patch: &[Value],
-        ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        fn patch_work_item(&self, id: i64, _patch: &[Value]) -> Result<StoredWorkItem> {
             if let Some((status, message)) = &self.refusal {
                 return Err(anyhow::Error::new(RequestRejected::new(
                     *status,
@@ -1886,7 +1883,7 @@ mod tests {
                 )));
             }
             match self.stored.iter().find(|ticket| ticket.key.id == id) {
-                Some(ticket) => Ok((ticket.clone(), Vec::new())),
+                Some(ticket) => Ok((ticket.clone(), Vec::new(), Vec::new())),
                 None => bail!("the fake source was not given a stored copy of #{id}"),
             }
         }
@@ -1896,7 +1893,7 @@ mod tests {
             _work_item_type: &str,
             _fields: &[Value],
             _parent: Option<i64>,
-        ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        ) -> Result<StoredWorkItem> {
             if let Some((status, message)) = &self.refusal {
                 return Err(anyhow::Error::new(RequestRejected::new(
                     *status,

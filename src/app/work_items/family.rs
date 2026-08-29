@@ -227,6 +227,13 @@ impl WorkItemsScreen {
         self.graph.comments_for(key)
     }
 
+    /// What one work item was worked on with: its pull requests, the commits
+    /// that named it, the builds it went out in.
+    #[must_use]
+    pub fn artifacts_for(&self, key: &TicketKey) -> Vec<ArtifactLink> {
+        self.graph.artifacts_for(key).into_iter().cloned().collect()
+    }
+
     #[must_use]
     pub fn history_for(&self, key: &TicketKey) -> Vec<&HistoryRecord> {
         self.graph.history_for(key)

@@ -19,8 +19,8 @@ use crate::db::{self, SqliteTicketRepository};
 use crate::edit::{EditApplied, EditRejection, EditRequest};
 use crate::model::{
     CommentRecord, CompletionOptions, DetailsUpdate, Identity, Pipeline, PrBuild, PrThread,
-    PullRequest, RelationKind, RelationRecord, Repo, Run, StateCatalog, StateOption, Ticket,
-    TicketGraph, TicketKey, WorkItemDetails,
+    PullRequest, RelationKind, RelationRecord, Repo, Run, StateCatalog, StateOption,
+    StoredWorkItem, Ticket, TicketGraph, TicketKey, WorkItemDetails,
 };
 use crate::search::SearchDocuments;
 use crate::timestamp::Timestamp;
@@ -574,7 +574,7 @@ pub trait WorkItemSource {
     }
     /// Write one work item with a JSON Patch document, answering with the copy
     /// the server stored.
-    fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<(Ticket, Vec<RelationRecord>)>;
+    fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<StoredWorkItem>;
     /// Add a work item to the project, answering with the copy the server
     /// stored. `fields` are the operations that set its fields and `parent` is
     /// the work item it hangs under. A source that cannot create one says so
@@ -584,7 +584,7 @@ pub trait WorkItemSource {
         _work_item_type: &str,
         _fields: &[Value],
         _parent: Option<i64>,
-    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+    ) -> Result<StoredWorkItem> {
         Err(anyhow!("this source cannot create work items"))
     }
     /// Move one work item under `new_parent`, or out from under the parent it
@@ -592,11 +592,7 @@ pub trait WorkItemSource {
     /// source reads the work item's current links itself: a parent is removed
     /// by the index it sits at, and only a copy read now knows that index. A
     /// source that cannot move one says so rather than pretending to have.
-    fn reparent_work_item(
-        &self,
-        _id: i64,
-        _new_parent: Option<i64>,
-    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+    fn reparent_work_item(&self, _id: i64, _new_parent: Option<i64>) -> Result<StoredWorkItem> {
         Err(anyhow!("this source cannot reparent work items"))
     }
 
@@ -715,15 +711,11 @@ impl WorkItemSource for AzureClient {
         self.current_user_display_name()
     }
 
-    fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<(Ticket, Vec<RelationRecord>)> {
+    fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<StoredWorkItem> {
         self.update_work_item(id, patch)
     }
 
-    fn reparent_work_item(
-        &self,
-        id: i64,
-        new_parent: Option<i64>,
-    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+    fn reparent_work_item(&self, id: i64, new_parent: Option<i64>) -> Result<StoredWorkItem> {
         AzureClient::reparent_work_item(self, id, new_parent)
     }
 
@@ -732,7 +724,7 @@ impl WorkItemSource for AzureClient {
         work_item_type: &str,
         fields: &[Value],
         parent: Option<i64>,
-    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+    ) -> Result<StoredWorkItem> {
         AzureClient::create_work_item(self, work_item_type, fields, parent)
     }
 
@@ -1193,10 +1185,10 @@ impl Worker {
         request: &EditRequest,
         events: &Sender<SyncEvent>,
     ) -> Result<EditApplied> {
-        let (ticket, relations) = self
+        let (ticket, relations, artifacts) = self
             .source(events)?
             .patch_work_item(request.key.id, &request.document())?;
-        self.repository()?.upsert(&ticket, &relations)?;
+        self.repository()?.upsert(&ticket, &relations, &artifacts)?;
         Ok(EditApplied {
             ticket,
             relations,
@@ -1232,7 +1224,7 @@ impl Worker {
         new_parent: Option<i64>,
         events: &Sender<SyncEvent>,
     ) -> Result<ReparentApplied> {
-        let (ticket, relations) = self
+        let (ticket, relations, _) = self
             .source(events)?
             .reparent_work_item(key.id, new_parent)?;
         self.repository()?.reparent(&ticket, &relations)?;
@@ -1350,10 +1342,10 @@ impl Worker {
         parent: Option<i64>,
         events: &Sender<SyncEvent>,
     ) -> Result<CreatedWorkItem> {
-        let (ticket, relations) =
+        let (ticket, relations, artifacts) =
             self.source(events)?
                 .create_work_item(work_item_type, patch, parent)?;
-        self.repository()?.upsert(&ticket, &relations)?;
+        self.repository()?.upsert(&ticket, &relations, &artifacts)?;
         Ok(CreatedWorkItem { ticket, relations })
     }
 
@@ -1483,6 +1475,7 @@ impl Worker {
         let batch = self.source(events)?.pull()?;
         let graph = TicketGraph {
             relations: batch.relations,
+            artifacts: batch.artifacts,
             ..TicketGraph::default()
         };
         let types = self.uncached_types(&batch.tickets)?;
@@ -1528,7 +1521,7 @@ impl Worker {
 
         let repository = self.repository()?;
         if !batch.tickets.is_empty() {
-            repository.upsert_all(&batch.tickets, &batch.relations, &details)?;
+            repository.upsert_all(&batch.tickets, &batch.relations, &batch.artifacts, &details)?;
         }
         let removed = repository.delete_missing(&live_ids)?;
         let count = batch.tickets.len() + removed;
@@ -1993,7 +1986,7 @@ mod tests {
         /// per batch of work items read.
         requests: Arc<Mutex<usize>>,
         /// The copy a write answers with, and the links that come with it.
-        stored: Option<(Ticket, Vec<RelationRecord>)>,
+        stored: Option<StoredWorkItem>,
         /// The status and message a write is refused with instead.
         refusal: Option<(u16, String)>,
         /// Every patch document the worker sent.
@@ -2076,7 +2069,7 @@ mod tests {
 
         fn storing(ticket: Ticket, relations: Vec<RelationRecord>) -> Self {
             Self {
-                stored: Some((ticket, relations)),
+                stored: Some((ticket, relations, Vec::new())),
                 ..Self::with(vec![Ok(SyncBatch::default())])
             }
         }
@@ -2320,11 +2313,7 @@ mod tests {
             Ok(self.runs.lock().unwrap().clone())
         }
 
-        fn patch_work_item(
-            &self,
-            id: i64,
-            patch: &[Value],
-        ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<StoredWorkItem> {
             self.patches.lock().unwrap().push((id, patch.to_vec()));
             if let Some(refusal) = throttled(&self.throttles) {
                 return Err(refusal);
@@ -2378,7 +2367,7 @@ mod tests {
             work_item_type: &str,
             fields: &[Value],
             parent: Option<i64>,
-        ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        ) -> Result<StoredWorkItem> {
             self.created
                 .lock()
                 .unwrap()
@@ -2395,11 +2384,7 @@ mod tests {
                 .context("the fake source was not given a stored copy")
         }
 
-        fn reparent_work_item(
-            &self,
-            id: i64,
-            new_parent: Option<i64>,
-        ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        fn reparent_work_item(&self, id: i64, new_parent: Option<i64>) -> Result<StoredWorkItem> {
             self.reparented.lock().unwrap().push((id, new_parent));
             if let Some((status, message)) = &self.refusal {
                 return Err(anyhow::Error::new(RequestRejected::new(
@@ -2653,6 +2638,7 @@ mod tests {
         let source = FakeSource::with(vec![Ok(SyncBatch {
             tickets: vec![ticket(7, "Pulled")],
             relations: Vec::new(),
+            artifacts: Vec::new(),
         })])
         .scoped(Some("[System.WorkItemType] <> 'Test Case'"));
         let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
@@ -2694,10 +2680,12 @@ mod tests {
             Ok(SyncBatch {
                 tickets: vec![ticket(7, "In the new scope")],
                 relations: Vec::new(),
+                artifacts: Vec::new(),
             }),
             Ok(SyncBatch {
                 tickets: vec![ticket(8, "Changed since")],
                 relations: Vec::new(),
+                artifacts: Vec::new(),
             }),
         ])
         .scoped(Some("[System.ChangedDate] > @today-180"));
@@ -2745,6 +2733,7 @@ mod tests {
                 to: ticket(7, "Pulled").key,
                 kind: RelationKind::Parent,
             }],
+            artifacts: Vec::new(),
         };
         let handle = SyncHandle::spawn(
             path.clone(),
@@ -2804,6 +2793,7 @@ mod tests {
         let batch = || SyncBatch {
             tickets: vec![ticket(7, "Pulled"), ticket(8, "Also pulled"), bug.clone()],
             relations: Vec::new(),
+            artifacts: Vec::new(),
         };
         let task_states = vec![
             StateOption::new("To Do", StateCategory::Proposed),
@@ -2871,10 +2861,12 @@ mod tests {
                 Ok(SyncBatch {
                     tickets: vec![ticket(1, "Existing")],
                     relations: Vec::new(),
+                    artifacts: Vec::new(),
                 }),
                 Ok(SyncBatch {
                     tickets: Vec::new(),
                     relations: Vec::new(),
+                    artifacts: Vec::new(),
                 }),
             ])
         };
@@ -2969,14 +2961,17 @@ mod tests {
                 Ok(SyncBatch {
                     tickets: vec![ticket(1, "Existing")],
                     relations: Vec::new(),
+                    artifacts: Vec::new(),
                 }),
                 Ok(SyncBatch {
                     tickets: Vec::new(),
                     relations: Vec::new(),
+                    artifacts: Vec::new(),
                 }),
                 Ok(SyncBatch {
                     tickets: Vec::new(),
                     relations: Vec::new(),
+                    artifacts: Vec::new(),
                 }),
             ])
         };
@@ -3129,14 +3124,17 @@ mod tests {
                 Ok(SyncBatch {
                     tickets: vec![ticket(1, "Existing")],
                     relations: Vec::new(),
+                    artifacts: Vec::new(),
                 }),
                 Ok(SyncBatch {
                     tickets: Vec::new(),
                     relations: Vec::new(),
+                    artifacts: Vec::new(),
                 }),
                 Ok(SyncBatch {
                     tickets: Vec::new(),
                     relations: Vec::new(),
+                    artifacts: Vec::new(),
                 }),
             ])
         };
@@ -3388,6 +3386,7 @@ mod tests {
                 kind: RelationKind::Parent,
             }],
             tickets: vec![changed.clone()],
+            artifacts: Vec::new(),
         })])
         .listing(vec![1, 2, 3]);
         let watermarks = Arc::clone(&source.watermarks);
@@ -3441,6 +3440,7 @@ mod tests {
         let source = FakeSource::with(vec![Ok(SyncBatch {
             tickets: vec![changed.clone()],
             relations: Vec::new(),
+            artifacts: Vec::new(),
         })])
         .listing(vec![1, 2])
         .with_details(2, details.clone());
@@ -3577,6 +3577,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let doomed = ticket(2, "Two").key;
         let graph = TicketGraph {
+            artifacts: Vec::new(),
             relations: vec![RelationRecord {
                 from: doomed.clone(),
                 to: ticket(1, "One").key,
@@ -3656,6 +3657,7 @@ mod tests {
         let source = FakeSource::with(vec![Ok(SyncBatch {
             tickets: vec![ticket(8, "Older"), newest.clone()],
             relations: Vec::new(),
+            artifacts: Vec::new(),
         })]);
         let watermarks = Arc::clone(&source.watermarks);
         let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
@@ -4455,6 +4457,7 @@ mod tests {
         let source = FakeSource::with(vec![Ok(SyncBatch {
             tickets: vec![moved],
             relations: Vec::new(),
+            artifacts: Vec::new(),
         })])
         .listing(vec![1, 2])
         .commenting(posted_comment(
@@ -4574,6 +4577,7 @@ mod tests {
         let source = FakeSource::with(vec![Ok(SyncBatch {
             tickets: moved,
             relations: Vec::new(),
+            artifacts: Vec::new(),
         })])
         .throttling_details(vec![Duration::from_secs(45)]);
         let handle = SyncHandle::spawn(path.clone(), Box::new(source.clone())).unwrap();
