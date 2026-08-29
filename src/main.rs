@@ -85,7 +85,7 @@ impl ReloadEngine {
             .name("ticket-reload".into())
             .spawn(move || {
                 let result = (|| -> Result<PreparedTickets> {
-                    let repository = SqliteTicketRepository::open(&path)?;
+                    let repository = SqliteTicketRepository::open_existing(&path)?;
                     let tickets = repository.load_all()?;
                     let graph = repository.load_graph()?;
                     Ok(PreparedTickets::with_graph(tickets, graph))

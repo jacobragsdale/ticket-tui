@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use directories::ProjectDirs;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -113,6 +113,25 @@ impl SqliteTicketRepository {
 
         ensure_current_schema(&connection)?;
 
+        Ok(Self { connection, path })
+    }
+
+    /// Open an existing cache without touching its schema. Background reloads use
+    /// this so an older running instance can never rebuild (and empty) a cache
+    /// that a newer build owns; a version mismatch is an error instead.
+    pub fn open_existing(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let connection = Connection::open(&path)
+            .with_context(|| format!("failed to open database at {}", path.display()))?;
+        connection
+            .busy_timeout(StdDuration::from_secs(3))
+            .context("failed to configure SQLite busy timeout")?;
+        let version = schema_version(&connection)?;
+        if version != SCHEMA_VERSION {
+            bail!(
+                "ticket cache schema is version {version} but this build expects {SCHEMA_VERSION}; restart ticket-tui"
+            );
+        }
         Ok(Self { connection, path })
     }
 
@@ -643,5 +662,40 @@ mod tests {
         let error = format!("{:#}", repository.load_all().unwrap_err());
         assert!(error.contains("10001"), "{error}");
         assert!(error.contains("created_at"), "{error}");
+    }
+
+    #[test]
+    fn open_existing_never_rebuilds_a_foreign_schema() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+        repository
+            .replace_all(&[ticket(1)], &TicketGraph::default())
+            .unwrap();
+        drop(repository);
+
+        assert_eq!(
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .load_all()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        let error = format!(
+            "{:#}",
+            SqliteTicketRepository::open_existing(&path).unwrap_err()
+        );
+        assert!(error.contains("restart ticket-tui"), "{error}");
+        let rows: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM work_items", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "a version mismatch must not drop the cached rows");
     }
 }
