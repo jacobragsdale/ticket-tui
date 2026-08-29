@@ -457,6 +457,138 @@ pub struct Approval {
     pub requested_at: Option<Timestamp>,
 }
 
+/// Where a pull request has got to.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PrStatus {
+    #[default]
+    Active,
+    Completed,
+    Abandoned,
+}
+
+impl PrStatus {
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        match raw.to_ascii_lowercase().as_str() {
+            "completed" => Self::Completed,
+            "abandoned" => Self::Abandoned,
+            _ => Self::Active,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Completed => "completed",
+            Self::Abandoned => "abandoned",
+        }
+    }
+
+    /// Whether the workflow has finished with it, which is what the table
+    /// hides by default the way it hides finished work items.
+    #[must_use]
+    pub const fn is_closed(self) -> bool {
+        matches!(self, Self::Completed | Self::Abandoned)
+    }
+}
+
+/// One reviewer's standing on a pull request. Azure DevOps votes in tens:
+/// 10 approved, 5 approved with suggestions, 0 no vote, -5 waiting for the
+/// author, -10 rejected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrReviewer {
+    pub id: String,
+    pub display_name: String,
+    pub unique_name: Option<String>,
+    pub vote: i8,
+    pub is_required: bool,
+}
+
+impl PrReviewer {
+    /// The glyph the conventions give a vote.
+    #[must_use]
+    pub const fn glyph(&self) -> &'static str {
+        match self.vote {
+            10 => "\u{2713}",
+            5 => "\u{25d1}",
+            -5 => "\u{25c7}",
+            -10 => "\u{2717}",
+            _ => "\u{00b7}",
+        }
+    }
+
+    /// How the vote reads in the details pane.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match self.vote {
+            10 => "approved",
+            5 => "approved with suggestions",
+            -5 => "waiting for the author",
+            -10 => "rejected",
+            _ => "no vote",
+        }
+    }
+}
+
+/// What the branch policy's build says about a pull request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrBuild {
+    /// `approved`, `queued`, `running`, `rejected`, as the policy reports it.
+    pub status: String,
+    /// The run it is talking about, when the evaluation names one.
+    pub run_id: Option<i64>,
+}
+
+/// One pull request, with everything the tab draws about it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PullRequest {
+    pub repo_id: String,
+    pub id: i64,
+    pub title: String,
+    pub description: String,
+    pub status: PrStatus,
+    pub is_draft: bool,
+    pub created_by: Identity,
+    pub created_at: Option<Timestamp>,
+    pub closed_at: Option<Timestamp>,
+    /// Full refs, as stored: `refs/heads/feature/x`.
+    pub source_ref: String,
+    pub target_ref: String,
+    /// `succeeded`, `conflicts`, `queued`, as the merge reports it.
+    pub merge_status: String,
+    /// The head commit the stored copy was read at. A pull request whose head
+    /// has moved is one worth reading again.
+    pub last_merge_source_commit: String,
+    /// Who turned auto-complete on, when somebody has.
+    pub auto_complete_set_by: Option<String>,
+    pub url: String,
+    pub reviewers: Vec<PrReviewer>,
+    /// The work items it says it closes.
+    pub work_items: Vec<i64>,
+    pub build: Option<PrBuild>,
+}
+
+impl PullRequest {
+    /// Whether the merge is blocked on a conflict, which the Build column says
+    /// in red.
+    #[must_use]
+    pub fn has_conflicts(&self) -> bool {
+        self.merge_status.eq_ignore_ascii_case("conflicts")
+    }
+
+    /// The reviewer set as a string, for telling one read from the next
+    /// without comparing every field.
+    #[must_use]
+    pub fn reviewer_signature(&self) -> String {
+        self.reviewers
+            .iter()
+            .map(|reviewer| format!("{}:{}", reviewer.id, reviewer.vote))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
 /// Somewhere worth going, wherever it lives. The shell resolves one by
 /// switching to the tab that holds it and asking that screen to select it, so
 /// a work item's pull request and a run's branch are one keystroke apart.

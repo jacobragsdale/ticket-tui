@@ -10,13 +10,13 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::classification::{ClassificationNode, NodeKind};
 use crate::model::{
-    CommentRecord, DetailsUpdate, HistoryRecord, Identity, Pipeline, RelationKind, RelationRecord,
-    Repo, Run, RunResult, RunStatus, StateCatalog, StateCategory, StateOption, Ticket, TicketGraph,
-    TicketKey,
+    CommentRecord, DetailsUpdate, HistoryRecord, Identity, Pipeline, PrBuild, PrReviewer, PrStatus,
+    PullRequest, RelationKind, RelationRecord, Repo, Run, RunResult, RunStatus, StateCatalog,
+    StateCategory, StateOption, Ticket, TicketGraph, TicketKey,
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -69,6 +69,9 @@ DROP TABLE IF EXISTS classification_nodes;
 DROP TABLE IF EXISTS repos;
 DROP TABLE IF EXISTS pipelines;
 DROP TABLE IF EXISTS runs;
+DROP TABLE IF EXISTS pull_requests;
+DROP TABLE IF EXISTS pr_reviewers;
+DROP TABLE IF EXISTS pr_work_items;
 DROP TABLE IF EXISTS sync_meta;
 CREATE TABLE work_items (
     organization   TEXT NOT NULL,
@@ -184,6 +187,41 @@ CREATE TABLE runs (
     url            TEXT NOT NULL
 );
 CREATE INDEX runs_by_pipeline ON runs (pipeline_id, queue_time DESC);
+CREATE TABLE pull_requests (
+    id                       INTEGER PRIMARY KEY,
+    repo_id                  TEXT NOT NULL,
+    title                    TEXT NOT NULL,
+    description              TEXT NOT NULL,
+    status                   TEXT NOT NULL,
+    is_draft                 INTEGER NOT NULL,
+    created_by               TEXT NOT NULL,
+    created_by_unique        TEXT,
+    created_at               TEXT,
+    closed_at                TEXT,
+    source_ref               TEXT NOT NULL,
+    target_ref               TEXT NOT NULL,
+    merge_status             TEXT NOT NULL,
+    last_merge_source_commit TEXT NOT NULL,
+    auto_complete_set_by     TEXT,
+    url                      TEXT NOT NULL,
+    build_status             TEXT,
+    build_run_id             INTEGER
+);
+CREATE TABLE pr_reviewers (
+    pull_request_id INTEGER NOT NULL,
+    reviewer_id     TEXT NOT NULL,
+    display_name    TEXT NOT NULL,
+    unique_name     TEXT,
+    vote            INTEGER NOT NULL,
+    is_required     INTEGER NOT NULL,
+    position        INTEGER NOT NULL,
+    PRIMARY KEY (pull_request_id, reviewer_id)
+);
+CREATE TABLE pr_work_items (
+    pull_request_id INTEGER NOT NULL,
+    work_item_id    INTEGER NOT NULL,
+    PRIMARY KEY (pull_request_id, work_item_id)
+);
 CREATE TABLE sync_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -632,6 +670,156 @@ impl SqliteTicketRepository {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to load pipeline runs")
+    }
+
+    /// Replaces the stored pull requests, their reviewers and their work-item
+    /// links with what the pull found. Answers whether anything changed.
+    pub fn replace_pull_requests(&mut self, requests: &[PullRequest]) -> Result<bool> {
+        let mut requests = requests.to_vec();
+        requests.sort_by_key(|request| std::cmp::Reverse(request.id));
+        if self.load_pull_requests()? == requests {
+            return Ok(false);
+        }
+        let transaction = self.connection.transaction()?;
+        for table in ["pull_requests", "pr_reviewers", "pr_work_items"] {
+            transaction.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        for request in &requests {
+            transaction.execute(
+                "INSERT OR REPLACE INTO pull_requests
+                 (id, repo_id, title, description, status, is_draft, created_by,
+                  created_by_unique, created_at, closed_at, source_ref, target_ref,
+                  merge_status, last_merge_source_commit, auto_complete_set_by, url,
+                  build_status, build_run_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                         ?16, ?17, ?18)",
+                params![
+                    request.id,
+                    request.repo_id,
+                    request.title,
+                    request.description,
+                    request.status.as_str(),
+                    i64::from(request.is_draft),
+                    request.created_by.display_name,
+                    request.created_by.unique_name,
+                    request.created_at.map(|at| at.to_rfc3339()),
+                    request.closed_at.map(|at| at.to_rfc3339()),
+                    request.source_ref,
+                    request.target_ref,
+                    request.merge_status,
+                    request.last_merge_source_commit,
+                    request.auto_complete_set_by,
+                    request.url,
+                    request.build.as_ref().map(|build| build.status.clone()),
+                    request.build.as_ref().and_then(|build| build.run_id),
+                ],
+            )?;
+            for (position, reviewer) in request.reviewers.iter().enumerate() {
+                transaction.execute(
+                    "INSERT OR REPLACE INTO pr_reviewers
+                     (pull_request_id, reviewer_id, display_name, unique_name, vote,
+                      is_required, position)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        request.id,
+                        reviewer.id,
+                        reviewer.display_name,
+                        reviewer.unique_name,
+                        i64::from(reviewer.vote),
+                        i64::from(reviewer.is_required),
+                        i64::try_from(position).unwrap_or_default(),
+                    ],
+                )?;
+            }
+            for work_item in &request.work_items {
+                transaction.execute(
+                    "INSERT OR REPLACE INTO pr_work_items (pull_request_id, work_item_id)
+                     VALUES (?1, ?2)",
+                    params![request.id, work_item],
+                )?;
+            }
+        }
+        transaction
+            .commit()
+            .context("failed to store the project's pull requests")?;
+        Ok(true)
+    }
+
+    /// The stored pull requests, newest first, with their reviewers and links.
+    pub fn load_pull_requests(&self) -> Result<Vec<PullRequest>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, repo_id, title, description, status, is_draft, created_by,
+                    created_by_unique, created_at, closed_at, source_ref, target_ref,
+                    merge_status, last_merge_source_commit, auto_complete_set_by, url,
+                    build_status, build_run_id
+             FROM pull_requests ORDER BY id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let build_status: Option<String> = row.get(16)?;
+            Ok(PullRequest {
+                id: row.get(0)?,
+                repo_id: row.get(1)?,
+                title: row.get(2)?,
+                description: row.get(3)?,
+                status: PrStatus::parse(&row.get::<_, String>(4)?),
+                is_draft: row.get::<_, i64>(5)? != 0,
+                created_by: Identity::new(row.get::<_, String>(6)?, row.get(7)?),
+                created_at: row
+                    .get::<_, Option<String>>(8)?
+                    .as_deref()
+                    .and_then(|raw| Timestamp::parse(raw).ok()),
+                closed_at: row
+                    .get::<_, Option<String>>(9)?
+                    .as_deref()
+                    .and_then(|raw| Timestamp::parse(raw).ok()),
+                source_ref: row.get(10)?,
+                target_ref: row.get(11)?,
+                merge_status: row.get(12)?,
+                last_merge_source_commit: row.get(13)?,
+                auto_complete_set_by: row.get(14)?,
+                url: row.get(15)?,
+                build: build_status.map(|status| PrBuild {
+                    status,
+                    run_id: row.get(17).ok().flatten(),
+                }),
+                reviewers: Vec::new(),
+                work_items: Vec::new(),
+            })
+        })?;
+        let mut requests = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        for request in &mut requests {
+            request.reviewers = self.load_pr_reviewers(request.id)?;
+            request.work_items = self.load_pr_work_items(request.id)?;
+        }
+        Ok(requests)
+    }
+
+    fn load_pr_reviewers(&self, pull_request: i64) -> Result<Vec<PrReviewer>> {
+        let mut statement = self.connection.prepare(
+            "SELECT reviewer_id, display_name, unique_name, vote, is_required
+             FROM pr_reviewers WHERE pull_request_id = ?1 ORDER BY position",
+        )?;
+        let rows = statement.query_map(params![pull_request], |row| {
+            Ok(PrReviewer {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                unique_name: row.get(2)?,
+                vote: i8::try_from(row.get::<_, i64>(3)?).unwrap_or_default(),
+                is_required: row.get::<_, i64>(4)? != 0,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load pull request reviewers")
+    }
+
+    fn load_pr_work_items(&self, pull_request: i64) -> Result<Vec<i64>> {
+        let mut statement = self.connection.prepare(
+            "SELECT work_item_id FROM pr_work_items WHERE pull_request_id = ?1
+             ORDER BY work_item_id",
+        )?;
+        let rows = statement.query_map(params![pull_request], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load pull request work items")
     }
 
     /// Everybody the last identity fetch found, by display name.

@@ -17,9 +17,9 @@ use url::Url;
 use crate::classification::{self, ClassificationNode};
 use crate::html::html_to_text;
 use crate::model::{
-    Approval, CommentRecord, HistoryRecord, Identity, Issue, Pipeline, RelationKind,
-    RelationRecord, Repo, Run, RunResult, RunStatus, StateCategory, StateOption, Ticket, TicketKey,
-    TimelineKind, TimelineRecord, WorkItemDetails,
+    Approval, CommentRecord, HistoryRecord, Identity, Issue, Pipeline, PrBuild, PrReviewer,
+    PrStatus, PullRequest, RelationKind, RelationRecord, Repo, Run, RunResult, RunStatus,
+    StateCategory, StateOption, Ticket, TicketKey, TimelineKind, TimelineRecord, WorkItemDetails,
 };
 use crate::timestamp::Timestamp;
 
@@ -869,6 +869,65 @@ impl AzureClient {
             .collect())
     }
 
+    /// The project's pull requests in one status. The list endpoint carries
+    /// the reviewers with each one, so a page is all the table needs.
+    pub fn fetch_pull_requests(&self, status: &str, top: usize) -> Result<Vec<PullRequest>> {
+        let segments = [self.config.project.as_str(), "_apis", "git", "pullrequests"];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&format!(
+            "searchCriteria.status={status}&$top={top}&api-version={API_VERSION}"
+        )));
+        Ok(parse_pull_requests(&self.get(url.as_str())?))
+    }
+
+    /// The work items one pull request says it closes.
+    pub fn fetch_pull_request_work_items(&self, repo_id: &str, id: i64) -> Result<Vec<i64>> {
+        let pull_request = id.to_string();
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "git",
+            "repositories",
+            repo_id,
+            "pullrequests",
+            pull_request.as_str(),
+            "workitems",
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&version_query()));
+        let response = self.get(url.as_str())?;
+        Ok(response["value"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|entry| {
+                entry["id"]
+                    .as_str()
+                    .and_then(|id| id.parse().ok())
+                    .or_else(|| entry["id"].as_i64())
+            })
+            .collect())
+    }
+
+    /// What the branch policies say about one pull request, which is where the
+    /// build that gates it is named. The endpoint asks for the pull request by
+    /// its artifact id, which is why the project's GUID is worth storing.
+    pub fn fetch_pull_request_policy(&self, project_id: &str, id: i64) -> Result<Option<PrBuild>> {
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "policy",
+            "evaluations",
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&format!(
+            "artifactId=vstfs:///CodeReview/CodeReviewId/{project_id}/{id}\
+             &api-version=7.1-preview.1"
+        )));
+        Ok(parse_policy_build(&self.get(url.as_str())?))
+    }
+
     /// The teams hang off `_apis/projects` rather than off the project. `tail`
     /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {
@@ -1201,6 +1260,99 @@ fn parse_approvals(response: &Value) -> Vec<Approval> {
             })
         })
         .collect()
+}
+
+/// The pull requests in a list response, with the reviewers each carries.
+fn parse_pull_requests(response: &Value) -> Vec<PullRequest> {
+    response["value"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| {
+            let time = |key: &str| {
+                entry[key]
+                    .as_str()
+                    .and_then(|raw| Timestamp::parse(raw).ok())
+            };
+            Some(PullRequest {
+                id: entry["pullRequestId"].as_i64()?,
+                repo_id: entry["repository"]["id"].as_str()?.to_owned(),
+                title: entry["title"].as_str().unwrap_or_default().to_owned(),
+                description: entry["description"].as_str().unwrap_or_default().to_owned(),
+                status: PrStatus::parse(entry["status"].as_str().unwrap_or_default()),
+                is_draft: entry["isDraft"].as_bool().unwrap_or_default(),
+                created_by: Identity::new(
+                    entry["createdBy"]["displayName"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    entry["createdBy"]["uniqueName"].as_str().map(str::to_owned),
+                ),
+                created_at: time("creationDate"),
+                closed_at: time("closedDate"),
+                source_ref: entry["sourceRefName"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                target_ref: entry["targetRefName"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                merge_status: entry["mergeStatus"].as_str().unwrap_or_default().to_owned(),
+                last_merge_source_commit: entry["lastMergeSourceCommit"]["commitId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                auto_complete_set_by: entry["autoCompleteSetBy"]["displayName"]
+                    .as_str()
+                    .map(str::to_owned),
+                url: entry["_links"]["web"]["href"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                reviewers: parse_reviewers(&entry["reviewers"]),
+                work_items: Vec::new(),
+                build: None,
+            })
+        })
+        .collect()
+}
+
+fn parse_reviewers(value: &Value) -> Vec<PrReviewer> {
+    value
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| {
+            Some(PrReviewer {
+                id: entry["id"].as_str()?.to_owned(),
+                display_name: entry["displayName"].as_str().unwrap_or_default().to_owned(),
+                unique_name: entry["uniqueName"].as_str().map(str::to_owned),
+                vote: i8::try_from(entry["vote"].as_i64().unwrap_or_default()).unwrap_or_default(),
+                is_required: entry["isRequired"].as_bool().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// The build a policy evaluation names, if one of the policies is a build.
+fn parse_policy_build(response: &Value) -> Option<PrBuild> {
+    response["value"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .find(|entry| {
+            entry["configuration"]["type"]["displayName"]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("build"))
+        })
+        .map(|entry| PrBuild {
+            status: entry["status"].as_str().unwrap_or_default().to_owned(),
+            run_id: entry["context"]["buildId"].as_i64(),
+        })
 }
 
 /// The repositories in a `GET .../_apis/git/repositories` response, and the

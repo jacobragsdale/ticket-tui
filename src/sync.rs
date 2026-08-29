@@ -18,8 +18,9 @@ use crate::classification::ClassificationNode;
 use crate::db::{self, SqliteTicketRepository};
 use crate::edit::{EditApplied, EditRejection, EditRequest};
 use crate::model::{
-    CommentRecord, DetailsUpdate, Identity, Pipeline, RelationKind, RelationRecord, Repo, Run,
-    StateCatalog, StateOption, Ticket, TicketGraph, TicketKey, WorkItemDetails,
+    CommentRecord, DetailsUpdate, Identity, Pipeline, PrBuild, PullRequest, RelationKind,
+    RelationRecord, Repo, Run, StateCatalog, StateOption, Ticket, TicketGraph, TicketKey,
+    WorkItemDetails,
 };
 use crate::search::SearchDocuments;
 use crate::timestamp::Timestamp;
@@ -269,6 +270,7 @@ pub struct PulledExtras {
     pub repos: usize,
     pub pipelines: usize,
     pub runs: usize,
+    pub pull_requests: usize,
 }
 
 impl PulledExtras {
@@ -279,6 +281,7 @@ impl PulledExtras {
             repos: snapshot.repos.len(),
             pipelines: snapshot.pipelines.len(),
             runs: snapshot.runs.len(),
+            pull_requests: snapshot.pull_requests.len(),
         }
     }
 
@@ -287,6 +290,7 @@ impl PulledExtras {
             (self.repos, "repo", "repos"),
             (self.pipelines, "pipeline", "pipelines"),
             (self.runs, "run", "runs"),
+            (self.pull_requests, "pull request", "pull requests"),
         ]
         .into_iter()
         .filter(|(count, _, _)| *count > 0)
@@ -297,6 +301,11 @@ impl PulledExtras {
         .collect()
     }
 }
+
+/// How many pull requests one pull will read the work items and build policy
+/// of. A busy project moves more than this between ticks; the rest wait for
+/// the next one rather than costing a hundred requests now.
+const PR_REFRESH_BUDGET: usize = 30;
 
 /// Everything one reload hands the main thread: the rows, what search needs of
 /// them, the links between them, the process states they move through, and the
@@ -315,6 +324,9 @@ pub struct Snapshot {
     /// The project's pipelines and the newest window of their runs.
     pub pipelines: Vec<Pipeline>,
     pub runs: Vec<Run>,
+    /// The project's pull requests: every active one, and a window of those
+    /// recently closed.
+    pub pull_requests: Vec<PullRequest>,
 }
 
 impl Snapshot {
@@ -334,6 +346,7 @@ impl Snapshot {
             repos: Vec::new(),
             pipelines: Vec::new(),
             runs: Vec::new(),
+            pull_requests: Vec::new(),
         }
     }
 
@@ -382,8 +395,19 @@ impl Snapshot {
     }
 
     #[must_use]
+    pub fn with_pull_requests(mut self, pull_requests: Vec<PullRequest>) -> Self {
+        self.pull_requests = pull_requests;
+        self
+    }
+
+    #[must_use]
     pub fn pipelines(&self) -> &[Pipeline] {
         &self.pipelines
+    }
+
+    #[must_use]
+    pub fn pull_requests(&self) -> &[PullRequest] {
+        &self.pull_requests
     }
 
     #[must_use]
@@ -470,6 +494,19 @@ pub trait WorkItemSource {
     }
     fn runs(&self) -> Result<Vec<Run>> {
         Ok(Vec::new())
+    }
+    /// The project's pull requests in one status: `active`, `completed` or
+    /// `abandoned`.
+    fn pull_requests(&self, _status: &str, _top: usize) -> Result<Vec<PullRequest>> {
+        Ok(Vec::new())
+    }
+    /// The work items one pull request says it closes.
+    fn pull_request_work_items(&self, _repo_id: &str, _id: i64) -> Result<Vec<i64>> {
+        Ok(Vec::new())
+    }
+    /// What the branch policies say about one pull request.
+    fn pull_request_policy(&self, _project_id: &str, _id: i64) -> Result<Option<PrBuild>> {
+        Ok(None)
     }
     /// Write one work item with a JSON Patch document, answering with the copy
     /// the server stored.
@@ -564,6 +601,18 @@ impl WorkItemSource for AzureClient {
 
     fn runs(&self) -> Result<Vec<Run>> {
         self.fetch_runs()
+    }
+
+    fn pull_requests(&self, status: &str, top: usize) -> Result<Vec<PullRequest>> {
+        self.fetch_pull_requests(status, top)
+    }
+
+    fn pull_request_work_items(&self, repo_id: &str, id: i64) -> Result<Vec<i64>> {
+        self.fetch_pull_request_work_items(repo_id, id)
+    }
+
+    fn pull_request_policy(&self, project_id: &str, id: i64) -> Result<Option<PrBuild>> {
+        self.fetch_pull_request_policy(project_id, id)
     }
 
     fn branches(&self, repo_id: &str) -> Result<Vec<String>> {
@@ -1355,6 +1404,7 @@ impl Worker {
         self.cache_type_states(&types, events)?;
         self.sync_repos(events)?;
         self.sync_pipelines(events)?;
+        self.sync_pull_requests(events)?;
         Ok(SyncOutcome::Pulled {
             snapshot: Box::new(self.reload()?),
             mode: SyncMode::Full,
@@ -1399,7 +1449,8 @@ impl Worker {
         // items and repositories are both untouched writes nothing at all.
         let repos_changed = self.sync_repos(events)?;
         let pipelines_changed = self.sync_pipelines(events)?;
-        if count == 0 && !repos_changed && !pipelines_changed {
+        let pull_requests_changed = self.sync_pull_requests(events)?;
+        if count == 0 && !repos_changed && !pipelines_changed && !pull_requests_changed {
             return Ok(SyncOutcome::Unchanged);
         }
         Ok(SyncOutcome::Pulled {
@@ -1444,6 +1495,61 @@ impl Worker {
         Ok(stored_pipelines || stored_runs)
     }
 
+    /// Reads the project's pull requests: every active one, and a window of
+    /// those recently closed so one that just landed does not vanish. For the
+    /// active ones whose head commit or reviewer set has moved — and at most
+    /// [`PR_REFRESH_BUDGET`] of them per pull, so a busy project does not cost
+    /// a hundred requests — the work items and the build policy are read too.
+    /// Answers whether anything was written.
+    fn sync_pull_requests(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
+        let Ok(active) = self.source(events)?.pull_requests("active", 200) else {
+            return Ok(false);
+        };
+        let mut requests = active;
+        for (status, top) in [("completed", 50), ("abandoned", 50)] {
+            if let Ok(closed) = self.source(events)?.pull_requests(status, top) {
+                requests.extend(closed);
+            }
+        }
+        let stored = self.repository()?.load_pull_requests()?;
+        let project_id = self.repository()?.meta(db::PROJECT_ID_KEY)?;
+        let mut refreshed = 0;
+        for request in &mut requests {
+            let held = stored.iter().find(|held| held.id == request.id);
+            // What was read before is kept unless the pull request has moved,
+            // which is what keeps the per-request reads down to what changed.
+            let unchanged = held.is_some_and(|held| {
+                held.last_merge_source_commit == request.last_merge_source_commit
+                    && held.reviewer_signature() == request.reviewer_signature()
+            });
+            if unchanged {
+                if let Some(held) = held {
+                    request.work_items.clone_from(&held.work_items);
+                    request.build.clone_from(&held.build);
+                }
+                continue;
+            }
+            if request.status.is_closed() || refreshed >= PR_REFRESH_BUDGET {
+                if let Some(held) = held {
+                    request.work_items.clone_from(&held.work_items);
+                    request.build.clone_from(&held.build);
+                }
+                continue;
+            }
+            refreshed += 1;
+            let source = self.source(events)?;
+            if let Ok(work_items) = source.pull_request_work_items(&request.repo_id, request.id) {
+                request.work_items = work_items;
+            }
+            if let Some(project_id) = project_id.as_deref()
+                && let Ok(build) = source.pull_request_policy(project_id, request.id)
+            {
+                request.build = build;
+            }
+        }
+        self.repository()?.replace_pull_requests(&requests)
+    }
+
     /// The rows, their graph, and the states they allow, all out of the same
     /// read, so what the main thread shows is what the database holds.
     fn reload(&mut self) -> Result<Snapshot> {
@@ -1454,10 +1560,12 @@ impl Worker {
         let repos = repository.load_repos()?;
         let pipelines = repository.load_pipelines()?;
         let runs = repository.load_runs()?;
+        let pull_requests = repository.load_pull_requests()?;
         Ok(Snapshot::with_graph(tickets, graph)
             .with_states(states)
             .with_repos(repos)
-            .with_pipelines(pipelines, runs))
+            .with_pipelines(pipelines, runs)
+            .with_pull_requests(pull_requests))
     }
 
     /// The work item types in a batch whose states nobody has read yet, in the
@@ -1663,7 +1771,7 @@ impl SyncScheduler {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{RunResult, RunStatus};
+    use crate::model::{PrReviewer, PrStatus, RunResult, RunStatus};
 
     use super::*;
     use crate::azure::{RequestRejected, Throttled};
@@ -1779,6 +1887,10 @@ mod tests {
         scope: Option<SyncScope>,
         /// Every run this source was asked to start, cancel or retry.
         started: Arc<Mutex<Vec<String>>>,
+        /// The active pull requests it lists, and every one whose extras were
+        /// read.
+        pull_requests: Arc<Mutex<Vec<PullRequest>>>,
+        pr_extras: Arc<Mutex<Vec<i64>>>,
         /// The repositories this source lists, and the project GUID they carry.
         repos: Arc<Mutex<Vec<Repo>>>,
         /// The pipelines and runs it lists, and how often they were asked for.
@@ -1962,6 +2074,19 @@ mod tests {
                 },
                 None,
             ))
+        }
+
+        fn pull_requests(&self, status: &str, _top: usize) -> Result<Vec<PullRequest>> {
+            Ok(if status == "active" {
+                self.pull_requests.lock().unwrap().clone()
+            } else {
+                Vec::new()
+            })
+        }
+
+        fn pull_request_work_items(&self, _repo_id: &str, id: i64) -> Result<Vec<i64>> {
+            self.pr_extras.lock().unwrap().push(id);
+            Ok(vec![10_001])
         }
 
         fn pipelines(&self) -> Result<Vec<Pipeline>> {
@@ -2736,6 +2861,122 @@ mod tests {
                 other => panic!("expected a run event, got {other:?}"),
             }
         }
+    }
+
+    fn pull_request(id: i64, commit: &str, status: PrStatus) -> PullRequest {
+        PullRequest {
+            repo_id: "aaa-111".into(),
+            id,
+            title: format!("Pull request {id}"),
+            description: String::new(),
+            status,
+            is_draft: false,
+            created_by: Identity::new("Jacob Ragsdale".to_owned(), None),
+            created_at: Some(crate::timestamp::ts("2026-08-29T09:00:00Z")),
+            closed_at: None,
+            source_ref: "refs/heads/feature".into(),
+            target_ref: "refs/heads/main".into(),
+            merge_status: "succeeded".into(),
+            last_merge_source_commit: commit.to_owned(),
+            auto_complete_set_by: None,
+            url: String::new(),
+            reviewers: vec![PrReviewer {
+                id: "reviewer-1".into(),
+                display_name: "Avery".into(),
+                unique_name: None,
+                vote: 0,
+                is_required: true,
+            }],
+            work_items: Vec::new(),
+            build: None,
+        }
+    }
+
+    #[test]
+    fn a_pull_stores_pull_requests_and_reads_the_extras_only_for_the_one_that_moved() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let active = Arc::new(Mutex::new(vec![
+            pull_request(7, "commit-a", PrStatus::Active),
+            pull_request(8, "commit-b", PrStatus::Active),
+        ]));
+        let source = FakeSource {
+            pull_requests: Arc::clone(&active),
+            ..FakeSource::with(vec![
+                Ok(SyncBatch {
+                    tickets: vec![ticket(1, "Existing")],
+                    relations: Vec::new(),
+                }),
+                Ok(SyncBatch {
+                    tickets: Vec::new(),
+                    relations: Vec::new(),
+                }),
+                Ok(SyncBatch {
+                    tickets: Vec::new(),
+                    relations: Vec::new(),
+                }),
+            ])
+        };
+        let extras = Arc::clone(&source.pr_extras);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let SyncOutcome::Pulled { snapshot, .. } = pulled(&handle) else {
+            panic!("expected a pull");
+        };
+        assert_eq!(snapshot.pull_requests().len(), 2);
+        assert_eq!(
+            snapshot.pull_requests()[0].reviewers[0].display_name,
+            "Avery",
+            "the reviewers come with the list page"
+        );
+        assert_eq!(
+            snapshot.pull_requests()[0].work_items,
+            vec![10_001],
+            "and the work items are read per pull request"
+        );
+        assert_eq!(
+            *extras.lock().unwrap(),
+            vec![7, 8],
+            "both are new, so both are read"
+        );
+
+        // One head moves, one closes, and one is left alone.
+        extras.lock().unwrap().clear();
+        *active.lock().unwrap() = vec![
+            pull_request(7, "commit-c", PrStatus::Active),
+            pull_request(8, "commit-b", PrStatus::Active),
+        ];
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let SyncOutcome::Pulled { snapshot, .. } = pulled(&handle) else {
+            panic!("a pull request that moved is something to write");
+        };
+        assert_eq!(
+            *extras.lock().unwrap(),
+            vec![7],
+            "only the one whose head moved is read again"
+        );
+        assert_eq!(
+            snapshot.pull_requests()[1].work_items,
+            vec![10_001],
+            "and the one that did not keeps what was read before"
+        );
+
+        extras.lock().unwrap().clear();
+        *active.lock().unwrap() = vec![pull_request(7, "commit-c", PrStatus::Active)];
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let SyncOutcome::Pulled { snapshot, .. } = pulled(&handle) else {
+            panic!("a pull request that closed is something to write");
+        };
+        assert_eq!(
+            snapshot.pull_requests().len(),
+            1,
+            "one that left the active set and is not on a closed page is dropped"
+        );
+        assert!(
+            extras.lock().unwrap().is_empty(),
+            "and nothing was read for it"
+        );
     }
 
     #[test]

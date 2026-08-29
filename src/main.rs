@@ -2239,9 +2239,10 @@ mod tests {
                     repos: 4,
                     pipelines: 1,
                     runs: 137,
+                    pull_requests: 2,
                 }
             ),
-            "Synced 52 work items, 4 repos, 1 pipeline, 137 runs from example-org/atlas",
+            "Synced 52 work items, 4 repos, 1 pipeline, 137 runs, 2 pull requests from example-org/atlas",
             "a full pull counts everything it brought down with the rows"
         );
     }
