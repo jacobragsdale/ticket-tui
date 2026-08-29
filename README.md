@@ -10,8 +10,8 @@ Azure DevOps is the source of truth. A background worker pulls the project's
 work items over the REST API every minute and replaces the local rows, so a
 state changed in the browser shows up in a running TUI without restarting it;
 the database file itself is durable, lives in the platform data directory, and
-is the interface other tools and agent skills read. Everything else the TUI does
-is local and never edits work items.
+is the interface other tools and agent skills read. A field changed in the TUI
+is written straight back over the same API; everything else it does is local.
 
 ## Run it
 
@@ -158,6 +158,46 @@ Every pull is a full pull; syncing only what changed is planned. Comments and
 revision history are not synced yet: their tables exist and the details pane
 renders them when present, but nothing fills them.
 
+## Editing
+
+Work items are written back to Azure DevOps as they change, one field at a
+time, and every edit takes the same path. The row changes in the table straight
+away, the sync worker sends a JSON Patch document to
+`PATCH /_apis/wit/workitems/<id>`, and what happens next depends on the answer.
+
+The document always leads with a revision test:
+
+```json
+[
+  {"op": "test", "path": "/rev", "value": 12},
+  {"op": "add", "path": "/fields/System.State", "value": "Doing"}
+]
+```
+
+so Azure DevOps refuses the whole write if the work item changed after it was
+loaded. On success the copy Azure DevOps stored — its new revision and changed
+date included — replaces the row, is written to SQLite on its own without
+touching any other record, and the status line reports
+`Updated #613 · State → Doing`. The row then re-sorts and re-filters if the
+change moved it, and the selection follows its work item rather than its row
+number.
+
+A refusal puts the row back exactly as it was and names the field, so a change
+is never dropped quietly. A conflict reads `#613 changed in Azure DevOps since
+it was loaded; State not saved — syncing the latest copy` and asks for a pull at
+once, so the value somebody else wrote appears. Anything else Azure DevOps
+refused is reported as it came.
+
+Edits ride the same worker as pulls and are handled in the order they arrive, so
+typing is never blocked and an edit queued before a pull is written before that
+pull reads. If a pull finishes while an edit is still in flight, the edit stays
+on screen over the rows the pull brought. There is no offline queue: without a
+configured organization an edit is refused before anything changes, and an edit
+that cannot be sent is reverted rather than saved for later.
+
+No keypress makes an edit yet; the state picker is the first field to use this
+path.
+
 ## Controls
 
 | Input | Action |
@@ -286,12 +326,13 @@ its schema and report the version mismatch, ending in `restart ticket-tui`, so a
 running instance can never empty a database a newer build owns. After upgrading
 the binary, restart any running ticket-tui.
 
-The TUI displays cached records but never edits them. Parent and child links
-render as an always-expanded family tree in the details pane. Click a family
-row, or press `Enter` on the family cursor, to select that ticket in the table.
-Fuzzy search covers ID, title, assignee, state, type, area, iteration, and tags;
-it intentionally excludes descriptions. Structured `field:value` tokens are
-parsed out of the query before fuzzy matching.
+An edited work item is written to Azure DevOps first and stored from the copy
+that comes back, so these records only ever hold what the server accepted.
+Parent and child links render as an always-expanded family tree in the details
+pane. Click a family row, or press `Enter` on the family cursor, to select that
+ticket in the table. Fuzzy search covers ID, title, assignee, state, type, area,
+iteration, and tags; it intentionally excludes descriptions. Structured
+`field:value` tokens are parsed out of the query before fuzzy matching.
 
 The application uses WAL mode and a busy timeout so external SQLite readers can
 query the cache while the TUI is running.

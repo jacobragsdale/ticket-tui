@@ -4,6 +4,7 @@ pub mod azure;
 pub mod columns;
 pub mod command;
 pub mod db;
+pub mod edit;
 pub mod export;
 pub mod filter;
 pub mod model;
