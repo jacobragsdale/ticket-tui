@@ -157,8 +157,8 @@ pub fn save(path: &Path, session: &Session) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::columns::ColumnLayout;
     use super::*;
+    use crate::columns::ColumnLayout;
     use crate::columns::TableLayout;
     use crate::filter::{FilterField, FilterSet, format_query, parse_query};
     use tempfile::tempdir;

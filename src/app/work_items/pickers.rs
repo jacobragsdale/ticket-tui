@@ -6,10 +6,10 @@ use super::*;
 /// The state picker, built when it opens so it never reads the network.
 #[derive(Clone, Debug, Default)]
 pub struct StatePicker {
+    /// Where the cursor is and how far the list is scrolled.
+    pub cursor: ListCursor,
     /// Every state the selected work item's type allows.
     pub options: Vec<StateOption>,
-    pub index: usize,
-    pub scroll: ScrollState,
     /// The state the work item is already in, which `Enter` treats as a no-op.
     pub current: String,
     /// What the picker was opened over, shown in its title.
@@ -19,8 +19,8 @@ pub struct StatePicker {
 /// The priority picker, built when it opens from the row it was opened on.
 #[derive(Clone, Debug, Default)]
 pub struct PriorityPicker {
-    pub index: usize,
-    pub scroll: ScrollState,
+    /// Where the cursor is and how far the list is scrolled.
+    pub cursor: ListCursor,
     /// The priority the work item already has, which `Enter` treats as a no-op.
     pub current: Option<i64>,
     /// The work item the picker was opened for, shown in its title.
@@ -56,12 +56,11 @@ impl AssigneeCandidate {
 /// typed. Built when it opens, so it never waits for the network.
 #[derive(Clone, Debug, Default)]
 pub struct AssigneePicker {
+    /// Where the cursor is and how far the list is scrolled.
+    pub cursor: ListCursor,
     /// Every candidate, in the order they were gathered.
     pub candidates: Vec<AssigneeCandidate>,
     pub query: TextInput,
-    /// The cursor, counted over the candidates the query left showing.
-    pub index: usize,
-    pub scroll: ScrollState,
     /// Who holds the work item now, which `Enter` treats as a no-op.
     pub current: Option<String>,
     /// What the picker was opened over, shown in its title.
@@ -86,12 +85,11 @@ pub struct ParentCandidate {
 /// unaskable-for rather than merely refused.
 #[derive(Clone, Debug)]
 pub struct ParentPicker {
+    /// Where the cursor is and how far the list is scrolled.
+    pub cursor: ListCursor,
     /// Every work item that could be the parent, in table order.
     pub candidates: Vec<ParentCandidate>,
     pub query: TextInput,
-    /// The cursor, counted over the candidates the query left showing.
-    pub index: usize,
-    pub scroll: ScrollState,
     /// The work item being moved, which is what the picker's title names.
     pub child: TicketKey,
     /// The parent it hangs under now, which `Enter` treats as a no-op.
@@ -106,8 +104,7 @@ impl Default for ParentPicker {
         Self {
             candidates: Vec::new(),
             query: TextInput::default(),
-            index: 0,
-            scroll: ScrollState::default(),
+            cursor: ListCursor::default(),
             child: TicketKey {
                 organization: String::new(),
                 id: 0,
@@ -165,14 +162,13 @@ impl NodeRow {
 /// nodes, so it never waits for the network.
 #[derive(Clone, Debug)]
 pub struct NodePicker {
+    /// Where the cursor is and how far the list is scrolled.
+    pub cursor: ListCursor,
     /// Which tree is open, which is also the field a choice is written to.
     pub kind: NodeKind,
     /// Every row, in tree order.
     pub rows: Vec<NodeRow>,
     pub query: TextInput,
-    /// The cursor, counted over the rows the query left showing.
-    pub index: usize,
-    pub scroll: ScrollState,
     /// The path the work item carries now, which `Enter` treats as a no-op.
     pub current: String,
     /// What the picker was opened over, shown in its title.
@@ -185,8 +181,7 @@ impl Default for NodePicker {
             kind: NodeKind::Iteration,
             rows: Vec::new(),
             query: TextInput::default(),
-            index: 0,
-            scroll: ScrollState::default(),
+            cursor: ListCursor::default(),
             current: String::new(),
             scope: EditScope::default(),
         }
@@ -197,9 +192,9 @@ impl Default for NodePicker {
 /// when it opens so it never waits for the network.
 #[derive(Clone, Debug, Default)]
 pub struct TypePicker {
+    /// Where the cursor is and how far the list is scrolled.
+    pub cursor: ListCursor,
     pub options: Vec<String>,
-    pub index: usize,
-    pub scroll: ScrollState,
     /// The type the form already names, which the picker marks.
     pub current: String,
     /// The form field the choice is written back into.
@@ -276,7 +271,7 @@ impl WorkItemsScreen {
         }
         let focused = self
             .assignee_matches()
-            .get(self.assignee_picker.index)
+            .get(self.assignee_picker.cursor.index)
             .map(|candidate| candidate.display.clone());
         self.assignee_picker.candidates = self.assignee_candidates(shell);
         let matches = self.assignee_matches();
@@ -286,7 +281,7 @@ impl WorkItemsScreen {
                     .iter()
                     .position(|candidate| candidate.display == display)
             })
-            .unwrap_or(self.assignee_picker.index)
+            .unwrap_or(self.assignee_picker.cursor.index)
             .min(matches.len().saturating_sub(1));
         self.focus_assignee(index);
     }
@@ -355,12 +350,14 @@ impl WorkItemsScreen {
             .unwrap_or_default();
         self.state_picker = StatePicker {
             options,
-            index,
-            scroll: ScrollState::default(),
+            cursor: ListCursor {
+                index,
+                scroll: ScrollState::default(),
+            },
             current,
             scope,
         };
-        self.state_picker.scroll.ensure_visible(index);
+        self.state_picker.cursor.focus(index);
         self.mode = WorkItemMode::StatePicker;
     }
 
@@ -373,24 +370,23 @@ impl WorkItemsScreen {
         match key.code {
             KeyCode::Esc | KeyCode::Char('S') => self.mode = WorkItemMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
-                self.focus_state(self.state_picker.index.saturating_sub(1));
+                self.focus_state(self.state_picker.cursor.index.saturating_sub(1));
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.focus_state((self.state_picker.index + 1).min(last));
+                self.focus_state((self.state_picker.cursor.index + 1).min(last));
             }
-            KeyCode::PageUp => self.focus_state(self.state_picker.index.saturating_sub(5)),
-            KeyCode::PageDown => self.focus_state((self.state_picker.index + 5).min(last)),
+            KeyCode::PageUp => self.focus_state(self.state_picker.cursor.index.saturating_sub(5)),
+            KeyCode::PageDown => self.focus_state((self.state_picker.cursor.index + 5).min(last)),
             KeyCode::Home => self.focus_state(0),
             KeyCode::End => self.focus_state(last),
-            KeyCode::Enter => return self.choose_state(shell, self.state_picker.index),
+            KeyCode::Enter => return self.choose_state(shell, self.state_picker.cursor.index),
             _ => {}
         }
         AppAction::None
     }
 
     fn focus_state(&mut self, index: usize) {
-        self.state_picker.index = index;
-        self.state_picker.scroll.ensure_visible(index);
+        self.state_picker.cursor.focus(index);
     }
 
     /// Confirms one state. Choosing the state the work item is already in
@@ -425,12 +421,14 @@ impl WorkItemsScreen {
             .position(|choice| *choice == current)
             .unwrap_or_default();
         self.priority_picker = PriorityPicker {
-            index,
-            scroll: ScrollState::default(),
+            cursor: ListCursor {
+                index,
+                scroll: ScrollState::default(),
+            },
             current,
             id,
         };
-        self.priority_picker.scroll.ensure_visible(index);
+        self.priority_picker.cursor.focus(index);
         self.mode = WorkItemMode::PriorityPicker;
     }
 
@@ -443,22 +441,23 @@ impl WorkItemsScreen {
         match key.code {
             KeyCode::Esc => self.mode = WorkItemMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
-                self.focus_priority(self.priority_picker.index.saturating_sub(1));
+                self.focus_priority(self.priority_picker.cursor.index.saturating_sub(1));
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.focus_priority((self.priority_picker.index + 1).min(last));
+                self.focus_priority((self.priority_picker.cursor.index + 1).min(last));
             }
             KeyCode::Home => self.focus_priority(0),
             KeyCode::End => self.focus_priority(last),
-            KeyCode::Enter => return self.choose_priority(shell, self.priority_picker.index),
+            KeyCode::Enter => {
+                return self.choose_priority(shell, self.priority_picker.cursor.index);
+            }
             _ => {}
         }
         AppAction::None
     }
 
     fn focus_priority(&mut self, index: usize) {
-        self.priority_picker.index = index;
-        self.priority_picker.scroll.ensure_visible(index);
+        self.priority_picker.cursor.focus(index);
     }
 
     /// Confirms one priority. The priority the work item already has is a
@@ -595,12 +594,14 @@ impl WorkItemsScreen {
         self.assignee_picker = AssigneePicker {
             candidates,
             query: TextInput::default(),
-            index,
-            scroll: ScrollState::default(),
+            cursor: ListCursor {
+                index,
+                scroll: ScrollState::default(),
+            },
             current,
             scope,
         };
-        self.assignee_picker.scroll.ensure_visible(index);
+        self.assignee_picker.cursor.focus(index);
         self.mode = WorkItemMode::AssigneePicker;
         if self.identities_requested {
             AppAction::None
@@ -621,15 +622,16 @@ impl WorkItemsScreen {
             KeyCode::Down => self.move_assignee_selection(1),
             KeyCode::PageUp => self.move_assignee_selection(-5),
             KeyCode::PageDown => self.move_assignee_selection(5),
-            KeyCode::Enter => return self.choose_assignee(shell, self.assignee_picker.index),
+            KeyCode::Enter => {
+                return self.choose_assignee(shell, self.assignee_picker.cursor.index);
+            }
             // Everything else is typing: Home, End, and the editing keys all
             // belong to the filter field, the way they do in the palette.
             _ => {
                 let before = self.assignee_picker.query.text().to_owned();
                 self.assignee_picker.query.handle_key(key);
                 if self.assignee_picker.query.text() != before {
-                    self.assignee_picker.index = 0;
-                    self.assignee_picker.scroll.scroll_to(0);
+                    self.assignee_picker.cursor.reset();
                 }
             }
         }
@@ -638,21 +640,11 @@ impl WorkItemsScreen {
 
     fn move_assignee_selection(&mut self, delta: isize) {
         let count = self.assignee_matches().len();
-        if count == 0 {
-            self.assignee_picker.index = 0;
-            return;
-        }
-        let index = self
-            .assignee_picker
-            .index
-            .saturating_add_signed(delta)
-            .min(count - 1);
-        self.focus_assignee(index);
+        self.assignee_picker.cursor.move_by(delta, count);
     }
 
     fn focus_assignee(&mut self, index: usize) {
-        self.assignee_picker.index = index;
-        self.assignee_picker.scroll.ensure_visible(index);
+        self.assignee_picker.cursor.focus(index);
     }
 
     /// Confirms one candidate. Whoever holds the work item already is a no-op,
@@ -772,12 +764,14 @@ impl WorkItemsScreen {
         self.parent_picker = ParentPicker {
             candidates,
             query: TextInput::default(),
-            index,
-            scroll: ScrollState::default(),
+            cursor: ListCursor {
+                index,
+                scroll: ScrollState::default(),
+            },
             child,
             current,
         };
-        self.parent_picker.scroll.ensure_visible(index);
+        self.parent_picker.cursor.focus(index);
         self.mode = WorkItemMode::ParentPicker;
     }
 
@@ -792,14 +786,13 @@ impl WorkItemsScreen {
             KeyCode::Down => self.move_parent_selection(1),
             KeyCode::PageUp => self.move_parent_selection(-5),
             KeyCode::PageDown => self.move_parent_selection(5),
-            KeyCode::Enter => return self.choose_parent(shell, self.parent_picker.index),
+            KeyCode::Enter => return self.choose_parent(shell, self.parent_picker.cursor.index),
             // Everything else is typing, the way it is in the assignee picker.
             _ => {
                 let before = self.parent_picker.query.text().to_owned();
                 self.parent_picker.query.handle_key(key);
                 if self.parent_picker.query.text() != before {
-                    self.parent_picker.index = 0;
-                    self.parent_picker.scroll.scroll_to(0);
+                    self.parent_picker.cursor.reset();
                 }
             }
         }
@@ -807,14 +800,8 @@ impl WorkItemsScreen {
     }
 
     fn move_parent_selection(&mut self, delta: isize) {
-        let last = self.parent_matches().len().saturating_sub(1);
-        let index = self
-            .parent_picker
-            .index
-            .saturating_add_signed(delta)
-            .min(last);
-        self.parent_picker.index = index;
-        self.parent_picker.scroll.ensure_visible(index);
+        let count = self.parent_matches().len();
+        self.parent_picker.cursor.move_by(delta, count);
     }
 
     /// `Enter` in the parent picker: the work item moves under whatever the
@@ -863,7 +850,7 @@ impl WorkItemsScreen {
         }
         let focused = self
             .node_matches()
-            .get(self.node_picker.index)
+            .get(self.node_picker.cursor.index)
             .map(|row| row.path.clone());
         let kind = self.node_picker.kind;
         let current = self.node_picker.current.clone();
@@ -872,7 +859,7 @@ impl WorkItemsScreen {
         let index = focused
             .and_then(|path| matches.iter().position(|row| row.path == path))
             .or_else(|| matches.iter().position(|row| row.path == current))
-            .unwrap_or(self.node_picker.index)
+            .unwrap_or(self.node_picker.cursor.index)
             .min(matches.len().saturating_sub(1));
         self.focus_node(index);
     }
@@ -991,12 +978,14 @@ impl WorkItemsScreen {
             kind,
             rows,
             query: TextInput::default(),
-            index,
-            scroll: ScrollState::default(),
+            cursor: ListCursor {
+                index,
+                scroll: ScrollState::default(),
+            },
             current,
             scope,
         };
-        self.node_picker.scroll.ensure_visible(index);
+        self.node_picker.cursor.focus(index);
         self.mode = WorkItemMode::NodePicker;
         if self.should_fetch_classification_nodes() {
             self.classification_requested = true;
@@ -1030,14 +1019,13 @@ impl WorkItemsScreen {
             KeyCode::Down => self.move_node_selection(1),
             KeyCode::PageUp => self.move_node_selection(-5),
             KeyCode::PageDown => self.move_node_selection(5),
-            KeyCode::Enter => return self.choose_node(shell, self.node_picker.index),
+            KeyCode::Enter => return self.choose_node(shell, self.node_picker.cursor.index),
             // Everything else is typing, the way it is in the assignee picker.
             _ => {
                 let before = self.node_picker.query.text().to_owned();
                 self.node_picker.query.handle_key(key);
                 if self.node_picker.query.text() != before {
-                    self.node_picker.index = 0;
-                    self.node_picker.scroll.scroll_to(0);
+                    self.node_picker.cursor.reset();
                 }
             }
         }
@@ -1046,21 +1034,11 @@ impl WorkItemsScreen {
 
     fn move_node_selection(&mut self, delta: isize) {
         let count = self.node_matches().len();
-        if count == 0 {
-            self.node_picker.index = 0;
-            return;
-        }
-        let index = self
-            .node_picker
-            .index
-            .saturating_add_signed(delta)
-            .min(count - 1);
-        self.focus_node(index);
+        self.node_picker.cursor.move_by(delta, count);
     }
 
     fn focus_node(&mut self, index: usize) {
-        self.node_picker.index = index;
-        self.node_picker.scroll.ensure_visible(index);
+        self.node_picker.cursor.focus(index);
     }
 
     /// Confirms one node. The node the work item already sits in is a no-op;
@@ -1116,7 +1094,7 @@ impl WorkItemsScreen {
         let focused = self
             .type_picker
             .options
-            .get(self.type_picker.index)
+            .get(self.type_picker.cursor.index)
             .cloned();
         self.type_picker.options = self.work_item_type_options();
         let index = focused
@@ -1127,7 +1105,7 @@ impl WorkItemsScreen {
                     .iter()
                     .position(|name| *name == self.type_picker.current)
             })
-            .unwrap_or(self.type_picker.index)
+            .unwrap_or(self.type_picker.cursor.index)
             .min(self.type_picker.options.len().saturating_sub(1));
         self.focus_type(index);
     }
@@ -1180,12 +1158,14 @@ impl WorkItemsScreen {
             .unwrap_or_default();
         self.type_picker = TypePicker {
             options,
-            index,
-            scroll: ScrollState::default(),
+            cursor: ListCursor {
+                index,
+                scroll: ScrollState::default(),
+            },
             current,
             field,
         };
-        self.type_picker.scroll.ensure_visible(index);
+        self.type_picker.cursor.focus(index);
         self.mode = WorkItemMode::TypePicker;
     }
 
@@ -1194,24 +1174,23 @@ impl WorkItemsScreen {
         match key.code {
             KeyCode::Esc => self.close_picker(EditScope::Form(self.type_picker.field)),
             KeyCode::Up | KeyCode::Char('k') => {
-                self.focus_type(self.type_picker.index.saturating_sub(1));
+                self.focus_type(self.type_picker.cursor.index.saturating_sub(1));
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.focus_type((self.type_picker.index + 1).min(last));
+                self.focus_type((self.type_picker.cursor.index + 1).min(last));
             }
-            KeyCode::PageUp => self.focus_type(self.type_picker.index.saturating_sub(5)),
-            KeyCode::PageDown => self.focus_type((self.type_picker.index + 5).min(last)),
+            KeyCode::PageUp => self.focus_type(self.type_picker.cursor.index.saturating_sub(5)),
+            KeyCode::PageDown => self.focus_type((self.type_picker.cursor.index + 5).min(last)),
             KeyCode::Home => self.focus_type(0),
             KeyCode::End => self.focus_type(last),
-            KeyCode::Enter => self.choose_work_item_type(self.type_picker.index),
+            KeyCode::Enter => self.choose_work_item_type(self.type_picker.cursor.index),
             _ => {}
         }
         AppAction::None
     }
 
     fn focus_type(&mut self, index: usize) {
-        self.type_picker.index = index;
-        self.type_picker.scroll.ensure_visible(index);
+        self.type_picker.cursor.focus(index);
     }
 
     /// Confirms one type, which writes it back into the form field that opened

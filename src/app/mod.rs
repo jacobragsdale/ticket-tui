@@ -45,10 +45,12 @@ use crate::sync::{ReparentApplied, ReparentRejection};
 use crate::text_input::TextInput;
 use crate::timestamp::Timestamp;
 
+pub mod cursor;
 mod screen;
 pub mod shell;
 pub mod work_items;
 
+pub use cursor::ListCursor;
 pub use screen::Screen;
 pub use shell::{
     DEFAULT_PANE_SPLIT_STACKED, DEFAULT_PANE_SPLIT_WIDE, DividerOrientation, Focus,

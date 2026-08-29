@@ -559,7 +559,7 @@ pub(super) fn render_column_overlay(
     let area = centered_rect(frame.area(), 56, 18);
     let inner = render_modal_frame(frame, screen, shell, area, " Columns ");
     let content = screen.layout.columns.len();
-    let selected = screen.column_overlay.index;
+    let selected = screen.column_overlay.cursor.index;
     let rows: Vec<Line> = screen
         .layout
         .columns

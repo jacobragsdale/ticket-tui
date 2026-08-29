@@ -59,7 +59,7 @@ pub(super) fn render_state_picker(
     let height = u16::try_from(options.len().saturating_add(2))
         .unwrap_or(u16::MAX)
         .clamp(3, 16);
-    let selected = screen.state_picker.index;
+    let selected = screen.state_picker.cursor.index;
     let rows: Vec<Line> = options
         .iter()
         .enumerate()
@@ -109,7 +109,7 @@ pub(super) fn render_priority_picker(
 ) {
     let current = screen.priority_picker.current;
     let height = u16::try_from(PRIORITY_CHOICES.len().saturating_add(2)).unwrap_or(u16::MAX);
-    let selected = screen.priority_picker.index;
+    let selected = screen.priority_picker.cursor.index;
     let rows: Vec<Line> = PRIORITY_CHOICES
         .iter()
         .enumerate()
@@ -159,7 +159,7 @@ pub(super) fn render_assignee_picker(
     let height = u16::try_from(candidates.len().saturating_add(3))
         .unwrap_or(u16::MAX)
         .clamp(5, 18);
-    let selected = screen.assignee_picker.index;
+    let selected = screen.assignee_picker.cursor.index;
     let rows: Vec<Line> = candidates
         .iter()
         .enumerate()
@@ -245,7 +245,7 @@ pub(super) fn render_parent_picker(
     let height = u16::try_from(candidates.len().saturating_add(3))
         .unwrap_or(u16::MAX)
         .clamp(5, 18);
-    let selected = screen.parent_picker.index;
+    let selected = screen.parent_picker.cursor.index;
     let rows: Vec<Line> = candidates
         .iter()
         .enumerate()
@@ -323,7 +323,7 @@ pub(super) fn render_node_picker(
     let height = u16::try_from(rows_data.len().saturating_add(3))
         .unwrap_or(u16::MAX)
         .clamp(5, 20);
-    let selected = screen.node_picker.index;
+    let selected = screen.node_picker.cursor.index;
     let rows: Vec<Line> = rows_data
         .iter()
         .enumerate()
@@ -488,7 +488,7 @@ pub(super) fn render_type_picker(
     let height = u16::try_from(options.len().saturating_add(2))
         .unwrap_or(u16::MAX)
         .clamp(3, 16);
-    let selected = screen.type_picker.index;
+    let selected = screen.type_picker.cursor.index;
     let rows: Vec<Line> = options
         .iter()
         .enumerate()

@@ -170,7 +170,9 @@ impl<C: ColumnId> ColumnLayout for TableLayout<C> {
     }
 
     fn label(&self, index: usize) -> &'static str {
-        self.columns.get(index).map_or("", |column| column.id.label())
+        self.columns
+            .get(index)
+            .map_or("", |column| column.id.label())
     }
 
     fn is_visible(&self, index: usize) -> bool {
@@ -328,7 +330,10 @@ mod tests {
         }
 
         fn from_key(key: &str) -> Option<Self> {
-            Self::all().iter().copied().find(|column| column.key() == key)
+            Self::all()
+                .iter()
+                .copied()
+                .find(|column| column.key() == key)
         }
 
         fn key(self) -> &'static str {

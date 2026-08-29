@@ -21,18 +21,18 @@ impl WorkItemsScreen {
             ScrollSurface::Help => self.help,
             ScrollSurface::Sort => self.sort,
             ScrollSurface::Filter => self.filter_overlay.scroll,
-            ScrollSurface::Columns => self.column_overlay.scroll,
+            ScrollSurface::Columns => self.column_overlay.cursor.scroll,
             ScrollSurface::Palette => self.palette.scroll,
             ScrollSurface::Views => self.views_overlay.scroll,
             ScrollSurface::Sprint => self.sprint_overlay.scroll,
             ScrollSurface::FacetMenu => self.facet_bar.scroll,
             ScrollSurface::EditMenu => self.edit_menu.scroll,
-            ScrollSurface::StatePicker => self.state_picker.scroll,
-            ScrollSurface::PriorityPicker => self.priority_picker.scroll,
-            ScrollSurface::AssigneePicker => self.assignee_picker.scroll,
-            ScrollSurface::ParentPicker => self.parent_picker.scroll,
-            ScrollSurface::NodePicker => self.node_picker.scroll,
-            ScrollSurface::TypePicker => self.type_picker.scroll,
+            ScrollSurface::StatePicker => self.state_picker.cursor.scroll,
+            ScrollSurface::PriorityPicker => self.priority_picker.cursor.scroll,
+            ScrollSurface::AssigneePicker => self.assignee_picker.cursor.scroll,
+            ScrollSurface::ParentPicker => self.parent_picker.cursor.scroll,
+            ScrollSurface::NodePicker => self.node_picker.cursor.scroll,
+            ScrollSurface::TypePicker => self.type_picker.cursor.scroll,
             ScrollSurface::Form => self.form_scroll,
         }
     }
@@ -47,18 +47,18 @@ impl WorkItemsScreen {
             ScrollSurface::Help => &mut self.help,
             ScrollSurface::Sort => &mut self.sort,
             ScrollSurface::Filter => &mut self.filter_overlay.scroll,
-            ScrollSurface::Columns => &mut self.column_overlay.scroll,
+            ScrollSurface::Columns => &mut self.column_overlay.cursor.scroll,
             ScrollSurface::Palette => &mut self.palette.scroll,
             ScrollSurface::Views => &mut self.views_overlay.scroll,
             ScrollSurface::Sprint => &mut self.sprint_overlay.scroll,
             ScrollSurface::FacetMenu => &mut self.facet_bar.scroll,
             ScrollSurface::EditMenu => &mut self.edit_menu.scroll,
-            ScrollSurface::StatePicker => &mut self.state_picker.scroll,
-            ScrollSurface::PriorityPicker => &mut self.priority_picker.scroll,
-            ScrollSurface::AssigneePicker => &mut self.assignee_picker.scroll,
-            ScrollSurface::ParentPicker => &mut self.parent_picker.scroll,
-            ScrollSurface::NodePicker => &mut self.node_picker.scroll,
-            ScrollSurface::TypePicker => &mut self.type_picker.scroll,
+            ScrollSurface::StatePicker => &mut self.state_picker.cursor.scroll,
+            ScrollSurface::PriorityPicker => &mut self.priority_picker.cursor.scroll,
+            ScrollSurface::AssigneePicker => &mut self.assignee_picker.cursor.scroll,
+            ScrollSurface::ParentPicker => &mut self.parent_picker.cursor.scroll,
+            ScrollSurface::NodePicker => &mut self.node_picker.cursor.scroll,
+            ScrollSurface::TypePicker => &mut self.type_picker.cursor.scroll,
             ScrollSurface::Form => &mut self.form_scroll,
         }
     }
@@ -328,16 +328,16 @@ impl WorkItemsScreen {
                 }
             }
             PointerTarget::ColumnToggle { index } => {
-                self.column_overlay.index = index;
+                self.column_overlay.cursor.focus(index);
                 self.columns_mut().toggle_visible(index);
                 shell.session_dirty = true;
             }
             PointerTarget::ColumnMove { index, delta } => {
-                self.column_overlay.index = self.columns_mut().move_column(index, delta);
+                self.column_overlay.cursor.index = self.columns_mut().move_column(index, delta);
                 shell.session_dirty = true;
             }
             PointerTarget::ColumnResize { index, delta } => {
-                self.column_overlay.index = index;
+                self.column_overlay.cursor.focus(index);
                 self.columns_mut().resize(index, delta);
                 shell.session_dirty = true;
             }
@@ -353,29 +353,29 @@ impl WorkItemsScreen {
                 return self.run_edit_menu_entry(shell, index);
             }
             PointerTarget::StateOption { index } => {
-                self.state_picker.index = index;
+                self.state_picker.cursor.focus(index);
                 return self.choose_state(shell, index);
             }
             PointerTarget::PriorityOption { index } => {
-                self.priority_picker.index = index;
+                self.priority_picker.cursor.focus(index);
                 return self.choose_priority(shell, index);
             }
             PointerTarget::AssigneeOption { index } => {
-                self.assignee_picker.index = index;
+                self.assignee_picker.cursor.focus(index);
                 return self.choose_assignee(shell, index);
             }
             PointerTarget::AssigneeQuery => {
                 self.place_caret(shell, TextEditor::Assignee, column, row);
             }
             PointerTarget::ParentOption { index } => {
-                self.parent_picker.index = index;
+                self.parent_picker.cursor.focus(index);
                 return self.choose_parent(shell, index);
             }
             PointerTarget::ParentQuery => {
                 self.place_caret(shell, TextEditor::Parent, column, row);
             }
             PointerTarget::NodeOption { index } => {
-                self.node_picker.index = index;
+                self.node_picker.cursor.focus(index);
                 return self.choose_node(shell, index);
             }
             PointerTarget::NodeQuery => {
@@ -390,7 +390,7 @@ impl WorkItemsScreen {
             PointerTarget::ConfirmDelete => return self.confirm_delete(shell),
             PointerTarget::CancelDelete => self.cancel_delete(),
             PointerTarget::TypeOption { index } => {
-                self.type_picker.index = index;
+                self.type_picker.cursor.focus(index);
                 self.choose_work_item_type(index);
             }
             PointerTarget::EditField { field } => return self.open_field_editor(shell, field),

@@ -26,8 +26,8 @@ pub struct FacetBar {
 
 #[derive(Clone, Debug, Default)]
 pub struct ColumnOverlay {
-    pub index: usize,
-    pub scroll: ScrollState,
+    /// Where the cursor is and how far the list is scrolled.
+    pub cursor: ListCursor,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -516,7 +516,7 @@ impl WorkItemsScreen {
     }
 
     fn open_columns(&mut self) {
-        self.column_overlay.index = 0;
+        self.column_overlay.cursor.reset();
         self.mode = WorkItemMode::Columns;
     }
 
@@ -599,33 +599,33 @@ impl WorkItemsScreen {
         match key.code {
             KeyCode::Esc | KeyCode::Char('w') | KeyCode::Enter => self.mode = WorkItemMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
-                self.focus_column(self.column_overlay.index.saturating_sub(1));
+                self.focus_column(self.column_overlay.cursor.index.saturating_sub(1));
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.focus_column((self.column_overlay.index + 1).min(last));
+                self.focus_column((self.column_overlay.cursor.index + 1).min(last));
             }
             KeyCode::Char(' ') => {
-                let index = self.column_overlay.index;
+                let index = self.column_overlay.cursor.index;
                 self.columns_mut().toggle_visible(index);
                 shell.session_dirty = true;
             }
             KeyCode::Char('K') => {
-                let index = self.column_overlay.index;
-                self.column_overlay.index = self.columns_mut().move_column(index, -1);
+                let index = self.column_overlay.cursor.index;
+                self.column_overlay.cursor.index = self.columns_mut().move_column(index, -1);
                 shell.session_dirty = true;
             }
             KeyCode::Char('J') => {
-                let index = self.column_overlay.index;
-                self.column_overlay.index = self.columns_mut().move_column(index, 1);
+                let index = self.column_overlay.cursor.index;
+                self.column_overlay.cursor.index = self.columns_mut().move_column(index, 1);
                 shell.session_dirty = true;
             }
             KeyCode::Left | KeyCode::Char('-') | KeyCode::Char('<') => {
-                let index = self.column_overlay.index;
+                let index = self.column_overlay.cursor.index;
                 self.columns_mut().resize(index, -1);
                 shell.session_dirty = true;
             }
             KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('>') => {
-                let index = self.column_overlay.index;
+                let index = self.column_overlay.cursor.index;
                 self.columns_mut().resize(index, 1);
                 shell.session_dirty = true;
             }
@@ -634,8 +634,7 @@ impl WorkItemsScreen {
     }
 
     fn focus_column(&mut self, index: usize) {
-        self.column_overlay.index = index;
-        self.column_overlay.scroll.ensure_visible(index);
+        self.column_overlay.cursor.focus(index);
     }
 
     pub(super) fn handle_palette_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {

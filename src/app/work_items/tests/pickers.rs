@@ -18,7 +18,7 @@ fn the_parent_picker_leaves_out_the_work_item_itself_and_everything_below_it() {
         Some(family_key(1)),
         "the epic it hangs under now opens under the cursor"
     );
-    assert_eq!(app.work_items.parent_picker.index, 0);
+    assert_eq!(app.work_items.parent_picker.cursor.index, 0);
 }
 
 #[test]
@@ -362,7 +362,7 @@ fn the_state_picker_opens_on_the_current_state_and_enter_writes_the_one_chosen()
     );
     assert_eq!(app.work_items.state_picker.current, "To Do");
     assert_eq!(
-        app.work_items.state_picker.index, 0,
+        app.work_items.state_picker.cursor.index, 0,
         "the state the work item is in starts under the cursor"
     );
     assert_eq!(
@@ -434,7 +434,7 @@ fn the_priority_picker_opens_on_the_current_value_and_writes_the_one_chosen() {
     assert_eq!(app.work_items.mode, WorkItemMode::PriorityPicker);
     assert_eq!(app.work_items.priority_picker.current, Some(1));
     assert_eq!(
-        app.work_items.priority_picker.index, 0,
+        app.work_items.priority_picker.cursor.index, 0,
         "the priority the work item has starts under the cursor"
     );
     assert_eq!(app.work_items.priority_picker.id, 3);
@@ -598,7 +598,7 @@ fn the_assignee_picker_lists_nobody_then_me_then_the_database_and_starts_on_the_
         "the signed-in user is marked as such"
     );
     assert_eq!(
-        app.work_items.assignee_picker.index, 2,
+        app.work_items.assignee_picker.cursor.index, 2,
         "the picker opens on whoever holds the work item"
     );
     assert_eq!(
@@ -684,7 +684,7 @@ fn typing_filters_the_assignee_picker_and_enter_assigns_who_is_left() {
         "the filter matches characters in order, not only whole words"
     );
     assert_eq!(
-        app.work_items.assignee_picker.index, 0,
+        app.work_items.assignee_picker.cursor.index, 0,
         "typing moves to the first hit"
     );
 
@@ -782,7 +782,7 @@ fn choosing_the_current_assignee_or_pressing_escape_writes_nothing() {
         None
     );
     press(&mut app, KeyCode::Char('a'));
-    assert_eq!(app.work_items.assignee_picker.index, 0);
+    assert_eq!(app.work_items.assignee_picker.cursor.index, 0);
     assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
     assert!(!app.work_items.edits_pending());
     assert_eq!(app.shell.notification(), None);
@@ -799,7 +799,7 @@ fn team_members_land_in_an_open_picker_without_moving_the_cursor() {
     let mut app = assignee_app();
 
     press(&mut app, KeyCode::Char('a'));
-    let focused = app.work_items.assignee_matches()[app.work_items.assignee_picker.index]
+    let focused = app.work_items.assignee_matches()[app.work_items.assignee_picker.cursor.index]
         .display
         .clone();
     assert_eq!(focused, "Avery Chen");
@@ -824,7 +824,7 @@ fn team_members_land_in_an_open_picker_without_moving_the_cursor() {
         "a team member nobody holds work for is appended after the database's"
     );
     assert_eq!(
-        app.work_items.assignee_matches()[app.work_items.assignee_picker.index].display,
+        app.work_items.assignee_matches()[app.work_items.assignee_picker.cursor.index].display,
         focused,
         "the cursor stays on the person it was on"
     );
@@ -921,7 +921,7 @@ fn the_iteration_picker_draws_the_tree_indented_and_opens_on_the_current_node() 
         "a scheduled iteration carries its date range"
     );
     assert_eq!(
-        app.work_items.node_picker.index, 2,
+        app.work_items.node_picker.cursor.index, 2,
         "the picker opens on the node the work item sits in"
     );
     assert_eq!(app.work_items.node_picker.current, "development\\Q3");
@@ -948,7 +948,7 @@ fn the_iteration_picker_draws_the_tree_indented_and_opens_on_the_current_node() 
         ["development", "  Platform"],
         "the area picker draws the other tree, with no dates on it"
     );
-    assert_eq!(app.work_items.node_picker.index, 1);
+    assert_eq!(app.work_items.node_picker.cursor.index, 1);
 }
 
 #[test]
@@ -1086,7 +1086,7 @@ fn a_picker_with_nothing_cached_lists_the_paths_the_database_holds() {
         "every work item is in development\\Q3, indented by its own depth"
     );
     assert_eq!(
-        app.work_items.node_picker.index, 0,
+        app.work_items.node_picker.cursor.index, 0,
         "which is where the cursor starts"
     );
 
@@ -1104,7 +1104,7 @@ fn fetched_trees_land_in_an_open_picker_without_moving_the_cursor() {
         AppAction::FetchClassificationNodes
     );
     assert_eq!(node_rows(&app), ["  Q3"]);
-    let focused = app.work_items.node_matches()[app.work_items.node_picker.index]
+    let focused = app.work_items.node_matches()[app.work_items.node_picker.cursor.index]
         .path
         .clone();
 
@@ -1116,7 +1116,7 @@ fn fetched_trees_land_in_an_open_picker_without_moving_the_cursor() {
         "the fetched tree replaces the fallback in the open picker"
     );
     assert_eq!(
-        app.work_items.node_matches()[app.work_items.node_picker.index].path,
+        app.work_items.node_matches()[app.work_items.node_picker.cursor.index].path,
         focused,
         "the cursor stays on the node it was on"
     );
