@@ -815,8 +815,22 @@ fn poll_sync(
                 }
                 app.set_me(resolve_me(Some(name), std::env::var("TICKET_TUI_ME").ok()));
             }
-            SyncEvent::Finished { origin, outcome } => {
-                runtime.scheduler.finish(Instant::now());
+            SyncEvent::Finished {
+                origin,
+                outcome,
+                pause,
+            } => {
+                let now = Instant::now();
+                let throttled = match &outcome {
+                    SyncOutcome::Throttled { retry_after } => Some(*retry_after),
+                    _ => None,
+                };
+                // A pull that reached Azure DevOps clears whatever backoff a run
+                // of throttles built up, before the pause below pushes the next
+                // one out again. Only throttles in a row keep doubling.
+                if throttled.is_none() {
+                    runtime.scheduler.finish(now);
+                }
                 match outcome {
                     SyncOutcome::Pulled {
                         prepared,
@@ -850,6 +864,17 @@ fn poll_sync(
                             app.set_error(format!("Sync failed: {error}"));
                         }
                     }
+                    // Throttling is the service working as designed. Nothing is
+                    // announced: the title says how long the timer is holding
+                    // off, and the pause below books when it stops.
+                    SyncOutcome::Throttled { .. } => {}
+                }
+                // The longer of the two waits wins: a pull turned away outright
+                // and a budget that ran out on the way through are the same
+                // request to be left alone, asked for twice.
+                if let Some(retry_after) = throttled.into_iter().chain(pause).max() {
+                    let until = runtime.scheduler.pause(now, retry_after);
+                    app.pause_sync(until);
                 }
             }
             SyncEvent::Edited(result) => match *result {
@@ -1127,7 +1152,7 @@ mod tests {
     use serde_json::Value;
     use tempfile::tempdir;
     use ticket_tui::app::NotificationLevel;
-    use ticket_tui::azure::{RequestRejected, SyncBatch};
+    use ticket_tui::azure::{RequestRejected, SyncBatch, Throttled};
     use ticket_tui::edit::FieldEdit;
     use ticket_tui::model::{
         CommentRecord, HistoryRecord, RelationRecord, StateOption, Ticket, TicketGraph, TicketKey,
@@ -1154,6 +1179,9 @@ mod tests {
         details: Option<(i64, WorkItemDetails)>,
         /// The comment a post answers with, if this fake takes comments at all.
         comment: Option<CommentRecord>,
+        /// The wait every pull is turned away with, for a project Azure DevOps
+        /// is shedding load from.
+        throttle: Option<Duration>,
     }
 
     impl FakeAzure {
@@ -1166,6 +1194,15 @@ mod tests {
                 quiet: false,
                 details: None,
                 comment: None,
+                throttle: None,
+            }
+        }
+
+        /// Turns every pull away for throttling, naming the same wait each time.
+        fn throttling(retry_after: Duration) -> Self {
+            Self {
+                throttle: Some(retry_after),
+                ..Self::returning(Vec::new())
             }
         }
 
@@ -1219,6 +1256,14 @@ mod tests {
 
     impl WorkItemSource for FakeAzure {
         fn pull(&self) -> Result<SyncBatch> {
+            if let Some(retry_after) = self.throttle {
+                return Err(anyhow::Error::new(Throttled::new(
+                    retry_after,
+                    429,
+                    "https://dev.azure.com/example-org/_apis/wit/wiql",
+                    "too many requests",
+                )));
+            }
             match &self.failure {
                 Some(message) => bail!("{message}"),
                 None => Ok(SyncBatch {
@@ -1741,6 +1786,37 @@ mod tests {
             "the same timer failure is not raised again"
         );
         assert_eq!(app.activity_label().as_deref(), Some("Sync failed"));
+    }
+
+    #[test]
+    fn a_throttled_pull_pauses_the_timer_and_says_so_instead_of_failing() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let (mut app, mut repository, mut runtime) =
+            synced_app(&path, FakeAzure::throttling(Duration::from_secs(120)));
+        app.set_status("still browsing");
+        let start = Instant::now();
+        runtime.scheduler.schedule_now(start);
+
+        dispatch_due_pull(&mut app, &mut runtime);
+        await_sync(&mut app, &mut repository, &mut runtime);
+
+        assert_eq!(app.tickets().len(), 3, "a throttled pull changes nothing");
+        assert_eq!(app.activity_label().as_deref(), Some("Sync paused 2m"));
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("still browsing"),
+            "throttling is the service working, not an error to toast"
+        );
+        let summary = app.sync_summary();
+        assert!(summary.contains("paused for throttling"), "{summary}");
+        assert!(summary.contains("next in 2m"), "{summary}");
+
+        assert!(
+            !runtime.scheduler.due(start + Duration::from_secs(119)),
+            "the next pull waits out the header value"
+        );
+        assert!(runtime.scheduler.due(start + Duration::from_secs(121)));
     }
 
     #[test]

@@ -1,15 +1,16 @@
 //! Azure DevOps work-item sync: authenticate with the Azure CLI, pull the
 //! project's work items over REST, and map them onto the local ticket model.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
+use ureq::http::HeaderMap;
 use url::Url;
 
 use crate::classification::{self, ClassificationNode};
@@ -54,6 +55,17 @@ const TRACKED_FIELDS: [(&str, &str); 8] = [
     ("System.Reason", "Reason"),
 ];
 const BODY_LIMIT: u64 = 64 * 1024 * 1024;
+/// How long a throttled request waits when Azure DevOps refuses one without
+/// saying how long to leave it. Its own guidance is to back off for a good
+/// while before asking again, and half a minute is the shortest wait worth
+/// calling one.
+const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(30);
+/// The longest wait any one header may ask for. A reset stamp read out of a
+/// clock that disagrees with ours could otherwise park the timer for days.
+const MAX_THROTTLE_PAUSE: Duration = Duration::from_secs(3600);
+/// The statuses Azure DevOps sheds load with: too many requests, and the
+/// service telling the client to come back later.
+const THROTTLED_STATUSES: [u16; 2] = [429, 503];
 /// Profiles live on the identity host, not on `dev.azure.com/{org}`.
 const PROFILE_URL: &str =
     "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1";
@@ -197,6 +209,9 @@ pub struct AzureClient {
     /// Refreshed in place when Azure DevOps rejects it: CLI access tokens
     /// expire in about an hour and the TUI outlives that.
     authorization: RefCell<String>,
+    /// When the rate-limit budget the last responses reported comes back, for
+    /// a budget that is already spent. `None` while there is room to spare.
+    throttled_until: Cell<Option<Instant>>,
 }
 
 /// Everything one pull produces.
@@ -217,6 +232,7 @@ impl AzureClient {
             agent,
             config,
             authorization: RefCell::new(authorization_header()?),
+            throttled_until: Cell::new(None),
         })
     }
 
@@ -587,7 +603,34 @@ impl AzureClient {
                 .send_json(patch)
                 .with_context(|| format!("PATCH {url} failed"))?,
         };
+        self.note_rate_limit(response.headers());
         read_json(response, url)
+    }
+
+    /// Records how long the last response asked to be left alone. Azure DevOps
+    /// reports the budget left on ordinary successes, well before it starts
+    /// refusing requests outright, so a spent budget is a chance to hold off
+    /// rather than something to find out about from the next 429.
+    fn note_rate_limit(&self, headers: &HeaderMap) {
+        let Some(until) = rate_limit_pause(headers, unix_now())
+            .and_then(|delay| Instant::now().checked_add(delay))
+        else {
+            return;
+        };
+        // One pull makes several requests; the longest wait any of them asked
+        // for is the one that has to be honoured.
+        if self.throttled_until.get().is_none_or(|held| until > held) {
+            self.throttled_until.set(Some(until));
+        }
+    }
+
+    /// How long the responses since the last time this was asked want to be
+    /// left alone. Reading it clears it, so one spent budget delays one pull
+    /// rather than every pull after it.
+    pub fn throttled_for(&self) -> Option<Duration> {
+        let until = self.throttled_until.take()?;
+        let left = until.saturating_duration_since(Instant::now());
+        (!left.is_zero()).then_some(left)
     }
 }
 
@@ -710,6 +753,107 @@ pub fn is_write_conflict(error: &anyhow::Error) -> bool {
         .is_some_and(RequestRejected::is_conflict)
 }
 
+/// Azure DevOps turned a request away to shed load, and said how long to leave
+/// it. Carried as its own error type because it is not a failure to report and
+/// forget: the timer that asked has to hold off, and asking again straight away
+/// is what makes the throttling worse.
+#[derive(Debug)]
+pub struct Throttled {
+    retry_after: Duration,
+    status: u16,
+    url: String,
+    message: String,
+}
+
+impl Throttled {
+    #[must_use]
+    pub fn new(
+        retry_after: Duration,
+        status: u16,
+        url: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            retry_after,
+            status,
+            url: url.into(),
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn retry_after(&self) -> Duration {
+        self.retry_after
+    }
+}
+
+impl fmt::Display for Throttled {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Azure DevOps is throttling requests (HTTP {}) for {}; try again in {}s: {}",
+            self.status,
+            self.url,
+            self.retry_after.as_secs(),
+            self.message
+        )
+    }
+}
+
+impl std::error::Error for Throttled {}
+
+/// How long a failure asks the caller to wait before trying again, for a
+/// request Azure DevOps turned away to shed load. `None` for every other
+/// failure, which is what tells a pull to report itself as failed rather than
+/// as paused.
+#[must_use]
+pub fn throttle_delay(error: &anyhow::Error) -> Option<Duration> {
+    error
+        .downcast_ref::<Throttled>()
+        .map(Throttled::retry_after)
+}
+
+/// The wait a throttled response asks for: `Retry-After` read as whole seconds,
+/// falling back to [`DEFAULT_RETRY_AFTER`] when the header is absent or is
+/// something this client cannot read, such as the HTTP-date form.
+fn retry_after_delay(headers: &HeaderMap) -> Duration {
+    header_number(headers, "retry-after")
+        .filter(|seconds| *seconds >= 0.0)
+        .map_or(DEFAULT_RETRY_AFTER, |seconds| {
+            Duration::from_secs_f64(seconds.min(MAX_THROTTLE_PAUSE.as_secs_f64()))
+        })
+}
+
+/// How long a response that still carried its data asks to be left alone:
+/// `Some` only when `X-RateLimit-Remaining` says the budget is spent, and then
+/// until the `X-RateLimit-Reset` epoch it names. Azure DevOps sends these on
+/// ordinary successes, ahead of the 429 a spent budget turns into.
+fn rate_limit_pause(headers: &HeaderMap, now: f64) -> Option<Duration> {
+    if header_number(headers, "x-ratelimit-remaining")? > 0.0 {
+        return None;
+    }
+    let delay = header_number(headers, "x-ratelimit-reset")
+        .map_or(DEFAULT_RETRY_AFTER.as_secs_f64(), |reset| reset - now);
+    // A reset already in the past is a budget already back: nothing to wait for.
+    (delay >= 1.0).then(|| Duration::from_secs_f64(delay.min(MAX_THROTTLE_PAUSE.as_secs_f64())))
+}
+
+/// One header read as a number. Azure DevOps writes these as integers, but the
+/// rate-limit counters are documented as usage units and read as decimals just
+/// as happily.
+fn header_number(headers: &HeaderMap, name: &str) -> Option<f64> {
+    headers.get(name)?.to_str().ok()?.trim().parse().ok()
+}
+
+/// Seconds since the Unix epoch, for reading a rate-limit reset stamp. A clock
+/// somehow set before the epoch reads as the epoch, which can only ask for a
+/// longer wait than the header meant.
+fn unix_now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |since| since.as_secs_f64())
+}
+
 /// Pull `displayName` out of a `/_apis/profile/profiles/me` document.
 fn profile_display_name(profile: &Value) -> Option<String> {
     profile
@@ -722,6 +866,8 @@ fn profile_display_name(profile: &Value) -> Option<String> {
 
 fn read_json(mut response: ureq::http::Response<ureq::Body>, url: &str) -> Result<Value> {
     let status = response.status().as_u16();
+    // Read before the body, which takes the response apart.
+    let retry_after = retry_after_delay(response.headers());
     let text = response
         .body_mut()
         .with_config()
@@ -738,6 +884,16 @@ fn read_json(mut response: ureq::http::Response<ureq::Body>, url: &str) -> Resul
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| text.chars().take(200).collect());
+        // Throttling first: it is the one refusal that is neither the caller's
+        // fault nor worth reporting, only worth waiting out.
+        if THROTTLED_STATUSES.contains(&status) {
+            return Err(anyhow::Error::new(Throttled::new(
+                retry_after,
+                status,
+                url,
+                message,
+            )));
+        }
         if status == 401 || status == 302 {
             return Err(anyhow::Error::new(RejectedCredentials(format!(
                 "Azure DevOps rejected the credentials ({status}); run `az login` and retry: {message}"
@@ -1418,6 +1574,7 @@ mod tests {
             agent: ureq::Agent::new_with_defaults(),
             config: client_config,
             authorization: RefCell::new("Bearer test".into()),
+            throttled_until: Cell::new(None),
         };
 
         assert_eq!(
@@ -1495,10 +1652,139 @@ mod tests {
     }
 
     fn response(status: u16, body: &str) -> ureq::http::Response<ureq::Body> {
-        ureq::http::Response::builder()
-            .status(status)
+        response_with(status, body, &[])
+    }
+
+    /// A synthetic response carrying the headers a throttled Azure DevOps sends.
+    fn response_with(
+        status: u16,
+        body: &str,
+        headers: &[(&str, &str)],
+    ) -> ureq::http::Response<ureq::Body> {
+        let mut builder = ureq::http::Response::builder().status(status);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder
             .body(ureq::Body::builder().data(body.as_bytes().to_vec()))
             .unwrap()
+    }
+
+    fn headers_of(pairs: &[(&str, &str)]) -> HeaderMap {
+        response_with(200, "{}", pairs).headers().clone()
+    }
+
+    #[test]
+    fn a_throttled_response_carries_the_wait_it_asked_for() {
+        let url = "https://dev.azure.com/demo/_apis/wit/wiql";
+        let throttled = |status: u16, headers: &[(&str, &str)]| {
+            read_json(
+                response_with(status, r#"{"message":"too many requests"}"#, headers),
+                url,
+            )
+            .expect_err("a throttled request is an error")
+        };
+
+        let error = throttled(429, &[("Retry-After", "45")]);
+        assert_eq!(throttle_delay(&error), Some(Duration::from_secs(45)));
+        assert!(
+            format!("{error:#}").contains("try again in 45s"),
+            "{error:#}"
+        );
+        assert!(
+            format!("{error:#}").contains("too many requests"),
+            "{error:#}"
+        );
+
+        assert_eq!(
+            throttle_delay(&throttled(503, &[("Retry-After", " 5 ")])),
+            Some(Duration::from_secs(5)),
+            "503 is the other way Azure DevOps sheds load"
+        );
+
+        for headers in [
+            &[][..],
+            &[("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT")],
+            &[("Retry-After", "-1")],
+        ] {
+            assert_eq!(
+                throttle_delay(&throttled(429, headers)),
+                Some(DEFAULT_RETRY_AFTER),
+                "a wait this client cannot read is still a wait: {headers:?}"
+            );
+        }
+        assert_eq!(
+            throttle_delay(&throttled(429, &[("Retry-After", "999999999")])),
+            Some(MAX_THROTTLE_PAUSE),
+            "no header parks the timer for a day"
+        );
+
+        let refused = read_json(response(500, r#"{"message":"boom"}"#), url).unwrap_err();
+        assert_eq!(
+            throttle_delay(&refused),
+            None,
+            "a fault is a failure, not a pause: {refused:#}"
+        );
+        assert!(!rejected_credentials(&refused));
+    }
+
+    #[test]
+    fn a_spent_rate_limit_budget_pauses_the_next_pull_and_keeps_this_one() {
+        let now = 1_800_000_000.0;
+
+        assert_eq!(
+            rate_limit_pause(
+                &headers_of(&[
+                    ("X-RateLimit-Remaining", "0"),
+                    ("X-RateLimit-Reset", "1800000090"),
+                ]),
+                now,
+            ),
+            Some(Duration::from_secs(90)),
+            "a spent budget waits for the reset it names"
+        );
+        assert_eq!(
+            rate_limit_pause(
+                &headers_of(&[
+                    ("X-RateLimit-Remaining", "180"),
+                    ("X-RateLimit-Reset", "1800000090"),
+                ]),
+                now,
+            ),
+            None,
+            "a budget with room to spare asks for nothing"
+        );
+        assert_eq!(
+            rate_limit_pause(&headers_of(&[]), now),
+            None,
+            "a response that reports no budget asks for nothing"
+        );
+        assert_eq!(
+            rate_limit_pause(
+                &headers_of(&[
+                    ("X-RateLimit-Remaining", "0"),
+                    ("X-RateLimit-Reset", "1799999990"),
+                ]),
+                now,
+            ),
+            None,
+            "a reset already behind us is a budget already back"
+        );
+        assert_eq!(
+            rate_limit_pause(&headers_of(&[("X-RateLimit-Remaining", "0")]), now),
+            Some(DEFAULT_RETRY_AFTER),
+            "spent, with no reset named, is the default wait"
+        );
+
+        assert_eq!(
+            read_json(
+                response_with(200, r#"{"count":1}"#, &[("X-RateLimit-Remaining", "0")]),
+                "https://dev.azure.com/demo/_apis/wit/wiql",
+            )
+            .unwrap(),
+            json!({"count": 1}),
+            "the data still applies; only the next pull is held back"
+        );
     }
 
     #[test]
