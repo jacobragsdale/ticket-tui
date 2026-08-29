@@ -6,8 +6,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Scrollbar, ScrollbarOrientation,
-    ScrollbarState, Table, Wrap,
+    Block, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, Wrap,
 };
 use time::OffsetDateTime;
 
@@ -18,12 +17,12 @@ use crate::app::{
 use crate::command::{COMMANDS, EDIT_MENU, key_label_for};
 use crate::filter::{FacetTarget, FilterField};
 use crate::model::{
-    FamilySnapshot, FamilyTreeEntry, SortDirection, SortField, StateCategory, Ticket, TicketKey,
-    path_leaf,
+    FamilySnapshot, FamilyTreeEntry, HistoryRecord, SortDirection, SortField, StateCategory,
+    Ticket, TicketKey, path_leaf,
 };
 use crate::pointer::{
     PointerLayer, PointerTarget, ScrollMetrics, ScrollSurface, SelectableSnapshot,
-    SelectableSurface, region,
+    SelectableSurface, ThumbGeometry, region,
 };
 use crate::search::QueryHighlighter;
 
@@ -797,23 +796,18 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         detail_lines.push(field_line("Created", ticket.created_at.exact_utc()));
         detail_lines.push(field_line("Changed", ticket.changed_at.exact_utc()));
         let history = app.history_for(&ticket.key);
-        if !history.is_empty() {
+        let loading_details = app.details_pending.as_ref() == Some(&ticket.key);
+        if loading_details || !history.is_empty() {
+            let now = OffsetDateTime::now_utc();
             detail_lines.push(Line::default());
             detail_lines.push(section_line("History"));
-            for entry in history {
-                let who = entry.changed_by.as_deref().unwrap_or("unknown");
-                let old = entry.old_value.as_deref().unwrap_or("—");
-                let new = entry.new_value.as_deref().unwrap_or("—");
-                detail_lines.push(Line::from(format!(
-                    "  r{} · {} · {who}",
-                    entry.revision,
-                    entry.changed_at.exact_utc()
-                )));
+            if loading_details {
                 detail_lines.push(Line::styled(
-                    format!("    {}: {old} → {new}", entry.field_name),
-                    Style::default().fg(theme().body),
+                    "  Loading comments and history…",
+                    Style::default().fg(theme().muted),
                 ));
             }
+            detail_lines.extend(history.into_iter().map(|entry| history_line(entry, now)));
         }
         let comments = app.comments_for(&ticket.key);
         if !comments.is_empty() {
@@ -2930,6 +2924,29 @@ fn field_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
     ])
 }
 
+/// One change on one revision: how long ago it landed, who made it, and what
+/// moved. The relative age is the wording the Changed column uses, with the
+/// exact instant beside it in muted text for anyone who needs one.
+fn history_line(entry: &HistoryRecord, now: OffsetDateTime) -> Line<'static> {
+    let who = entry.changed_by.as_deref().unwrap_or("unknown");
+    let old = entry.old_value.as_deref().unwrap_or("—");
+    let new = entry.new_value.as_deref().unwrap_or("—");
+    Line::from(vec![
+        Span::styled(
+            format!(
+                "  {} · {who} · {}: {old} → {new}",
+                entry.changed_at.relative_to(now),
+                entry.field_name
+            ),
+            Style::default().fg(theme().body),
+        ),
+        Span::styled(
+            format!("  {}", entry.changed_at.exact_utc()),
+            Style::default().fg(theme().muted),
+        ),
+    ])
+}
+
 fn section_line(title: &'static str) -> Line<'static> {
     Line::styled(
         title,
@@ -3034,6 +3051,14 @@ fn render_control(
     }
 }
 
+/// Paints the scrollbar down the last column of `area` and registers the click
+/// and drag regions that go with it.
+///
+/// Painting reads the same [`ScrollMetrics::thumb`] geometry the hit regions
+/// do, so the thumb on screen is exactly the thumb you can grab. Ratatui's own
+/// `Scrollbar` widget reads its content length as a count of scroll positions
+/// rather than of rows, which left the painted thumb short of the bottom of the
+/// track at the maximum offset while the draggable one reached it.
 fn render_scrollbar(
     frame: &mut Frame<'_>,
     app: &mut App,
@@ -3043,19 +3068,6 @@ fn render_scrollbar(
     offset: usize,
     viewport: usize,
 ) {
-    let mut scrollbar_state = ScrollbarState::new(content)
-        .position(offset)
-        .viewport_content_length(viewport);
-    frame.render_stateful_widget(
-        Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(None)
-            .end_symbol(None)
-            .track_symbol(Some("│"))
-            .thumb_symbol("┃")
-            .style(Style::default().fg(theme().scrollbar)),
-        area,
-        &mut scrollbar_state,
-    );
     let track = Rect::new(
         area.x.saturating_add(area.width.saturating_sub(1)),
         area.y,
@@ -3068,8 +3080,10 @@ fn render_scrollbar(
         viewport,
         track,
     };
+    let geometry = metrics.thumb();
+    paint_scrollbar(frame, track, geometry);
     app.hit_regions.set_scroll(surface, metrics);
-    if let Some(thumb) = metrics.thumb() {
+    if let Some(thumb) = geometry {
         let thumb_rect = Rect::new(track.x, track.y.saturating_add(thumb.y), 1, thumb.height);
         let above = Rect::new(track.x, track.y, 1, thumb.y);
         let below_y = track.y.saturating_add(thumb.y).saturating_add(thumb.height);
@@ -3104,6 +3118,26 @@ fn render_scrollbar(
                 None,
                 Some(surface),
             ));
+        }
+    }
+}
+
+/// Fills the track column, then overwrites the thumb's rows on top of it. The
+/// thumb's weight carries the distinction under NO_COLOR, where the scrollbar
+/// colour resets along with every other.
+fn paint_scrollbar(frame: &mut Frame<'_>, track: Rect, thumb: Option<ThumbGeometry>) {
+    let track_style = Style::default().fg(theme().scrollbar);
+    let thumb_style = track_style.add_modifier(Modifier::BOLD);
+    let thumb_rows = thumb.map_or(0..0, |thumb| thumb.y..thumb.y.saturating_add(thumb.height));
+    let buffer = frame.buffer_mut();
+    for row in 0..track.height {
+        let (symbol, style) = if thumb_rows.contains(&row) {
+            ("┃", thumb_style)
+        } else {
+            ("│", track_style)
+        };
+        if let Some(cell) = buffer.cell_mut((track.x, track.y.saturating_add(row))) {
+            cell.set_symbol(symbol).set_style(style);
         }
     }
 }
@@ -3316,6 +3350,7 @@ mod tests {
             created_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
             changed_at: crate::timestamp::ts("2026-01-02T00:00:00Z"),
             web_url: "https://dev.azure.com/demo/atlas/_workitems/edit/10001".into(),
+            details_rev: 0,
         }
     }
 
@@ -3581,6 +3616,113 @@ mod tests {
             app.selected_row(),
             Some(1),
             "a comfortable row spans two lines"
+        );
+    }
+
+    /// The one contiguous run of thumb glyphs down a scrollbar track, as
+    /// (first row, height). Every other row of the track has to be track, so a
+    /// gap, a stray glyph or a second run fails here rather than silently
+    /// matching.
+    fn painted_thumb(terminal: &Terminal<TestBackend>, track: Rect) -> Option<(u16, u16)> {
+        let buffer = terminal.backend().buffer();
+        let rows = track.y..track.y.saturating_add(track.height);
+        let mut painted = Vec::new();
+        for y in rows {
+            match buffer[(track.x, y)].symbol() {
+                "┃" => painted.push(y),
+                "│" => {}
+                other => panic!("the track column holds only scrollbar glyphs, found {other:?}"),
+            }
+        }
+        let first = *painted.first()?;
+        let last = *painted.last()?;
+        let height = last - first + 1;
+        assert_eq!(
+            usize::from(height),
+            painted.len(),
+            "the thumb is one contiguous run"
+        );
+        Some((first, height))
+    }
+
+    #[test]
+    fn the_table_thumb_is_painted_where_it_can_be_grabbed_and_reaches_the_bottom() {
+        let tickets = (0..100)
+            .map(|index| {
+                let mut item = ticket();
+                item.key.id += index;
+                item.title = format!("Ticket {index}");
+                item
+            })
+            .collect();
+        let mut app = App::new(tickets);
+        for offset in [0, 45, 90] {
+            app.table.offset = offset;
+            // 29 rows of terminal leave the table body exactly 20 rows tall.
+            let mut terminal = Terminal::new(TestBackend::new(120, 29)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let metrics = app
+                .hit_regions
+                .scroll(ScrollSurface::Table)
+                .expect("an overflowing table registers its scrollbar");
+            assert_eq!((metrics.content, metrics.viewport), (100, 20));
+            let track = metrics.track;
+            assert_eq!(track.height, 20);
+            let thumb = metrics.thumb().expect("100 rows overflow 20");
+            assert_eq!(
+                painted_thumb(&terminal, track),
+                Some((track.y + thumb.y, thumb.height)),
+                "the painted thumb is the draggable thumb at offset {}",
+                metrics.offset
+            );
+            if metrics.offset == 0 {
+                assert_eq!(
+                    track.y + thumb.y,
+                    track.y,
+                    "offset 0 starts the thumb flush"
+                );
+            }
+            if metrics.offset == metrics.max_offset() {
+                assert_eq!(
+                    track.y + thumb.y + thumb.height,
+                    track.y + track.height,
+                    "the last offset finishes the thumb on the last row of the track"
+                );
+            }
+        }
+        assert_eq!(
+            app.table.offset,
+            app.table.max_offset(),
+            "90 clamps to the end"
+        );
+    }
+
+    #[test]
+    fn the_details_thumb_finishes_on_the_last_row_of_its_track() {
+        let mut long_ticket = ticket();
+        long_ticket.description = "A long wrapped detail line. ".repeat(40);
+        let mut app = App::new(vec![long_ticket]);
+        app.narrow_details = true;
+        app.focus = Focus::Details;
+        app.details.offset = usize::MAX;
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let metrics = app
+            .hit_regions
+            .scroll(ScrollSurface::Details)
+            .expect("an overflowing details pane registers its scrollbar");
+        assert_eq!(metrics.offset, metrics.max_offset(), "scrolled to the end");
+        let track = metrics.track;
+        let thumb = metrics.thumb().expect("the description overflows the pane");
+        assert_eq!(
+            painted_thumb(&terminal, track),
+            Some((track.y + thumb.y, thumb.height)),
+            "the painted thumb is the draggable thumb"
+        );
+        assert_eq!(
+            track.y + thumb.y + thumb.height,
+            track.y + track.height,
+            "a tall viewport still lands the thumb on the last row"
         );
     }
 

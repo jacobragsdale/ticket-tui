@@ -30,6 +30,10 @@ pub struct Ticket {
     pub created_at: Timestamp,
     pub changed_at: Timestamp,
     pub web_url: String,
+    /// The revision whose comments and history are stored for this work item,
+    /// or `0` when none have ever been read. Anything below `revision` means
+    /// the details on file are behind the work item and are fetched again.
+    pub details_rev: i64,
 }
 
 impl Ticket {
@@ -356,6 +360,24 @@ pub struct TicketGraph {
     pub history: Vec<HistoryRecord>,
 }
 
+/// One work item's discussion and revision history, as a single fetch reads
+/// them. Empty vectors are a real answer: plenty of work items have neither.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WorkItemDetails {
+    pub comments: Vec<CommentRecord>,
+    pub history: Vec<HistoryRecord>,
+}
+
+/// Details read for one work item, and the revision they were read at. That
+/// revision is what `work_items.details_rev` records, so a work item edited
+/// afterwards is known to need reading again.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DetailsUpdate {
+    pub key: TicketKey,
+    pub revision: i64,
+    pub details: WorkItemDetails,
+}
+
 const MAX_ANCESTOR_DEPTH: usize = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -389,6 +411,16 @@ impl TicketGraph {
     pub fn replace_relations_from(&mut self, key: &TicketKey, relations: Vec<RelationRecord>) {
         self.relations.retain(|relation| relation.from != *key);
         self.relations.extend(relations);
+    }
+
+    /// Swaps one work item's comments and history for the set a fetch brought
+    /// back, leaving every other work item's alone. This is what keeps a
+    /// details fetch from costing a full reload of the graph.
+    pub fn replace_details(&mut self, key: &TicketKey, details: WorkItemDetails) {
+        self.comments.retain(|comment| comment.ticket != *key);
+        self.history.retain(|entry| entry.ticket != *key);
+        self.comments.extend(details.comments);
+        self.history.extend(details.history);
     }
 
     #[must_use]
@@ -947,6 +979,7 @@ mod tests {
                 time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(id),
             ),
             web_url: format!("https://dev.azure.com/demo/demo/_workitems/edit/{id}"),
+            details_rev: 0,
         }
     }
 

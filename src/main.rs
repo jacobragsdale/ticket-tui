@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -20,11 +21,11 @@ use ticket_tui::app::{
 use ticket_tui::azure::{AzureClient, AzureConfig};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
 use ticket_tui::edit::{EditRejection, EditRequest};
-use ticket_tui::model::TicketGraph;
+use ticket_tui::model::{Ticket, TicketGraph, TicketKey};
 use ticket_tui::session;
 use ticket_tui::sync::{
-    self, AzureConnector, PullOrigin, SyncEvent, SyncHandle, SyncMode, SyncOutcome, SyncRequest,
-    SyncScheduler,
+    self, AzureConnector, DetailsOutcome, PullOrigin, SyncEvent, SyncHandle, SyncMode, SyncOutcome,
+    SyncRequest, SyncScheduler,
 };
 use ticket_tui::timestamp::Timestamp;
 use url::Url;
@@ -59,6 +60,91 @@ struct SyncRuntime {
     /// Why Azure DevOps could not be resolved, reported when the user asks for
     /// a sync anyway.
     offline_reason: Option<String>,
+    /// When to read the selected work item's comments and history.
+    details: DetailsEngine,
+}
+
+/// How long the selection has to stay on one work item before its comments and
+/// history are worth two requests. Holding `j` down the table crosses dozens of
+/// rows; none of them is being read.
+const DETAILS_REST: Duration = Duration::from_millis(300);
+
+/// When to ask for the selected work item's comments and revision history.
+///
+/// The trigger is the selection coming to rest, not the selection changing, so
+/// scrolling costs nothing. One request is in flight at a time, and a work item
+/// whose details could not be read is not asked about again for the rest of the
+/// run: a failure is a notification, never a loop.
+#[derive(Debug, Default)]
+struct DetailsEngine {
+    /// The work item the selection is sitting on and when it landed there.
+    resting: Option<(TicketKey, Instant)>,
+    in_flight: Option<TicketKey>,
+    failed: HashSet<TicketKey>,
+    /// Whether a failure has already been reported this run.
+    reported: bool,
+}
+
+impl DetailsEngine {
+    /// The work item to read now, if the selection has been on one whose
+    /// stored details are behind it for [`DETAILS_REST`]. Called every turn of
+    /// the event loop, which is what makes the rest period a rest period.
+    fn due(&mut self, selected: Option<&Ticket>, now: Instant) -> Option<TicketKey> {
+        let Some(key) = self.wanted(selected) else {
+            self.resting = None;
+            return None;
+        };
+        match &self.resting {
+            Some((resting, since)) if *resting == key => {
+                if now.duration_since(*since) < DETAILS_REST {
+                    return None;
+                }
+            }
+            // Somewhere new: the rest period starts over from here.
+            _ => {
+                self.resting = Some((key, now));
+                return None;
+            }
+        }
+        if self.in_flight.is_some() {
+            return None;
+        }
+        self.resting = None;
+        self.in_flight = Some(key.clone());
+        Some(key)
+    }
+
+    /// The selected work item, when what is stored for it is behind the
+    /// revision on screen and reading it has not already failed.
+    fn wanted(&self, selected: Option<&Ticket>) -> Option<TicketKey> {
+        let ticket = selected?;
+        (ticket.details_rev < ticket.revision && !self.failed.contains(&ticket.key))
+            .then(|| ticket.key.clone())
+    }
+
+    /// The request answered, whatever it said.
+    fn finish(&mut self) {
+        self.in_flight = None;
+    }
+
+    /// The request failed. Reports whether it is worth saying so: only the
+    /// first failure of the run is, because every one after it says the same
+    /// thing about a pane the user did not ask to fill.
+    fn fail(&mut self, key: TicketKey) -> bool {
+        self.finish();
+        self.failed.insert(key);
+        !std::mem::replace(&mut self.reported, true)
+    }
+
+    /// How long the event loop may sleep before the rest period is up.
+    fn time_until_due(&self, now: Instant) -> Option<Duration> {
+        if self.in_flight.is_some() {
+            return None;
+        }
+        self.resting
+            .as_ref()
+            .map(|(_, since)| DETAILS_REST.saturating_sub(now.duration_since(*since)))
+    }
 }
 
 impl SyncRuntime {
@@ -227,6 +313,7 @@ fn run() -> Result<()> {
         scheduler: SyncScheduler::new(interval),
         config: config.clone(),
         offline_reason,
+        details: DetailsEngine::default(),
     };
     if let Some(config) = config {
         runtime.worker = Some(SyncHandle::spawn(
@@ -378,6 +465,7 @@ fn run_terminal(
         redraw |= poll_sync(app, repository, runtime);
         redraw |= poll_watch(app, repository, &mut reloader);
         redraw |= dispatch_due_pull(app, runtime);
+        redraw |= dispatch_due_details(app, runtime);
         redraw |= persist_session(app, repository);
         redraw |= app.tick();
         if redraw {
@@ -398,6 +486,7 @@ fn run_terminal(
             [
                 app.next_wakeup(),
                 runtime.scheduler.time_until_due(Instant::now()),
+                runtime.details.time_until_due(Instant::now()),
             ]
             .into_iter()
             .flatten()
@@ -488,6 +577,29 @@ fn dispatch_due_pull(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     runtime.scheduler.start();
     app.begin_sync();
     send_pull(app, runtime, PullOrigin::Timer);
+    true
+}
+
+/// Asks for the selected work item's comments and revision history once the
+/// selection has settled on it. Nothing goes out while the selection is still
+/// moving, while one request is already out, or for a work item whose stored
+/// details already match the revision on screen.
+fn dispatch_due_details(app: &mut App, runtime: &mut SyncRuntime) -> bool {
+    if runtime.worker.is_none() {
+        return false;
+    }
+    let Some(key) = runtime.details.due(app.selected_ticket(), Instant::now()) else {
+        return false;
+    };
+    let sent = runtime
+        .worker
+        .as_ref()
+        .map(|worker| worker.send(SyncRequest::Details(key.clone())));
+    match sent {
+        Some(Ok(())) => app.details_pending = Some(key),
+        Some(Err(error)) => runtime.stop(app, &format!("{error:#}")),
+        None => return false,
+    }
     true
 }
 
@@ -637,6 +749,30 @@ fn poll_sync(
                     app.reject_edit(&rejection);
                 }
             },
+            // The worker wrote these rows itself, so the signature moves with
+            // them and the watcher below leaves the file alone. Only this work
+            // item's comments and history change: the table, the search, and
+            // every other row stay exactly as they were.
+            SyncEvent::Details(outcome) => {
+                app.details_pending = None;
+                match *outcome {
+                    DetailsOutcome::Fetched(update) => {
+                        runtime.details.finish();
+                        app.apply_details(update);
+                        app.configure_database(
+                            repository.path().to_path_buf(),
+                            db::data_signature(repository.path()),
+                        );
+                    }
+                    DetailsOutcome::Failed { key, message } => {
+                        if runtime.details.fail(key) {
+                            app.set_error(format!(
+                                "Could not read comments and history: {message}"
+                            ));
+                        }
+                    }
+                }
+            }
             SyncEvent::Identities(identities) => app.merge_identities(identities),
             SyncEvent::ClassificationNodes(nodes) => app.merge_classification_nodes(nodes),
             SyncEvent::Stopped => {
@@ -659,6 +795,7 @@ fn poll_watch(
         || app.reload_pending
         || app.sync_pending
         || app.edits_pending()
+        || app.details_pending.is_some()
     {
         return false;
     }
@@ -853,7 +990,10 @@ mod tests {
     use ticket_tui::app::NotificationLevel;
     use ticket_tui::azure::{RequestRejected, SyncBatch};
     use ticket_tui::edit::FieldEdit;
-    use ticket_tui::model::{RelationRecord, StateOption, Ticket, TicketGraph, TicketKey};
+    use ticket_tui::model::{
+        CommentRecord, HistoryRecord, RelationRecord, StateOption, Ticket, TicketGraph, TicketKey,
+        WorkItemDetails,
+    };
     use ticket_tui::sync::{SourceConnector, WorkItemSource};
     use ticket_tui::timestamp::Timestamp;
 
@@ -870,6 +1010,9 @@ mod tests {
         /// Whether a changed-since query comes back empty: the project still
         /// lists every one of `tickets`, but none of them has moved.
         quiet: bool,
+        /// The one work item whose comments and history can be read, and what
+        /// they say.
+        details: Option<(i64, WorkItemDetails)>,
     }
 
     impl FakeAzure {
@@ -880,6 +1023,7 @@ mod tests {
                 stored: None,
                 refusal: None,
                 quiet: false,
+                details: None,
             }
         }
 
@@ -911,6 +1055,14 @@ mod tests {
             Self {
                 refusal: Some((status, message.to_owned())),
                 ..Self::returning(tickets)
+            }
+        }
+
+        /// Answers with `details` when that one work item is read.
+        fn detailing(id: i64, details: WorkItemDetails) -> Self {
+            Self {
+                details: Some((id, details)),
+                ..Self::returning(Vec::new())
             }
         }
     }
@@ -969,6 +1121,13 @@ mod tests {
         fn work_item_type_states(&self, _work_item_type: &str) -> Result<Vec<StateOption>> {
             Ok(Vec::new())
         }
+
+        fn fetch_details(&self, id: i64) -> Result<WorkItemDetails> {
+            match &self.details {
+                Some((detailed, details)) if *detailed == id => Ok(details.clone()),
+                _ => Ok(WorkItemDetails::default()),
+            }
+        }
     }
 
     impl SourceConnector for FakeAzure {
@@ -991,6 +1150,7 @@ mod tests {
                 project: "atlas".into(),
             }),
             offline_reason: None,
+            details: DetailsEngine::default(),
         };
         (app, repository, runtime)
     }
@@ -1044,6 +1204,7 @@ mod tests {
             created_at: Timestamp::parse("2026-01-01T00:00:00Z").unwrap(),
             changed_at: Timestamp::parse(&format!("2026-0{id}-01T00:00:00Z")).unwrap(),
             web_url: format!("https://dev.azure.com/example-org/atlas/_workitems/edit/{id}"),
+            details_rev: 0,
         }
     }
 
@@ -1294,6 +1455,7 @@ mod tests {
             scheduler: SyncScheduler::new(None),
             config: None,
             offline_reason: Some("no Azure DevOps organization; pass --org".into()),
+            details: DetailsEngine::default(),
         };
 
         handle_action(AppAction::Sync, &mut app, &mut runtime, &FailingOpener);
@@ -1454,6 +1616,183 @@ mod tests {
             "another process writing the database still reloads"
         );
         assert!(app.reload_pending);
+    }
+
+    /// Pumps the event loop's sync polling until the details fetch answers.
+    fn await_details(
+        app: &mut App,
+        repository: &mut SqliteTicketRepository,
+        runtime: &mut SyncRuntime,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.details_pending.is_some() {
+            poll_sync(app, repository, runtime);
+            assert!(Instant::now() < deadline, "the sync worker timed out");
+            thread::yield_now();
+        }
+    }
+
+    /// A work item whose details nobody has read, so the pane wants them.
+    fn unread(id: i64) -> Ticket {
+        let mut ticket = ticket(id);
+        ticket.revision = 4;
+        ticket
+    }
+
+    fn comment(id: i64, text: &str) -> CommentRecord {
+        CommentRecord {
+            ticket: ticket(id).key,
+            comment_id: id * 10,
+            created_at: Timestamp::parse("2026-03-04T00:00:00Z").unwrap(),
+            author: Some("Avery Chen".into()),
+            text: text.into(),
+        }
+    }
+
+    fn transition(id: i64, to: &str) -> HistoryRecord {
+        HistoryRecord {
+            ticket: ticket(id).key,
+            revision: 4,
+            changed_at: Timestamp::parse("2026-03-05T10:00:00Z").unwrap(),
+            changed_by: Some("Jacob Ragsdale".into()),
+            field_name: "State".into(),
+            old_value: Some("To Do".into()),
+            new_value: Some(to.to_owned()),
+        }
+    }
+
+    #[test]
+    fn details_are_read_once_the_selection_settles_and_never_while_it_is_moving() {
+        let start = Instant::now();
+        let after = |millis: u64| start + Duration::from_millis(millis);
+        let mut engine = DetailsEngine::default();
+        let (first, second) = (unread(1), unread(2));
+
+        // Scrolling: a different work item every hundred milliseconds, so the
+        // rest period never runs out and nothing is asked for.
+        assert_eq!(engine.due(Some(&first), start), None);
+        assert_eq!(engine.due(Some(&second), after(100)), None);
+        assert_eq!(engine.due(Some(&first), after(200)), None);
+        assert_eq!(engine.due(Some(&first), after(400)), None);
+        assert_eq!(
+            engine.time_until_due(after(400)),
+            Some(Duration::from_millis(100)),
+            "the event loop wakes for the rest of the rest period"
+        );
+
+        assert_eq!(
+            engine.due(Some(&first), after(520)),
+            Some(first.key.clone()),
+            "settled for longer than the rest period, so it is worth reading"
+        );
+        assert_eq!(
+            engine.due(Some(&first), after(900)),
+            None,
+            "one request at a time, however long the selection sits there"
+        );
+        assert_eq!(engine.time_until_due(after(900)), None);
+
+        engine.finish();
+        let mut read = first.clone();
+        read.details_rev = read.revision;
+        assert_eq!(
+            engine.due(Some(&read), after(2000)),
+            None,
+            "a work item whose details are already current asks for nothing"
+        );
+        assert_eq!(engine.due(None, after(2100)), None);
+        assert_eq!(engine.time_until_due(after(2100)), None);
+
+        // A work item that cannot be read is reported once and never asked
+        // about again, however often the selection returns to it.
+        assert_eq!(engine.due(Some(&second), after(3000)), None);
+        assert_eq!(
+            engine.due(Some(&second), after(3400)),
+            Some(second.key.clone())
+        );
+        assert!(engine.fail(second.key.clone()));
+        assert_eq!(engine.due(Some(&second), after(4000)), None);
+        assert_eq!(engine.due(Some(&second), after(5000)), None);
+
+        let third = unread(3);
+        assert_eq!(engine.due(Some(&third), after(6000)), None);
+        assert_eq!(
+            engine.due(Some(&third), after(6400)),
+            Some(third.key.clone())
+        );
+        assert!(
+            !engine.fail(third.key.clone()),
+            "one notification about a pane nobody asked to fill is enough"
+        );
+    }
+
+    #[test]
+    fn settling_on_a_work_item_reads_its_details_and_patches_only_its_own_rows() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let details = WorkItemDetails {
+            comments: vec![comment(3, "Looks good")],
+            history: vec![transition(3, "Doing")],
+        };
+        let (mut app, mut repository, mut runtime) =
+            synced_app(&path, FakeAzure::detailing(3, details.clone()));
+        let selected = app.selected_ticket().unwrap().key.clone();
+        assert_eq!(selected.id, 3, "the newest work item starts selected");
+        // Another work item's discussion, which this fetch must not disturb.
+        let elsewhere = ticket(1).key;
+        app.set_workspace_graph(TicketGraph {
+            comments: vec![comment(1, "Someone else's thread")],
+            history: vec![transition(1, "Done")],
+            ..TicketGraph::default()
+        });
+
+        assert!(
+            !dispatch_due_details(&mut app, &mut runtime),
+            "the selection has only just landed"
+        );
+        // Stand where the selection would be after the rest period, rather
+        // than waiting out three hundred milliseconds of real time.
+        runtime.details.resting = Some((selected.clone(), Instant::now() - DETAILS_REST));
+
+        assert!(dispatch_due_details(&mut app, &mut runtime));
+        assert_eq!(
+            app.details_pending.as_ref(),
+            Some(&selected),
+            "the pane says it is reading while the request is out"
+        );
+        assert!(
+            !dispatch_due_details(&mut app, &mut runtime),
+            "nothing is queued behind the request in flight"
+        );
+
+        await_details(&mut app, &mut repository, &mut runtime);
+
+        assert_eq!(app.comments_for(&selected), vec![&details.comments[0]]);
+        assert_eq!(app.history_for(&selected), vec![&details.history[0]]);
+        assert_eq!(
+            app.comments_for(&elsewhere),
+            vec![&comment(1, "Someone else's thread")],
+            "another work item's discussion is left exactly as it was"
+        );
+        assert_eq!(app.history_for(&elsewhere), vec![&transition(1, "Done")]);
+        assert_eq!(
+            app.ticket_by_key(&selected)
+                .map(|ticket| ticket.details_rev),
+            Some(1),
+            "the row records the revision its details came from"
+        );
+        assert!(
+            app.notification().is_none(),
+            "a fetch nobody asked for is silent"
+        );
+        assert!(
+            !poll_watch(&mut app, &repository, &mut ReloadEngine::default()),
+            "the watcher does not chase the rows our own worker just wrote"
+        );
+        assert!(
+            !dispatch_due_details(&mut app, &mut runtime),
+            "the details are current, so nothing is asked for again"
+        );
     }
 
     #[test]

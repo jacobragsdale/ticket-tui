@@ -22,9 +22,9 @@ use crate::filter::{
     FacetValue, FilterField, FilterToken, ParsedQuery, facet_values, format_query, parse_query,
 };
 use crate::model::{
-    CommentRecord, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity, RelationRecord,
-    SortDirection, SortField, StateCatalog, StateOption, Ticket, TicketGraph, TicketKey,
-    compare_tickets, path_leaf,
+    CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity,
+    RelationRecord, SortDirection, SortField, StateCatalog, StateOption, Ticket, TicketGraph,
+    TicketKey, compare_tickets, path_leaf,
 };
 pub use crate::model::{RowDensity, SearchOrder};
 use crate::pointer::{
@@ -586,6 +586,9 @@ pub struct App {
     pub data_signature: u128,
     /// Whether a pull from Azure DevOps is in flight.
     pub sync_pending: bool,
+    /// The work item whose comments and history are being read, if one is.
+    /// The details pane says so where that history is about to appear.
+    pub details_pending: Option<TicketKey>,
     /// Edits sent to Azure DevOps and not answered yet, keyed by work item.
     pending_edits: HashMap<TicketKey, PendingEdit>,
     /// Why there is nothing to write to, reported when an edit is attempted
@@ -702,6 +705,7 @@ impl App {
             stale: false,
             data_signature: 0,
             sync_pending: false,
+            details_pending: None,
             pending_edits: HashMap::new(),
             offline_reason: None,
             sync_enabled: false,
@@ -1158,6 +1162,17 @@ impl App {
     #[must_use]
     pub fn history_for(&self, key: &TicketKey) -> Vec<&HistoryRecord> {
         self.graph.history_for(key)
+    }
+
+    /// Swaps in the comments and history just read for one work item, leaving
+    /// every other work item's alone, and records the revision they were read
+    /// at so the pane stops asking. Nothing else about the row moves: this is
+    /// what keeps a details fetch from costing a reload.
+    pub fn apply_details(&mut self, update: DetailsUpdate) {
+        self.graph.replace_details(&update.key, update.details);
+        if let Some(index) = self.index_of(&update.key) {
+            Arc::make_mut(&mut self.tickets)[index].details_rev = update.revision;
+        }
     }
 
     pub fn replace_tickets(&mut self, tickets: Vec<Ticket>) {
@@ -3994,6 +4009,7 @@ mod tests {
             created_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
             changed_at: crate::timestamp::ts(changed_at),
             web_url: format!("https://dev.azure.com/demo/atlas/_workitems/edit/{id}"),
+            details_rev: 0,
         }
     }
 

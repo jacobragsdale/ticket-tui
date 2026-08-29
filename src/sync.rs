@@ -5,6 +5,7 @@
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::slice;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,7 +18,10 @@ use crate::azure::{self, AzureClient, AzureConfig, SyncBatch};
 use crate::classification::ClassificationNode;
 use crate::db::{self, SqliteTicketRepository};
 use crate::edit::{EditApplied, EditRejection, EditRequest};
-use crate::model::{Identity, RelationRecord, StateOption, Ticket, TicketGraph};
+use crate::model::{
+    DetailsUpdate, Identity, RelationRecord, StateOption, Ticket, TicketGraph, TicketKey,
+    WorkItemDetails,
+};
 use crate::timestamp::Timestamp;
 
 /// What asked for a pull. A timer pull is silent unless it fails; a keypress
@@ -36,6 +40,9 @@ pub enum SyncRequest {
     Pull(PullOrigin),
     /// Write one field of one work item back to Azure DevOps.
     Edit(EditRequest),
+    /// Read one work item's comments and revision history, for a work item
+    /// whose stored details are behind the revision on screen.
+    Details(TicketKey),
     /// Read the project's team members, for the assignee picker. Asked for once
     /// a session, the first time that picker opens.
     Identities,
@@ -57,6 +64,9 @@ pub enum SyncEvent {
     },
     /// One edit landed, or was refused and changes nothing.
     Edited(Box<Result<EditApplied, EditRejection>>),
+    /// One work item's comments and revision history were read, or could not
+    /// be.
+    Details(Box<DetailsOutcome>),
     /// The project's team members, already stored. Empty when they could not be
     /// read, which is not worth reporting: the assignee picker already offers
     /// everybody the database has seen.
@@ -67,6 +77,15 @@ pub enum SyncEvent {
     ClassificationNodes(Vec<ClassificationNode>),
     /// The worker thread is gone and no further events will arrive.
     Stopped,
+}
+
+/// How one details request ended. A failure names the work item it was for, so
+/// the main thread can stop asking about that one rather than about all of
+/// them.
+#[derive(Debug)]
+pub enum DetailsOutcome {
+    Fetched(DetailsUpdate),
+    Failed { key: TicketKey, message: String },
 }
 
 /// How much of the project one pull asked Azure DevOps for.
@@ -127,6 +146,12 @@ pub trait WorkItemSource {
     /// The states one work item type allows, which is what the state picker
     /// offers once a pull has cached them.
     fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>>;
+    /// One work item's comments and revision history. A source that cannot
+    /// read them answers with none, which leaves the details pane showing what
+    /// the work item itself says and nothing more.
+    fn fetch_details(&self, _id: i64) -> Result<WorkItemDetails> {
+        Ok(WorkItemDetails::default())
+    }
     /// Everybody on the project's teams, which the assignee picker offers
     /// alongside the people already assigned work. A source that cannot list
     /// them answers with nobody, and the picker is none the worse for it.
@@ -164,6 +189,10 @@ impl WorkItemSource for AzureClient {
 
     fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>> {
         self.fetch_work_item_type_states(work_item_type)
+    }
+
+    fn fetch_details(&self, id: i64) -> Result<WorkItemDetails> {
+        self.fetch_work_item_details(id)
     }
 
     fn team_members(&self) -> Result<Vec<Identity>> {
@@ -267,6 +296,7 @@ fn work(
             SyncRequest::Edit(request) => {
                 SyncEvent::Edited(Box::new(worker.edit(&request, events)))
             }
+            SyncRequest::Details(key) => SyncEvent::Details(Box::new(worker.details(key, events))),
             SyncRequest::Identities => SyncEvent::Identities(worker.identities(events)),
             SyncRequest::ClassificationNodes => {
                 SyncEvent::ClassificationNodes(worker.classification_nodes(events))
@@ -316,6 +346,64 @@ impl Worker {
                 conflict: azure::is_write_conflict(&error),
                 message: format!("{error:#}"),
             })
+    }
+
+    /// Reads one work item's comments and revision history and stores them
+    /// against the revision the database currently holds for it. A failure
+    /// names the work item rather than the whole sync: nothing else is wrong.
+    fn details(&mut self, key: TicketKey, events: &Sender<SyncEvent>) -> DetailsOutcome {
+        match self.try_details(&key, events) {
+            Ok(update) => DetailsOutcome::Fetched(update),
+            Err(error) => DetailsOutcome::Failed {
+                key,
+                message: format!("{error:#}"),
+            },
+        }
+    }
+
+    fn try_details(
+        &mut self,
+        key: &TicketKey,
+        events: &Sender<SyncEvent>,
+    ) -> Result<DetailsUpdate> {
+        // The revision is read before the fetch, so details stored against it
+        // can only ever be treated as older than the work item, never newer.
+        let revision = self
+            .repository()?
+            .revision_of(key)?
+            .with_context(|| format!("work item {} is no longer in the database", key.id))?;
+        let details = self.source(events)?.fetch_details(key.id)?;
+        let update = DetailsUpdate {
+            key: key.clone(),
+            revision,
+            details,
+        };
+        self.repository()?
+            .replace_details(slice::from_ref(&update))?;
+        Ok(update)
+    }
+
+    /// Reads the comments and revision history of every work item a pull
+    /// brought back. A work item whose details could not be read is left
+    /// without any, so its `details_rev` stays behind and the selection
+    /// landing on it asks again; the pull itself still lands.
+    fn details_for(
+        &mut self,
+        tickets: &[Ticket],
+        events: &Sender<SyncEvent>,
+    ) -> Result<Vec<DetailsUpdate>> {
+        let mut updates = Vec::with_capacity(tickets.len());
+        for ticket in tickets {
+            let Ok(details) = self.source(events)?.fetch_details(ticket.key.id) else {
+                continue;
+            };
+            updates.push(DetailsUpdate {
+                key: ticket.key.clone(),
+                revision: ticket.revision,
+                details,
+            });
+        }
+        Ok(updates)
     }
 
     fn try_edit(
@@ -435,9 +523,15 @@ impl Worker {
         // than the watermark that asked for it.
         let next = watermark_of(&batch.tickets).filter(|next| *next > watermark);
 
+        // A work item that moved is a work item somebody is about to look at,
+        // so its comments and history come down with it and land in the same
+        // transaction. A full pull does not do this: two more requests per
+        // work item is a price only a handful of changes can pay.
+        let details = self.details_for(&batch.tickets, events)?;
+
         let repository = self.repository()?;
         if !batch.tickets.is_empty() {
-            repository.upsert_all(&batch.tickets, &batch.relations)?;
+            repository.upsert_all(&batch.tickets, &batch.relations, &details)?;
         }
         let removed = repository.delete_missing(&live_ids)?;
         let count = batch.tickets.len() + removed;
@@ -662,6 +756,7 @@ mod tests {
             created_at: ts("2026-01-01T00:00:00Z"),
             changed_at: ts("2026-02-01T00:00:00Z"),
             web_url: format!("https://dev.azure.com/demo/atlas/_workitems/edit/{id}"),
+            details_rev: 0,
         }
     }
 
@@ -694,6 +789,10 @@ mod tests {
         type_states: Arc<Mutex<HashMap<String, Vec<StateOption>>>>,
         /// Every work item type whose states were asked for.
         asked_types: Arc<Mutex<Vec<String>>>,
+        /// The comments and history each work item answers with.
+        details: Arc<Mutex<HashMap<i64, WorkItemDetails>>>,
+        /// Every work item whose details were read, in order.
+        detailed: Arc<Mutex<Vec<i64>>>,
         /// The project's team members, or `None` for a source that cannot list
         /// them, which is what the trait's default leaves behind.
         team_members: Option<Vec<Identity>>,
@@ -730,6 +829,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(work_item_type.to_owned(), states);
+            self
+        }
+
+        /// What one work item's comments and history endpoints answer with.
+        fn with_details(self, id: i64, details: WorkItemDetails) -> Self {
+            self.details.lock().unwrap().insert(id, details);
             self
         }
 
@@ -840,6 +945,19 @@ mod tests {
                 .cloned()
                 .with_context(|| format!("no states for {work_item_type}"))
         }
+
+        /// Two requests over the wire: one page of comments and one of updates.
+        fn fetch_details(&self, id: i64) -> Result<WorkItemDetails> {
+            *self.requests.lock().unwrap() += 2;
+            self.detailed.lock().unwrap().push(id);
+            Ok(self
+                .details
+                .lock()
+                .unwrap()
+                .get(&id)
+                .cloned()
+                .unwrap_or_default())
+        }
     }
 
     impl SourceConnector for FakeSource {
@@ -925,6 +1043,40 @@ mod tests {
                 SyncEvent::DisplayName(_) => continue,
                 other => panic!("expected a finished pull, got {other:?}"),
             }
+        }
+    }
+
+    /// How the next details request ended, past the display name the first
+    /// connect reports.
+    fn detailed(handle: &SyncHandle) -> DetailsOutcome {
+        loop {
+            match next_event(handle) {
+                SyncEvent::Details(outcome) => return *outcome,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected a details fetch to finish, got {other:?}"),
+            }
+        }
+    }
+
+    /// One work item's comments and history, as a fake source hands them over.
+    fn details_of(key: &TicketKey) -> WorkItemDetails {
+        WorkItemDetails {
+            comments: vec![CommentRecord {
+                ticket: key.clone(),
+                comment_id: 5,
+                created_at: ts("2026-03-04T00:00:00Z"),
+                author: Some("Avery Chen".into()),
+                text: "Looks good".into(),
+            }],
+            history: vec![HistoryRecord {
+                ticket: key.clone(),
+                revision: 4,
+                changed_at: ts("2026-03-05T10:00:00Z"),
+                changed_by: Some("Jacob Ragsdale".into()),
+                field_name: "State".into(),
+                old_value: Some("To Do".into()),
+                new_value: Some("Doing".into()),
+            }],
         }
     }
 
@@ -1110,9 +1262,13 @@ mod tests {
         let stored = SqliteTicketRepository::open_existing(&path).unwrap();
         let mut rows = stored.load_all().unwrap();
         rows.sort_by_key(|ticket| ticket.key.id);
+        // The pull read the changed work item's details as well, so its row
+        // says which revision they belong to.
+        let mut expected = changed.clone();
+        expected.details_rev = changed.revision;
         assert_eq!(
             rows,
-            vec![ticket(1, "One"), changed.clone(), ticket(3, "Three")],
+            vec![ticket(1, "One"), expected, ticket(3, "Three")],
             "the rows nobody touched are left exactly as they were"
         );
         assert_eq!(stored.load_graph().unwrap().relations.len(), 1);
@@ -1121,6 +1277,100 @@ mod tests {
             Some(changed.changed_at.to_rfc3339()),
             "the watermark is the batch's own greatest ChangedDate, never the clock"
         );
+    }
+
+    #[test]
+    fn an_incremental_pull_reads_the_details_of_what_moved_and_of_nothing_else() {
+        let directory = tempdir().unwrap();
+        let path = watermarked_database(
+            &directory,
+            &[ticket(1, "One"), ticket(2, "Two")],
+            &TicketGraph::default(),
+            "2026-02-01T00:00:00Z",
+        );
+        let mut changed = ticket(2, "Changed in Azure DevOps");
+        changed.revision = 4;
+        changed.changed_at = ts("2026-03-05T10:00:00Z");
+        let details = details_of(&changed.key);
+        let source = FakeSource::with(vec![Ok(SyncBatch {
+            tickets: vec![changed.clone()],
+            relations: Vec::new(),
+        })])
+        .listing(vec![1, 2])
+        .with_details(2, details.clone());
+        let read = Arc::clone(&source.detailed);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        assert!(matches!(pulled(&handle), SyncOutcome::Pulled { .. }));
+
+        assert_eq!(
+            *read.lock().unwrap(),
+            [2],
+            "the work item that moved is read; the one that did not is not"
+        );
+        let stored = SqliteTicketRepository::open_existing(&path).unwrap();
+        let graph = stored.load_graph().unwrap();
+        assert_eq!(graph.comments, details.comments);
+        assert_eq!(graph.history, details.history);
+        let mut rows = stored.load_all().unwrap();
+        rows.sort_by_key(|ticket| ticket.key.id);
+        assert_eq!(
+            rows.iter()
+                .map(|ticket| ticket.details_rev)
+                .collect::<Vec<_>>(),
+            [0, 4],
+            "the row that moved records the revision its details came from"
+        );
+    }
+
+    #[test]
+    fn a_details_request_reads_one_work_item_and_stores_it_against_that_revision() {
+        let directory = tempdir().unwrap();
+        let mut resting = ticket(1, "Resting");
+        resting.revision = 6;
+        let path = seeded_database_of(&directory, &[resting.clone(), ticket(2, "Elsewhere")]);
+        let details = details_of(&resting.key);
+        let source = FakeSource::with(Vec::new()).with_details(1, details.clone());
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle
+            .send(SyncRequest::Details(resting.key.clone()))
+            .unwrap();
+        let DetailsOutcome::Fetched(update) = detailed(&handle) else {
+            panic!("expected the details to be read");
+        };
+        assert_eq!(update.key, resting.key);
+        assert_eq!(
+            update.revision, 6,
+            "the details belong to the revision the database held when they were read"
+        );
+        assert_eq!(update.details, details);
+
+        let stored = SqliteTicketRepository::open_existing(&path).unwrap();
+        assert_eq!(stored.load_graph().unwrap().comments, details.comments);
+        let mut rows = stored.load_all().unwrap();
+        rows.sort_by_key(|ticket| ticket.key.id);
+        assert_eq!(
+            rows.iter()
+                .map(|ticket| ticket.details_rev)
+                .collect::<Vec<_>>(),
+            [6, 0],
+            "one row moved; the work item nobody looked at is untouched"
+        );
+
+        // A work item the database no longer holds fails by name, so the main
+        // thread can stop asking about that one rather than about all of them.
+        let gone = TicketKey {
+            organization: "demo".into(),
+            id: 404,
+        };
+        handle.send(SyncRequest::Details(gone.clone())).unwrap();
+        let DetailsOutcome::Failed { key, message } = detailed(&handle) else {
+            panic!("expected the fetch to fail");
+        };
+        assert_eq!(key, gone);
+        assert!(message.contains("404"), "{message}");
     }
 
     #[test]
@@ -1516,6 +1766,7 @@ mod tests {
                 }
                 SyncEvent::Finished { .. } => seen.push("pull"),
                 SyncEvent::DisplayName(_)
+                | SyncEvent::Details(_)
                 | SyncEvent::Identities(_)
                 | SyncEvent::ClassificationNodes(_) => continue,
                 SyncEvent::Stopped => panic!("the worker stopped early"),
