@@ -97,6 +97,10 @@ pub struct SortContext {
 pub struct TicketsContext {
     pub total_count: usize,
     pub matching_count: usize,
+    /// Whether the table is leaving finished work out, so the rows counted
+    /// here are the open backlog rather than everything the query matches.
+    /// The details pane and the family tree still reach a hidden work item.
+    pub finished_hidden: bool,
     pub viewport_start: usize,
     pub viewport_size: usize,
     pub visible_rows: Vec<TicketContext>,
@@ -225,6 +229,7 @@ mod tests {
             tickets: TicketsContext {
                 total_count: 0,
                 matching_count: 0,
+                finished_hidden: true,
                 viewport_start: 0,
                 viewport_size: 0,
                 visible_rows: Vec::new(),
@@ -252,6 +257,7 @@ mod tests {
         assert_eq!(first_json["sort"]["field"], "changed");
         assert_eq!(first_json["sort"]["direction"], "desc");
         assert_eq!(first_json["sort"]["row_density"], "compact");
+        assert_eq!(first_json["tickets"]["finished_hidden"], true);
         assert!(first_json["process_id"].as_u64().is_some());
         assert!(first_json["updated_at"].as_str().is_some());
 

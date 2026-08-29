@@ -631,7 +631,7 @@ against the server.
 | `Enter` | Select the family cursor ticket; with details focused, edit the field under the pointer, or open the work item |
 | `o` | Open the selected ticket in the system browser |
 | `r` | Sync from Azure DevOps now, without waiting for the timer |
-| `i` | Show database path, row counts, and sync freshness |
+| `i` | Show database path, row counts, hidden finished rows, and sync freshness |
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
 
@@ -712,10 +712,28 @@ be typed straight into the search box, they are stored and shown as written,
 and a sentinel the app cannot fill in — nobody signed in, no sprint scheduled —
 matches nothing rather than everything. `TICKET_TUI_ME` sets who `@me` is for
 anyone whose profile name differs from the name their work items are assigned
-to. Active filters appear as removable chips. The command palette copies
+to. Active filters appear as removable chips.
+
+Finished work — Done, Closed, Removed, Cut, and whatever else the process
+template puts in the Completed and Removed categories — is left off the table,
+so the view you open on is the open backlog. A `Finished hidden ×` chip says so
+whenever it applies, and its `×` puts the rows back; `Show finished tickets` and
+`Hide finished tickets` in the command palette do the same thing, and the choice
+is saved with the rest of the session. A query that names a state of its own
+takes over from the rule, so `state:done` lists the Done work whether or not the
+toggle is on, and `state:@open` — including the **Stale** built-in view written
+with it — means exactly what it says rather than being applied twice. The table
+title counts what is on the table over the whole database, so the rows left out
+are the difference between the two; `i` says how many they are. The details
+pane and the family tree reach a hidden work item as they always did: a parent
+or child that is finished is still shown there.
+
+The command palette copies
 IDs, URLs, titles, Markdown links, or summaries, edits the title, priority,
-tags, iteration, area, or description, leaves a comment, and exports the
-selection as JSON or CSV. Press `i` for database path, row count, freshness, and the last
+tags, iteration, area, or description, leaves a comment, shows or hides finished
+tickets, and exports the
+selection as JSON or CSV. Press `i` for database path, row counts, how many
+finished rows are hidden, freshness, and the last
 sync. A database another process writes reloads automatically; the table title
 shows `Stale` until that reload finishes, and `Syncing…`, `Synced 2m ago`, or
 `Sync failed` for the pulls from Azure DevOps.
@@ -726,8 +744,9 @@ a state outside those groups stays plain. Work-item types carry fixed badge
 colours — Epic yellow, Feature magenta, Issue, User Story, and Product Backlog
 Item blue, Task cyan, Bug and Impediment red, Test Case green — priority 1 is
 red, 2 yellow, 3 and 4 blue, and each tag is hashed onto a stable badge colour
-so one tag reads the same everywhere. Completed and removed rows are dimmed so
-open work stands out, the Area and Iteration table columns show only the last
+so one tag reads the same everywhere. Completed and removed rows are dimmed
+wherever they are shown — once the toggle above lists them, and in the family
+tree, which never leaves them out — the Area and Iteration table columns show only the last
 path segment while details keeps the full path, family-tree rows carry a
 one-character state glyph (`○ ◐ ● ✓ ✗`), and matched search characters are
 underlined in visible results. ID, Title, State, Type, Pri, Changed, and
@@ -755,7 +774,8 @@ cursor, and `d` deletes one you saved.
 
 Changed dates use compact relative labels, and exact UTC timestamps remain
 available in details. Press `c` to switch between compact and comfortable row
-density. Named views, column layout, bookmarks, the pane split, and the last
+density. Named views, column layout, bookmarks, the pane split, whether finished
+tickets are listed, and the last
 query are saved beside the cache as `*.session.json`.
 
 ## Database reference
@@ -929,7 +949,7 @@ The versioned snapshot includes:
 
 - selected and checked tickets;
 - the rows currently rendered in the ticket viewport, plus matching and total
-  counts;
+  counts and whether finished work is being left off the table;
 - the complete query, fuzzy text, and parsed filters;
 - sort order, named view, mode, focused pane, family cursor, and details scroll;
 - cache path, the signed-in display name that marks your own work items,

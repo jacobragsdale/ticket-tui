@@ -1575,6 +1575,11 @@ mod tests {
         }
     }
 
+    /// The work items on the table, in the order it holds them.
+    fn visible_ids(app: &App) -> Vec<i64> {
+        app.visible_tickets().map(|ticket| ticket.key.id).collect()
+    }
+
     fn seeded_repository(path: &Path) -> SqliteTicketRepository {
         let mut repository = SqliteTicketRepository::open(path).unwrap();
         let tickets: Vec<Ticket> = (1..=3).map(ticket).collect();
@@ -2052,6 +2057,9 @@ mod tests {
         stored.revision = 9;
         let (mut app, mut repository, mut runtime) =
             synced_app(&path, FakeAzure::storing(stored.clone()));
+        // The edit itself is the subject, so the row it finishes stays on the
+        // table for the assertions below to find it on.
+        app.set_show_finished(true);
         let selected = app.selected_ticket().unwrap().key.clone();
         assert_eq!(selected.id, 3, "the newest work item starts selected");
 
@@ -2091,6 +2099,45 @@ mod tests {
             "the watcher does not chase the row our own worker just wrote"
         );
         assert!(!runtime.scheduler.in_flight(), "nothing else was asked for");
+    }
+
+    #[test]
+    fn finishing_the_selected_work_item_takes_it_off_the_table_once_the_write_lands() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let stored = Ticket {
+            state: "Done".into(),
+            revision: 9,
+            ..ticket(3)
+        };
+        let (mut app, mut repository, mut runtime) = synced_app(&path, FakeAzure::storing(stored));
+        assert_eq!(visible_ids(&app), vec![3, 2, 1]);
+
+        let action = app.edit_selected(FieldEdit::state("Done"));
+        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        assert_eq!(
+            visible_ids(&app),
+            vec![3, 2, 1],
+            "the optimistic copy stays on the table, so a refusal has a row to revert to"
+        );
+
+        await_edit(&mut app, &mut repository, &mut runtime);
+
+        assert_eq!(
+            visible_ids(&app),
+            vec![2, 1],
+            "the copy Azure DevOps stored is finished, so the row leaves"
+        );
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.key.id),
+            Some(2),
+            "the cursor lands on the next piece of work rather than on nothing"
+        );
+        assert_eq!(
+            app.hidden_finished(),
+            1,
+            "and the row it took off the table is counted for the `i` overlay"
+        );
     }
 
     #[test]

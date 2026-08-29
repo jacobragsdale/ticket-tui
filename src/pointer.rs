@@ -130,6 +130,8 @@ pub enum PointerTarget {
     },
     DismissFacet,
     RemoveChip(FilterToken),
+    /// The `×` on the chip saying finished work is being left out.
+    ShowFinished,
     SortChoose(SortField),
     SortSetDirection(SortDirection),
     FilterRow {

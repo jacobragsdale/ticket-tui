@@ -166,7 +166,7 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
-    let chip_height = u16::from(!app.overflow_filter_tokens().is_empty());
+    let chip_height = u16::from(app.finished_hidden() || !app.overflow_filter_tokens().is_empty());
     let sections = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(1),
@@ -1211,15 +1211,27 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
 fn render_chips(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut spans = Vec::new();
     let mut x = area.x;
-    for token in app.overflow_filter_tokens() {
-        let label = format!(" {} × ", token.chip_label());
+    // The rule the app applies on its own leads the row, so it keeps its place
+    // however many filters are typed beside it, and reads like the rest: its
+    // `×` puts finished work back on the table.
+    let mut chips: Vec<(String, PointerTarget)> = Vec::new();
+    if app.finished_hidden() {
+        chips.push(("Finished hidden".to_owned(), PointerTarget::ShowFinished));
+    }
+    chips.extend(
+        app.overflow_filter_tokens()
+            .into_iter()
+            .map(|token| (token.chip_label(), PointerTarget::RemoveChip(token))),
+    );
+    for (text, target) in chips {
+        let label = format!(" {text} × ");
         let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
         if x.saturating_add(width) > area.x.saturating_add(area.width) {
             break;
         }
         app.hit_regions.push(region(
             Rect::new(x, area.y, width, 1),
-            PointerTarget::RemoveChip(token.clone()),
+            target,
             PointerLayer::Base,
             None,
             None,
@@ -2610,9 +2622,16 @@ impl RowTone {
 }
 
 fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
-    let area = centered_rect(frame.area(), 62, 11);
+    let area = centered_rect(frame.area(), 62, 12);
     frame.render_widget(Clear, area);
     let stale = if app.stale { "stale" } else { "current" };
+    // What the difference between the count and the total is made of, so the
+    // rows the table is leaving out are a number rather than a suspicion.
+    let finished = if app.finished_hidden() {
+        format!("{} hidden", app.hidden_finished())
+    } else {
+        "shown".to_owned()
+    };
     let path = if app.database_path.as_os_str().is_empty() {
         "(not set)".into()
     } else {
@@ -2622,6 +2641,7 @@ fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
         field_line("Path", path),
         field_line("Tickets", app.tickets().len().to_string()),
         field_line("Visible", app.visible_count().to_string()),
+        field_line("Finished", finished),
         field_line("Loaded", app.freshness_label()),
         field_line("Freshness", stale),
         field_line("Sync", app.sync_summary()),
@@ -3851,6 +3871,25 @@ mod tests {
     }
 
     #[test]
+    fn the_database_overlay_counts_the_finished_rows_the_table_is_leaving_out() {
+        let mut app = App::new(vec![
+            ticket_at(10_001, "Alpha", "Issue", "To Do", "2026-03-03T00:00:00Z"),
+            ticket_at(10_002, "Beta", "Issue", "Done", "2026-03-02T00:00:00Z"),
+            ticket_at(10_003, "Gamma", "Issue", "Removed", "2026-03-01T00:00:00Z"),
+        ]);
+        app.mode = AppMode::Info;
+
+        let hiding = render_text(90, 24, &mut app);
+        assert!(hiding.contains("Finished"), "{hiding}");
+        assert!(hiding.contains("2 hidden"), "{hiding}");
+
+        app.set_show_finished(true);
+        let showing = render_text(90, 24, &mut app);
+        assert!(showing.contains("Finished"), "{showing}");
+        assert!(showing.contains("shown"), "{showing}");
+    }
+
+    #[test]
     fn empty_reloading_and_no_result_states_render_with_a_usable_search_field() {
         let mut app = App::new(Vec::new());
         let empty = render_text(90, 24, &mut app);
@@ -3989,6 +4028,8 @@ mod tests {
             })
             .collect();
         let mut app = App::new(tickets);
+        // No chip bar over the table, so the arithmetic below is the table's.
+        app.set_show_finished(true);
         for offset in [0, 45, 90] {
             app.table.offset = offset;
             // 29 rows of terminal leave the table body exactly 20 rows tall.
@@ -4186,6 +4227,8 @@ mod tests {
             ticket_at(10_002, "Beta", "Issue", "Doing", "2026-03-02T00:00:00Z"),
             ticket_at(10_003, "Gamma", "Issue", "Done", "2026-03-01T00:00:00Z"),
         ]);
+        // How a finished row is painted, so it has to be on the table to look at.
+        app.set_show_finished(true);
         if theme() != &Theme::new(true) {
             // NO_COLOR renders every colour as Reset, so only compare palettes.
             let states = column_cell_colors(&mut app, SortField::State, 3);
@@ -4856,6 +4899,9 @@ mod tests {
             ),
         ]);
         app.set_workspace_graph(parent_child_graph());
+        // These read the details pane row by row, so the chip bar saying
+        // finished work is hidden must not sit between it and the top.
+        app.set_show_finished(true);
         app.narrow_details = true;
         app.focus = Focus::Family;
         app
@@ -5098,6 +5144,32 @@ mod tests {
         click(&mut app, x, y);
         assert!(app.filter_overlay.showing_values);
         assert_eq!(app.filter_overlay.field_index, 2);
+    }
+
+    #[test]
+    fn the_chip_bar_says_finished_work_is_hidden_and_its_cross_puts_it_back() {
+        let mut app = App::new(vec![
+            ticket_at(10_001, "Alpha", "Issue", "To Do", "2026-03-03T00:00:00Z"),
+            ticket_at(10_002, "Gamma", "Issue", "Done", "2026-03-01T00:00:00Z"),
+        ]);
+
+        let text = render_text(130, 24, &mut app);
+        assert!(text.contains("Finished hidden ×"), "{text}");
+        assert!(
+            text.contains("Tickets 1/2"),
+            "the total stays the database's, so the count hidden is the difference: {text}"
+        );
+
+        let chip = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::ShowFinished))
+            .map(|region| region.rect)
+            .expect("the chip is clickable");
+        click(&mut app, chip.x, chip.y);
+
+        let text = render_text(130, 24, &mut app);
+        assert!(!text.contains("Finished hidden"), "{text}");
+        assert!(text.contains("Tickets 2/2"), "{text}");
     }
 
     #[test]
