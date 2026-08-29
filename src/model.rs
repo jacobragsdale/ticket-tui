@@ -49,6 +49,36 @@ impl Ticket {
     }
 }
 
+/// Where a work item state sits in the Azure DevOps state-category model.
+///
+/// Every process template (Agile, Basic, Scrum, CMMI) names its states
+/// differently, so the raw string is mapped onto a shared category before it is
+/// used for colouring or done/not-done decisions.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StateCategory {
+    Proposed,
+    InProgress,
+    Resolved,
+    Completed,
+    Removed,
+    Unknown,
+}
+
+impl StateCategory {
+    /// Classify a work item state name, ignoring case and surrounding space.
+    #[must_use]
+    pub fn of(state: &str) -> Self {
+        match state.trim().to_ascii_lowercase().as_str() {
+            "new" | "to do" | "proposed" | "approved" | "open" => Self::Proposed,
+            "active" | "doing" | "in progress" | "committed" | "in review" => Self::InProgress,
+            "resolved" | "ready for test" => Self::Resolved,
+            "done" | "closed" | "completed" => Self::Completed,
+            "removed" | "cut" | "rejected" => Self::Removed,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SortField {
@@ -787,6 +817,16 @@ mod tests {
             ),
             web_url: format!("https://dev.azure.com/demo/demo/_workitems/edit/{id}"),
         }
+    }
+
+    #[test]
+    fn state_category_maps_every_standard_process_state() {
+        assert_eq!(StateCategory::of("To Do"), StateCategory::Proposed);
+        assert_eq!(StateCategory::of("  doing "), StateCategory::InProgress);
+        assert_eq!(StateCategory::of("Ready for Test"), StateCategory::Resolved);
+        assert_eq!(StateCategory::of("DONE"), StateCategory::Completed);
+        assert_eq!(StateCategory::of("Removed"), StateCategory::Removed);
+        assert_eq!(StateCategory::of("Needs triage"), StateCategory::Unknown);
     }
 
     #[test]
