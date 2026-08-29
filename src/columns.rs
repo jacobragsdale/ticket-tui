@@ -1,108 +1,85 @@
+//! The columns a list screen shows: which ones, in what order, how wide, and
+//! what the Columns overlay needs to edit them without knowing whose they are.
+
 use ratatui::layout::Constraint;
 
-use crate::model::SortField;
 use crate::session::SessionColumn;
 
+/// One screen's set of columns. Work items sort and arrange by `SortField`;
+/// repositories, pull requests and runs bring their own enum and get the same
+/// table, the same header sorting and the same Columns overlay for free.
+///
+/// `key` is the identity: it is what the session file records and what a
+/// `SortHeader` pointer target carries, so a screen can resolve a clicked
+/// header back to its own column.
+pub trait ColumnId: Copy + Eq + Sized + 'static {
+    /// Every column the table offers, in the order it opens with.
+    fn all() -> &'static [Self];
+
+    /// The column that key names, if this table has one. An unknown key comes
+    /// out of a session file written by an older build, and is dropped.
+    fn from_key(key: &str) -> Option<Self>;
+
+    fn key(self) -> &'static str;
+
+    /// What the header cell says, which is not always the name the sort popup
+    /// uses: a header has less room.
+    fn label(self) -> &'static str;
+
+    fn default_width(self) -> u16;
+
+    fn default_visible(self) -> bool;
+
+    /// Numbers read better against the right edge of their cell.
+    fn right_aligned(self) -> bool;
+
+    /// Whether the column stays whatever happens: auto-hide never takes a
+    /// pinned column away, and the overlay will not hide one.
+    fn pinned(self) -> bool;
+
+    /// The one column that takes whatever width is left over. Its stored width
+    /// is ignored and it cannot be resized.
+    fn flexible(self) -> bool;
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ColumnConfig {
-    pub id: SortField,
+pub struct ColumnConfig<C> {
+    pub id: C,
     pub visible: bool,
     pub width: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TableLayout {
-    pub columns: Vec<ColumnConfig>,
+pub struct TableLayout<C> {
+    pub columns: Vec<ColumnConfig<C>>,
+    /// Whether the table is still dropping optional columns to fit a narrow
+    /// terminal. Any deliberate change to the layout turns it off.
     pub auto_hide: bool,
 }
 
-impl Default for TableLayout {
+impl<C: ColumnId> Default for TableLayout<C> {
     fn default() -> Self {
         Self {
-            columns: vec![
-                ColumnConfig {
-                    id: SortField::Id,
-                    visible: true,
-                    width: 7,
-                },
-                ColumnConfig {
-                    id: SortField::Title,
-                    visible: true,
-                    width: 0,
-                },
-                ColumnConfig {
-                    id: SortField::State,
-                    visible: true,
-                    width: 10,
-                },
-                ColumnConfig {
-                    id: SortField::Type,
-                    visible: true,
-                    width: 13,
-                },
-                ColumnConfig {
-                    id: SortField::Priority,
-                    visible: true,
-                    width: 4,
-                },
-                ColumnConfig {
-                    id: SortField::Changed,
-                    visible: true,
-                    width: 10,
-                },
-                ColumnConfig {
-                    id: SortField::Assignee,
-                    visible: true,
-                    width: 16,
-                },
-                ColumnConfig {
-                    id: SortField::Organization,
-                    visible: false,
-                    width: 12,
-                },
-                ColumnConfig {
-                    id: SortField::Project,
-                    visible: false,
-                    width: 10,
-                },
-                ColumnConfig {
-                    id: SortField::Area,
-                    visible: false,
-                    width: 16,
-                },
-                ColumnConfig {
-                    id: SortField::Iteration,
-                    visible: false,
-                    width: 16,
-                },
-                ColumnConfig {
-                    id: SortField::Created,
-                    visible: false,
-                    width: 10,
-                },
-                ColumnConfig {
-                    id: SortField::Tags,
-                    visible: false,
-                    width: 16,
-                },
-                ColumnConfig {
-                    id: SortField::Progress,
-                    visible: false,
-                    width: 9,
-                },
-            ],
+            columns: C::all()
+                .iter()
+                .map(|id| ColumnConfig {
+                    id: *id,
+                    visible: id.default_visible(),
+                    width: id.default_width(),
+                })
+                .collect(),
             auto_hide: true,
         }
     }
 }
 
-impl TableLayout {
+impl<C: ColumnId> TableLayout<C> {
     #[must_use]
     pub fn to_session_columns(&self) -> Vec<SessionColumn> {
         self.columns
             .iter()
             .map(|column| SessionColumn {
-                id: column.id,
+                id: column.id.key().to_owned(),
                 visible: column.visible,
                 width: column.width,
             })
@@ -118,12 +95,14 @@ impl TableLayout {
             }
             return layout;
         }
-        let mut restored: Vec<ColumnConfig> = columns
+        let mut restored: Vec<ColumnConfig<C>> = columns
             .iter()
-            .map(|column| ColumnConfig {
-                id: column.id,
-                visible: column.visible,
-                width: column.width,
+            .filter_map(|column| {
+                Some(ColumnConfig {
+                    id: C::from_key(&column.id)?,
+                    visible: column.visible,
+                    width: column.width,
+                })
             })
             .collect();
         for default in &layout.columns {
@@ -137,7 +116,7 @@ impl TableLayout {
     }
 
     #[must_use]
-    pub fn visible_columns(&self, inner_width: u16) -> Vec<ColumnConfig> {
+    pub fn visible_columns(&self, inner_width: u16) -> Vec<ColumnConfig<C>> {
         let mut columns: Vec<_> = self
             .columns
             .iter()
@@ -152,10 +131,7 @@ impl TableLayout {
             if required <= inner_width {
                 break;
             }
-            if let Some(index) = columns
-                .iter()
-                .rposition(|column| !matches!(column.id, SortField::Id | SortField::Title))
-            {
+            if let Some(index) = columns.iter().rposition(|column| !column.id.pinned()) {
                 columns.remove(index);
             } else {
                 break;
@@ -164,16 +140,61 @@ impl TableLayout {
         columns
     }
 
-    pub fn toggle_visible(&mut self, index: usize) {
+    #[must_use]
+    pub fn constraint(column: ColumnConfig<C>) -> Constraint {
+        if column.id.flexible() || column.width == 0 {
+            Constraint::Fill(1)
+        } else {
+            Constraint::Length(column.width)
+        }
+    }
+}
+
+/// What the Columns overlay needs of a layout, whichever screen's it is. The
+/// overlay draws and edits rows by index and never names a column type.
+pub trait ColumnLayout {
+    fn count(&self) -> usize;
+    fn label(&self, index: usize) -> &'static str;
+    fn is_visible(&self, index: usize) -> bool;
+    fn width(&self, index: usize) -> u16;
+    fn auto_hide(&self) -> bool;
+    fn toggle_visible(&mut self, index: usize);
+    /// Moves one column and answers where it landed.
+    fn move_column(&mut self, index: usize, delta: isize) -> usize;
+    fn resize(&mut self, index: usize, delta: i16);
+}
+
+impl<C: ColumnId> ColumnLayout for TableLayout<C> {
+    fn count(&self) -> usize {
+        self.columns.len()
+    }
+
+    fn label(&self, index: usize) -> &'static str {
+        self.columns.get(index).map_or("", |column| column.id.label())
+    }
+
+    fn is_visible(&self, index: usize) -> bool {
+        self.columns.get(index).is_some_and(|column| column.visible)
+    }
+
+    fn width(&self, index: usize) -> u16 {
+        self.columns.get(index).map_or(0, |column| column.width)
+    }
+
+    fn auto_hide(&self) -> bool {
+        self.auto_hide
+    }
+
+    fn toggle_visible(&mut self, index: usize) {
         if let Some(column) = self.columns.get_mut(index)
-            && !matches!(column.id, SortField::Id | SortField::Title)
+            && !column.id.pinned()
         {
             column.visible = !column.visible;
             self.auto_hide = false;
         }
     }
 
-    pub fn move_column(&mut self, index: usize, delta: isize) -> usize {
+    fn move_column(&mut self, index: usize, delta: isize) -> usize {
         if self.columns.is_empty() {
             return 0;
         }
@@ -187,34 +208,25 @@ impl TableLayout {
         next
     }
 
-    pub fn resize(&mut self, index: usize, delta: i16) {
+    fn resize(&mut self, index: usize, delta: i16) {
         let Some(column) = self.columns.get_mut(index) else {
             return;
         };
-        if column.id == SortField::Title {
+        if column.id.flexible() {
             return;
         }
         let width = i16::try_from(column.width).unwrap_or(i16::MAX);
         column.width = width.saturating_add(delta).clamp(3, 40) as u16;
         self.auto_hide = false;
     }
-
-    #[must_use]
-    pub fn constraint(column: ColumnConfig) -> Constraint {
-        if column.id == SortField::Title || column.width == 0 {
-            Constraint::Fill(1)
-        } else {
-            Constraint::Length(column.width)
-        }
-    }
 }
 
-fn required_width(columns: &[ColumnConfig]) -> u16 {
+fn required_width<C: ColumnId>(columns: &[ColumnConfig<C>]) -> u16 {
     let spacing = columns.len().saturating_sub(1) as u16;
     let widths: u16 = columns
         .iter()
         .map(|column| {
-            if column.id == SortField::Title {
+            if column.id.flexible() {
                 12
             } else {
                 column.width.max(3)
@@ -227,10 +239,11 @@ fn required_width(columns: &[ColumnConfig]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::SortField;
 
     #[test]
     fn auto_hide_drops_trailing_optional_columns_when_narrow() {
-        let layout = TableLayout::default();
+        let layout = TableLayout::<SortField>::default();
         let visible: Vec<_> = layout
             .visible_columns(40)
             .into_iter()
@@ -245,7 +258,7 @@ mod tests {
 
     #[test]
     fn child_progress_is_an_opt_in_column_the_overlay_turns_on_and_off() {
-        let mut layout = TableLayout::default();
+        let mut layout = TableLayout::<SortField>::default();
         let index = layout
             .columns
             .iter()
@@ -277,7 +290,7 @@ mod tests {
 
     #[test]
     fn toggling_disables_auto_hide_while_title_stays_visible() {
-        let mut layout = TableLayout::default();
+        let mut layout = TableLayout::<SortField>::default();
         let org = layout
             .columns
             .iter()
@@ -297,5 +310,100 @@ mod tests {
         assert_eq!(layout.columns[title].width, 0);
         layout.toggle_visible(title);
         assert!(layout.columns[title].visible);
+    }
+
+    /// A second column set, to prove the layout is not a work-item one. It is
+    /// what #668's repositories tab will look like.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RepoColumn {
+        Name,
+        Branch,
+        Status,
+        Size,
+    }
+
+    impl ColumnId for RepoColumn {
+        fn all() -> &'static [Self] {
+            &[Self::Name, Self::Branch, Self::Status, Self::Size]
+        }
+
+        fn from_key(key: &str) -> Option<Self> {
+            Self::all().iter().copied().find(|column| column.key() == key)
+        }
+
+        fn key(self) -> &'static str {
+            match self {
+                Self::Name => "name",
+                Self::Branch => "branch",
+                Self::Status => "status",
+                Self::Size => "size",
+            }
+        }
+
+        fn label(self) -> &'static str {
+            match self {
+                Self::Name => "Repository",
+                Self::Branch => "Branch",
+                Self::Status => "Status",
+                Self::Size => "Size",
+            }
+        }
+
+        fn default_width(self) -> u16 {
+            match self {
+                Self::Name => 0,
+                Self::Branch => 18,
+                Self::Status => 12,
+                Self::Size => 8,
+            }
+        }
+
+        fn default_visible(self) -> bool {
+            !matches!(self, Self::Size)
+        }
+
+        fn right_aligned(self) -> bool {
+            matches!(self, Self::Size)
+        }
+
+        fn pinned(self) -> bool {
+            matches!(self, Self::Name)
+        }
+
+        fn flexible(self) -> bool {
+            matches!(self, Self::Name)
+        }
+    }
+
+    #[test]
+    fn a_second_column_set_gets_the_same_layout_and_the_same_session_shape() {
+        let mut layout = TableLayout::<RepoColumn>::default();
+        assert_eq!(
+            layout
+                .visible_columns(120)
+                .into_iter()
+                .map(|column| column.id)
+                .collect::<Vec<_>>(),
+            vec![RepoColumn::Name, RepoColumn::Branch, RepoColumn::Status],
+            "the hidden column stays off until it is asked for"
+        );
+
+        let size = 3;
+        layout.toggle_visible(size);
+        layout.resize(size, 2);
+        let stored = layout.to_session_columns();
+        assert_eq!(stored[0].id, "name");
+        assert_eq!(stored[size].width, 10);
+
+        let restored = TableLayout::<RepoColumn>::from_session_columns(&stored, Some(false));
+        assert_eq!(restored, layout, "the file round-trips through the keys");
+
+        layout.toggle_visible(0);
+        assert!(
+            layout.is_visible(0),
+            "the pinned column cannot be turned off"
+        );
+        layout.resize(0, 5);
+        assert_eq!(layout.width(0), 0, "and the flexible one cannot be resized");
     }
 }

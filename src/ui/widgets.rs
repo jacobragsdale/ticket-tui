@@ -246,7 +246,7 @@ pub(super) fn row_like(target: &PointerTarget) -> bool {
     matches!(
         target,
         PointerTarget::TableRow { .. }
-            | PointerTarget::OpenTicket { .. }
+            | PointerTarget::OpenInBrowser { .. }
             | PointerTarget::ToggleBookmark { .. }
             | PointerTarget::ToggleRowSelect { .. }
             | PointerTarget::JumpToTicket(_)

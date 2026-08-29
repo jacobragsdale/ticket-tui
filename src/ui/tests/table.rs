@@ -1,4 +1,5 @@
 use super::*;
+use crate::columns::ColumnLayout;
 use crate::ui::details::ticket_assignment_line;
 use crate::ui::table::tag_color;
 
@@ -13,7 +14,7 @@ fn table_clicks_open_tickets_sort_columns_and_follow_the_row_density() {
     render_text(90, 24, &mut app);
 
     let id = target_rect(&app, |target| {
-        matches!(target, PointerTarget::OpenTicket { index: 1 })
+        matches!(target, PointerTarget::OpenInBrowser { index: 1 })
     });
     let action = click(&mut app, id.x, id.y);
 
@@ -301,7 +302,7 @@ fn tag_colours_are_stable_and_shared_by_the_table_and_details() {
         .iter()
         .position(|column| column.id == SortField::Tags)
         .expect("tags column");
-    app.work_items.layout.toggle_visible(tags);
+    ColumnLayout::toggle_visible(&mut app.work_items.layout, tags);
 
     let mut terminal = Terminal::new(TestBackend::new(150, 24)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
@@ -363,7 +364,7 @@ fn underlines_mark_search_matches_and_stop_after_the_id_digits() {
     }
 
     let area = target_rect(&app, |target| {
-        matches!(target, PointerTarget::OpenTicket { index: 0 })
+        matches!(target, PointerTarget::OpenInBrowser { index: 0 })
     });
     let (x, y) = find_buffer_text_in(buffer, area, "10001").expect("id visible in table");
     for offset in 0..5 {

@@ -84,10 +84,13 @@ impl Default for Session {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionColumn {
+    /// The column's key, as [`crate::columns::ColumnId::key`] spells it. A
+    /// string rather than an enum so every screen's columns share one file
+    /// shape; the work-item keys are what earlier builds already wrote.
     #[serde(default)]
-    pub id: SortField,
+    pub id: String,
     pub visible: bool,
     pub width: u16,
 }
@@ -109,8 +112,10 @@ pub struct NamedView {
     pub auto_hide: bool,
 }
 
-/// Drops stored columns whose identifier is no longer known instead of
-/// failing the whole session load.
+/// Drops a stored column that is not shaped like one instead of failing the
+/// whole session load. A column whose key no name in this screen's set is kept
+/// here and dropped by [`crate::columns::TableLayout::from_session_columns`],
+/// which is the only place that knows what the keys mean.
 fn known_columns<'de, D>(deserializer: D) -> Result<Vec<SessionColumn>, D::Error>
 where
     D: Deserializer<'de>,
@@ -152,6 +157,7 @@ pub fn save(path: &Path, session: &Session) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::columns::ColumnLayout;
     use super::*;
     use crate::columns::TableLayout;
     use crate::filter::{FilterField, FilterSet, format_query, parse_query};
@@ -175,7 +181,7 @@ mod tests {
             sort_direction: SortDirection::Descending,
             search_order: SearchOrder::Relevance,
             row_density: RowDensity::Compact,
-            columns: TableLayout::default().to_session_columns(),
+            columns: TableLayout::<SortField>::default().to_session_columns(),
             auto_hide: true,
         });
 
@@ -217,7 +223,7 @@ mod tests {
             sort_direction: SortDirection::Descending,
             search_order: SearchOrder::Relevance,
             row_density: RowDensity::Compact,
-            columns: TableLayout::default().to_session_columns(),
+            columns: TableLayout::<SortField>::default().to_session_columns(),
             auto_hide: true,
         });
 
@@ -243,7 +249,7 @@ mod tests {
         assert_eq!(loaded.views[0].sort_field, SortField::Changed);
         assert_eq!(
             loaded.views[0].columns.len(),
-            TableLayout::default().columns.len()
+            TableLayout::<SortField>::default().columns.len()
         );
         assert_eq!(loaded.pane_split_wide, 70);
         assert_eq!(loaded.pane_split_stacked, 44);
@@ -257,13 +263,13 @@ mod tests {
     fn a_progress_column_switched_on_is_still_on_after_a_restart() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tickets.session.json");
-        let mut layout = TableLayout::default();
+        let mut layout = TableLayout::<SortField>::default();
         let index = layout
             .columns
             .iter()
             .position(|column| column.id == SortField::Progress)
             .expect("the layout offers a Progress column");
-        layout.toggle_visible(index);
+        ColumnLayout::toggle_visible(&mut layout, index);
         let session = Session {
             columns: layout.to_session_columns(),
             auto_hide: Some(layout.auto_hide),
@@ -272,7 +278,8 @@ mod tests {
 
         save(&path, &session).unwrap();
         let loaded = load(&path).unwrap();
-        let restored = TableLayout::from_session_columns(&loaded.columns, loaded.auto_hide);
+        let restored =
+            TableLayout::<SortField>::from_session_columns(&loaded.columns, loaded.auto_hide);
 
         assert_eq!(restored.columns[index].id, SortField::Progress);
         assert!(
@@ -347,7 +354,28 @@ mod tests {
             loaded.stale_days, 14,
             "and one written before the Changed column flagged anything keeps the fortnight"
         );
-        let ids: Vec<_> = loaded.columns.iter().map(|column| column.id).collect();
-        assert_eq!(ids, vec![SortField::Id, SortField::Title]);
+        let ids: Vec<_> = loaded
+            .columns
+            .iter()
+            .map(|column| column.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["id", "sprint", "title"],
+            "the file keeps every key it holds, whoever they belong to"
+        );
+        let layout =
+            TableLayout::<SortField>::from_session_columns(&loaded.columns, loaded.auto_hide);
+        let restored: Vec<_> = layout
+            .columns
+            .iter()
+            .take(2)
+            .map(|column| column.id)
+            .collect();
+        assert_eq!(
+            restored,
+            [SortField::Id, SortField::Title],
+            "and the work-item layout drops a column it has no name for"
+        );
     }
 }

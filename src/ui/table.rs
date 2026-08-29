@@ -1,6 +1,7 @@
 //! The work item table: its rows, its cells and the colours they carry.
 
 use super::*;
+use crate::columns::ColumnId;
 
 pub(super) fn render_table(
     frame: &mut Frame<'_>,
@@ -146,7 +147,7 @@ pub(super) fn render_table(
         for (header_rect, column) in header_columns.iter().skip(1).zip(columns.iter()) {
             shell.hit_regions.push(region(
                 *header_rect,
-                PointerTarget::SortHeader(column.id),
+                PointerTarget::SortHeader(column.id.key()),
                 PointerLayer::Base,
                 None,
                 None,
@@ -201,7 +202,7 @@ pub(super) fn render_table(
             if let Some(id_area) = header_columns.get(1) {
                 shell.hit_regions.push(region(
                     Rect::new(id_area.x, y, id_area.width, 1),
-                    PointerTarget::OpenTicket { index: logical },
+                    PointerTarget::OpenInBrowser { index: logical },
                     PointerLayer::Base,
                     None,
                     None,

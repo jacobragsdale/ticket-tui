@@ -3,6 +3,8 @@
 
 use ratatui::Frame;
 
+use crate::columns::ColumnLayout;
+
 use super::*;
 use shell::{MAX_SPLIT_PERCENT, MIN_SPLIT_PERCENT};
 
@@ -211,7 +213,7 @@ pub struct WorkItemsScreen {
     pub row_density: RowDensity,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
-    pub layout: TableLayout,
+    pub layout: TableLayout<SortField>,
     pub mode: WorkItemMode,
     pub table_state: TableState,
     pub table: ScrollState,
@@ -926,6 +928,10 @@ impl Screen for WorkItemsScreen {
 
     fn scroll_state_mut(&mut self, surface: ScrollSurface) -> &mut ScrollState {
         Self::scroll_state_mut(self, surface)
+    }
+
+    fn columns_mut(&mut self) -> &mut dyn ColumnLayout {
+        &mut self.layout
     }
 
     fn footer_hint(&self, shell: &Shell) -> &str {

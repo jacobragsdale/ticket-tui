@@ -595,7 +595,7 @@ impl WorkItemsScreen {
     }
 
     pub(super) fn handle_columns_key(&mut self, shell: &mut Shell, key: KeyEvent) {
-        let last = self.layout.columns.len().saturating_sub(1);
+        let last = self.columns_mut().count().saturating_sub(1);
         match key.code {
             KeyCode::Esc | KeyCode::Char('w') | KeyCode::Enter => self.mode = WorkItemMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -605,23 +605,28 @@ impl WorkItemsScreen {
                 self.focus_column((self.column_overlay.index + 1).min(last));
             }
             KeyCode::Char(' ') => {
-                self.layout.toggle_visible(self.column_overlay.index);
+                let index = self.column_overlay.index;
+                self.columns_mut().toggle_visible(index);
                 shell.session_dirty = true;
             }
             KeyCode::Char('K') => {
-                self.column_overlay.index = self.layout.move_column(self.column_overlay.index, -1);
+                let index = self.column_overlay.index;
+                self.column_overlay.index = self.columns_mut().move_column(index, -1);
                 shell.session_dirty = true;
             }
             KeyCode::Char('J') => {
-                self.column_overlay.index = self.layout.move_column(self.column_overlay.index, 1);
+                let index = self.column_overlay.index;
+                self.column_overlay.index = self.columns_mut().move_column(index, 1);
                 shell.session_dirty = true;
             }
             KeyCode::Left | KeyCode::Char('-') | KeyCode::Char('<') => {
-                self.layout.resize(self.column_overlay.index, -1);
+                let index = self.column_overlay.index;
+                self.columns_mut().resize(index, -1);
                 shell.session_dirty = true;
             }
             KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('>') => {
-                self.layout.resize(self.column_overlay.index, 1);
+                let index = self.column_overlay.index;
+                self.columns_mut().resize(index, 1);
                 shell.session_dirty = true;
             }
             _ => {}

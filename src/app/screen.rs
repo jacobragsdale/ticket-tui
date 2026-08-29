@@ -6,6 +6,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use super::{AppAction, Shell};
+use crate::columns::ColumnLayout;
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 use crossterm::event::KeyEvent;
 
@@ -39,6 +40,10 @@ pub trait Screen {
 
     /// The same surface, to scroll it.
     fn scroll_state_mut(&mut self, surface: ScrollSurface) -> &mut ScrollState;
+
+    /// The columns the Columns overlay edits: whichever list this screen is
+    /// showing, without the overlay knowing what its columns are.
+    fn columns_mut(&mut self) -> &mut dyn ColumnLayout;
 
     /// What the footer says when there is no notification over it.
     fn footer_hint(&self, shell: &Shell) -> &str;

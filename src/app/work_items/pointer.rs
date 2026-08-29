@@ -1,6 +1,7 @@
 //! Hover, press, drag and release: what the mouse does to the app.
 
 use super::*;
+use crate::columns::ColumnId;
 
 impl WorkItemsScreen {
     pub fn set_table_viewport(&mut self, rows: usize) {
@@ -237,7 +238,7 @@ impl WorkItemsScreen {
                     self.record_history(shell);
                 }
             }
-            PointerTarget::OpenTicket { index } => {
+            PointerTarget::OpenInBrowser { index } => {
                 shell.focus = Focus::Tickets;
                 shell.narrow_details = false;
                 if index < self.visible.len() {
@@ -258,7 +259,11 @@ impl WorkItemsScreen {
                     self.toggle_row_selection();
                 }
             }
-            PointerTarget::SortHeader(field) => self.toggle_sort(shell, field),
+            PointerTarget::SortHeader(key) => {
+                if let Some(field) = SortField::from_key(key) {
+                    self.toggle_sort(shell, field);
+                }
+            }
             PointerTarget::OpenSelectedUrl => {
                 shell.focus = Focus::Details;
                 shell.narrow_details = true;
@@ -324,16 +329,16 @@ impl WorkItemsScreen {
             }
             PointerTarget::ColumnToggle { index } => {
                 self.column_overlay.index = index;
-                self.layout.toggle_visible(index);
+                self.columns_mut().toggle_visible(index);
                 shell.session_dirty = true;
             }
             PointerTarget::ColumnMove { index, delta } => {
-                self.column_overlay.index = self.layout.move_column(index, delta);
+                self.column_overlay.index = self.columns_mut().move_column(index, delta);
                 shell.session_dirty = true;
             }
             PointerTarget::ColumnResize { index, delta } => {
                 self.column_overlay.index = index;
-                self.layout.resize(index, delta);
+                self.columns_mut().resize(index, delta);
                 shell.session_dirty = true;
             }
             PointerTarget::PaletteCommand { index } => {

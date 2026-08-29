@@ -16,6 +16,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::*;
+use crate::columns::ColumnId;
 
 use crate::app::FormFieldId;
 
@@ -115,7 +116,7 @@ fn details_pane(app: &App) -> Rect {
 fn header_rect(app: &App, field: SortField) -> Rect {
     target_rect(
         app,
-        |target| matches!(target, PointerTarget::SortHeader(painted) if *painted == field),
+        |target| matches!(target, PointerTarget::SortHeader(painted) if *painted == field.key()),
     )
 }
 

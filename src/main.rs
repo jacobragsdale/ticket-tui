@@ -1197,7 +1197,7 @@ fn mouse_pointer_for_hover(
 ) -> MousePointerShape {
     match target {
         Some(
-            PointerTarget::OpenTicket { .. }
+            PointerTarget::OpenInBrowser { .. }
             | PointerTarget::OpenSelectedUrl
             | PointerTarget::EditField { .. },
         ) => MousePointerShape::Link,
@@ -1707,7 +1707,7 @@ mod tests {
             MousePointerShape::Link
         );
         assert_eq!(
-            mouse_pointer_for_hover(Some(&PointerTarget::OpenTicket { index: 0 }), None),
+            mouse_pointer_for_hover(Some(&PointerTarget::OpenInBrowser { index: 0 }), None),
             MousePointerShape::Link
         );
         assert_eq!(

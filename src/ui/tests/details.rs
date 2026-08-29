@@ -1,4 +1,5 @@
 use super::*;
+use crate::columns::ColumnLayout;
 use crate::ui::details::{changed_field_line, with_cursor_style};
 
 #[test]
@@ -389,7 +390,7 @@ fn the_progress_column_is_hidden_until_the_column_overlay_shows_it() {
         SortField::Assignee,
     ] {
         let index = column_index(&app, field);
-        app.work_items.layout.toggle_visible(index);
+        ColumnLayout::toggle_visible(&mut app.work_items.layout, index);
     }
     let progress = column_index(&app, SortField::Progress);
     assert!(
@@ -401,7 +402,7 @@ fn the_progress_column_is_hidden_until_the_column_overlay_shows_it() {
     assert!(!hidden.contains("Progress"), "{hidden}");
     assert!(!hidden.contains("2/3"), "{hidden}");
 
-    app.work_items.layout.toggle_visible(progress);
+    ColumnLayout::toggle_visible(&mut app.work_items.layout, progress);
     let shown = render_text(60, 20, &mut app);
     assert!(shown.contains("Progress"), "{shown}");
     assert!(shown.contains("2/3"), "{shown}");
@@ -411,7 +412,7 @@ fn the_progress_column_is_hidden_until_the_column_overlay_shows_it() {
         "a work item with no children leaves the cell empty: {shown}"
     );
 
-    app.work_items.layout.toggle_visible(progress);
+    ColumnLayout::toggle_visible(&mut app.work_items.layout, progress);
     let hidden_again = render_text(60, 20, &mut app);
     assert!(!hidden_again.contains("Progress"), "{hidden_again}");
     assert!(!hidden_again.contains("2/3"), "{hidden_again}");
@@ -655,7 +656,7 @@ fn hovering_tints_a_row_without_recolouring_it_and_still_reverses_controls() {
     let header = app
         .shell
         .hit_regions
-        .find_target(|target| matches!(target, PointerTarget::SortHeader(SortField::Title)))
+        .find_target(|target| matches!(target, PointerTarget::SortHeader("title")))
         .map(|region| region.rect)
         .expect("title sort header");
     app.handle_mouse(mouse(MouseEventKind::Moved, header.x, header.y));

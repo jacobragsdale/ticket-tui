@@ -298,6 +298,103 @@ impl SortField {
     }
 }
 
+impl crate::columns::ColumnId for SortField {
+    /// The order the table opens in, which is not the order the sort popup
+    /// offers: a table leads with the id and the title.
+    fn all() -> &'static [Self] {
+        &[
+            Self::Id,
+            Self::Title,
+            Self::State,
+            Self::Type,
+            Self::Priority,
+            Self::Changed,
+            Self::Assignee,
+            Self::Organization,
+            Self::Project,
+            Self::Area,
+            Self::Iteration,
+            Self::Created,
+            Self::Tags,
+            Self::Progress,
+        ]
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        <Self as crate::columns::ColumnId>::all()
+            .iter()
+            .copied()
+            .find(|field| field.key() == key)
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Changed => "changed",
+            Self::Priority => "priority",
+            Self::Id => "id",
+            Self::Title => "title",
+            Self::State => "state",
+            Self::Type => "type",
+            Self::Assignee => "assignee",
+            Self::Organization => "organization",
+            Self::Project => "project",
+            Self::Area => "area",
+            Self::Iteration => "iteration",
+            Self::Created => "created",
+            Self::Tags => "tags",
+            Self::Progress => "progress",
+        }
+    }
+
+    /// The header labels, which are the sort popup's names shortened where a
+    /// column is narrower than its name.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Priority => "Pri",
+            Self::Organization => "Org",
+            other => other.label(),
+        }
+    }
+
+    fn default_width(self) -> u16 {
+        match self {
+            Self::Title => 0,
+            Self::Priority => 4,
+            Self::Id => 7,
+            Self::Progress => 9,
+            Self::Changed | Self::Created | Self::Project | Self::State => 10,
+            Self::Organization => 12,
+            Self::Type => 13,
+            Self::Area | Self::Assignee | Self::Iteration | Self::Tags => 16,
+        }
+    }
+
+    fn default_visible(self) -> bool {
+        matches!(
+            self,
+            Self::Id
+                | Self::Title
+                | Self::State
+                | Self::Type
+                | Self::Priority
+                | Self::Changed
+                | Self::Assignee
+        )
+    }
+
+    fn right_aligned(self) -> bool {
+        self.is_numeric()
+    }
+
+    fn pinned(self) -> bool {
+        matches!(self, Self::Id | Self::Title)
+    }
+
+    fn flexible(self) -> bool {
+        matches!(self, Self::Title)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RelationKind {
     Parent,
