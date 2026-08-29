@@ -329,6 +329,23 @@ impl AzureClient {
         parse_work_item(&item, &self.config)
     }
 
+    /// Move one work item to the project's recycle bin.
+    ///
+    /// The URL carries no `destroy` parameter, so the delete is the soft one:
+    /// Azure DevOps takes the work item out of every query and every board and
+    /// keeps it, and somebody who deleted the wrong thing restores it from the
+    /// recycle bin. Nothing comes back worth reading — the answer is the work
+    /// item as it was, which is of no use to a row about to be dropped — so the
+    /// body is discarded and only the refusal matters.
+    pub fn delete_work_item(&self, id: i64) -> Result<()> {
+        let url = format!(
+            "{}/_apis/wit/workitems/{id}?api-version={API_VERSION}",
+            self.config.base_url()
+        );
+        self.send(&url, Request::Delete)?;
+        Ok(())
+    }
+
     /// The states one work item type allows, in the order the process template
     /// lists them, which is the order the state picker offers. A state carries
     /// the category Azure DevOps assigned it rather than one guessed from its
@@ -648,6 +665,9 @@ impl AzureClient {
                 .header("Content-Type", "application/json-patch+json")
                 .send_json(document)
                 .with_context(|| format!("POST {url} failed"))?,
+            Request::Delete => authorized(self.agent.delete(url), &authorization)
+                .call()
+                .with_context(|| format!("DELETE {url} failed"))?,
         };
         self.note_rate_limit(response.headers());
         read_json(response, url)
@@ -691,6 +711,9 @@ enum Request<'a> {
     /// The same document posted rather than patched, which is how a work item
     /// is created: there is no work item yet to patch.
     PostPatch(&'a [Value]),
+    /// Move a work item to the recycle bin. Nothing goes out with it and
+    /// nothing worth reading comes back.
+    Delete,
 }
 
 /// The headers every Azure DevOps request carries, whatever its method.
@@ -951,6 +974,12 @@ fn read_json(mut response: ureq::http::Response<ureq::Body>, url: &str) -> Resul
         return Err(anyhow::Error::new(RequestRejected::new(
             status, url, message,
         )));
+    }
+    // A success with nothing in it is an answer rather than a broken one: a
+    // delete replies `204 No Content`, and the caller has no document to read
+    // either way.
+    if text.trim().is_empty() {
+        return Ok(Value::Null);
     }
     serde_json::from_str(&text)
         .with_context(|| format!("Azure DevOps returned invalid JSON from {url}"))

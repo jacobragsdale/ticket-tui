@@ -83,6 +83,10 @@ pub enum SyncRequest {
         patch: Vec<Value>,
         parent: Option<i64>,
     },
+    /// Move one work item to the project's recycle bin, and forget it here.
+    /// A set of checked rows sends one of these each, which the worker takes
+    /// in the order they were queued.
+    Delete(TicketKey),
 }
 
 /// What the sync thread sends back.
@@ -123,6 +127,9 @@ pub enum SyncEvent {
     /// One work item was created and is already written to SQLite, or was
     /// refused and nothing was written at all.
     Created(Box<Result<CreatedWorkItem, CreateRejection>>),
+    /// One work item went to the recycle bin and is already out of SQLite, or
+    /// was refused and is still exactly where it was.
+    Deleted(Box<Result<TicketKey, DeleteRejection>>),
     /// The worker thread is gone and no further events will arrive.
     Stopped,
 }
@@ -139,6 +146,15 @@ pub struct CreatedWorkItem {
 /// id to name: only what Azure DevOps said is left to report.
 #[derive(Clone, Debug)]
 pub struct CreateRejection {
+    pub message: String,
+}
+
+/// A work item that is still there. It names the one the delete was for, so the
+/// row can stop waiting on it and the summary of a checked-set delete can say
+/// which of them stayed.
+#[derive(Clone, Debug)]
+pub struct DeleteRejection {
+    pub key: TicketKey,
     pub message: String,
 }
 
@@ -232,6 +248,12 @@ pub trait WorkItemSource {
     ) -> Result<(Ticket, Vec<RelationRecord>)> {
         Err(anyhow!("this source cannot create work items"))
     }
+    /// Move one work item to the project's recycle bin. A source that cannot
+    /// says so rather than pretending to have, because a row taken off the
+    /// table for a delete that never happened is a lie the next pull undoes.
+    fn delete_work_item(&self, _id: i64) -> Result<()> {
+        Err(anyhow!("this source cannot delete work items"))
+    }
     /// The states one work item type allows, which is what the state picker
     /// offers once a pull has cached them.
     fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>>;
@@ -303,6 +325,10 @@ impl WorkItemSource for AzureClient {
         parent: Option<i64>,
     ) -> Result<(Ticket, Vec<RelationRecord>)> {
         AzureClient::create_work_item(self, work_item_type, fields, parent)
+    }
+
+    fn delete_work_item(&self, id: i64) -> Result<()> {
+        AzureClient::delete_work_item(self, id)
     }
 
     fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>> {
@@ -512,6 +538,7 @@ fn work(
                 parent,
                 events,
             ))),
+            SyncRequest::Delete(key) => SyncEvent::Deleted(Box::new(worker.delete(key, events))),
         };
         if events.send(event).is_err() {
             break;
@@ -821,6 +848,31 @@ impl Worker {
                 .create_work_item(work_item_type, patch, parent)?;
         self.repository()?.upsert(&ticket, &relations)?;
         Ok(CreatedWorkItem { ticket, relations })
+    }
+
+    /// Sends one work item to the recycle bin and forgets it here, answering
+    /// with the work item that went. Nothing is forgotten locally unless Azure
+    /// DevOps took the delete, so a refusal leaves the row where it was rather
+    /// than dropping it from a database the project still lists it in.
+    fn delete(
+        &mut self,
+        key: TicketKey,
+        events: &Sender<SyncEvent>,
+    ) -> Result<TicketKey, DeleteRejection> {
+        self.awaiting_throttle(|worker| worker.try_delete(&key, events))
+            .map(|()| key.clone())
+            .map_err(|error| DeleteRejection {
+                key,
+                message: format!("{error:#}"),
+            })
+    }
+
+    /// The links are dropped in both directions, so the children the delete
+    /// left behind stop claiming a parent that is gone. They are not deleted
+    /// with it: a soft delete takes the one work item.
+    fn try_delete(&mut self, key: &TicketKey, events: &Sender<SyncEvent>) -> Result<()> {
+        self.source(events)?.delete_work_item(key.id)?;
+        self.repository()?.delete_work_item(key)
     }
 
     /// Reads both classification trees and stores them for the next session,
@@ -1298,6 +1350,8 @@ mod tests {
         /// Every create the worker sent: the type, the field operations, and
         /// the parent it named.
         created: Arc<Mutex<Vec<Creation>>>,
+        /// Every work item the worker asked to have deleted, in order.
+        deleted: Arc<Mutex<Vec<i64>>>,
         /// What this source pulls, for the tests about recording it. `None`
         /// stands in for a source that does not know, which is what leaves
         /// every other test's database free of sync scope rows.
@@ -1520,6 +1574,18 @@ mod tests {
             self.stored
                 .clone()
                 .context("the fake source was not given a stored copy")
+        }
+
+        fn delete_work_item(&self, id: i64) -> Result<()> {
+            self.deleted.lock().unwrap().push(id);
+            if let Some((status, message)) = &self.refusal {
+                return Err(anyhow::Error::new(RequestRejected::new(
+                    *status,
+                    format!("https://dev.azure.com/demo/_apis/wit/workitems/{id}"),
+                    message.clone(),
+                )));
+            }
+            Ok(())
         }
 
         fn post_comment(&self, id: i64, html: &str) -> Result<CommentRecord> {
@@ -2515,6 +2581,7 @@ mod tests {
                 | SyncEvent::ClassificationNodes(_)
                 | SyncEvent::WorkItemTypes(_)
                 | SyncEvent::Created(_)
+                | SyncEvent::Deleted(_)
                 | SyncEvent::Commented(_) => continue,
                 SyncEvent::Stopped => panic!("the worker stopped early"),
             }
@@ -2637,6 +2704,109 @@ mod tests {
                 .len(),
             1,
             "nothing was written for a work item that was never created"
+        );
+    }
+
+    /// The answer to the next delete, past the display name the first connect
+    /// reports.
+    fn deleted(handle: &SyncHandle) -> Result<TicketKey, DeleteRejection> {
+        loop {
+            match next_event(handle) {
+                SyncEvent::Deleted(result) => return *result,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected a delete to finish, got {other:?}"),
+            }
+        }
+    }
+
+    /// A parent with one child under it, which is what a delete leaves behind.
+    fn family_database(directory: &TempDir) -> (PathBuf, Ticket, Ticket) {
+        let parent = ticket(1, "Auth rewrite");
+        let child = ticket(2, "Login form");
+        let path = directory.path().join("tickets.sqlite3");
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+        repository
+            .replace_all(
+                &[parent.clone(), child.clone()],
+                &TicketGraph {
+                    relations: vec![RelationRecord {
+                        from: child.key.clone(),
+                        to: parent.key.clone(),
+                        kind: RelationKind::Parent,
+                    }],
+                    ..TicketGraph::default()
+                },
+            )
+            .unwrap();
+        (path, parent, child)
+    }
+
+    #[test]
+    fn a_deleted_work_item_is_out_of_sqlite_before_it_is_reported() {
+        let directory = tempdir().unwrap();
+        let (path, parent, child) = family_database(&directory);
+        let source = FakeSource::with(vec![Ok(SyncBatch::default())]);
+        let sent = Arc::clone(&source.deleted);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle
+            .send(SyncRequest::Delete(parent.key.clone()))
+            .unwrap();
+        let gone = deleted(&handle).expect("the delete was accepted");
+
+        assert_eq!(gone, parent.key);
+        assert_eq!(sent.lock().unwrap().clone(), vec![1]);
+
+        let repository = SqliteTicketRepository::open_existing(&path).unwrap();
+        assert_eq!(
+            repository
+                .load_all()
+                .unwrap()
+                .iter()
+                .map(|ticket| ticket.key.id)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "the row is out of SQLite before the main thread hears about it"
+        );
+        assert!(
+            repository
+                .load_graph()
+                .unwrap()
+                .parents_of(&child.key)
+                .is_empty(),
+            "and the child it left behind is a work item nobody broke down from"
+        );
+    }
+
+    #[test]
+    fn a_refused_delete_leaves_the_work_item_where_it_was_and_says_what_azure_devops_said() {
+        let directory = tempdir().unwrap();
+        let (path, parent, _) = family_database(&directory);
+        let handle = SyncHandle::spawn(
+            path.clone(),
+            Box::new(FakeSource::refusing(403, "TF401232: read only")),
+        )
+        .unwrap();
+
+        handle
+            .send(SyncRequest::Delete(parent.key.clone()))
+            .unwrap();
+        let rejection = deleted(&handle).expect_err("the delete was refused");
+
+        assert_eq!(rejection.key, parent.key);
+        assert!(
+            rejection.message.contains("TF401232: read only"),
+            "the refusal travels as it came: {}",
+            rejection.message
+        );
+        assert_eq!(
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .load_all()
+                .unwrap()
+                .len(),
+            2,
+            "nothing was forgotten for a work item the project still has"
         );
     }
 

@@ -220,6 +220,7 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::NodePicker => render_node_picker(frame, app),
         AppMode::Form => render_form(frame, app),
         AppMode::TypePicker => render_type_picker(frame, app),
+        AppMode::ConfirmDelete => render_delete_confirm(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
 }
@@ -1044,6 +1045,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             }
             AppMode::TypePicker => "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel",
             AppMode::Form => "\u{2191}\u{2193}/Tab fields  Enter picker  Ctrl-S create  Esc cancel",
+            AppMode::ConfirmDelete => "d delete  Esc cancel",
             AppMode::Browse if app.focus == Focus::Family => "↑↓ move  Enter select  Tab details",
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
@@ -2325,6 +2327,77 @@ fn render_form(frame: &mut Frame<'_>, app: &mut App) {
         Rect::new(buttons.x.saturating_add(9), buttons.y, 8, 1),
         "[Cancel]",
         PointerTarget::CancelForm,
+        PointerLayer::Modal,
+        true,
+    );
+}
+
+/// The delete confirmation: what is going, what it leaves behind, and how to
+/// get it back.
+///
+/// Three things have to be on screen before anybody presses `d`. Which work
+/// item it is, by id and title, so the confirmation is about a work item rather
+/// than about a row. How many children it has and that they stay — an Epic over
+/// eight issues is exactly when somebody needs telling. And that the delete is
+/// the recoverable one, because a confirmation more frightening than the action
+/// warrants is its own kind of wrong.
+fn render_delete_confirm(frame: &mut Frame<'_>, app: &mut App) {
+    let Some(confirm) = app.delete_confirm.clone() else {
+        return;
+    };
+    let mut text = vec![
+        Line::styled(
+            confirm.question(),
+            Style::default()
+                .fg(theme().text)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::default(),
+    ];
+    if let Some(orphans) = confirm.orphans() {
+        text.push(Line::styled(orphans, Style::default().fg(theme().warning)));
+    }
+    text.push(Line::styled(
+        "It goes to the Azure DevOps recycle bin and can be restored from there.",
+        Style::default().fg(theme().muted),
+    ));
+    text.push(Line::default());
+    let width: u16 = 66;
+    let body = Paragraph::new(Text::from(text.clone())).wrap(Wrap { trim: false });
+    // The lines wrap, so the height comes off the wrapped paragraph rather than
+    // off the count: a long title must not push the buttons out of the frame.
+    let height = u16::try_from(body.line_count(width.saturating_sub(2)).saturating_add(3))
+        .unwrap_or(u16::MAX)
+        .min(frame.area().height);
+    let area = centered_rect(frame.area(), width, height);
+    frame.render_widget(Clear, area);
+    let inner = render_modal_frame(frame, app, area, " Delete ");
+    let chunks = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).split(inner);
+    frame.render_widget(body, chunks[0]);
+    app.hit_regions.push(region(
+        chunks[0],
+        PointerTarget::OverlayBody,
+        PointerLayer::Modal,
+        Some(SelectableSurface::Overlay),
+        None,
+    ));
+    capture_selectable(frame, app, SelectableSurface::Overlay, chunks[0], false);
+    let buttons = chunks[1];
+    render_control(
+        frame,
+        app,
+        Rect::new(buttons.x, buttons.y, 8, 1),
+        "[Delete]",
+        PointerTarget::ConfirmDelete,
+        PointerLayer::Modal,
+        true,
+    );
+    render_control(
+        frame,
+        app,
+        Rect::new(buttons.x.saturating_add(9), buttons.y, 8, 1),
+        "[Cancel]",
+        PointerTarget::CancelDelete,
         PointerLayer::Modal,
         true,
     );
@@ -5036,6 +5109,55 @@ mod tests {
         assert!(
             prompt.contains("Enter post"),
             "the footer explains the prompt: {prompt}"
+        );
+    }
+
+    #[test]
+    fn the_delete_confirmation_names_the_work_item_the_children_and_the_recycle_bin() {
+        let mut app = App::new(progress_tickets());
+        app.set_workspace_graph(progress_graph());
+        app.enable_sync();
+        app.set_table_viewport(5);
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let row = crate::command::EDIT_MENU
+            .iter()
+            .position(|entry| entry.command == crate::command::CommandId::DeleteWorkItem)
+            .expect("the Edit menu offers a delete row");
+        for _ in 0..row {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::ConfirmDelete);
+
+        let confirm = render_text(90, 24, &mut app);
+
+        assert!(
+            confirm.contains("Delete #10001 Auth rewrite?"),
+            "the confirmation is about a work item, not about a row: {confirm}"
+        );
+        assert!(
+            confirm.contains("3 children are not deleted"),
+            "an epic over three issues says what happens to them: {confirm}"
+        );
+        assert!(
+            confirm.contains("left with no parent"),
+            "and says what that leaves them as: {confirm}"
+        );
+        assert!(
+            confirm.contains("recycle bin"),
+            "a soft delete is recoverable, and the overlay says so: {confirm}"
+        );
+        assert!(confirm.contains("[Delete]"), "{confirm}");
+        assert!(confirm.contains("[Cancel]"), "{confirm}");
+        assert!(
+            confirm.contains("d delete  Esc cancel"),
+            "the footer says what confirms it: {confirm}"
+        );
+        assert!(
+            app.hit_regions
+                .find_target(|target| matches!(target, PointerTarget::CancelDelete))
+                .is_some(),
+            "and both buttons are clickable"
         );
     }
 

@@ -614,30 +614,30 @@ impl SqliteTicketRepository {
 
         let transaction = self.connection.transaction()?;
         for (organization, id) in &missing {
-            transaction.execute(
-                "DELETE FROM work_items WHERE organization = ?1 AND work_item_id = ?2",
-                params![organization, id],
-            )?;
-            // Links in both directions: a relation pointing at a work item that
-            // no longer exists is no more meaningful than one leading out of it.
-            transaction.execute(
-                "DELETE FROM work_item_relations
-                 WHERE organization = ?1 AND (from_id = ?2 OR to_id = ?2)",
-                params![organization, id],
-            )?;
-            transaction.execute(
-                "DELETE FROM work_item_comments WHERE organization = ?1 AND work_item_id = ?2",
-                params![organization, id],
-            )?;
-            transaction.execute(
-                "DELETE FROM work_item_history WHERE organization = ?1 AND work_item_id = ?2",
-                params![organization, id],
-            )?;
+            forget_work_item(&transaction, organization, *id)?;
         }
         transaction
             .commit()
             .context("failed to remove the work items the project no longer has")?;
         Ok(missing.len())
+    }
+
+    /// Removes one work item and everything hanging off it, for a work item the
+    /// user has just sent to the recycle bin. The next pull would catch it
+    /// anyway — a deleted work item vanishes from WIQL, which is what
+    /// [`Self::delete_missing`] reads — but the row has to leave the table now,
+    /// and the file has to agree with the table.
+    ///
+    /// Links are dropped in both directions, so the children left behind stop
+    /// claiming a parent that is gone. They are not deleted with it: a soft
+    /// delete takes the one work item, and its children become work items
+    /// nobody has broken down from.
+    pub fn delete_work_item(&mut self, key: &TicketKey) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        forget_work_item(&transaction, &key.organization, key.id)?;
+        transaction
+            .commit()
+            .with_context(|| format!("failed to remove #{} from the database", key.id))
     }
 
     /// One transaction holding every work item in `tickets`, the links leading
@@ -848,6 +848,32 @@ impl std::error::Error for InvalidTimestamp {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.source)
     }
+}
+
+/// Drops one work item and everything filed under it: the row, its links in
+/// both directions — a relation pointing at a work item that no longer exists
+/// is no more meaningful than one leading out of it — its comments, and its
+/// history. Both a pull that noticed a work item has gone and a delete the user
+/// asked for leave the file this way.
+fn forget_work_item(transaction: &Transaction<'_>, organization: &str, id: i64) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM work_items WHERE organization = ?1 AND work_item_id = ?2",
+        params![organization, id],
+    )?;
+    transaction.execute(
+        "DELETE FROM work_item_relations
+         WHERE organization = ?1 AND (from_id = ?2 OR to_id = ?2)",
+        params![organization, id],
+    )?;
+    transaction.execute(
+        "DELETE FROM work_item_comments WHERE organization = ?1 AND work_item_id = ?2",
+        params![organization, id],
+    )?;
+    transaction.execute(
+        "DELETE FROM work_item_history WHERE organization = ?1 AND work_item_id = ?2",
+        params![organization, id],
+    )?;
+    Ok(())
 }
 
 fn insert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {

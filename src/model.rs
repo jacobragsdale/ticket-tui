@@ -433,6 +433,18 @@ impl TicketGraph {
         self.relations.extend(relations);
     }
 
+    /// Drops every trace of one work item: the links leading out of it, the
+    /// links leading to it, and its discussion and history. What it was a
+    /// parent of is left where it is — a delete takes the one work item, and
+    /// its children become work items nobody has broken down from — so only
+    /// the link is forgotten, never the work item at the other end of it.
+    pub fn forget(&mut self, key: &TicketKey) {
+        self.relations
+            .retain(|relation| relation.from != *key && relation.to != *key);
+        self.comments.retain(|comment| comment.ticket != *key);
+        self.history.retain(|entry| entry.ticket != *key);
+    }
+
     /// Swaps one work item's comments and history for the set a fetch brought
     /// back, leaving every other work item's alone. This is what keeps a
     /// details fetch from costing a full reload of the graph.
