@@ -116,7 +116,7 @@ fn a_pull_that_lands_during_an_edit_keeps_the_optimistic_value() {
     pulled.revision = 4;
     app.work_items.replace_prepared_tickets(
         &mut app.shell,
-        PreparedTickets::new(vec![
+        Snapshot::new(vec![
             ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
             ticket(2, "Beta", "2026-02-01T00:00:00Z"),
             pulled.clone(),

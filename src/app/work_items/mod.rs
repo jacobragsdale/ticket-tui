@@ -147,52 +147,6 @@ const NAMED_BULK_FAILURES: usize = 3;
 /// How many cells wide the details pane draws the bar beside the ratio.
 pub const PROGRESS_BAR_CELLS: usize = 6;
 
-#[derive(Debug)]
-pub struct PreparedTickets {
-    tickets: Vec<Ticket>,
-    search_documents: SearchDocuments,
-    graph: TicketGraph,
-    /// The states each work item type allows, empty until a sync cached them.
-    states: StateCatalog,
-}
-
-impl PreparedTickets {
-    #[must_use]
-    pub fn new(tickets: Vec<Ticket>) -> Self {
-        Self::with_graph(tickets, TicketGraph::default())
-    }
-
-    #[must_use]
-    pub fn with_graph(tickets: Vec<Ticket>, graph: TicketGraph) -> Self {
-        let search_documents = SearchDocuments::prepare(&tickets);
-        Self {
-            tickets,
-            search_documents,
-            graph,
-            states: StateCatalog::default(),
-        }
-    }
-
-    /// The cached work item type states that came out of the same database
-    /// read, so the state picker and the rows never disagree.
-    #[must_use]
-    pub fn with_states(mut self, states: StateCatalog) -> Self {
-        self.states = states;
-        self
-    }
-
-    #[must_use]
-    pub fn ticket_count(&self) -> usize {
-        self.tickets.len()
-    }
-
-    /// The work item type states read alongside these rows.
-    #[must_use]
-    pub const fn states(&self) -> &StateCatalog {
-        &self.states
-    }
-}
-
 pub struct WorkItemsScreen {
     tickets: Arc<Vec<Ticket>>,
     visible: Vec<SearchMatch>,
@@ -348,7 +302,7 @@ const fn command_for_field(field: EditableField) -> CommandId {
 impl WorkItemsScreen {
     #[must_use]
     pub fn new(shell: &mut Shell, tickets: Vec<Ticket>) -> Self {
-        let prepared = PreparedTickets::new(tickets);
+        let prepared = Snapshot::new(tickets);
         let search = SearchEngine::from_documents(prepared.search_documents);
         let mut app = Self {
             tickets: Arc::new(prepared.tickets),

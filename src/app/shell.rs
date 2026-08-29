@@ -159,6 +159,10 @@ pub struct Shell {
     pub sync_pending: bool,
     /// Why there is nothing to write to, reported when an edit is attempted
     /// without a configured Azure DevOps project.
+    /// The project's Git repositories, as the last pull found them. Every tab
+    /// reads these: a pull request, a run and an artifact link all name a
+    /// repository by its GUID.
+    pub(crate) repos: Vec<Repo>,
     /// Everywhere this run has been, oldest last, across every tab. `[` walks
     /// back through it and `]` forward through what `[` came off.
     pub(crate) history: Vec<Jump>,
@@ -212,6 +216,7 @@ impl Default for Shell {
             stale: false,
             data_signature: 0,
             sync_pending: false,
+            repos: Vec::new(),
             history: Vec::new(),
             future: Vec::new(),
             offline_reason: None,
@@ -228,6 +233,27 @@ impl Default for Shell {
 }
 
 impl Shell {
+    /// What the last pull found. Written on every pull that changed them.
+    pub fn set_repos(&mut self, repos: Vec<Repo>) {
+        self.repos = repos;
+    }
+
+    #[must_use]
+    pub fn repos(&self) -> &[Repo] {
+        &self.repos
+    }
+
+    /// What a repository GUID is called, for the tabs that only ever see the
+    /// GUID. An id nothing on file matches reads as the id itself, so a link
+    /// still says something.
+    #[must_use]
+    pub fn repo_name(&self, id: &str) -> String {
+        self.repos
+            .iter()
+            .find(|repo| repo.id == id)
+            .map_or_else(|| id.to_owned(), |repo| repo.name.clone())
+    }
+
     /// Records somewhere this run has been. Arriving where you already are is
     /// not a move, and going somewhere new is what closes off the forward
     /// list — the same rule a browser's back button follows.

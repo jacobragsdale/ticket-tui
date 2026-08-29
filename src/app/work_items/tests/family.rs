@@ -70,10 +70,8 @@ fn an_epic_reads_as_complete_once_its_last_child_closes() {
 
     let mut closing = epic_tickets();
     closing[3].state = "Closed".into();
-    app.work_items.replace_prepared_tickets(
-        &mut app.shell,
-        PreparedTickets::with_graph(closing, epic_graph()),
-    );
+    app.work_items
+        .replace_prepared_tickets(&mut app.shell, Snapshot::with_graph(closing, epic_graph()));
 
     let epic = app.work_items.child_progress(&family_key(1)).unwrap();
     assert_eq!((epic.done, epic.total), (3, 3));
@@ -247,7 +245,7 @@ fn a_background_sync_leaves_the_search_box_and_the_selection_alone() {
     let mut refreshed = app.work_items.tickets().to_vec();
     refreshed.push(ticket(3, "Gamma", "2026-03-01T00:00:00Z"));
     app.work_items
-        .replace_prepared_tickets(&mut app.shell, PreparedTickets::new(refreshed));
+        .replace_prepared_tickets(&mut app.shell, Snapshot::new(refreshed));
     await_search(&mut app);
 
     assert_eq!(app.work_items.mode, WorkItemMode::Search);
@@ -278,7 +276,7 @@ fn family_selection_and_cursor_restore_after_reload() {
     let graph = app.work_items.graph.clone();
     let tickets = app.work_items.tickets().to_vec();
     app.work_items
-        .replace_prepared_tickets(&mut app.shell, PreparedTickets::with_graph(tickets, graph));
+        .replace_prepared_tickets(&mut app.shell, Snapshot::with_graph(tickets, graph));
 
     assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 3);
     assert_eq!(

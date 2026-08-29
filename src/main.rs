@@ -19,7 +19,7 @@ use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use serde_json::Value;
 use ticket_tui::agent_context::{self, AgentContext};
 use ticket_tui::app::{
-    App, AppAction, CopiedContent, DividerOrientation, PointerTarget, PreparedTickets, SyncTarget,
+    App, AppAction, CopiedContent, DividerOrientation, PointerTarget, Snapshot, SyncTarget,
 };
 use ticket_tui::azure::AzureConfig;
 use ticket_tui::cli::{self, Cli, resolve_me};
@@ -137,8 +137,8 @@ impl DetailsEngine {
 
 impl SyncRuntime {
     /// What a pull the user asked for reports, and where it pulled from.
-    fn status_for(&self, mode: SyncMode, count: usize) -> String {
-        let synced = sync::pull_summary(mode, count);
+    fn status_for(&self, mode: SyncMode, count: usize, repos: usize) -> String {
+        let synced = sync::pull_summary(mode, count, repos);
         self.config.as_ref().map_or_else(
             || synced.clone(),
             |config| format!("{synced} from {}/{}", config.organization, config.project),
@@ -174,7 +174,7 @@ impl SyncRuntime {
 
 #[derive(Default)]
 struct ReloadEngine {
-    receiver: Option<Receiver<std::result::Result<PreparedTickets, String>>>,
+    receiver: Option<Receiver<std::result::Result<Snapshot, String>>>,
 }
 
 struct AgentContextPublisher {
@@ -216,12 +216,15 @@ impl ReloadEngine {
         thread::Builder::new()
             .name("ticket-reload".into())
             .spawn(move || {
-                let result = (|| -> Result<PreparedTickets> {
+                let result = (|| -> Result<Snapshot> {
                     let repository = SqliteTicketRepository::open_existing(&path)?;
                     let tickets = repository.load_all()?;
                     let graph = repository.load_graph()?;
                     let states = repository.load_type_states()?;
-                    Ok(PreparedTickets::with_graph(tickets, graph).with_states(states))
+                    let repos = repository.load_repos()?;
+                    Ok(Snapshot::with_graph(tickets, graph)
+                        .with_states(states)
+                        .with_repos(repos))
                 })()
                 .map_err(|error| format!("{error:#}"));
                 let _ = sender.send(result);
@@ -231,7 +234,7 @@ impl ReloadEngine {
         Ok(true)
     }
 
-    fn try_result(&mut self) -> Option<std::result::Result<PreparedTickets, String>> {
+    fn try_result(&mut self) -> Option<std::result::Result<Snapshot, String>> {
         let result = match self.receiver.as_ref()?.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return None,
@@ -295,6 +298,7 @@ fn run() -> Result<()> {
     app.work_items.set_workspace_graph(&mut app.shell, graph);
     app.work_items
         .set_state_catalog(repository.load_type_states()?);
+    app.shell.set_repos(repository.load_repos()?);
     app.work_items.set_identities(repository.load_identities()?);
     app.work_items
         .set_work_item_types(repository.load_work_item_types()?);
@@ -960,16 +964,17 @@ fn poll_sync(
                 }
                 match outcome {
                     SyncOutcome::Pulled {
-                        prepared,
+                        snapshot,
                         mode,
                         count,
                     } => {
+                        let repos = snapshot.repo_count();
                         app.work_items
-                            .replace_prepared_tickets(&mut app.shell, prepared);
+                            .replace_prepared_tickets(&mut app.shell, snapshot);
                         app.shell.finish_sync();
                         stamp_database(app, repository);
                         if origin == PullOrigin::User {
-                            app.shell.set_status(runtime.status_for(mode, count));
+                            app.shell.set_status(runtime.status_for(mode, count, repos));
                         }
                     }
                     // Nothing moved in Azure DevOps, so nothing was written and
@@ -1272,10 +1277,10 @@ fn poll_reload(
     };
     app.shell.reload_pending = false;
     match result {
-        Ok(prepared) => {
-            let count = prepared.ticket_count();
+        Ok(snapshot) => {
+            let count = snapshot.ticket_count();
             app.work_items
-                .replace_prepared_tickets(&mut app.shell, prepared);
+                .replace_prepared_tickets(&mut app.shell, snapshot);
             stamp_database(app, repository);
             app.shell.set_status(format!("Reloaded {count} tickets"));
         }
@@ -1925,14 +1930,14 @@ mod tests {
         assert!(!reloader.start(&path).unwrap());
 
         let deadline = Instant::now() + Duration::from_secs(2);
-        let prepared = loop {
+        let snapshot = loop {
             if let Some(result) = reloader.try_result() {
                 break result.unwrap();
             }
             assert!(Instant::now() < deadline, "reload worker timed out");
             thread::yield_now();
         };
-        assert_eq!(prepared.ticket_count(), 3);
+        assert_eq!(snapshot.ticket_count(), 3);
     }
 
     #[test]
@@ -2003,16 +2008,17 @@ mod tests {
         );
 
         assert_eq!(
-            runtime.status_for(SyncMode::Incremental, 1),
+            runtime.status_for(SyncMode::Incremental, 1, 0),
             "Synced 1 change from example-org/atlas"
         );
         assert_eq!(
-            runtime.status_for(SyncMode::Incremental, 3),
+            runtime.status_for(SyncMode::Incremental, 3, 0),
             "Synced 3 changes from example-org/atlas"
         );
         assert_eq!(
-            runtime.status_for(SyncMode::Full, 52),
-            "Synced 52 work items from example-org/atlas"
+            runtime.status_for(SyncMode::Full, 52, 4),
+            "Synced 52 work items, 4 repos from example-org/atlas",
+            "a full pull counts the repositories it brought down with the rows"
         );
     }
 

@@ -10,12 +10,12 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::classification::{ClassificationNode, NodeKind};
 use crate::model::{
-    CommentRecord, DetailsUpdate, HistoryRecord, Identity, RelationKind, RelationRecord,
+    CommentRecord, DetailsUpdate, HistoryRecord, Identity, RelationKind, RelationRecord, Repo,
     StateCatalog, StateCategory, StateOption, Ticket, TicketGraph, TicketKey,
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -42,6 +42,10 @@ pub const PROJECT_KEY: &str = "project";
 /// work items in and narrowing it has to drop the ones now outside.
 pub const SYNC_SCOPE_KEY: &str = "sync_scope";
 
+/// `sync_meta` key holding the project's GUID, which the pull request policy
+/// and artifact-link endpoints ask for by id rather than by name.
+pub const PROJECT_ID_KEY: &str = "project_id";
+
 /// `sync_meta` key holding when the project's classification nodes were last
 /// read. The iteration and area pickers open from the cached trees and only ask
 /// Azure DevOps again once this is an hour old, so a run that follows another
@@ -61,6 +65,7 @@ DROP TABLE IF EXISTS work_item_type_states;
 DROP TABLE IF EXISTS work_item_types;
 DROP TABLE IF EXISTS identities;
 DROP TABLE IF EXISTS classification_nodes;
+DROP TABLE IF EXISTS repos;
 DROP TABLE IF EXISTS sync_meta;
 CREATE TABLE work_items (
     organization   TEXT NOT NULL,
@@ -138,6 +143,17 @@ CREATE TABLE classification_nodes (
     finish_date TEXT,
     position    INTEGER NOT NULL,
     PRIMARY KEY (kind, path)
+);
+CREATE TABLE repos (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    project        TEXT NOT NULL,
+    default_branch TEXT,
+    remote_url     TEXT NOT NULL,
+    ssh_url        TEXT NOT NULL,
+    web_url        TEXT NOT NULL,
+    is_disabled    INTEGER NOT NULL,
+    size           INTEGER
 );
 CREATE TABLE sync_meta (
     key   TEXT PRIMARY KEY,
@@ -392,6 +408,66 @@ impl SqliteTicketRepository {
         transaction
             .commit()
             .context("failed to store the project's identities")
+    }
+
+    /// Replaces the project's repositories with what the pull found. Answers
+    /// whether anything changed, so an idle project writes nothing.
+    pub fn replace_repos(&mut self, repos: &[Repo]) -> Result<bool> {
+        // Compared in the order they are read back in, so a source that lists
+        // them another way is still recognised as the same set.
+        let mut repos = repos.to_vec();
+        repos.sort_by_key(|repo| repo.name.to_lowercase());
+        if self.load_repos()? == repos {
+            return Ok(false);
+        }
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM repos", [])?;
+        for repo in &repos {
+            transaction.execute(
+                "INSERT OR REPLACE INTO repos
+                 (id, name, project, default_branch, remote_url, ssh_url, web_url, is_disabled, size)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    repo.id,
+                    repo.name,
+                    repo.project,
+                    repo.default_branch,
+                    repo.remote_url,
+                    repo.ssh_url,
+                    repo.web_url,
+                    i64::from(repo.is_disabled),
+                    repo.size,
+                ],
+            )?;
+        }
+        transaction
+            .commit()
+            .context("failed to store the project's repositories")?;
+        Ok(true)
+    }
+
+    /// The project's repositories, by name.
+    pub fn load_repos(&self) -> Result<Vec<Repo>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, project, default_branch, remote_url, ssh_url, web_url,
+                    is_disabled, size
+             FROM repos ORDER BY name COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(Repo {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                project: row.get(2)?,
+                default_branch: row.get(3)?,
+                remote_url: row.get(4)?,
+                ssh_url: row.get(5)?,
+                web_url: row.get(6)?,
+                is_disabled: row.get::<_, i64>(7)? != 0,
+                size: row.get(8)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load repositories")
     }
 
     /// Everybody the last identity fetch found, by display name.

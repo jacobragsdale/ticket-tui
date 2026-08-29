@@ -16,7 +16,7 @@ use url::Url;
 use crate::classification::{self, ClassificationNode};
 use crate::html::html_to_text;
 use crate::model::{
-    CommentRecord, HistoryRecord, Identity, RelationKind, RelationRecord, StateCategory,
+    CommentRecord, HistoryRecord, Identity, RelationKind, RelationRecord, Repo, StateCategory,
     StateOption, Ticket, TicketKey, WorkItemDetails,
 };
 use crate::timestamp::Timestamp;
@@ -594,6 +594,17 @@ impl AzureClient {
         Ok(classification::parse_classification_nodes(&response))
     }
 
+    /// The project's Git repositories, and the project's own GUID, which comes
+    /// back on each of them and is what the pull request and artifact-link
+    /// endpoints ask for. One cheap request, made on every pull.
+    pub fn fetch_repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
+        let segments = [self.config.project.as_str(), "_apis", "git", "repositories"];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&version_query()));
+        let response = self.get(url.as_str())?;
+        Ok(parse_repositories(&response, &self.config.project))
+    }
+
     /// The teams hang off `_apis/projects` rather than off the project. `tail`
     /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {
@@ -734,6 +745,42 @@ enum Request<'a> {
 }
 
 /// The query every plain endpoint takes: the API version and nothing else.
+/// The repositories in a `GET .../_apis/git/repositories` response, and the
+/// project GUID they all carry. A repository the response cannot be read as is
+/// left out rather than sinking the pull.
+fn parse_repositories(response: &Value, project: &str) -> (Vec<Repo>, Option<String>) {
+    let mut project_id = None;
+    let mut repos: Vec<Repo> = response["value"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| {
+            let id = entry["id"].as_str()?.to_owned();
+            let name = entry["name"].as_str()?.to_owned();
+            if project_id.is_none() {
+                project_id = entry["project"]["id"].as_str().map(str::to_owned);
+            }
+            Some(Repo {
+                id,
+                name,
+                project: entry["project"]["name"]
+                    .as_str()
+                    .unwrap_or(project)
+                    .to_owned(),
+                default_branch: entry["defaultBranch"].as_str().map(str::to_owned),
+                remote_url: entry["remoteUrl"].as_str().unwrap_or_default().to_owned(),
+                ssh_url: entry["sshUrl"].as_str().unwrap_or_default().to_owned(),
+                web_url: entry["webUrl"].as_str().unwrap_or_default().to_owned(),
+                is_disabled: entry["isDisabled"].as_bool().unwrap_or_default(),
+                size: entry["size"].as_i64(),
+            })
+        })
+        .collect();
+    repos.sort_by_key(|repo| repo.name.to_lowercase());
+    (repos, project_id)
+}
+
 fn version_query() -> String {
     format!("api-version={API_VERSION}")
 }

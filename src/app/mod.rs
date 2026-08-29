@@ -30,7 +30,7 @@ use crate::filter::{
 pub use crate::model::Jump;
 use crate::model::{
     CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity,
-    RelationKind, RelationRecord, SortDirection, SortField, StateCatalog, StateCategory,
+    RelationKind, RelationRecord, Repo, SortDirection, SortField, StateCatalog, StateCategory,
     StateOption, Ticket, TicketGraph, TicketKey, compare_tickets, path_leaf, same_text,
 };
 pub use crate::model::{RowDensity, SearchOrder};
@@ -39,9 +39,10 @@ use crate::pointer::{
     TextSelection,
 };
 pub use crate::pointer::{EditableField, HitRegions, OverlayAnchor, PointerTarget};
-use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
+use crate::search::{SearchEngine, SearchMatch};
 use crate::session::{NamedView, Session, TabSession};
 use crate::sprint::{self, SprintSummary, SummaryRow, SummaryRowKind};
+pub use crate::sync::Snapshot;
 use crate::sync::{ReparentApplied, ReparentRejection};
 use crate::text_input::TextInput;
 use crate::timestamp::Timestamp;
@@ -64,9 +65,9 @@ pub use work_items::{
     BuiltinView, ChildProgress, ChildProgressIndex, ColumnOverlay, DEFAULT_STALE_DAYS,
     DeleteConfirm, EditMenu, EditScope, FacetBar, FilterOverlay, FormField, FormFieldId,
     FormFieldKind, FormKind, FormOverlay, FormPicker, PRIORITY_CHOICES, PROGRESS_BAR_CELLS,
-    PaletteState, PreparedTickets, PriorityPicker, PromptField, SortDraft, SprintOverlay,
-    StatePicker, SyncTarget, TextPrompt, TypePicker, UNASSIGNED_LABEL, ViewRow, ViewRowKind,
-    ViewsOverlay, WorkItemMode, WorkItemsScreen,
+    PaletteState, PriorityPicker, PromptField, SortDraft, SprintOverlay, StatePicker, SyncTarget,
+    TextPrompt, TypePicker, UNASSIGNED_LABEL, ViewRow, ViewRowKind, ViewsOverlay, WorkItemMode,
+    WorkItemsScreen,
 };
 
 #[derive(Clone, Debug, PartialEq)]

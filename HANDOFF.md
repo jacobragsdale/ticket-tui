@@ -6,11 +6,11 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
 
 ## State of `main`
 
-- The four-tab roadmap is under way: #661–#665 are Done, #666 is next.
-  Everything before it is merged. `cargo fmt --check`, `cargo clippy --all-targets
+- The four-tab roadmap is under way: Epic 656 is finished (#661–#667) and
+  #668 (repos sync) is Done. Epic 659 (Pipelines, #680–#689) is next. `cargo fmt --check`, `cargo clippy --all-targets
   --all-features -D warnings`, `cargo test --all-targets` (415 tests, and again
   under `NO_COLOR=1`) and `cargo build --release` are clean.
-- Database schema is `PRAGMA user_version = 12`. The first launch of this build
+- Database schema is `PRAGMA user_version = 13`. The first launch of this build
   rebuilds any older database and does one full pull automatically.
 
 ## The module tree (#661, #662)
@@ -141,8 +141,9 @@ subcommands and context v3.
 
 ## What is left
 
-The roadmap above. #661–#665 are Done; start at **#666**, then #667, then #668
-before anything in Epic 659, then #668 before anything in Epic 659. Query round-tripping was an
+The roadmap above. #661–#668 are Done; start at **Epic 659** (#680–#689, the
+live log tail in #684 is the critical one), then Epic 658, the rest of Epic
+657, then Epic 660. then #668 before anything in Epic 659. Query round-tripping was an
 earlier loose end and is fixed: `quote_if_needed` now escapes `\` and `take_quoted`
 unescapes it, so `iteration:"development\Sprint 1"` survives
 `format_query`/`parse_query` (#654), and a backslash typed once inside a quoted

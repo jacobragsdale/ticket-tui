@@ -244,11 +244,14 @@ impl WorkItemsScreen {
     }
 
     pub fn replace_tickets(&mut self, shell: &mut Shell, tickets: Vec<Ticket>) {
-        self.replace_prepared_tickets(shell, PreparedTickets::new(tickets));
+        self.replace_prepared_tickets(shell, Snapshot::new(tickets));
     }
 
-    pub fn replace_prepared_tickets(&mut self, shell: &mut Shell, prepared: PreparedTickets) {
+    pub fn replace_prepared_tickets(&mut self, shell: &mut Shell, prepared: Snapshot) {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
+        if !prepared.repos.is_empty() {
+            shell.set_repos(prepared.repos.clone());
+        }
         self.tickets = Arc::new(prepared.tickets);
         self.graph = prepared.graph;
         // A pull that has not cached the states yet must not throw away the

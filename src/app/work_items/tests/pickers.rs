@@ -864,7 +864,7 @@ fn planned_app() -> App {
         })
         .collect();
     app.work_items
-        .replace_prepared_tickets(&mut app.shell, PreparedTickets::new(planned));
+        .replace_prepared_tickets(&mut app.shell, Snapshot::new(planned));
     app.work_items.set_table_viewport(3);
     app
 }
@@ -1170,7 +1170,7 @@ fn a_pull_without_cached_states_keeps_the_ones_an_earlier_pull_brought() {
     let tickets = app.work_items.tickets().to_vec();
 
     app.work_items
-        .replace_prepared_tickets(&mut app.shell, PreparedTickets::new(tickets.clone()));
+        .replace_prepared_tickets(&mut app.shell, Snapshot::new(tickets.clone()));
     assert_eq!(
         state_names(&app.work_items.states_for("Task")),
         ["To Do", "Doing", "Done"],
@@ -1182,9 +1182,7 @@ fn a_pull_without_cached_states_keeps_the_ones_an_earlier_pull_brought() {
         "Task",
         vec![StateOption::new("Cut", StateCategory::Removed)],
     );
-    app.work_items.replace_prepared_tickets(
-        &mut app.shell,
-        PreparedTickets::new(tickets).with_states(catalog),
-    );
+    app.work_items
+        .replace_prepared_tickets(&mut app.shell, Snapshot::new(tickets).with_states(catalog));
     assert_eq!(state_names(&app.work_items.states_for("Task")), ["Cut"]);
 }

@@ -13,15 +13,15 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 
-use crate::app::PreparedTickets;
 use crate::azure::{self, AzureClient, AzureConfig, SyncBatch};
 use crate::classification::ClassificationNode;
 use crate::db::{self, SqliteTicketRepository};
 use crate::edit::{EditApplied, EditRejection, EditRequest};
 use crate::model::{
-    CommentRecord, DetailsUpdate, Identity, RelationKind, RelationRecord, StateOption, Ticket,
-    TicketGraph, TicketKey, WorkItemDetails,
+    CommentRecord, DetailsUpdate, Identity, RelationKind, RelationRecord, Repo, StateCatalog,
+    StateOption, Ticket, TicketGraph, TicketKey, WorkItemDetails,
 };
+use crate::search::SearchDocuments;
 use crate::timestamp::Timestamp;
 
 /// How long the worker will wait out a throttled request the user is waiting
@@ -229,11 +229,87 @@ pub enum SyncMode {
 /// it stored; an incremental one counts what actually moved, which on a quiet
 /// project is usually a handful or none.
 #[must_use]
-pub fn pull_summary(mode: SyncMode, count: usize) -> String {
+pub fn pull_summary(mode: SyncMode, count: usize, repos: usize) -> String {
+    let repos = match repos {
+        0 => String::new(),
+        1 => ", 1 repo".to_owned(),
+        repos => format!(", {repos} repos"),
+    };
     match mode {
-        SyncMode::Full => format!("Synced {count} work items"),
-        SyncMode::Incremental if count == 1 => "Synced 1 change".to_owned(),
-        SyncMode::Incremental => format!("Synced {count} changes"),
+        SyncMode::Full => format!("Synced {count} work items{repos}"),
+        SyncMode::Incremental if count == 1 => format!("Synced 1 change{repos}"),
+        SyncMode::Incremental => format!("Synced {count} changes{repos}"),
+    }
+}
+
+/// Everything one reload hands the main thread: the rows, what search needs of
+/// them, the links between them, the process states they move through, and the
+/// project's repositories. The tabs that follow add their own slices, so the
+/// main thread applies one snapshot rather than one event per table.
+#[derive(Debug)]
+pub struct Snapshot {
+    pub tickets: Vec<Ticket>,
+    pub search_documents: SearchDocuments,
+    pub graph: TicketGraph,
+    /// The states each work item type allows, empty until a sync cached them.
+    pub states: StateCatalog,
+    /// The project's Git repositories, which every tab reads to turn a
+    /// repository GUID into a name. Empty until a pull has fetched them.
+    pub repos: Vec<Repo>,
+}
+
+impl Snapshot {
+    #[must_use]
+    pub fn new(tickets: Vec<Ticket>) -> Self {
+        Self::with_graph(tickets, TicketGraph::default())
+    }
+
+    #[must_use]
+    pub fn with_graph(tickets: Vec<Ticket>, graph: TicketGraph) -> Self {
+        let search_documents = SearchDocuments::prepare(&tickets);
+        Self {
+            tickets,
+            search_documents,
+            graph,
+            states: StateCatalog::default(),
+            repos: Vec::new(),
+        }
+    }
+
+    /// The cached work item type states that came out of the same database
+    /// read, so the state picker and the rows never disagree.
+    #[must_use]
+    pub fn with_states(mut self, states: StateCatalog) -> Self {
+        self.states = states;
+        self
+    }
+
+    #[must_use]
+    pub fn ticket_count(&self) -> usize {
+        self.tickets.len()
+    }
+
+    /// The project's repositories, read alongside these rows.
+    #[must_use]
+    pub fn with_repos(mut self, repos: Vec<Repo>) -> Self {
+        self.repos = repos;
+        self
+    }
+
+    /// The work item type states read alongside these rows.
+    #[must_use]
+    pub const fn states(&self) -> &StateCatalog {
+        &self.states
+    }
+
+    #[must_use]
+    pub fn repos(&self) -> &[Repo] {
+        &self.repos
+    }
+
+    #[must_use]
+    pub fn repo_count(&self) -> usize {
+        self.repos.len()
     }
 }
 
@@ -243,7 +319,7 @@ pub enum SyncOutcome {
     /// Work items already written to SQLite and read back from it, so memory
     /// and the database hold the same rows.
     Pulled {
-        prepared: PreparedTickets,
+        snapshot: Snapshot,
         mode: SyncMode,
         /// Work items stored, for a full pull; work items changed or removed,
         /// for an incremental one.
@@ -283,6 +359,12 @@ pub trait WorkItemSource {
     fn list_ids(&self) -> Result<Vec<i64>>;
     /// Display name of the signed-in user, used to mark their own work items.
     fn display_name(&self) -> Result<Option<String>>;
+    /// The project's Git repositories, and the project's own GUID. One cheap
+    /// request, made on every pull; a source with no repositories to offer
+    /// answers with none rather than failing the pull.
+    fn repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
+        Ok((Vec::new(), None))
+    }
     /// Write one work item with a JSON Patch document, answering with the copy
     /// the server stored.
     fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<(Ticket, Vec<RelationRecord>)>;
@@ -364,6 +446,10 @@ pub trait WorkItemSource {
 impl WorkItemSource for AzureClient {
     fn pull(&self) -> Result<SyncBatch> {
         self.fetch_all_work_items()
+    }
+
+    fn repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
+        self.fetch_repositories()
     }
 
     fn pull_changed_since(&self, watermark: Timestamp) -> Result<SyncBatch> {
@@ -1104,8 +1190,9 @@ impl Worker {
             repository.set_meta(db::WATERMARK_KEY, &watermark.to_rfc3339())?;
         }
         self.cache_type_states(&types, events)?;
+        self.sync_repos(events)?;
         Ok(SyncOutcome::Pulled {
-            prepared: self.reload()?,
+            snapshot: self.reload()?,
             mode: SyncMode::Full,
             count,
         })
@@ -1140,28 +1227,52 @@ impl Worker {
         }
         let removed = repository.delete_missing(&live_ids)?;
         let count = batch.tickets.len() + removed;
-        if count == 0 {
-            return Ok(SyncOutcome::Unchanged);
-        }
         if let Some(next) = next {
             repository.set_meta(db::WATERMARK_KEY, &next.to_rfc3339())?;
         }
         self.cache_type_states(&types, events)?;
+        // The repositories come down with every pull, and a project whose work
+        // items and repositories are both untouched writes nothing at all.
+        let repos_changed = self.sync_repos(events)?;
+        if count == 0 && !repos_changed {
+            return Ok(SyncOutcome::Unchanged);
+        }
         Ok(SyncOutcome::Pulled {
-            prepared: self.reload()?,
+            snapshot: self.reload()?,
             mode: SyncMode::Incremental,
             count,
         })
     }
 
+    /// Reads the project's repositories and stores them if they differ from
+    /// what is on file, so an idle project still writes nothing. Answers
+    /// whether anything was written. A fetch that fails leaves the stored set
+    /// alone: repositories are not what the pull is for.
+    fn sync_repos(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
+        let Ok((repos, project_id)) = self.source(events)?.repositories() else {
+            return Ok(false);
+        };
+        let repository = self.repository()?;
+        let written = repository.replace_repos(&repos)?;
+        if let Some(project_id) = project_id
+            && repository.meta(db::PROJECT_ID_KEY)?.as_deref() != Some(project_id.as_str())
+        {
+            repository.set_meta(db::PROJECT_ID_KEY, &project_id)?;
+        }
+        Ok(written)
+    }
+
     /// The rows, their graph, and the states they allow, all out of the same
     /// read, so what the main thread shows is what the database holds.
-    fn reload(&mut self) -> Result<PreparedTickets> {
+    fn reload(&mut self) -> Result<Snapshot> {
         let repository = self.repository()?;
         let tickets = repository.load_all()?;
         let graph = repository.load_graph()?;
         let states = repository.load_type_states()?;
-        Ok(PreparedTickets::with_graph(tickets, graph).with_states(states))
+        let repos = repository.load_repos()?;
+        Ok(Snapshot::with_graph(tickets, graph)
+            .with_states(states)
+            .with_repos(repos))
     }
 
     /// The work item types in a batch whose states nobody has read yet, in the
@@ -1479,6 +1590,11 @@ mod tests {
         /// stands in for a source that does not know, which is what leaves
         /// every other test's database free of sync scope rows.
         scope: Option<SyncScope>,
+        /// The repositories this source lists, and the project GUID they carry.
+        repos: Arc<Mutex<Vec<Repo>>>,
+        project_id: Option<String>,
+        /// How many times the repositories were asked for.
+        repo_requests: Arc<Mutex<usize>>,
     }
 
     impl FakeSource {
@@ -1622,6 +1738,11 @@ mod tests {
 
         fn display_name(&self) -> Result<Option<String>> {
             Ok(self.display_name.clone())
+        }
+
+        fn repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
+            *self.repo_requests.lock().unwrap() += 1;
+            Ok((self.repos.lock().unwrap().clone(), self.project_id.clone()))
         }
 
         fn patch_work_item(
@@ -2064,7 +2185,7 @@ mod tests {
         let (origin, outcome) = finished(&handle);
         assert_eq!(origin, PullOrigin::Timer);
         let SyncOutcome::Pulled {
-            prepared,
+            snapshot,
             mode,
             count,
         } = outcome
@@ -2077,7 +2198,7 @@ mod tests {
             "a database with no watermark is filled whole"
         );
         assert_eq!(count, 2);
-        assert_eq!(prepared.ticket_count(), 2);
+        assert_eq!(snapshot.ticket_count(), 2);
 
         let stored = SqliteTicketRepository::open_existing(&path).unwrap();
         let mut titles: Vec<String> = stored
@@ -2120,11 +2241,11 @@ mod tests {
         let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
 
         handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
-        let SyncOutcome::Pulled { prepared, .. } = pulled(&handle) else {
+        let SyncOutcome::Pulled { snapshot, .. } = pulled(&handle) else {
             panic!("expected a successful pull");
         };
         assert_eq!(
-            prepared.states().states_for("Task"),
+            snapshot.states().states_for("Task"),
             task_states,
             "the rows and the states they allow come out of the same read"
         );
@@ -2144,6 +2265,85 @@ mod tests {
             *asked.lock().unwrap(),
             ["Task", "Bug", "Bug"],
             "a cached type is asked once; a type whose states failed is asked again"
+        );
+    }
+
+    fn repo(id: &str, name: &str) -> Repo {
+        Repo {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            project: "atlas".into(),
+            default_branch: Some("refs/heads/main".into()),
+            remote_url: format!("https://dev.azure.com/demo/atlas/_git/{name}"),
+            ssh_url: format!("git@ssh.dev.azure.com:v3/demo/atlas/{name}"),
+            web_url: format!("https://dev.azure.com/demo/atlas/_git/{name}"),
+            is_disabled: false,
+            size: Some(4_096),
+        }
+    }
+
+    #[test]
+    fn a_pull_stores_the_projects_repositories_and_writes_nothing_the_second_time() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource {
+            repos: Arc::new(Mutex::new(vec![
+                repo("aaa-111", "ticket-tui"),
+                repo("bbb-222", "skillbook"),
+            ])),
+            project_id: Some("project-guid".into()),
+            ..FakeSource::with(vec![
+                Ok(SyncBatch {
+                    tickets: vec![ticket(1, "Existing")],
+                    relations: Vec::new(),
+                }),
+                Ok(SyncBatch {
+                    tickets: Vec::new(),
+                    relations: Vec::new(),
+                }),
+            ])
+        };
+        let repo_requests = Arc::clone(&source.repo_requests);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let SyncOutcome::Pulled { snapshot, .. } = pulled(&handle) else {
+            panic!("expected a pull");
+        };
+        assert_eq!(
+            snapshot
+                .repos()
+                .iter()
+                .map(|repo| repo.name.as_str())
+                .collect::<Vec<_>>(),
+            ["skillbook", "ticket-tui"],
+            "the snapshot carries them, by name"
+        );
+
+        let stored = SqliteTicketRepository::open_existing(&path).unwrap();
+        assert_eq!(
+            stored.load_repos().unwrap().len(),
+            2,
+            "and so does the file"
+        );
+        assert_eq!(
+            stored.meta(db::PROJECT_ID_KEY).unwrap().as_deref(),
+            Some("project-guid"),
+            "the project GUID the pull request and artifact endpoints want came with them"
+        );
+        drop(stored);
+        let signature = crate::db::data_signature(&path);
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        assert!(
+            matches!(pulled(&handle), SyncOutcome::Unchanged),
+            "the same repositories and no work items is nothing to write"
+        );
+        assert_eq!(*repo_requests.lock().unwrap(), 2, "asked once per pull");
+        assert_eq!(
+            crate::db::data_signature(&path),
+            signature,
+            "and an idle project leaves the file alone"
         );
     }
 
@@ -2411,7 +2611,7 @@ mod tests {
 
         handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
         let SyncOutcome::Pulled {
-            prepared,
+            snapshot,
             mode,
             count,
         } = pulled(&handle)
@@ -2420,7 +2620,7 @@ mod tests {
         };
         assert_eq!(mode, SyncMode::Incremental);
         assert_eq!(count, 1, "a work item that vanished is a change");
-        assert_eq!(prepared.ticket_count(), 1);
+        assert_eq!(snapshot.ticket_count(), 1);
 
         let stored = SqliteTicketRepository::open_existing(&path).unwrap();
         assert_eq!(

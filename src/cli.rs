@@ -231,8 +231,12 @@ fn guard_stored_project(
 /// it is an error, so the exit status says so too.
 fn sync_report(outcome: &SyncOutcome, config: &AzureConfig) -> Result<String> {
     let summary = match outcome {
-        SyncOutcome::Pulled { mode, count, .. } => sync::pull_summary(*mode, *count),
-        SyncOutcome::Unchanged => sync::pull_summary(SyncMode::Incremental, 0),
+        SyncOutcome::Pulled {
+            mode,
+            count,
+            snapshot,
+        } => sync::pull_summary(*mode, *count, snapshot.repo_count()),
+        SyncOutcome::Unchanged => sync::pull_summary(SyncMode::Incremental, 0, 0),
         SyncOutcome::Failed(message) => bail!("{message}"),
         SyncOutcome::Throttled { retry_after } => bail!(
             "Azure DevOps is throttling requests; try again in {}s",
@@ -1653,7 +1657,7 @@ mod tests {
         assert_eq!(
             sync_report(
                 &SyncOutcome::Pulled {
-                    prepared: crate::app::PreparedTickets::with_graph(
+                    snapshot: crate::app::Snapshot::with_graph(
                         Vec::new(),
                         crate::model::TicketGraph::default(),
                     ),

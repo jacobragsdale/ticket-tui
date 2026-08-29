@@ -693,7 +693,7 @@ fn auth_family_app_with_long_details() -> App {
         .expect("current ticket")
         .description = "line\n".repeat(40);
     let graph = parent_child_graph();
-    let prepared = crate::app::PreparedTickets::with_graph(tickets, graph);
+    let prepared = crate::app::Snapshot::with_graph(tickets, graph);
     app.work_items
         .replace_prepared_tickets(&mut app.shell, prepared);
     app.shell.narrow_details = true;

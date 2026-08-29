@@ -231,6 +231,29 @@ impl StateCatalog {
     }
 }
 
+/// One Git repository in the project, as the Repos tab lists it and as every
+/// other tab names it: a pull request, a pipeline run and an artifact link all
+/// carry the repository's GUID rather than its name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Repo {
+    /// The GUID Azure DevOps knows it by.
+    pub id: String,
+    pub name: String,
+    pub project: String,
+    /// The full ref, as stored — `refs/heads/main` — because that is what the
+    /// pull request and pipeline APIs compare against.
+    pub default_branch: Option<String>,
+    pub remote_url: String,
+    pub ssh_url: String,
+    pub web_url: String,
+    /// A repository the project has switched off. It stays on file so a link
+    /// naming it still resolves, and the Repos tab greys it.
+    pub is_disabled: bool,
+    /// Bytes, as the API reports them, and `None` for a repository with no
+    /// commits yet.
+    pub size: Option<i64>,
+}
+
 /// Somewhere worth going, wherever it lives. The shell resolves one by
 /// switching to the tab that holds it and asking that screen to select it, so
 /// a work item's pull request and a run's branch are one keystroke apart.
