@@ -4,7 +4,7 @@
 use super::*;
 use crate::app::pipelines::rows::{duration_label, run_glyph};
 use crate::app::pipelines::{
-    Level, PipelineColumn, PipelineRow, PipelinesScreen, RunColumn, RunRow,
+    Level, PipelineColumn, PipelineMode, PipelineRow, PipelinesScreen, RunColumn, RunRow,
 };
 use crate::model::{RunResult, RunStatus, TimelineKind, TimelineRecord};
 use crate::ui::details::section_line;
@@ -29,6 +29,87 @@ pub(crate) fn render(
     render_search(frame, screen, shell, sections[0]);
     render_content(frame, screen, shell, sections[1]);
     render_footer(frame, screen, shell, sections[2]);
+    match screen.mode {
+        PipelineMode::BranchPicker => render_branch_picker(frame, screen, shell),
+        PipelineMode::ConfirmCancel => render_cancel_confirm(frame, screen, shell),
+        _ => {}
+    }
+}
+
+/// The branch picker a run is started from: a filter field over the
+/// repository's branches, opening on whatever is cached.
+fn render_branch_picker(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut Shell) {
+    let branches = screen.branch_matches();
+    let height = u16::try_from(branches.len().clamp(1, 12) + 5).unwrap_or(12);
+    let area = centered_rect(frame.area(), 52, height);
+    frame.render_widget(Clear, area);
+    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, " Run on branch ");
+    let field = Rect::new(inner.x, inner.y, inner.width, 1);
+    render_query_field(
+        frame,
+        shell,
+        field,
+        screen.branch_picker.query.text(),
+        screen.branch_picker.query.cursor(),
+        "Type to filter branches",
+        PointerTarget::NodeQuery,
+    );
+    let selected = screen.branch_picker.cursor.index;
+    let rows: Vec<Line> = branches
+        .iter()
+        .enumerate()
+        .map(|(index, branch)| {
+            let marker = if index == selected { "\u{203a}" } else { " " };
+            Line::from(format!("{marker} {branch}"))
+        })
+        .collect();
+    let list = Rect::new(
+        inner.x,
+        inner.y.saturating_add(2),
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    frame.render_widget(Paragraph::new(rows), list);
+    for (index, _) in branches.iter().enumerate() {
+        let y = list
+            .y
+            .saturating_add(u16::try_from(index).unwrap_or(u16::MAX));
+        if y >= list.y.saturating_add(list.height) {
+            break;
+        }
+        shell.hit_regions.push(region(
+            Rect::new(list.x, y, list.width, 1),
+            PointerTarget::NodeOption { index },
+            PointerLayer::Modal,
+            None,
+            None,
+        ));
+    }
+}
+
+/// `Cancel 20260829.4? · x again`, in the same shape the delete confirmation
+/// takes on the work items tab.
+fn render_cancel_confirm(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut Shell) {
+    let Some(row) = screen.cancelling_run() else {
+        return;
+    };
+    let area = centered_rect(frame.area(), 52, 7);
+    frame.render_widget(Clear, area);
+    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, " Cancel run ");
+    let lines = vec![
+        Line::from(format!("Cancel {}?", row.run.build_number)),
+        Line::from(""),
+        Line::styled(
+            "The jobs still going are stopped where they are.",
+            Style::default().fg(theme().muted),
+        ),
+        Line::from(""),
+        Line::styled(
+            "x again to cancel it  \u{00b7}  Esc to leave it",
+            Style::default().fg(theme().muted),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_search(frame: &mut Frame<'_>, screen: &PipelinesScreen, shell: &mut Shell, area: Rect) {

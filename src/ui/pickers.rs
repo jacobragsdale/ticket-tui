@@ -13,7 +13,7 @@ pub(super) fn render_edit_menu(
     let entries = screen.edit_menu_entries();
     let height = u16::try_from(entries.len().saturating_add(2)).unwrap_or(u16::MAX);
     let area = centered_rect(frame.area(), 40, height.max(3));
-    let inner = render_modal_frame(frame, screen, shell, area, " Actions ");
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, " Actions ");
     let selected = screen.edit_menu.index;
     let rows: Vec<Line> = entries
         .iter()
@@ -79,7 +79,7 @@ pub(super) fn render_state_picker(
     let width = overlay_width(shell.overlay_anchor, &rows, 40, frame.area());
     let area = overlay_area(frame.area(), shell.overlay_anchor, width, height);
     let title = format!(" State \u{b7} {} ", screen.state_picker.scope.label());
-    let inner = render_modal_frame(frame, screen, shell, area, &title);
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, &title);
     render_list_overlay(
         frame,
         screen,
@@ -126,7 +126,7 @@ pub(super) fn render_priority_picker(
     let width = overlay_width(shell.overlay_anchor, &rows, 40, frame.area());
     let area = overlay_area(frame.area(), shell.overlay_anchor, width, height);
     let title = format!(" Priority \u{b7} #{} ", screen.priority_picker.id);
-    let inner = render_modal_frame(frame, screen, shell, area, &title);
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, &title);
     render_list_overlay(
         frame,
         screen,
@@ -196,7 +196,7 @@ pub(super) fn render_assignee_picker(
         " Assignee \u{b7} {} ",
         screen.scope_label(screen.assignee_picker.scope)
     );
-    let inner = render_modal_frame(frame, screen, shell, area, &title);
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, &title);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
     let (text, cursor) = (
         screen.assignee_picker.query.text().to_owned(),
@@ -273,7 +273,7 @@ pub(super) fn render_parent_picker(
     let width = overlay_width(shell.overlay_anchor, &rows, 64, frame.area());
     let area = overlay_area(frame.area(), shell.overlay_anchor, width, height);
     let title = format!(" Parent of #{} ", screen.parent_picker.child.id);
-    let inner = render_modal_frame(frame, screen, shell, area, &title);
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, &title);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
     let (text, cursor) = (
         screen.parent_picker.query.text().to_owned(),
@@ -358,7 +358,7 @@ pub(super) fn render_node_picker(
         kind.label(),
         screen.scope_label(screen.node_picker.scope)
     );
-    let inner = render_modal_frame(frame, screen, shell, area, &title);
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, &title);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
     let (text, cursor) = (
         screen.node_picker.query.text().to_owned(),
@@ -414,7 +414,7 @@ pub(super) fn render_prompt(
     let width = overlay_width(shell.overlay_anchor, &measured, 64, frame.area());
     let area = overlay_area(frame.area(), shell.overlay_anchor, width, 5);
     let title = format!(" {} ", field.title(id));
-    let inner = render_modal_frame(frame, screen, shell, area, &title);
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, &title);
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -502,7 +502,7 @@ pub(super) fn render_type_picker(
         })
         .collect();
     let area = centered_rect(frame.area(), 36, height);
-    let inner = render_modal_frame(frame, screen, shell, area, " Type ");
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, " Type ");
     render_list_overlay(
         frame,
         screen,
@@ -544,7 +544,13 @@ pub(super) fn render_form(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, s
         .unwrap_or(u16::MAX)
         .min(frame.area().height);
     let area = centered_rect(frame.area(), 66, height);
-    let inner = render_modal_frame(frame, screen, shell, area, &format!(" {title} "));
+    let inner = render_modal_frame(
+        frame,
+        modal_layer(screen),
+        shell,
+        area,
+        &format!(" {title} "),
+    );
     let chunks = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(1),
@@ -719,7 +725,7 @@ pub(super) fn render_delete_confirm(
         .unwrap_or(u16::MAX)
         .min(frame.area().height);
     let area = centered_rect(frame.area(), width, height);
-    let inner = render_modal_frame(frame, screen, shell, area, " Delete ");
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, " Delete ");
     let chunks = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).split(inner);
     frame.render_widget(body, chunks[0]);
     shell.hit_regions.push(region(

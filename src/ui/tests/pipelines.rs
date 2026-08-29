@@ -1,4 +1,5 @@
 use super::*;
+use crate::app::pipelines::Level;
 use crate::app::pipelines::tests::{pipeline, pipelines_app, run};
 use crate::app::{Screen, TabId};
 use crate::model::{RunResult, RunStatus, TimelineKind, TimelineRecord};
@@ -516,5 +517,122 @@ fn a_watched_run_finishing_is_reported_while_another_tab_is_showing() {
         Screen::badge(&app.pipelines),
         None,
         "the badge goes with the last running run"
+    );
+}
+
+#[test]
+fn t_opens_a_branch_picker_and_enter_starts_the_pipeline_on_what_it_names() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    render_text(140, 30, &mut app);
+
+    let action = app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+    assert!(
+        matches!(action, crate::app::AppAction::FetchBranches(repo) if repo == "aaa-111"),
+        "the picker asks for the repository's branches"
+    );
+    let text = render_text(140, 30, &mut app);
+    assert!(text.contains("Run on branch"), "{text}");
+    assert!(
+        text.contains("main"),
+        "it opens on the default branch at once: {text}"
+    );
+
+    app.pipelines.set_branches(
+        "aaa-111",
+        vec![
+            "develop".to_owned(),
+            "main".to_owned(),
+            "release".to_owned(),
+        ],
+    );
+    let text = render_text(140, 30, &mut app);
+    assert!(
+        text.contains("develop") && text.contains("release"),
+        "{text}"
+    );
+
+    for character in "rel".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    assert_eq!(app.pipelines.branch_matches(), vec!["release".to_owned()]);
+
+    let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        matches!(
+            action,
+            crate::app::AppAction::TriggerRun { pipeline_id, ref branch }
+                if pipeline_id == 1 && branch == "release"
+        ),
+        "and Enter starts that pipeline on that branch, got {action:?}"
+    );
+}
+
+#[test]
+fn the_run_azure_devops_starts_is_selected_focused_and_watched() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    let started = run(20, 1, RunStatus::InProgress, None);
+
+    app.pipelines.accept_run(&mut app.shell, started);
+
+    assert_eq!(app.pipelines.level(), Level::Runs(1), "its runs come up");
+    assert_eq!(
+        app.pipelines.selected_run(&app.shell).map(|row| row.run.id),
+        Some(20),
+        "with the new run under the cursor"
+    );
+    assert_eq!(app.pipelines.focused_run(), Some(20), "and focused");
+    assert!(app.pipelines.is_watched(20), "and watched");
+}
+
+#[test]
+fn x_asks_before_cancelling_and_r_retries_a_run_that_has_stopped() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    app.pipelines.pipeline_cursor.focus(0);
+    app.pipelines.open_runs(&app.shell);
+    render_text(140, 30, &mut app);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    let text = render_text(140, 30, &mut app);
+    assert!(text.contains("Cancel 20260829.14?"), "{text}");
+    assert!(text.contains("x again"), "{text}");
+
+    let action = app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert!(
+        matches!(
+            action,
+            crate::app::AppAction::RunAction {
+                run_id: 14,
+                retry: false
+            }
+        ),
+        "x again cancels it, got {action:?}"
+    );
+
+    // The second run in the list has failed, so it is the one Retry is for.
+    app.pipelines.run_cursor.focus(1);
+    let action = app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
+    assert!(
+        matches!(
+            action,
+            crate::app::AppAction::RunAction {
+                run_id: 13,
+                retry: true
+            }
+        ),
+        "R retries the failed run, got {action:?}"
+    );
+
+    // And neither is offered where it makes no sense.
+    app.pipelines.run_cursor.focus(0);
+    let action = app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
+    assert!(matches!(action, crate::app::AppAction::None));
+    assert!(
+        app.shell
+            .notification()
+            .is_some_and(|(message, _)| message.contains("still going")),
+        "a run still going cannot be retried"
     );
 }

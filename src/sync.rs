@@ -65,6 +65,14 @@ pub enum SyncRequest {
     /// Read the project's team members, for the assignee picker. Asked for once
     /// a session, the first time that picker opens.
     Identities,
+    /// Read one repository's branches, for the branch picker a run is started
+    /// from. Asked for when the picker opens on a cache that is empty or over
+    /// ten minutes old.
+    Branches(String),
+    /// Start one pipeline on one branch.
+    TriggerRun { pipeline_id: i64, branch: String },
+    /// Stop one run, or retry the jobs that failed in it.
+    RunAction { run_id: i64, retry: bool },
     /// Read the project's iteration and area trees, for the two node pickers.
     /// Asked for once a session, the first time either one opens on a cache
     /// that is empty or over an hour old.
@@ -102,6 +110,13 @@ pub enum SyncRequest {
 pub enum SyncEvent {
     /// The signed-in display name, sent once after the first connect.
     DisplayName(String),
+    /// One repository's branches, as short names.
+    Branches {
+        repo_id: String,
+        branches: Vec<String>,
+    },
+    /// A run this session started, stopped or retried, or why it could not be.
+    RunStarted(Result<Run, String>),
     /// A request finished, successfully or not.
     Finished {
         origin: PullOrigin,
@@ -424,6 +439,18 @@ pub trait WorkItemSource {
     fn repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
         Ok((Vec::new(), None))
     }
+    /// One repository's branches, as short names, for the branch picker.
+    fn branches(&self, _repo_id: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+    /// Starts one pipeline on one branch, answering with the run.
+    fn trigger_run(&self, _pipeline_id: i64, _branch: &str) -> Result<Run> {
+        Err(anyhow!("this source cannot start pipelines"))
+    }
+    /// Stops one run, or retries the jobs that failed in it.
+    fn run_action(&self, _run_id: i64, _retry: bool) -> Result<Run> {
+        Err(anyhow!("this source cannot act on runs"))
+    }
     /// The project's build definitions, and the newest window of runs. Two
     /// requests, made on every pull; a source with neither answers with none.
     fn pipelines(&self) -> Result<Vec<Pipeline>> {
@@ -525,6 +552,18 @@ impl WorkItemSource for AzureClient {
 
     fn runs(&self) -> Result<Vec<Run>> {
         self.fetch_runs()
+    }
+
+    fn branches(&self, repo_id: &str) -> Result<Vec<String>> {
+        self.fetch_branches(repo_id)
+    }
+
+    fn trigger_run(&self, pipeline_id: i64, branch: &str) -> Result<Run> {
+        self.start_run(pipeline_id, branch)
+    }
+
+    fn run_action(&self, run_id: i64, retry: bool) -> Result<Run> {
+        self.patch_run(run_id, retry)
     }
 
     fn pull_changed_since(&self, watermark: Timestamp) -> Result<SyncBatch> {
@@ -754,6 +793,28 @@ fn work(
             }
             SyncRequest::Details(key) => SyncEvent::Details(Box::new(worker.details(key, events))),
             SyncRequest::Identities => SyncEvent::Identities(worker.identities(events)),
+            SyncRequest::Branches(repo_id) => {
+                let branches = worker
+                    .source(events)
+                    .and_then(|source| source.branches(&repo_id))
+                    .unwrap_or_default();
+                SyncEvent::Branches { repo_id, branches }
+            }
+            SyncRequest::TriggerRun {
+                pipeline_id,
+                branch,
+            } => SyncEvent::RunStarted(
+                worker
+                    .source(events)
+                    .and_then(|source| source.trigger_run(pipeline_id, &branch))
+                    .map_err(|error| format!("{error:#}")),
+            ),
+            SyncRequest::RunAction { run_id, retry } => SyncEvent::RunStarted(
+                worker
+                    .source(events)
+                    .and_then(|source| source.run_action(run_id, retry))
+                    .map_err(|error| format!("{error:#}")),
+            ),
             SyncRequest::ClassificationNodes => {
                 SyncEvent::ClassificationNodes(worker.classification_nodes(events))
             }
@@ -1689,6 +1750,8 @@ mod tests {
         /// stands in for a source that does not know, which is what leaves
         /// every other test's database free of sync scope rows.
         scope: Option<SyncScope>,
+        /// Every run this source was asked to start, cancel or retry.
+        started: Arc<Mutex<Vec<String>>>,
         /// The repositories this source lists, and the project GUID they carry.
         repos: Arc<Mutex<Vec<Repo>>>,
         /// The pipelines and runs it lists, and how often they were asked for.
@@ -1846,6 +1909,32 @@ mod tests {
         fn repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
             *self.repo_requests.lock().unwrap() += 1;
             Ok((self.repos.lock().unwrap().clone(), self.project_id.clone()))
+        }
+
+        fn trigger_run(&self, pipeline_id: i64, branch: &str) -> Result<Run> {
+            self.started
+                .lock()
+                .unwrap()
+                .push(format!("trigger {pipeline_id} refs/heads/{branch}"));
+            Ok(run(20, pipeline_id, RunStatus::InProgress, None))
+        }
+
+        fn run_action(&self, run_id: i64, retry: bool) -> Result<Run> {
+            let verb = if retry { "retry" } else { "cancel" };
+            self.started
+                .lock()
+                .unwrap()
+                .push(format!("{verb} {run_id}"));
+            Ok(run(
+                run_id,
+                1,
+                if retry {
+                    RunStatus::InProgress
+                } else {
+                    RunStatus::Cancelling
+                },
+                None,
+            ))
         }
 
         fn pipelines(&self) -> Result<Vec<Pipeline>> {
@@ -2569,6 +2658,60 @@ mod tests {
     }
 
     #[test]
+    fn a_triggered_run_sends_the_branch_and_a_cancel_sends_the_status() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource {
+            started: Arc::new(Mutex::new(Vec::new())),
+            ..FakeSource::with(vec![])
+        };
+        let started = Arc::clone(&source.started);
+        let handle = SyncHandle::spawn(path, Box::new(source)).unwrap();
+
+        handle
+            .send(SyncRequest::TriggerRun {
+                pipeline_id: 1,
+                branch: "release".into(),
+            })
+            .unwrap();
+        let SyncEvent::RunStarted(result) = next_started(&handle) else {
+            panic!("expected a run");
+        };
+        assert_eq!(result.expect("the run started").pipeline_id, 1);
+
+        handle
+            .send(SyncRequest::RunAction {
+                run_id: 14,
+                retry: true,
+            })
+            .unwrap();
+        let SyncEvent::RunStarted(result) = next_started(&handle) else {
+            panic!("expected a run");
+        };
+        result.expect("the retry was taken");
+
+        assert_eq!(
+            *started.lock().unwrap(),
+            vec![
+                "trigger 1 refs/heads/release".to_owned(),
+                "retry 14".to_owned()
+            ],
+            "the worker sends what each endpoint asks for"
+        );
+    }
+
+    /// The next run event, past the display name the first connect reports.
+    fn next_started(handle: &SyncHandle) -> SyncEvent {
+        loop {
+            match next_event(handle) {
+                event @ SyncEvent::RunStarted(_) => return event,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected a run event, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn a_failed_pull_reports_the_error_and_leaves_the_rows_alone() {
         let directory = tempdir().unwrap();
         let path = seeded_database(&directory);
@@ -3131,6 +3274,8 @@ mod tests {
                 }
                 SyncEvent::Finished { .. } => seen.push("pull"),
                 SyncEvent::DisplayName(_)
+                | SyncEvent::Branches { .. }
+                | SyncEvent::RunStarted(_)
                 | SyncEvent::Details(_)
                 | SyncEvent::Identities(_)
                 | SyncEvent::ClassificationNodes(_)

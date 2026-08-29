@@ -634,6 +634,25 @@ fn handle_action(
             drop(runtime.send(SyncRequest::ClassificationNodes));
         }
         AppAction::FetchWorkItemTypes => drop(runtime.send(SyncRequest::WorkItemTypes)),
+        // The picker is already open on what is cached, so a worker that is
+        // gone leaves it showing that and says nothing.
+        AppAction::FetchBranches(repo_id) => drop(runtime.send(SyncRequest::Branches(repo_id))),
+        AppAction::TriggerRun {
+            pipeline_id,
+            branch,
+        } => {
+            if let Err(refusal) = runtime.send(SyncRequest::TriggerRun {
+                pipeline_id,
+                branch,
+            }) {
+                app.shell.set_error(refusal);
+            }
+        }
+        AppAction::RunAction { run_id, retry } => {
+            if let Err(refusal) = runtime.send(SyncRequest::RunAction { run_id, retry }) {
+                app.shell.set_error(refusal);
+            }
+        }
         AppAction::Comment { key, text } => start_comment(app, runtime, key, text),
         AppAction::Reparent { key, new_parent } => start_reparent(app, runtime, key, new_parent),
         AppAction::Create {
@@ -1090,6 +1109,15 @@ fn poll_sync(
     while let Some(event) = runtime.worker.as_ref().and_then(SyncHandle::try_event) {
         redraw = true;
         match event {
+            SyncEvent::Branches { repo_id, branches } => {
+                app.pipelines.set_branches(&repo_id, branches);
+            }
+            // A run this session started, cancelled or retried. It is not
+            // optimistic: what comes back is the run Azure DevOps made.
+            SyncEvent::RunStarted(result) => match result {
+                Ok(run) => app.pipelines.accept_run(&mut app.shell, run),
+                Err(refusal) => app.shell.set_error(refusal),
+            },
             SyncEvent::DisplayName(name) => {
                 if let Err(error) = repository.set_meta(db::ME_DISPLAY_NAME_KEY, &name) {
                     app.shell

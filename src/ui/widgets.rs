@@ -7,15 +7,11 @@ use super::*;
 /// registers its close button. The inner area is what the overlay paints in.
 pub(super) fn render_modal_frame(
     frame: &mut Frame<'_>,
-    screen: &mut WorkItemsScreen,
+    layer: PointerLayer,
     shell: &mut Shell,
     area: Rect,
     title: &str,
 ) -> Rect {
-    let layer = match screen.mode {
-        WorkItemMode::Facets => PointerLayer::Popup,
-        _ => PointerLayer::Modal,
-    };
     let block = Block::default()
         .title(title.to_owned())
         .title(Line::from("[×]").right_aligned())

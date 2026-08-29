@@ -624,6 +624,15 @@ fn register_narrow_tabs(shell: &mut Shell, area: Rect) {
     ));
 }
 
+/// The layer a modal on the work items screen sits on: the facet menu is a
+/// popup, everything else is modal.
+fn modal_layer(screen: &WorkItemsScreen) -> PointerLayer {
+    match screen.mode {
+        WorkItemMode::Facets => PointerLayer::Popup,
+        _ => PointerLayer::Modal,
+    }
+}
+
 fn current_layer(screen: &WorkItemsScreen) -> PointerLayer {
     match screen.mode {
         WorkItemMode::Facets => PointerLayer::Popup,

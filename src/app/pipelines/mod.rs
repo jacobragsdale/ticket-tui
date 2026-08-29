@@ -17,7 +17,12 @@ use crate::filter::{MatchContext, ParsedQuery, parse_query};
 use crate::model::{Jump, Pipeline, Run, TimelineRecord};
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 use crate::session::TabSession;
+use crate::timestamp::Timestamp;
 use crate::watch::LogTarget;
+
+/// How long a repository's branches are worth keeping before the picker asks
+/// for them again.
+const BRANCH_CACHE_SECONDS: i64 = 600;
 
 /// The most lines one log is worth keeping in memory. Past this the oldest go
 /// and a line at the top says how many.
@@ -50,6 +55,23 @@ pub enum PipelineMode {
     #[default]
     Browse,
     Search,
+    /// The branch picker a run is started from.
+    BranchPicker,
+    /// `Cancel 20260829.4? · x again`, the delete-style confirmation.
+    ConfirmCancel,
+}
+
+/// The branch picker: what it is for, what it is offering, and what has been
+/// typed into its filter.
+#[derive(Clone, Debug, Default)]
+pub struct BranchPicker {
+    /// The pipeline the chosen branch will be run on.
+    pub pipeline_id: i64,
+    /// The repository whose branches these are.
+    pub repo_id: String,
+    pub branches: Vec<String>,
+    pub query: TextInput,
+    pub cursor: ListCursor,
 }
 
 pub struct PipelinesScreen {
@@ -87,6 +109,12 @@ pub struct PipelinesScreen {
     /// The runs being followed whatever tab is showing. They live for the
     /// session only.
     watched: Vec<i64>,
+    pub branch_picker: BranchPicker,
+    /// The branches each repository answered with, and when, so a picker
+    /// opening on a fresh cache asks for nothing.
+    branch_cache: Vec<(String, Vec<String>, Timestamp)>,
+    /// The run the cancel confirmation is about.
+    pub cancelling: Option<i64>,
 }
 
 impl Default for PipelinesScreen {
@@ -115,6 +143,9 @@ impl Default for PipelinesScreen {
             log_full: false,
             log_finished: false,
             watched: Vec::new(),
+            branch_picker: BranchPicker::default(),
+            branch_cache: Vec::new(),
+            cancelling: None,
         }
     }
 }
@@ -639,8 +670,11 @@ impl PipelinesScreen {
 
 impl Screen for PipelinesScreen {
     fn handle_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
-        if self.mode == PipelineMode::Search {
-            return self.handle_search_key(shell, key);
+        match self.mode {
+            PipelineMode::Search => return self.handle_search_key(shell, key),
+            PipelineMode::BranchPicker => return self.handle_branch_key(shell, key),
+            PipelineMode::ConfirmCancel => return self.handle_cancel_key(shell, key),
+            PipelineMode::Browse => {}
         }
         if shell.focus == Focus::Details {
             match key.code {
@@ -719,6 +753,9 @@ impl Screen for PipelinesScreen {
                 self.sync_focus(shell);
             }
             KeyCode::Backspace | KeyCode::Char('h') => self.close_runs(),
+            KeyCode::Char('t') => return self.open_branch_picker(shell),
+            KeyCode::Char('x') => self.confirm_cancel(shell),
+            KeyCode::Char('R') => return self.retry_run(shell),
             KeyCode::Char('W') => {
                 if let Some((run, watching)) = self.toggle_watch(shell) {
                     let word = if watching {
@@ -800,6 +837,17 @@ impl Screen for PipelinesScreen {
                 return self.open_in_browser(shell);
             }
             PointerTarget::SortHeader(key) => self.toggle_sort(key),
+            // The branch picker's own rows and filter field.
+            PointerTarget::NodeOption { index } => {
+                self.branch_picker.cursor.focus(index);
+                return self.choose_branch(shell);
+            }
+            PointerTarget::NodeQuery => {
+                self.branch_picker.query.set_cursor(usize::from(column));
+            }
+            PointerTarget::CloseOverlay | PointerTarget::DismissOverlay => {
+                self.close_overlay(shell);
+            }
             PointerTarget::SearchField => {
                 self.mode = PipelineMode::Search;
                 self.place_caret(shell, TextEditor::Search, column, row);
@@ -818,10 +866,15 @@ impl Screen for PipelinesScreen {
 
     fn close_overlay(&mut self, _shell: &mut Shell) {
         self.mode = PipelineMode::Browse;
+        self.cancelling = None;
     }
 
     fn active_editor(&self) -> Option<TextEditor> {
-        (self.mode == PipelineMode::Search).then_some(TextEditor::Search)
+        match self.mode {
+            PipelineMode::Search => Some(TextEditor::Search),
+            PipelineMode::BranchPicker => Some(TextEditor::Node),
+            _ => None,
+        }
     }
 
     fn scroll_state(&self, surface: ScrollSurface) -> ScrollState {
@@ -917,6 +970,10 @@ impl Screen for PipelinesScreen {
             (PipelineMode::Search, _) => {
                 "←→ cursor  Ctrl-W delete word  Ctrl-U clear  Enter/Esc finish"
             }
+            (PipelineMode::BranchPicker, _) => {
+                "Type to filter  ↑↓ choose  Enter run it  Esc cancel"
+            }
+            (PipelineMode::ConfirmCancel, _) => "x cancel the run  Esc leave it",
             (_, Level::Pipelines) => "↑↓/jk move  Enter runs  / search  o open  ? help  q quit",
             (_, Level::Runs(_)) => "↑↓/jk move  Backspace/h back  / search  o open  ? help  q quit",
         }
@@ -940,6 +997,44 @@ impl PipelinesScreen {
         AppAction::None
     }
 
+    /// The branch picker: type to filter, arrows to move, `Enter` to start.
+    fn handle_branch_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => self.mode = PipelineMode::Browse,
+            KeyCode::Enter => return self.choose_branch(shell),
+            KeyCode::Down => {
+                let count = self.branch_matches().len();
+                self.branch_picker.cursor.move_by(1, count);
+            }
+            KeyCode::Up => {
+                let count = self.branch_matches().len();
+                self.branch_picker.cursor.move_by(-1, count);
+            }
+            _ => {
+                self.branch_picker.query.handle_key(key);
+                self.branch_picker.cursor.reset();
+            }
+        }
+        AppAction::None
+    }
+
+    /// `x` again confirms the cancel; anything else calls it off.
+    fn handle_cancel_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        let run = self.cancelling;
+        self.mode = PipelineMode::Browse;
+        self.cancelling = None;
+        if key.code == KeyCode::Char('x')
+            && let Some(run_id) = run
+        {
+            shell.set_status("Cancelling\u{2026}");
+            return AppAction::RunAction {
+                run_id,
+                retry: false,
+            };
+        }
+        AppAction::None
+    }
+
     /// The global keys a list screen answers: search, open, sync, quit and the
     /// cross-tab history. The rest arrive with the tickets that need them.
     fn handle_command_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
@@ -958,5 +1053,172 @@ impl PipelinesScreen {
             }
             _ => AppAction::None,
         }
+    }
+}
+
+impl PipelinesScreen {
+    /// Opens the branch picker over the pipeline under the cursor. It opens at
+    /// once on whatever is cached — the default branch at the very least — and
+    /// fills in when the worker answers.
+    pub fn open_branch_picker(&mut self, shell: &mut Shell) -> AppAction {
+        let Some(row) = self
+            .visible_pipelines(shell)
+            .get(self.pipeline_cursor.index)
+            .cloned()
+        else {
+            shell.set_error("No pipeline to run here");
+            return AppAction::None;
+        };
+        let Some(repo_id) = row.pipeline.repo_id.clone() else {
+            shell.set_error(format!(
+                "{} names no repository to pick a branch from",
+                row.pipeline.name
+            ));
+            return AppAction::None;
+        };
+        let default = row
+            .pipeline
+            .default_branch
+            .as_deref()
+            .map(rows::short_branch)
+            .unwrap_or_default();
+        let (cached, fresh) = self.cached_branches(&repo_id);
+        let mut branches = cached;
+        if branches.is_empty() && !default.is_empty() {
+            branches.push(default);
+        }
+        self.branch_picker = BranchPicker {
+            pipeline_id: row.pipeline.id,
+            repo_id: repo_id.clone(),
+            branches,
+            query: TextInput::default(),
+            cursor: ListCursor::default(),
+        };
+        self.mode = PipelineMode::BranchPicker;
+        if fresh {
+            AppAction::None
+        } else {
+            AppAction::FetchBranches(repo_id)
+        }
+    }
+
+    /// What the picker is showing: the branches the filter leaves.
+    #[must_use]
+    pub fn branch_matches(&self) -> Vec<String> {
+        let needle = self.branch_picker.query.text().trim().to_lowercase();
+        self.branch_picker
+            .branches
+            .iter()
+            .filter(|branch| needle.is_empty() || branch.to_lowercase().contains(&needle))
+            .cloned()
+            .collect()
+    }
+
+    /// The branches held for one repository, and whether they are fresh enough
+    /// to open on without asking again.
+    fn cached_branches(&self, repo_id: &str) -> (Vec<String>, bool) {
+        self.branch_cache
+            .iter()
+            .find(|(held, _, _)| held == repo_id)
+            .map_or_else(
+                || (Vec::new(), false),
+                |(_, branches, at)| {
+                    let fresh = at.seconds_until(Timestamp::now()) < BRANCH_CACHE_SECONDS;
+                    (branches.clone(), fresh)
+                },
+            )
+    }
+
+    /// What the worker answered with, which fills an open picker without
+    /// moving its cursor.
+    pub fn set_branches(&mut self, repo_id: &str, branches: Vec<String>) {
+        self.branch_cache.retain(|(held, _, _)| held != repo_id);
+        self.branch_cache
+            .push((repo_id.to_owned(), branches.clone(), Timestamp::now()));
+        if self.branch_picker.repo_id == repo_id {
+            self.branch_picker.branches = branches;
+        }
+    }
+
+    /// Starts the pipeline the picker was opened over, on the branch chosen.
+    pub fn choose_branch(&mut self, shell: &mut Shell) -> AppAction {
+        let Some(branch) = self
+            .branch_matches()
+            .get(self.branch_picker.cursor.index)
+            .cloned()
+        else {
+            self.mode = PipelineMode::Browse;
+            return AppAction::None;
+        };
+        self.mode = PipelineMode::Browse;
+        shell.set_status(format!(
+            "Starting {} on {branch}\u{2026}",
+            self.pipelines
+                .iter()
+                .find(|pipeline| pipeline.id == self.branch_picker.pipeline_id)
+                .map_or_else(
+                    || "the pipeline".to_owned(),
+                    |pipeline| pipeline.name.clone()
+                )
+        ));
+        AppAction::TriggerRun {
+            pipeline_id: self.branch_picker.pipeline_id,
+            branch,
+        }
+    }
+
+    /// Takes the run Azure DevOps started: it goes to the top of the list, is
+    /// selected, focused and watched, so its timeline and log start at once.
+    pub fn accept_run(&mut self, shell: &mut Shell, run: Run) {
+        let id = run.id;
+        let number = run.build_number.clone();
+        let pipeline = run.pipeline_id;
+        self.merge_live_runs(vec![run]);
+        self.level = Level::Runs(pipeline);
+        self.run_cursor.reset();
+        self.watch_run(id);
+        self.focus_run(Some(id));
+        shell.set_status(format!("Started {number}"));
+    }
+
+    /// `x` on a run that is going: the confirmation, then the cancel.
+    pub fn confirm_cancel(&mut self, shell: &mut Shell) {
+        let Some(row) = self.selected_run(shell) else {
+            shell.set_error("No run to cancel here");
+            return;
+        };
+        if !row.run.status.is_live() {
+            shell.set_error(format!("{} has already finished", row.run.build_number));
+            return;
+        }
+        self.cancelling = Some(row.run.id);
+        self.mode = PipelineMode::ConfirmCancel;
+    }
+
+    /// `R` on a failed or canceled run: retry the jobs that failed.
+    pub fn retry_run(&mut self, shell: &mut Shell) -> AppAction {
+        let Some(row) = self.selected_run(shell) else {
+            shell.set_error("No run to retry here");
+            return AppAction::None;
+        };
+        if row.run.status.is_live() {
+            shell.set_error(format!("{} is still going", row.run.build_number));
+            return AppAction::None;
+        }
+        shell.set_status(format!("Retrying {}\u{2026}", row.run.build_number));
+        AppAction::RunAction {
+            run_id: row.run.id,
+            retry: true,
+        }
+    }
+
+    /// What the cancel confirmation is about, for the overlay to name.
+    #[must_use]
+    pub fn cancelling_run(&self) -> Option<RunRow> {
+        let id = self.cancelling?;
+        self.runs
+            .iter()
+            .find(|run| run.id == id)
+            .map(|run| self.run_row(run))
     }
 }

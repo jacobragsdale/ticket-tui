@@ -9,7 +9,7 @@ pub(super) fn render_sort_popup(
     shell: &mut Shell,
 ) {
     let area = centered_rect(frame.area(), 48, 16);
-    let inner = render_modal_frame(frame, screen, shell, area, " Sort tickets ");
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, " Sort tickets ");
     let selected = screen.sort_draft.field_index;
     let rows: Vec<Line> = SortField::ALL
         .iter()
@@ -474,7 +474,13 @@ pub(super) fn render_facet_menu(
         None,
         None,
     ));
-    let inner = render_modal_frame(frame, screen, shell, area, &format!(" {} ", field.label()));
+    let inner = render_modal_frame(
+        frame,
+        modal_layer(screen),
+        shell,
+        area,
+        &format!(" {} ", field.label()),
+    );
     let selected = screen.facet_bar.value_index;
     let rows: Vec<Line> = facets
         .iter()
@@ -518,7 +524,7 @@ pub(super) fn render_filter_overlay(
     } else {
         " Filters ".into()
     };
-    let inner = render_modal_frame(frame, screen, shell, area, &title);
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, &title);
     let showing_values = screen.filter_overlay.showing_values;
     let selected = if showing_values {
         screen.filter_overlay.value_index
@@ -580,7 +586,7 @@ pub(super) fn render_column_overlay(
     shell: &mut Shell,
 ) {
     let area = centered_rect(frame.area(), 56, 18);
-    let inner = render_modal_frame(frame, screen, shell, area, " Columns ");
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, " Columns ");
     let layout = Screen::columns(screen);
     let content = layout.count();
     let selected = screen.column_overlay.cursor.index;
@@ -704,7 +710,7 @@ pub(super) fn render_palette(
         .unwrap_or(u16::MAX)
         .min(16);
     let area = centered_rect(frame.area(), 56, height.max(6));
-    let inner = render_modal_frame(frame, screen, shell, area, " Commands ");
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, " Commands ");
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
     let (text, cursor) = (
         screen.palette.query.text().to_owned(),
@@ -763,7 +769,7 @@ pub(super) fn render_views_overlay(
     } else {
         " Views "
     };
-    let inner = render_modal_frame(frame, screen, shell, area, title);
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, title);
     if let Some((name, name_cursor)) = screen
         .views_overlay
         .naming
@@ -913,7 +919,7 @@ pub(super) fn render_sprint_overlay(
             .min(SPRINT_OVERLAY_MAX_HEIGHT),
     );
     let title = screen.summary_title();
-    let inner = render_modal_frame(frame, screen, shell, area, &title);
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, &title);
     // An overlay with no grid — an empty sprint, or none to count — has nothing
     // for the cursor to sit on, so nothing is highlighted rather than the first
     // line of an explanation being lit up as though it were a row.
@@ -1026,7 +1032,7 @@ pub(super) fn render_info_overlay(
             Style::default().fg(theme().muted),
         ),
     ]);
-    let inner = render_modal_frame(frame, screen, shell, area, " Database ");
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, " Database ");
     frame.render_widget(Paragraph::new(text), inner);
     shell.hit_regions.push(region(
         inner,

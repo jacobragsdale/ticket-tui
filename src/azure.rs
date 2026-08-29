@@ -717,6 +717,94 @@ impl AzureClient {
             .next())
     }
 
+    /// One repository's branches, as short names: `main`, not
+    /// `refs/heads/main`, which is what the picker lists and what the trigger
+    /// puts back in front of `refs/heads/`.
+    pub fn fetch_branches(&self, repo_id: &str) -> Result<Vec<String>> {
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "git",
+            "repositories",
+            repo_id,
+            "refs",
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&format!("filter=heads/&api-version={API_VERSION}")));
+        let response = self.get(url.as_str())?;
+        let mut branches: Vec<String> = response["value"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|entry| {
+                entry["name"]
+                    .as_str()
+                    .and_then(|name| name.strip_prefix("refs/heads/"))
+                    .map(str::to_owned)
+            })
+            .collect();
+        branches.sort_by_key(|branch| branch.to_lowercase());
+        Ok(branches)
+    }
+
+    /// Starts one pipeline on one branch, answering with the run it made.
+    pub fn start_run(&self, pipeline_id: i64, branch: &str) -> Result<Run> {
+        let id = pipeline_id.to_string();
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "pipelines",
+            id.as_str(),
+            "runs",
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&version_query()));
+        let body = serde_json::json!({
+            "resources": {
+                "repositories": {
+                    "self": { "refName": format!("refs/heads/{branch}") }
+                }
+            }
+        });
+        let response = self.post(url.as_str(), &body)?;
+        // The pipelines endpoint answers with its own shape, so the run is read
+        // back through the builds endpoint every other reader uses.
+        let id = response["id"]
+            .as_i64()
+            .ok_or_else(|| anyhow!("Azure DevOps started a run it did not name"))?;
+        self.fetch_run(id)?
+            .ok_or_else(|| anyhow!("the run Azure DevOps started could not be read back"))
+    }
+
+    /// Stops one run, or retries the jobs that failed in it.
+    pub fn patch_run(&self, run_id: i64, retry: bool) -> Result<Run> {
+        let id = run_id.to_string();
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "build",
+            "builds",
+            id.as_str(),
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&if retry {
+            format!("retry=true&api-version={API_VERSION}")
+        } else {
+            version_query()
+        }));
+        let body = if retry {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "status": "cancelling" })
+        };
+        let response = self.patch(url.as_str(), &body)?;
+        parse_runs(&serde_json::json!({ "value": [response] }))
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("Azure DevOps answered with a run that could not be read"))
+    }
+
     /// The teams hang off `_apis/projects` rather than off the project. `tail`
     /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {
@@ -770,6 +858,10 @@ impl AzureClient {
         self.send(url, Request::Post(body))
     }
 
+    fn patch(&self, url: &str, body: &Value) -> Result<Value> {
+        self.send(url, Request::PatchJson(body))
+    }
+
     /// One request, retried once with a freshly minted token when Azure DevOps
     /// rejects the current one, because an access token expires long before a
     /// running TUI does. A failed refresh reports the original rejection, which
@@ -800,6 +892,9 @@ impl AzureClient {
                 // Azure DevOps refuses a patch document sent as plain JSON.
                 .header("Content-Type", "application/json-patch+json")
                 .send_json(patch)
+                .with_context(|| format!("PATCH {url} failed"))?,
+            Request::PatchJson(body) => authorized(self.agent.patch(url), &authorization)
+                .send_json(body)
                 .with_context(|| format!("PATCH {url} failed"))?,
             Request::PostPatch(document) => authorized(self.agent.post(url), &authorization)
                 .header("Content-Type", "application/json-patch+json")
@@ -848,6 +943,9 @@ enum Request<'a> {
     /// A JSON Patch document, which Azure DevOps takes only under its own
     /// media type.
     Patch(&'a [Value]),
+    /// An ordinary JSON body patched rather than posted, which is how a build
+    /// is cancelled or retried.
+    PatchJson(&'a Value),
     /// The same document posted rather than patched, which is how a work item
     /// is created: there is no work item yet to patch.
     PostPatch(&'a [Value]),

@@ -78,6 +78,18 @@ pub enum AppAction {
     /// Go where a reference points: the shell switches tabs if it has to and
     /// asks the screen that holds it to select it.
     Follow(Jump),
+    /// Read one repository's branches, for the branch picker.
+    FetchBranches(String),
+    /// Start one pipeline on one branch.
+    TriggerRun {
+        pipeline_id: i64,
+        branch: String,
+    },
+    /// Stop one run, or retry the jobs that failed in it.
+    RunAction {
+        run_id: i64,
+        retry: bool,
+    },
     /// `[` and `]`: back and forward through everywhere this run has been,
     /// across tabs.
     HistoryBack,

@@ -947,6 +947,15 @@ the short commit, who set it going and why, when it was queued, started and
 finished, and how long it took. `o` opens the run, or the pipeline, in the
 browser; column headers sort; the tab wears a `◐2` badge while anything runs.
 
+`t` on a pipeline opens a branch picker — a filter field over the repository's
+branches, opening at once on the default branch and filling in when Azure
+DevOps answers, cached for ten minutes — and `Enter` starts it there. The run
+that comes back is inserted at the top of that pipeline's runs, selected,
+focused and watched, so its timeline and log start straight away. `x` on a run
+that is going asks `Cancel 20260829.4?` and a second `x` stops it; `R` on one
+that has stopped retries the jobs that failed, in place. A refusal is a toast
+and nothing changes.
+
 `W` on a run — or on a pipeline, meaning the run it is having now — follows it:
 the row wears a `◉` in its gutter, the watcher keeps polling it whatever tab is
 showing, and when it stops the footer says so for eight seconds, `✓ Build
