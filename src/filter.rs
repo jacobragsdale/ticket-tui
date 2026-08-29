@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::model::Ticket;
+use crate::model::{StateCategory, Ticket};
 use crate::timestamp::Timestamp;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -197,6 +197,129 @@ fn parse_age(value: &str) -> Option<i64> {
     count.checked_mul(seconds)
 }
 
+/// A value written with a leading `@`, standing for something only the running
+/// app knows: who is signed in, which sprint contains today, whether a state
+/// counts as finished.
+///
+/// A sentinel is stored in the query exactly as it was typed and read at match
+/// time, so a view saved as `assignee:@me` still means whoever is signed in
+/// tomorrow and `iteration:@current` follows the sprint over its rollover.
+/// This is the shape relative date bounds already take.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Sentinel {
+    /// `assignee:@me`, the display name the session is signed in under.
+    Me,
+    /// `assignee:@none`, work nobody owns.
+    Nobody,
+    /// `iteration:@current`, the sprint whose dates contain today.
+    CurrentIteration,
+    /// `state:@open`, anything the workflow has not finished with. Read by
+    /// state category rather than by name, because every process template
+    /// spells its finished states differently.
+    Open,
+}
+
+impl Sentinel {
+    /// The sentinel a value asks for on a given field. A sentinel written on a
+    /// field that has none — `state:@me` — is nothing special: it stays an
+    /// ordinary value, and so matches the states literally named that, of
+    /// which there are none.
+    #[must_use]
+    pub fn parse(field: FilterField, value: &str) -> Option<Self> {
+        let name = value.strip_prefix('@')?.to_ascii_lowercase();
+        match (field, name.as_str()) {
+            (FilterField::Assignee, "me") => Some(Self::Me),
+            (FilterField::Assignee, "none") => Some(Self::Nobody),
+            (FilterField::Iteration, "current") => Some(Self::CurrentIteration),
+            (FilterField::State, "open") => Some(Self::Open),
+            _ => None,
+        }
+    }
+
+    /// Whether a ticket satisfies the sentinel. One the context cannot fill in
+    /// — nobody signed in, no sprint scheduled — matches nothing rather than
+    /// everything, so a query never quietly widens to the whole project.
+    fn matches(self, ticket: &Ticket, context: &MatchContext) -> bool {
+        match self {
+            Self::Me => context.me.as_deref().is_some_and(|me| {
+                ticket
+                    .assigned_to
+                    .as_deref()
+                    .is_some_and(|assignee| same_text(assignee, me))
+            }),
+            Self::Nobody => ticket.assigned_to.is_none(),
+            Self::CurrentIteration => context
+                .current_iteration
+                .as_deref()
+                .is_some_and(|iteration| same_text(&ticket.iteration_path, iteration)),
+            Self::Open => !is_finished(&ticket.state),
+        }
+    }
+}
+
+/// What a query means at the moment it runs: the clock its relative date
+/// bounds are measured from, and the values its sentinels stand for.
+///
+/// Everything here is resolved as the filter runs rather than as the query is
+/// parsed, which is what lets a saved view follow the person and the calendar
+/// instead of freezing whatever they meant the day it was written.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MatchContext {
+    /// The instant `changed:<7d` and its like are measured back from.
+    pub now: Timestamp,
+    /// The display name `@me` stands for, and `None` when nobody is signed in.
+    pub me: Option<String>,
+    /// The iteration path `@current` stands for, and `None` when no sprint is
+    /// scheduled around today.
+    pub current_iteration: Option<String>,
+}
+
+impl MatchContext {
+    /// A context reading the wall clock, knowing nobody and no sprint.
+    #[must_use]
+    pub fn now() -> Self {
+        Self::at(Timestamp::now())
+    }
+
+    /// The same against a fixed instant, which is how a relative bound is
+    /// tested without reaching for the clock.
+    #[must_use]
+    pub const fn at(now: Timestamp) -> Self {
+        Self {
+            now,
+            me: None,
+            current_iteration: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_me(mut self, me: Option<String>) -> Self {
+        self.me = me;
+        self
+    }
+
+    #[must_use]
+    pub fn with_current_iteration(mut self, iteration: Option<String>) -> Self {
+        self.current_iteration = iteration;
+        self
+    }
+}
+
+/// Whether a state means the work is over. Completed and removed both are:
+/// neither is waiting on anybody.
+fn is_finished(state: &str) -> bool {
+    matches!(
+        StateCategory::of(state),
+        StateCategory::Completed | StateCategory::Removed
+    )
+}
+
+/// Azure DevOps echoes names and paths back with inconsistent casing and
+/// spacing, so two of them are the same when they are the same after both.
+fn same_text(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FacetTarget {
     Field(FilterField),
@@ -298,24 +421,31 @@ impl FilterSet {
         tokens
     }
 
-    /// Whether a ticket passes every field of the query, with relative date
-    /// bounds measured from the current instant.
+    /// Whether a ticket passes every field of the query, read against the
+    /// current instant and against nobody in particular.
     #[must_use]
     pub fn matches(&self, ticket: &Ticket, is_bookmarked: bool) -> bool {
-        self.matches_at(ticket, is_bookmarked, Timestamp::now())
+        self.matches_in(ticket, is_bookmarked, &MatchContext::now())
     }
 
     /// `matches` against a given instant, which is how `changed:<7d` is tested
     /// without reaching for the wall clock.
     #[must_use]
     pub fn matches_at(&self, ticket: &Ticket, is_bookmarked: bool, now: Timestamp) -> bool {
+        self.matches_in(ticket, is_bookmarked, &MatchContext::at(now))
+    }
+
+    /// `matches` with everything a sentinel needs to stand for something: the
+    /// clock, the signed-in name, and the sprint containing today.
+    #[must_use]
+    pub fn matches_in(&self, ticket: &Ticket, is_bookmarked: bool, context: &MatchContext) -> bool {
         if self.bookmarked && !is_bookmarked {
             return false;
         }
         self.values.iter().all(|(field, values)| {
             values
                 .iter()
-                .any(|value| field_matches(*field, ticket, value, now))
+                .any(|value| field_matches(*field, ticket, value, context))
         })
     }
 }
@@ -392,23 +522,14 @@ pub fn facet_values(
     filters: &FilterSet,
     field: FilterField,
     bookmarked: impl Fn(&Ticket) -> bool,
-) -> Vec<FacetValue> {
-    facet_values_at(tickets, filters, field, bookmarked, Timestamp::now())
-}
-
-fn facet_values_at(
-    tickets: &[Ticket],
-    filters: &FilterSet,
-    field: FilterField,
-    bookmarked: impl Fn(&Ticket) -> bool,
-    now: Timestamp,
+    context: &MatchContext,
 ) -> Vec<FacetValue> {
     if field.is_date() {
-        return date_facets(tickets, filters, field, bookmarked, now);
+        return date_facets(tickets, filters, field, bookmarked, context);
     }
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for ticket in tickets {
-        if !matches_excluding(ticket, filters, field, bookmarked(ticket), now) {
+        if !matches_excluding(ticket, filters, field, bookmarked(ticket), context) {
             continue;
         }
         for value in field_values(field, ticket) {
@@ -444,7 +565,7 @@ fn date_facets(
     filters: &FilterSet,
     field: FilterField,
     bookmarked: impl Fn(&Ticket) -> bool,
-    now: Timestamp,
+    context: &MatchContext,
 ) -> Vec<FacetValue> {
     let mut values: Vec<String> = DATE_PRESETS
         .iter()
@@ -460,7 +581,7 @@ fn date_facets(
     }
     let remaining: Vec<&Ticket> = tickets
         .iter()
-        .filter(|ticket| matches_excluding(ticket, filters, field, bookmarked(ticket), now))
+        .filter(|ticket| matches_excluding(ticket, filters, field, bookmarked(ticket), context))
         .collect();
     values
         .into_iter()
@@ -468,7 +589,7 @@ fn date_facets(
             selected: filters.contains(field, &value),
             count: remaining
                 .iter()
-                .filter(|ticket| field_matches(field, ticket, &value, now))
+                .filter(|ticket| field_matches(field, ticket, &value, context))
                 .count(),
             value,
         })
@@ -480,7 +601,7 @@ fn matches_excluding(
     filters: &FilterSet,
     excluded: FilterField,
     is_bookmarked: bool,
-    now: Timestamp,
+    context: &MatchContext,
 ) -> bool {
     if filters.bookmarked && !is_bookmarked {
         return false;
@@ -489,14 +610,22 @@ fn matches_excluding(
         *field == excluded
             || values
                 .iter()
-                .any(|value| field_matches(*field, ticket, value, now))
+                .any(|value| field_matches(*field, ticket, value, context))
     })
 }
 
-fn field_matches(field: FilterField, ticket: &Ticket, needle: &str, now: Timestamp) -> bool {
+fn field_matches(
+    field: FilterField,
+    ticket: &Ticket,
+    needle: &str,
+    context: &MatchContext,
+) -> bool {
     if let Some(instant) = date_value(field, ticket) {
         return DatePredicate::parse(needle)
-            .is_some_and(|predicate| predicate.matches(instant, now));
+            .is_some_and(|predicate| predicate.matches(instant, context.now));
+    }
+    if let Some(sentinel) = Sentinel::parse(field, needle) {
+        return sentinel.matches(ticket, context);
     }
     field_values(field, ticket)
         .iter()
@@ -739,7 +868,13 @@ mod tests {
             ticket("New", "Bug", Some("Avery"), "rust"),
         ];
         let filters = parse_query("type:bug").filters;
-        let facets = facet_values(&tickets, &filters, FilterField::Type, |_| false);
+        let facets = facet_values(
+            &tickets,
+            &filters,
+            FilterField::Type,
+            |_| false,
+            &MatchContext::now(),
+        );
 
         let bug = facets.iter().find(|facet| facet.value == "Bug").unwrap();
         let task = facets.iter().find(|facet| facet.value == "Task").unwrap();
@@ -875,7 +1010,13 @@ mod tests {
             dated("2026-01-01T00:00:00Z", "2026-08-01T00:00:00Z"),
         ];
         let filters = parse_query("changed:>14d").filters;
-        let facets = facet_values_at(&tickets, &filters, FilterField::Changed, |_| false, now);
+        let facets = facet_values(
+            &tickets,
+            &filters,
+            FilterField::Changed,
+            |_| false,
+            &MatchContext::at(now),
+        );
         let values: Vec<&str> = facets.iter().map(|facet| facet.value.as_str()).collect();
 
         assert_eq!(
@@ -887,5 +1028,194 @@ mod tests {
         assert_eq!(facets[3].count, 2);
         assert!(facets[4].selected);
         assert!(!facets[0].selected);
+    }
+
+    #[test]
+    fn the_me_sentinel_stands_for_whoever_the_context_is_signed_in_as() {
+        let now = ts("2026-08-29T12:00:00Z");
+        let filters = parse_query("assignee:@me").filters;
+        let mine = ticket("Active", "Bug", Some("  avery CHEN "), "rust");
+        let theirs = ticket("Active", "Bug", Some("Jordan Patel"), "rust");
+        let nobodys = ticket("Active", "Bug", None, "rust");
+
+        let signed_in = MatchContext::at(now).with_me(Some("Avery Chen".into()));
+        assert!(
+            filters.matches_in(&mine, false, &signed_in),
+            "casing and padding do not make it somebody else"
+        );
+        assert!(!filters.matches_in(&theirs, false, &signed_in));
+        assert!(!filters.matches_in(&nobodys, false, &signed_in));
+
+        let signed_out = MatchContext::at(now);
+        assert!(
+            !filters.matches_in(&mine, false, &signed_out),
+            "with no name known @me is nobody rather than everybody"
+        );
+        assert!(!filters.matches_in(&nobodys, false, &signed_out));
+    }
+
+    #[test]
+    fn the_me_sentinel_follows_the_name_it_is_handed_rather_than_the_one_it_was_saved_beside() {
+        let now = ts("2026-08-29T12:00:00Z");
+        let filters = parse_query("assignee:@me").filters;
+        let jordans = ticket("Active", "Bug", Some("Jordan Patel"), "rust");
+
+        assert!(!filters.matches_in(
+            &jordans,
+            false,
+            &MatchContext::at(now).with_me(Some("Avery Chen".into()))
+        ));
+        assert!(
+            filters.matches_in(
+                &jordans,
+                false,
+                &MatchContext::at(now).with_me(Some("Jordan Patel".into()))
+            ),
+            "the same saved query means somebody else once somebody else is signed in"
+        );
+    }
+
+    #[test]
+    fn the_none_sentinel_keeps_only_the_work_nobody_owns() {
+        let now = ts("2026-08-29T12:00:00Z");
+        let filters = parse_query("assignee:@none").filters;
+        let context = MatchContext::at(now).with_me(Some("Avery Chen".into()));
+
+        assert!(filters.matches_in(&ticket("Active", "Bug", None, "rust"), false, &context));
+        assert!(!filters.matches_in(
+            &ticket("Active", "Bug", Some("Avery Chen"), "rust"),
+            false,
+            &context
+        ));
+    }
+
+    #[test]
+    fn the_current_sentinel_follows_the_sprint_the_context_names() {
+        let now = ts("2026-08-29T12:00:00Z");
+        let filters = parse_query("iteration:@current").filters;
+        let sprint_one = ticket("Active", "Bug", Some("Avery"), "rust");
+        let sprint_two = Ticket {
+            iteration_path: "Atlas\\Sprint 2".into(),
+            ..sprint_one.clone()
+        };
+
+        let first = MatchContext::at(now).with_current_iteration(Some("Atlas\\Sprint 1".into()));
+        assert!(filters.matches_in(&sprint_one, false, &first));
+        assert!(!filters.matches_in(&sprint_two, false, &first));
+
+        let rolled_over =
+            MatchContext::at(now).with_current_iteration(Some("Atlas\\Sprint 2".into()));
+        assert!(!filters.matches_in(&sprint_one, false, &rolled_over));
+        assert!(
+            filters.matches_in(&sprint_two, false, &rolled_over),
+            "the query is unchanged; the sprint under it moved on"
+        );
+
+        assert!(
+            !filters.matches_in(&sprint_one, false, &MatchContext::at(now)),
+            "with no sprint scheduled @current is no sprint at all"
+        );
+    }
+
+    #[test]
+    fn the_open_sentinel_reads_the_state_category_rather_than_the_state_name() {
+        let now = ts("2026-08-29T12:00:00Z");
+        let filters = parse_query("state:@open").filters;
+        let context = MatchContext::at(now);
+        let in_state = |state: &str| {
+            filters.matches_in(
+                &ticket(state, "Bug", Some("Avery"), "rust"),
+                false,
+                &context,
+            )
+        };
+
+        assert!(in_state("To Do"));
+        assert!(in_state("Doing"));
+        assert!(in_state("Active"));
+        assert!(in_state("Resolved"));
+        assert!(
+            in_state("Needs triage"),
+            "an unclassified state is not over"
+        );
+        assert!(!in_state("Done"));
+        assert!(!in_state("Closed"));
+        assert!(!in_state("Removed"));
+    }
+
+    #[test]
+    fn a_sentinel_written_on_a_field_that_has_none_stays_an_ordinary_value() {
+        let now = ts("2026-08-29T12:00:00Z");
+        let context = MatchContext::at(now).with_me(Some("Avery Chen".into()));
+        let subject = ticket("Active", "Bug", Some("Avery Chen"), "rust");
+
+        assert_eq!(Sentinel::parse(FilterField::Type, "@me"), None);
+        assert!(
+            !parse_query("type:@me")
+                .filters
+                .matches_in(&subject, false, &context),
+            "no work item type is named @me"
+        );
+        assert_eq!(Sentinel::parse(FilterField::Assignee, "@nobody"), None);
+        assert_eq!(
+            Sentinel::parse(FilterField::Assignee, "@ME"),
+            Some(Sentinel::Me),
+            "a sentinel is read without regard to case"
+        );
+    }
+
+    #[test]
+    fn sentinel_chips_read_as_typed_and_round_trip_through_the_query_text() {
+        let parsed = parse_query("assignee:@me iteration:@current state:@open changed:>14d rust");
+        let labels: Vec<String> = parsed
+            .filters
+            .tokens()
+            .iter()
+            .map(FilterToken::chip_label)
+            .collect();
+
+        assert_eq!(
+            labels,
+            vec![
+                "state:@open",
+                "assignee:@me",
+                "iteration:@current",
+                "changed:>14d"
+            ]
+        );
+
+        let formatted = format_query(&parsed.filters, &parsed.fuzzy);
+        assert_eq!(
+            formatted,
+            "state:@open assignee:@me iteration:@current changed:>14d rust"
+        );
+        assert_eq!(parse_query(&formatted), parsed);
+    }
+
+    #[test]
+    fn facet_counts_are_taken_against_the_sentinels_the_rest_of_the_query_holds() {
+        let now = ts("2026-08-29T12:00:00Z");
+        let tickets = vec![
+            ticket("Active", "Bug", Some("Avery Chen"), "rust"),
+            ticket("Active", "Task", Some("Avery Chen"), "rust"),
+            ticket("Active", "Bug", Some("Jordan Patel"), "rust"),
+        ];
+        let filters = parse_query("assignee:@me").filters;
+        let facets = facet_values(
+            &tickets,
+            &filters,
+            FilterField::Type,
+            |_| false,
+            &MatchContext::at(now).with_me(Some("Avery Chen".into())),
+        );
+
+        let count = |value: &str| {
+            facets
+                .iter()
+                .find(|facet| facet.value == value)
+                .map_or(0, |facet| facet.count)
+        };
+        assert_eq!(count("Bug"), 1, "Jordan's bug is not mine");
+        assert_eq!(count("Task"), 1);
     }
 }

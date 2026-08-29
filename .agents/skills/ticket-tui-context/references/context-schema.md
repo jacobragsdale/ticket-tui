@@ -87,7 +87,10 @@ flight.
 `search.query` preserves the complete user input. `search.fuzzy_text` contains
 only free-text terms. `search.filters` contains canonical labels such as
 `state:Active`, `tag:rust`, and `is:bookmarked`. Values in one field are ORed;
-different fields are ANDed. `search.pending` means the fuzzy result worker has
+different fields are ANDed. A value written with a leading `@` — `assignee:@me`,
+`assignee:@none`, `iteration:@current`, `state:@open` — is reported as typed and
+resolved as the filter runs, so read `me` at the top level to know who
+`assignee:@me` currently means. `search.pending` means the fuzzy result worker has
 not yet published its latest matches.
 
 ## Ticket viewport fields
