@@ -42,6 +42,12 @@ struct Theme {
     state_resolved: Color,
     state_completed: Color,
     state_removed: Color,
+    type_epic: Color,
+    type_feature: Color,
+    type_story: Color,
+    type_task: Color,
+    type_bug: Color,
+    type_test: Color,
     priority_critical: Color,
     priority_high: Color,
     priority_normal: Color,
@@ -66,6 +72,12 @@ impl Theme {
                 state_resolved: Color::Reset,
                 state_completed: Color::Reset,
                 state_removed: Color::Reset,
+                type_epic: Color::Reset,
+                type_feature: Color::Reset,
+                type_story: Color::Reset,
+                type_task: Color::Reset,
+                type_bug: Color::Reset,
+                type_test: Color::Reset,
                 priority_critical: Color::Reset,
                 priority_high: Color::Reset,
                 priority_normal: Color::Reset,
@@ -87,6 +99,12 @@ impl Theme {
                 state_resolved: Color::Magenta,
                 state_completed: Color::Green,
                 state_removed: Color::DarkGray,
+                type_epic: Color::Yellow,
+                type_feature: Color::Magenta,
+                type_story: Color::Blue,
+                type_task: Color::Cyan,
+                type_bug: Color::Red,
+                type_test: Color::Green,
                 priority_critical: Color::Red,
                 priority_high: Color::Yellow,
                 priority_normal: Color::Blue,
@@ -2157,14 +2175,17 @@ fn highlight_line(text: String, indices: &[u32], base: Style, matched: Style) ->
     Line::from(spans)
 }
 
+/// Colour a work item type across the Agile, Basic, Scrum, and CMMI processes.
 fn type_style(work_item_type: &str) -> Style {
-    let color = match work_item_type.to_ascii_lowercase().as_str() {
-        "bug" => theme().priority_critical,
-        "task" => theme().accent,
-        "user story" | "story" => theme().state_proposed,
-        "feature" => theme().state_resolved,
-        "epic" => theme().state_in_progress,
-        _ => theme().muted,
+    let color = match work_item_type.trim().to_ascii_lowercase().as_str() {
+        "epic" => theme().type_epic,
+        "feature" => theme().type_feature,
+        "issue" | "user story" | "story" | "product backlog item" => theme().type_story,
+        "task" => theme().type_task,
+        "bug" | "impediment" => theme().type_bug,
+        "test case" => theme().type_test,
+        // Custom types stay readable rather than fading into the background.
+        _ => theme().text,
     };
     Style::default().fg(color)
 }
@@ -2894,6 +2915,7 @@ mod tests {
 
         assert_eq!(monochrome.accent, Color::Reset);
         assert_eq!(monochrome.state_in_progress, Color::Reset);
+        assert_eq!(monochrome.type_epic, Color::Reset);
         assert_eq!(monochrome.priority_critical, Color::Reset);
         assert_eq!(monochrome.search_match, Color::Reset);
         assert_eq!(monochrome.error, Color::Reset);
@@ -2941,6 +2963,22 @@ mod tests {
         ]);
 
         let colors = column_cell_colors(&mut app, SortField::State, 3);
+
+        assert_distinct_and_legible(&colors);
+    }
+
+    #[test]
+    fn standard_process_types_get_distinct_badge_colors() {
+        if theme() == &Theme::new(true) {
+            return; // NO_COLOR: every colour is intentionally Reset.
+        }
+        let mut app = App::new(vec![
+            ticket_at(10_001, "Alpha", "Epic", "To Do", "2026-03-03T00:00:00Z"),
+            ticket_at(10_002, "Beta", "Issue", "To Do", "2026-03-02T00:00:00Z"),
+            ticket_at(10_003, "Gamma", "Task", "To Do", "2026-03-01T00:00:00Z"),
+        ]);
+
+        let colors = column_cell_colors(&mut app, SortField::Type, 3);
 
         assert_distinct_and_legible(&colors);
     }
