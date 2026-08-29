@@ -1489,6 +1489,15 @@ ticket-tui list [--query '<filter>'] [--json]
 ticket-tui edit <id> [--state S] [--assignee A] [--priority N] [--iteration I] [--area A] [--title T] [--tags a,b] [--description-file F]
 ticket-tui comment <id> "text"
 ticket-tui create --type Issue --title T [--parent ID] [--iteration I] [--assignee A] [--priority N] [--tags a,b]
+ticket-tui repos list [--query '<filter>'] [--json]
+ticket-tui repos show <name> [--json]
+ticket-tui prs list [--query '<filter>'] [--json]
+ticket-tui prs show <id> [--json]
+ticket-tui prs vote <id> approve|suggest|wait|reject|none
+ticket-tui prs complete <id> [--strategy squash|merge|rebase] [--keep-source] [--no-transition]
+ticket-tui prs abandon <id>
+ticket-tui prs autocomplete <id> on|off
+ticket-tui prs comment <id> "text"
 ```
 
 `sync` pulls and exits, printing what moved — `Synced 3 changes from
@@ -1533,6 +1542,41 @@ refused rather than overwritten — run `ticket-tui sync` and try again.
 value takes the work item off whoever holds it; `--tags` replaces the tag list;
 `--description-file` reads Markdown and writes the HTML Azure DevOps stores,
 the same conversion the Actions menu's description editor makes.
+
+`repos` and `prs` are the Repos and Pull requests tabs without the tab. Both
+reads answer from the database and take the tab's own filter grammar —
+`repos list --query 'local:dirty'`, `prs list --query 'reviewer:@me vote:none'`,
+which is what the To review count counts. `repos` also reads the workspace, so
+the Local column says what `git status` says; that is the only thing either read
+touches beyond SQLite, and it never fetches.
+
+```console
+$ ticket-tui prs list
+!7  pr-checkout-smoke  Jacob Ragsdale  0/0  —          Checks test PR
+!1  development        Jacob Ragsdale  1/1  succeeded  ado-cli PR smoke test
+```
+
+The columns are `!id repo author votes build title`, where votes counts the
+reviewers who have approved out of those asked. `repos list` prints
+`name branch prs pipelines local`. `prs show` adds the reviewers and their
+votes, the work items it carries, the build and the discussion; `--json` prints
+the same, with `list` leaving out the reviewers, work items, threads and
+description the way `list` leaves out a work item's body.
+
+The five writes go out over the same REST API the TUI uses and store the copy
+Azure DevOps answers with, so a running TUI shows the change without a pull. A
+completion carries the head commit the stored copy was read at, so a merge that
+raced somebody else's push is refused rather than landing over it; a refusal
+exits non-zero in Azure DevOps's own words. `prs vote` writes as whoever is
+signed in — read once from Azure DevOps and kept in the database, since no
+work-item endpoint ever reports it.
+
+```console
+$ ticket-tui prs vote 7 approve
+!7 vote: approve
+$ ticket-tui prs complete 7 --strategy squash
+!7 completed
+```
 
 `create` adds a work item of any type the process template offers, and
 `--parent` links it under an existing one. A refusal prints what Azure DevOps

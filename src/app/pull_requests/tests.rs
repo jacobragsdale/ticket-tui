@@ -323,7 +323,7 @@ fn the_completion_form_sends_the_options_it_was_left_on() {
 
     assert!(
         matches!(
-            action,
+            &action,
             AppAction::PullRequestAction {
                 id: 11,
                 action: crate::sync::PrAction::Complete(options),
@@ -331,6 +331,8 @@ fn the_completion_form_sends_the_options_it_was_left_on() {
             } if options.strategy == crate::model::MergeStrategy::Merge
                 && !options.delete_source
                 && options.transition_work_items
+                // The head the row was read at travels with the completion.
+                && options.last_merge_source_commit == "abc1234"
         ),
         "got {action:?}"
     );

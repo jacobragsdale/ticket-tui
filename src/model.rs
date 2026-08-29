@@ -576,16 +576,20 @@ impl MergeStrategy {
 }
 
 /// What completing a pull request should do besides merging it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompletionOptions {
     pub strategy: MergeStrategy,
     pub delete_source: bool,
     pub transition_work_items: bool,
+    /// The head the copy being completed was read at. Azure DevOps refuses the
+    /// merge when the source branch has moved since, which is the point.
+    pub last_merge_source_commit: String,
 }
 
 impl Default for CompletionOptions {
     fn default() -> Self {
         Self {
+            last_merge_source_commit: String::new(),
             strategy: MergeStrategy::default(),
             delete_source: true,
             transition_work_items: true,

@@ -873,7 +873,7 @@ impl AzureClient {
         url.set_query(Some(&format!(
             "searchCriteria.status={status}&$top={top}&api-version={API_VERSION}"
         )));
-        Ok(parse_pull_requests(&self.get(url.as_str())?))
+        Ok(parse_pull_requests(&self.get(url.as_str())?, &self.config))
     }
 
     /// The work items one pull request says it closes.
@@ -1034,7 +1034,7 @@ impl AzureClient {
         let mut url = self.api_url(&segments)?;
         url.set_query(Some(&version_query()));
         let response = self.patch(url.as_str(), body)?;
-        parse_pull_requests(&serde_json::json!({ "value": [response] }))
+        parse_pull_requests(&serde_json::json!({ "value": [response] }), &self.config)
             .into_iter()
             .next()
             .ok_or_else(|| {
@@ -1417,7 +1417,7 @@ fn parse_thread(entry: &Value) -> Option<PrThread> {
 }
 
 /// The pull requests in a list response, with the reviewers each carries.
-fn parse_pull_requests(response: &Value) -> Vec<PullRequest> {
+fn parse_pull_requests(response: &Value, config: &AzureConfig) -> Vec<PullRequest> {
     response["value"]
         .as_array()
         .map(Vec::as_slice)
@@ -1461,10 +1461,12 @@ fn parse_pull_requests(response: &Value) -> Vec<PullRequest> {
                 auto_complete_set_by: entry["autoCompleteSetBy"]["displayName"]
                     .as_str()
                     .map(str::to_owned),
+                // The list endpoint does not always carry `_links`, so the
+                // browser URL is built the way the web UI spells it when it
+                // does not: `o` on this row has to open something.
                 url: entry["_links"]["web"]["href"]
                     .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
+                    .map_or_else(|| pull_request_url(entry, config), str::to_owned),
                 reviewers: parse_reviewers(&entry["reviewers"]),
                 work_items: Vec::new(),
                 build: None,
@@ -1472,6 +1474,23 @@ fn parse_pull_requests(response: &Value) -> Vec<PullRequest> {
             })
         })
         .collect()
+}
+
+/// `https://dev.azure.com/org/project/_git/repo/pullrequest/7`, which is what
+/// the web UI's own address bar says.
+fn pull_request_url(entry: &Value, config: &AzureConfig) -> String {
+    let repository = &entry["repository"];
+    let (Some(name), Some(id)) = (repository["name"].as_str(), entry["pullRequestId"].as_i64())
+    else {
+        return String::new();
+    };
+    let project = repository["project"]["name"]
+        .as_str()
+        .unwrap_or(config.project.as_str());
+    format!(
+        "{}/{project}/_git/{name}/pullrequest/{id}",
+        config.base_url()
+    )
 }
 
 fn parse_reviewers(value: &Value) -> Vec<PrReviewer> {
@@ -3271,5 +3290,25 @@ mod tests {
         assert_eq!(artifact_kind("vstfs:///Build/Build/nine"), None);
         assert_eq!(artifact_kind("vstfs:///Git/PullRequestId/atlas%2F7"), None);
         assert_eq!(artifact_kind("https://dev.azure.com/demo"), None);
+    }
+    #[test]
+    fn a_pull_request_the_api_gave_no_link_still_has_somewhere_to_open() {
+        let entry = json!({
+            "pullRequestId": 7,
+            "repository": {
+                "id": "aaa-111",
+                "name": "pr-checkout-smoke",
+                "project": { "name": "development" }
+            }
+        });
+        assert_eq!(
+            pull_request_url(&entry, &config()),
+            "https://dev.azure.com/demo/development/_git/pr-checkout-smoke/pullrequest/7"
+        );
+        assert_eq!(
+            pull_request_url(&json!({ "pullRequestId": 7 }), &config()),
+            "",
+            "and one the answer says nothing about is left empty rather than guessed"
+        );
     }
 }

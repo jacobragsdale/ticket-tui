@@ -16,15 +16,21 @@ use clap::{Args, Parser, Subcommand, ValueHint};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::app::pull_requests::{PrRow, PrSchema};
+use crate::app::repos::{RepoRow, RepoSchema};
 use crate::azure::{self, AzureClient, AzureConfig};
 use crate::classification::{self, NodeKind};
 use crate::db::{self, SqliteTicketRepository, default_database_path};
 use crate::edit::{FieldEdit, normalize_tags, revision_test};
 use crate::filter::{FilterField, MatchContext, ParsedQuery, WorkItemSchema, parse_query};
+use crate::local;
 use crate::markdown;
-use crate::model::{CommentRecord, Identity, Ticket, TicketKey};
+use crate::model::{
+    CommentRecord, CompletionOptions, Identity, MergeStrategy, PullRequest, Ticket, TicketKey,
+    same_text,
+};
 use crate::search;
-use crate::sync::{self, AzureConnector, SyncMode, SyncOutcome, WorkItemSource};
+use crate::sync::{self, AzureConnector, PrAction, SyncMode, SyncOutcome, WorkItemSource};
 use crate::timestamp::Timestamp;
 
 #[derive(Debug, Parser)]
@@ -100,6 +106,91 @@ pub enum Command {
     },
     /// Add a work item to the project
     Create(CreateArgs),
+    /// Read the project's Git repositories and the clones on this machine
+    #[command(subcommand)]
+    Repos(ReposCommand),
+    /// Read and act on pull requests
+    #[command(subcommand)]
+    Prs(PrsCommand),
+}
+
+/// The Repos tab, without the tab. Both reads answer from the database and the
+/// workspace; neither touches the network.
+#[derive(Clone, Debug, Subcommand)]
+pub enum ReposCommand {
+    /// Print the project's repositories
+    List {
+        /// The Repos tab's filter grammar: `name:`, `branch:`, `local:` and
+        /// `disabled:`; anything else is matched fuzzily
+        #[arg(long, value_name = "QUERY")]
+        query: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one repository, its URLs and the clone on this machine
+    Show {
+        /// The repository's name, as the project spells it
+        name: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// The Pull requests tab, without the tab. The two reads answer from the
+/// database; every other form writes to Azure DevOps and stores the copy it
+/// answers with, so a running TUI picks the change up from the database it is
+/// already watching.
+#[derive(Clone, Debug, Subcommand)]
+pub enum PrsCommand {
+    /// Print pull requests
+    List {
+        /// The Pull requests tab's filter grammar: `repo:`, `author:`,
+        /// `reviewer:` (`@me`), `vote:`, `status:`, `target:`, `source:`,
+        /// `draft:` and `build:`; anything else is matched fuzzily
+        #[arg(long, value_name = "QUERY")]
+        query: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one pull request: its reviewers, work items, build and discussion
+    Show {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Record your own vote
+    Vote {
+        id: i64,
+        /// `approve`, `suggest`, `wait`, `reject`, or `none` to withdraw
+        vote: String,
+    },
+    /// Complete it, merging the source branch into the target
+    Complete {
+        id: i64,
+        /// How to merge: `squash` (the default), `merge` or `rebase`
+        #[arg(long, value_name = "STRATEGY")]
+        strategy: Option<String>,
+        /// Leave the source branch in place rather than deleting it
+        #[arg(long)]
+        keep_source: bool,
+        /// Leave the linked work items in the state they are in
+        #[arg(long)]
+        no_transition: bool,
+    },
+    /// Abandon it
+    Abandon { id: i64 },
+    /// Turn auto-complete on or off
+    Autocomplete {
+        id: i64,
+        /// `on` or `off`
+        state: String,
+    },
+    /// Leave one comment, as a thread of its own
+    Comment {
+        id: i64,
+        /// What the comment says, as plain text
+        text: String,
+    },
 }
 
 #[derive(Args, Clone, Debug)]
@@ -170,6 +261,8 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Edit(args) => run_edit(cli, &database, args),
         Command::Comment { id, text } => run_comment(cli, &database, *id, text),
         Command::Create(args) => run_create(cli, &database, args),
+        Command::Repos(command) => run_repos(cli, &database, command),
+        Command::Prs(command) => run_prs(cli, &database, command),
     }
 }
 
@@ -830,6 +923,676 @@ fn tabulate(tickets: &[Ticket]) -> String {
 
 /// Says one thing on standard output. A closed pipe — `ticket-tui list | head`
 /// — is not an error worth reporting: there is nobody left to report it to.
+/// One repository as `--json` prints it.
+#[derive(Serialize)]
+struct RepoJson<'a> {
+    id: &'a str,
+    name: &'a str,
+    project: &'a str,
+    default_branch: String,
+    is_disabled: bool,
+    pull_requests: usize,
+    pipelines: usize,
+    web_url: &'a str,
+    remote_url: &'a str,
+    ssh_url: &'a str,
+    local: Option<LocalJson<'a>>,
+}
+
+#[derive(Serialize)]
+struct LocalJson<'a> {
+    path: String,
+    origin: &'a str,
+    branch: &'a str,
+    dirty: bool,
+    ahead: u32,
+    behind: u32,
+}
+
+impl<'a> From<&'a RepoRow> for RepoJson<'a> {
+    fn from(row: &'a RepoRow) -> Self {
+        Self {
+            id: &row.repo.id,
+            name: &row.repo.name,
+            project: &row.repo.project,
+            default_branch: row.branch(),
+            is_disabled: row.repo.is_disabled,
+            pull_requests: row.pull_requests,
+            pipelines: row.pipelines,
+            web_url: &row.repo.web_url,
+            remote_url: &row.repo.remote_url,
+            ssh_url: &row.repo.ssh_url,
+            local: row.local.as_ref().map(|local| LocalJson {
+                path: local.path.display().to_string(),
+                origin: &local.origin,
+                branch: &local.branch,
+                dirty: local.dirty,
+                ahead: local.ahead,
+                behind: local.behind,
+            }),
+        }
+    }
+}
+
+/// One pull request as `--json` prints it. `list` prints the row; `show` adds
+/// the reviewers, the work items and the discussion, the way the work-item
+/// commands keep descriptions out of a list of five hundred.
+#[derive(Serialize)]
+struct PrJson<'a> {
+    id: i64,
+    repo: &'a str,
+    title: &'a str,
+    author: &'a str,
+    status: &'a str,
+    is_draft: bool,
+    source: String,
+    target: String,
+    merge_status: &'a str,
+    auto_complete: bool,
+    created: Option<String>,
+    closed: Option<String>,
+    url: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build: Option<PrBuildJson<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reviewers: Option<Vec<ReviewerJson<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    work_items: Option<&'a [i64]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    threads: Option<Vec<ThreadJson<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct PrBuildJson<'a> {
+    status: &'a str,
+    run_id: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct ReviewerJson<'a> {
+    name: &'a str,
+    vote: i8,
+    is_required: bool,
+}
+
+#[derive(Serialize)]
+struct ThreadJson<'a> {
+    id: i64,
+    author: &'a str,
+    text: &'a str,
+    status: &'a str,
+    published: Option<String>,
+}
+
+impl<'a> PrJson<'a> {
+    fn row(row: &'a PrRow) -> Self {
+        let request = &row.request;
+        Self {
+            id: request.id,
+            repo: &row.repo,
+            title: &request.title,
+            author: &request.created_by.display_name,
+            status: request.status.as_str(),
+            is_draft: request.is_draft,
+            source: row.source_branch(),
+            target: row.target_branch(),
+            merge_status: &request.merge_status,
+            auto_complete: request.auto_complete_set_by.is_some(),
+            created: request.created_at.map(|at| at.to_rfc3339()),
+            closed: request.closed_at.map(|at| at.to_rfc3339()),
+            url: &request.url,
+            build: request.build.as_ref().map(|build| PrBuildJson {
+                status: &build.status,
+                run_id: build.run_id,
+            }),
+            reviewers: None,
+            work_items: None,
+            threads: None,
+            description: None,
+        }
+    }
+
+    fn full(row: &'a PrRow) -> Self {
+        let request = &row.request;
+        Self {
+            reviewers: Some(
+                request
+                    .reviewers
+                    .iter()
+                    .map(|reviewer| ReviewerJson {
+                        name: &reviewer.display_name,
+                        vote: reviewer.vote,
+                        is_required: reviewer.is_required,
+                    })
+                    .collect(),
+            ),
+            work_items: Some(&request.work_items),
+            threads: Some(
+                request
+                    .threads
+                    .iter()
+                    .map(|thread| ThreadJson {
+                        id: thread.id,
+                        author: &thread.author,
+                        text: &thread.text,
+                        status: &thread.status,
+                        published: thread.published_at.map(|at| at.to_rfc3339()),
+                    })
+                    .collect(),
+            ),
+            description: Some(&request.description),
+            ..Self::row(row)
+        }
+    }
+}
+
+/// The Repos tab's two reads. The workspace is read for both, because which
+/// repositories are on this machine is the question the tab exists to answer
+/// and a `git status` costs no network.
+fn run_repos(cli: &Cli, database: &Path, command: &ReposCommand) -> Result<()> {
+    let repository = open_database(database)?;
+    let repos = repository.load_repos()?;
+    let requests = repository.load_pull_requests()?;
+    let pipelines = repository.load_pipelines()?;
+    let local = local::workspace_root(cli.workspace.clone())
+        .map(|workspace| {
+            local::scan(
+                &workspace,
+                &repos
+                    .iter()
+                    .map(|repo| local::RepoKey {
+                        id: repo.id.clone(),
+                        remote: local::normalise_remote(&repo.remote_url),
+                        name: repo.name.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .unwrap_or_default();
+    let rows: Vec<RepoRow> = repos
+        .iter()
+        .map(|repo| RepoRow {
+            local: local
+                .iter()
+                .find(|(id, _)| *id == repo.id)
+                .map(|(_, found)| found.clone()),
+            pull_requests: requests
+                .iter()
+                .filter(|request| request.repo_id == repo.id && !request.status.is_closed())
+                .count(),
+            pipelines: pipelines
+                .iter()
+                .filter(|pipeline| pipeline.repo_id.as_deref() == Some(repo.id.as_str()))
+                .count(),
+            repo: repo.clone(),
+        })
+        .collect();
+    match command {
+        ReposCommand::List { query, json } => {
+            let rows = filter_repos(rows, query.as_deref());
+            emit(&if *json {
+                to_json(&rows.iter().map(RepoJson::from).collect::<Vec<_>>())?
+            } else {
+                tabulate_repos(&rows)
+            });
+        }
+        ReposCommand::Show { name, json } => {
+            let row = rows
+                .into_iter()
+                .find(|row| same_text(&row.repo.name, name))
+                .with_context(|| format!("no repository called {name} is in the database"))?;
+            emit(&if *json {
+                to_json(&RepoJson::from(&row))?
+            } else {
+                describe_repo(&row)
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The rows one `--query` names, in the order the tab lists them.
+fn filter_repos(rows: Vec<RepoRow>, query: Option<&str>) -> Vec<RepoRow> {
+    let Some(query) = query else {
+        return rows;
+    };
+    let parsed = parse_query::<RepoSchema>(query);
+    let context = MatchContext::now();
+    rows.into_iter()
+        .filter(|row| {
+            parsed.filters.matches_in(row, false, &context) && row.matches_fuzzy(&parsed.fuzzy)
+        })
+        .collect()
+}
+
+fn tabulate_repos(rows: &[RepoRow]) -> String {
+    if rows.is_empty() {
+        return "no matching repositories".to_owned();
+    }
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.repo.name.clone(),
+                row.branch(),
+                row.pull_requests.to_string(),
+                row.pipelines.to_string(),
+                local_words(row),
+            ]
+        })
+        .collect();
+    columns(&cells)
+}
+
+/// The Local column, in words rather than glyphs: a pipe reads better than a
+/// terminal here.
+fn local_words(row: &RepoRow) -> String {
+    let Some(local) = row.local.as_ref() else {
+        return "—".to_owned();
+    };
+    let mut state = local.branch.clone();
+    if local.dirty {
+        state.push_str(" dirty");
+    }
+    if local.ahead > 0 {
+        state.push_str(&format!(" +{}", local.ahead));
+    }
+    if local.behind > 0 {
+        state.push_str(&format!(" -{}", local.behind));
+    }
+    state
+}
+
+fn describe_repo(row: &RepoRow) -> String {
+    let mut lines = vec![
+        format!("{} ({})", row.repo.name, row.repo.project),
+        String::new(),
+        format!("Default branch  {}", row.branch()),
+        format!("Pull requests   {}", row.pull_requests),
+        format!("Pipelines       {}", row.pipelines),
+        format!("Web             {}", row.repo.web_url),
+        format!("HTTPS           {}", row.repo.remote_url),
+        format!("SSH             {}", row.repo.ssh_url),
+    ];
+    if row.repo.is_disabled {
+        lines.push("Disabled        yes".to_owned());
+    }
+    lines.push(String::new());
+    match row.local.as_ref() {
+        Some(local) => {
+            lines.push(format!("Local           {}", local.path.display()));
+            lines.push(format!("                {}", local_words(row)));
+            lines.push(format!("Origin          {}", local.origin));
+        }
+        None => lines.push("Local           not on this machine".to_owned()),
+    }
+    lines.join("\n")
+}
+
+/// The Pull requests tab, without the tab: two reads and five writes.
+fn run_prs(cli: &Cli, database: &Path, command: &PrsCommand) -> Result<()> {
+    match command {
+        PrsCommand::List { query, json } => {
+            let repository = open_database(database)?;
+            let rows = pr_rows(&repository)?;
+            let me = resolve_me(
+                repository.meta(db::ME_DISPLAY_NAME_KEY)?,
+                std::env::var("TICKET_TUI_ME").ok(),
+            );
+            let rows = filter_pull_requests(rows, query.as_deref(), me)?;
+            emit(&if *json {
+                to_json(&rows.iter().map(PrJson::row).collect::<Vec<_>>())?
+            } else {
+                tabulate_pull_requests(&rows)
+            });
+            Ok(())
+        }
+        PrsCommand::Show { id, json } => {
+            let repository = open_database(database)?;
+            let row = find_pull_request(&repository, *id)?;
+            emit(&if *json {
+                to_json(&PrJson::full(&row))?
+            } else {
+                describe_pull_request(&row)
+            });
+            Ok(())
+        }
+        PrsCommand::Vote { id, vote } => run_pr_vote(cli, database, *id, vote),
+        PrsCommand::Complete {
+            id,
+            strategy,
+            keep_source,
+            no_transition,
+        } => {
+            let strategy = merge_strategy(strategy.as_deref())?;
+            let repository = open_database(database)?;
+            let row = find_pull_request(&repository, *id)?;
+            let options = CompletionOptions {
+                strategy,
+                delete_source: !keep_source,
+                transition_work_items: !no_transition,
+                // The head the stored copy was read at: a source branch that
+                // has moved since is a merge Azure DevOps should refuse.
+                last_merge_source_commit: row.request.last_merge_source_commit.clone(),
+            };
+            run_pr_action(cli, database, *id, PrAction::Complete(options), "completed")
+        }
+        PrsCommand::Abandon { id } => {
+            run_pr_action(cli, database, *id, PrAction::Abandon, "abandoned")
+        }
+        PrsCommand::Autocomplete { id, state } => {
+            let on = match state.to_ascii_lowercase().as_str() {
+                "on" | "yes" | "true" => true,
+                "off" | "no" | "false" => false,
+                other => bail!("auto-complete is `on` or `off`, not {other}"),
+            };
+            run_pr_action(
+                cli,
+                database,
+                *id,
+                PrAction::AutoComplete(on),
+                if on {
+                    "set to complete automatically"
+                } else {
+                    "no longer completing automatically"
+                },
+            )
+        }
+        PrsCommand::Comment { id, text } => run_pr_comment(cli, database, *id, text),
+    }
+}
+
+/// Every stored pull request, with the repository name the table shows.
+fn pr_rows(repository: &SqliteTicketRepository) -> Result<Vec<PrRow>> {
+    let repos = repository.load_repos()?;
+    Ok(repository
+        .load_pull_requests()?
+        .into_iter()
+        .map(|request| PrRow {
+            repo: repos
+                .iter()
+                .find(|repo| repo.id == request.repo_id)
+                .map_or_else(|| request.repo_id.clone(), |repo| repo.name.clone()),
+            request,
+        })
+        .collect())
+}
+
+fn find_pull_request(repository: &SqliteTicketRepository, id: i64) -> Result<PrRow> {
+    pr_rows(repository)?
+        .into_iter()
+        .find(|row| row.request.id == id)
+        .with_context(|| format!("no pull request !{id} is in the database"))
+}
+
+fn filter_pull_requests(
+    rows: Vec<PrRow>,
+    query: Option<&str>,
+    me: Option<String>,
+) -> Result<Vec<PrRow>> {
+    let Some(query) = query else {
+        return Ok(rows);
+    };
+    let parsed = parse_query::<PrSchema>(query);
+    let context = MatchContext::now().with_me(me);
+    if context.me.is_none() && query.contains("@me") {
+        bail!(
+            "`@me` cannot be resolved: no signed-in user is stored, so set TICKET_TUI_ME or sync"
+        );
+    }
+    Ok(rows
+        .into_iter()
+        .filter(|row| {
+            parsed.filters.matches_in(row, false, &context) && row.matches_fuzzy(&parsed.fuzzy)
+        })
+        .collect())
+}
+
+fn tabulate_pull_requests(rows: &[PrRow]) -> String {
+    if rows.is_empty() {
+        return "no matching pull requests".to_owned();
+    }
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                format!("!{}", row.request.id),
+                row.repo.clone(),
+                row.request.created_by.display_name.clone(),
+                vote_summary(row),
+                if row.build_word().is_empty() {
+                    "—".to_owned()
+                } else {
+                    row.build_word()
+                },
+                row.request.title.clone(),
+            ]
+        })
+        .collect();
+    columns(&cells)
+}
+
+/// The votes as a count rather than a run of glyphs: `2/3` is two of the three
+/// reviewers approving, and `0/0` is nobody asked.
+fn vote_summary(row: &PrRow) -> String {
+    let approved = row
+        .request
+        .reviewers
+        .iter()
+        .filter(|reviewer| reviewer.vote > 0)
+        .count();
+    format!("{approved}/{}", row.request.reviewers.len())
+}
+
+fn describe_pull_request(row: &PrRow) -> String {
+    let request = &row.request;
+    let mut lines = vec![
+        format!(
+            "!{} {} · {} · {}",
+            request.id,
+            request.status.as_str(),
+            if request.is_draft { "draft" } else { "ready" },
+            row.repo
+        ),
+        request.title.clone(),
+        String::new(),
+        format!("Author          {}", request.created_by.display_name),
+        format!("Branches        {}", row.branches()),
+        format!("Merge           {}", request.merge_status),
+        format!("URL             {}", request.url),
+    ];
+    if let Some(build) = request.build.as_ref() {
+        lines.push(format!(
+            "Build           {}{}",
+            build.status,
+            build
+                .run_id
+                .map(|id| format!(" (run {id})"))
+                .unwrap_or_default()
+        ));
+    }
+    if request.auto_complete_set_by.is_some() {
+        lines.push("Auto-complete   on".to_owned());
+    }
+    lines.push(String::new());
+    lines.push("Reviewers".to_owned());
+    if request.reviewers.is_empty() {
+        lines.push("  nobody asked".to_owned());
+    }
+    for reviewer in &request.reviewers {
+        lines.push(format!(
+            "  {} {}{}",
+            reviewer.glyph(),
+            reviewer.display_name,
+            if reviewer.is_required {
+                " (required)"
+            } else {
+                ""
+            }
+        ));
+    }
+    if !request.work_items.is_empty() {
+        lines.push(String::new());
+        lines.push("Work items".to_owned());
+        for id in &request.work_items {
+            lines.push(format!("  #{id}"));
+        }
+    }
+    if !request.threads.is_empty() {
+        lines.push(String::new());
+        lines.push("Discussion".to_owned());
+        for thread in &request.threads {
+            lines.push(format!("  {} · {}", thread.author, thread.text));
+        }
+    }
+    lines.join("\n")
+}
+
+/// `approve`, `suggest`, `wait`, `reject`, `none`, on the API's own scale.
+fn parse_vote(word: &str) -> Result<i8> {
+    Ok(match word.to_ascii_lowercase().as_str() {
+        "approve" | "approved" => 10,
+        "suggest" | "suggestions" => 5,
+        "wait" | "waiting" => -5,
+        "reject" | "rejected" => -10,
+        "none" | "reset" | "clear" => 0,
+        other => bail!("a vote is approve, suggest, wait, reject or none, not {other}"),
+    })
+}
+
+fn merge_strategy(word: Option<&str>) -> Result<MergeStrategy> {
+    Ok(
+        match word.unwrap_or("squash").to_ascii_lowercase().as_str() {
+            "squash" => MergeStrategy::Squash,
+            "merge" | "no-fast-forward" => MergeStrategy::Merge,
+            "rebase" => MergeStrategy::Rebase,
+            other => bail!("a strategy is squash, merge or rebase, not {other}"),
+        },
+    )
+}
+
+/// One vote, written as whoever is signed in. Their own id is read once and
+/// kept in `sync_meta`, the same key the TUI's worker fills.
+fn run_pr_vote(cli: &Cli, database: &Path, id: i64, word: &str) -> Result<()> {
+    let vote = parse_vote(word)?;
+    let mut repository = open_database(database)?;
+    let row = find_pull_request(&repository, id)?;
+    let client = connect(cli)?;
+    let reviewer = match repository.meta(db::ME_ID_KEY)? {
+        Some(reviewer) => reviewer,
+        None => {
+            let reviewer = client
+                .my_id()?
+                .context("Azure DevOps did not say who is signed in")?;
+            repository.set_meta(db::ME_ID_KEY, &reviewer)?;
+            reviewer
+        }
+    };
+    client.vote_pull_request(&row.request.repo_id, id, &reviewer, vote)?;
+    // A vote is not answered with the pull request, so the stored copy is
+    // amended in place: the next pull brings back whatever else moved.
+    let mut request = row.request;
+    if let Some(existing) = request
+        .reviewers
+        .iter_mut()
+        .find(|held| held.id == reviewer)
+    {
+        existing.vote = vote;
+    }
+    store_pull_request(&mut repository, request)?;
+    emit(&format!("!{id} vote: {word}"));
+    Ok(())
+}
+
+/// Complete, abandon, or set auto-complete, storing the copy Azure DevOps
+/// answers with so a running TUI sees it on its next reload.
+fn run_pr_action(cli: &Cli, database: &Path, id: i64, action: PrAction, said: &str) -> Result<()> {
+    let mut repository = open_database(database)?;
+    let row = find_pull_request(&repository, id)?;
+    let client = connect(cli)?;
+    let me = match action {
+        PrAction::AutoComplete(true) => Some(match repository.meta(db::ME_ID_KEY)? {
+            Some(reviewer) => reviewer,
+            None => {
+                let reviewer = client
+                    .my_id()?
+                    .context("Azure DevOps did not say who is signed in")?;
+                repository.set_meta(db::ME_ID_KEY, &reviewer)?;
+                reviewer
+            }
+        }),
+        _ => None,
+    };
+    let updated = client.pull_request_action(&row.request.repo_id, id, action, me.as_deref())?;
+    store_pull_request(&mut repository, updated)?;
+    emit(&format!("!{id} {said}"));
+    Ok(())
+}
+
+/// One comment, as a thread of its own. It is stored with the pull request,
+/// so the TUI's discussion shows it without waiting for a pull.
+fn run_pr_comment(cli: &Cli, database: &Path, id: i64, text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        bail!("a comment cannot be empty");
+    }
+    let mut repository = open_database(database)?;
+    let row = find_pull_request(&repository, id)?;
+    let client = connect(cli)?;
+    let thread = client.comment_on_pull_request(&row.request.repo_id, id, text)?;
+    let mut request = row.request;
+    request.threads.push(thread);
+    store_pull_request(&mut repository, request)?;
+    emit(&format!("!{id} comment posted"));
+    Ok(())
+}
+
+/// Puts one pull request back among the stored ones, leaving the rest as they
+/// are. The threads a read never brought down are kept.
+fn store_pull_request(
+    repository: &mut SqliteTicketRepository,
+    mut updated: PullRequest,
+) -> Result<()> {
+    let mut stored = repository.load_pull_requests()?;
+    if let Some(existing) = stored.iter().find(|held| held.id == updated.id)
+        && updated.threads.is_empty()
+    {
+        updated.threads = existing.threads.clone();
+    }
+    stored.retain(|held| held.id != updated.id);
+    stored.push(updated);
+    repository.replace_pull_requests(&stored)?;
+    Ok(())
+}
+
+/// Pads every column but the last, which is the title.
+fn columns(cells: &[Vec<String>]) -> String {
+    let width = cells.first().map_or(0, Vec::len);
+    let mut widths = vec![0usize; width];
+    for row in cells {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    cells
+        .iter()
+        .map(|row| {
+            let mut line = String::new();
+            for (index, cell) in row.iter().enumerate() {
+                if index + 1 == row.len() {
+                    line.push_str(cell);
+                } else {
+                    line.push_str(cell);
+                    line.push_str(&" ".repeat(widths[index] - cell.chars().count() + 2));
+                }
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn emit(text: &str) {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
@@ -1734,5 +2497,303 @@ mod tests {
             "{error:#}"
         );
         assert!(!missing.exists(), "and no empty file is left behind");
+    }
+    /// A repository, a pull request and a database holding both.
+    fn pr_repository() -> (TempDir, PathBuf) {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+        repository
+            .replace_repos(&[crate::model::Repo {
+                id: "aaa-111".into(),
+                name: "ticket-tui".into(),
+                project: "atlas".into(),
+                default_branch: Some("refs/heads/main".into()),
+                remote_url: "https://dev.azure.com/demo/atlas/_git/ticket-tui".into(),
+                ssh_url: "git@ssh.dev.azure.com:v3/demo/atlas/ticket-tui".into(),
+                web_url: "https://dev.azure.com/demo/atlas/_git/ticket-tui".into(),
+                is_disabled: false,
+                size: Some(2_097_152),
+            }])
+            .unwrap();
+        repository
+            .replace_pull_requests(&[stored_pull_request()])
+            .unwrap();
+        (directory, path)
+    }
+
+    fn stored_pull_request() -> PullRequest {
+        PullRequest {
+            repo_id: "aaa-111".into(),
+            id: 11,
+            title: "Split the files".into(),
+            description: "What it does.".into(),
+            status: crate::model::PrStatus::Active,
+            is_draft: false,
+            created_by: Identity::new("Avery Chen".to_owned(), None),
+            created_at: Some(crate::timestamp::ts("2026-08-29T07:00:00Z")),
+            closed_at: None,
+            source_ref: "refs/heads/feature/tabs".into(),
+            target_ref: "refs/heads/main".into(),
+            merge_status: "succeeded".into(),
+            last_merge_source_commit: "abc1234".into(),
+            auto_complete_set_by: None,
+            url: "https://dev.azure.com/demo/atlas/_git/ticket-tui/pullrequest/11".into(),
+            reviewers: vec![crate::model::PrReviewer {
+                id: "me-id".into(),
+                display_name: "Jacob Ragsdale".into(),
+                unique_name: None,
+                vote: 0,
+                is_required: true,
+            }],
+            work_items: vec![690],
+            build: None,
+            threads: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_repos_and_prs_subcommands_take_the_arguments_the_readme_documents() {
+        let Some(Command::Repos(ReposCommand::List { query, json })) = Cli::parse_from([
+            "ticket-tui",
+            "repos",
+            "list",
+            "--query",
+            "local:dirty",
+            "--json",
+        ])
+        .command
+        else {
+            panic!("repos list did not parse");
+        };
+        assert_eq!(query.as_deref(), Some("local:dirty"));
+        assert!(json);
+
+        let Some(Command::Repos(ReposCommand::Show { name, .. })) =
+            Cli::parse_from(["ticket-tui", "repos", "show", "ticket-tui"]).command
+        else {
+            panic!("repos show did not parse");
+        };
+        assert_eq!(name, "ticket-tui");
+
+        let Some(Command::Prs(PrsCommand::List { query, .. })) = Cli::parse_from([
+            "ticket-tui",
+            "prs",
+            "list",
+            "--query",
+            "reviewer:@me vote:none",
+        ])
+        .command
+        else {
+            panic!("prs list did not parse");
+        };
+        assert_eq!(query.as_deref(), Some("reviewer:@me vote:none"));
+
+        let Some(Command::Prs(PrsCommand::Vote { id, vote })) =
+            Cli::parse_from(["ticket-tui", "prs", "vote", "11", "approve"]).command
+        else {
+            panic!("prs vote did not parse");
+        };
+        assert_eq!((id, vote.as_str()), (11, "approve"));
+
+        let Some(Command::Prs(PrsCommand::Complete {
+            id,
+            strategy,
+            keep_source,
+            no_transition,
+        })) = Cli::parse_from([
+            "ticket-tui",
+            "prs",
+            "complete",
+            "11",
+            "--strategy",
+            "rebase",
+            "--keep-source",
+        ])
+        .command
+        else {
+            panic!("prs complete did not parse");
+        };
+        assert_eq!((id, strategy.as_deref()), (11, Some("rebase")));
+        assert!(keep_source && !no_transition);
+
+        assert!(matches!(
+            Cli::parse_from(["ticket-tui", "prs", "abandon", "11"]).command,
+            Some(Command::Prs(PrsCommand::Abandon { id: 11 }))
+        ));
+        assert!(matches!(
+            Cli::parse_from(["ticket-tui", "prs", "autocomplete", "11", "on"]).command,
+            Some(Command::Prs(PrsCommand::Autocomplete { id: 11, ref state })) if state == "on"
+        ));
+        assert!(matches!(
+            Cli::parse_from(["ticket-tui", "prs", "comment", "11", "looks good"]).command,
+            Some(Command::Prs(PrsCommand::Comment { id: 11, ref text })) if text == "looks good"
+        ));
+    }
+
+    #[test]
+    fn a_vote_and_a_strategy_are_read_by_name_and_a_typo_says_what_the_names_are() {
+        assert_eq!(parse_vote("approve").unwrap(), 10);
+        assert_eq!(parse_vote("Suggest").unwrap(), 5);
+        assert_eq!(parse_vote("wait").unwrap(), -5);
+        assert_eq!(parse_vote("reject").unwrap(), -10);
+        assert_eq!(parse_vote("none").unwrap(), 0);
+        let refused = parse_vote("lgtm").unwrap_err().to_string();
+        assert!(
+            refused.contains("approve, suggest, wait, reject or none"),
+            "{refused}"
+        );
+
+        assert_eq!(merge_strategy(None).unwrap(), MergeStrategy::Squash);
+        assert_eq!(merge_strategy(Some("merge")).unwrap(), MergeStrategy::Merge);
+        assert_eq!(
+            merge_strategy(Some("rebase")).unwrap(),
+            MergeStrategy::Rebase
+        );
+        assert!(
+            merge_strategy(Some("octopus"))
+                .unwrap_err()
+                .to_string()
+                .contains("squash, merge or rebase")
+        );
+    }
+
+    #[test]
+    fn the_pull_request_reads_answer_from_the_database_and_narrow_by_the_tab_grammar() {
+        let (_directory, path) = pr_repository();
+        let repository = open_database(&path).unwrap();
+        let rows = pr_rows(&repository).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].repo, "ticket-tui", "the GUID is resolved to a name");
+
+        let mine = filter_pull_requests(
+            rows.clone(),
+            Some("reviewer:@me vote:none"),
+            Some("Jacob Ragsdale".to_owned()),
+        )
+        .unwrap();
+        assert_eq!(mine.len(), 1, "which is what To review is");
+
+        let others = filter_pull_requests(
+            rows.clone(),
+            Some("author:@me"),
+            Some("Jacob Ragsdale".to_owned()),
+        )
+        .unwrap();
+        assert!(others.is_empty(), "it is somebody else's");
+
+        let refused = filter_pull_requests(rows.clone(), Some("reviewer:@me"), None).unwrap_err();
+        assert!(
+            refused.to_string().contains("TICKET_TUI_ME"),
+            "a sentinel nothing can resolve is said rather than answered with nothing: {refused}"
+        );
+
+        let table = tabulate_pull_requests(&rows);
+        assert!(
+            table.starts_with("!11  ticket-tui  Avery Chen  0/1"),
+            "{table}"
+        );
+        assert!(table.ends_with("Split the files"), "{table}");
+        assert_eq!(
+            tabulate_pull_requests(&[]),
+            "no matching pull requests",
+            "and an empty answer says so"
+        );
+
+        // `show` carries what `list` leaves out.
+        let listed = serde_json::to_value(PrJson::row(&rows[0])).unwrap();
+        assert!(listed.get("reviewers").is_none());
+        assert!(listed.get("description").is_none());
+        let shown = serde_json::to_value(PrJson::full(&rows[0])).unwrap();
+        assert_eq!(shown["reviewers"][0]["name"], "Jacob Ragsdale");
+        assert_eq!(shown["work_items"][0], 690);
+        assert_eq!(shown["target"], "main");
+        assert_eq!(shown["description"], "What it does.");
+
+        let text = describe_pull_request(&rows[0]);
+        assert!(text.contains("!11 active"), "{text}");
+        assert!(text.contains("feature/tabs \u{2192} main"), "{text}");
+        assert!(text.contains("#690"), "{text}");
+    }
+
+    #[test]
+    fn the_repository_read_names_what_is_open_against_each_one() {
+        let (directory, path) = pr_repository();
+        let cli = Cli::parse_from([
+            "ticket-tui",
+            "--workspace",
+            directory.path().join("nowhere").to_str().unwrap(),
+            "repos",
+            "list",
+        ]);
+        let Some(Command::Repos(command)) = &cli.command else {
+            panic!("repos list did not parse");
+        };
+        // A workspace that is not there is not an error: it simply finds
+        // nothing local.
+        run_repos(&cli, &path, command).unwrap();
+
+        let repository = open_database(&path).unwrap();
+        let row = RepoRow {
+            repo: repository.load_repos().unwrap().remove(0),
+            local: None,
+            pull_requests: 1,
+            pipelines: 0,
+        };
+        let table = tabulate_repos(std::slice::from_ref(&row));
+        assert!(
+            table.starts_with("ticket-tui  main  1  0  \u{2014}"),
+            "{table}"
+        );
+        let text = describe_repo(&row);
+        assert!(text.contains("Pull requests   1"), "{text}");
+        assert!(text.contains("git@ssh.dev.azure.com"), "{text}");
+        assert!(text.contains("not on this machine"), "{text}");
+        let json = serde_json::to_value(RepoJson::from(&row)).unwrap();
+        assert_eq!(json["name"], "ticket-tui");
+        assert_eq!(json["default_branch"], "main");
+        assert_eq!(json["pull_requests"], 1);
+        assert!(json["local"].is_null());
+    }
+
+    #[test]
+    fn every_pull_request_write_stores_the_copy_azure_devops_answered_with() {
+        let action =
+            |action: &PrAction, me: Option<&str>| crate::sync::pull_request_patch(action, me);
+
+        let completion = action(
+            &PrAction::Complete(CompletionOptions {
+                strategy: MergeStrategy::Rebase,
+                delete_source: false,
+                transition_work_items: true,
+                last_merge_source_commit: "abc1234".into(),
+            }),
+            None,
+        );
+        assert_eq!(completion["status"], "completed");
+        assert_eq!(completion["completionOptions"]["mergeStrategy"], "rebase");
+        assert_eq!(completion["completionOptions"]["deleteSourceBranch"], false);
+        assert_eq!(
+            completion["lastMergeSourceCommit"]["commitId"], "abc1234",
+            "a merge that raced somebody else's push is refused rather than landing over it"
+        );
+        assert_eq!(action(&PrAction::Abandon, None)["status"], "abandoned");
+        assert_eq!(
+            action(&PrAction::AutoComplete(true), Some("me-id"))["autoCompleteSetBy"]["id"],
+            "me-id"
+        );
+        assert!(action(&PrAction::AutoComplete(false), None)["autoCompleteSetBy"].is_null());
+
+        // The store puts one back among the rest and keeps the threads a
+        // write did not bring down.
+        let (_directory, path) = pr_repository();
+        let mut repository = open_database(&path).unwrap();
+        let mut updated = stored_pull_request();
+        updated.status = crate::model::PrStatus::Completed;
+        store_pull_request(&mut repository, updated).unwrap();
+        let stored = repository.load_pull_requests().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].status, crate::model::PrStatus::Completed);
     }
 }

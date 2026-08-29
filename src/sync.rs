@@ -53,13 +53,36 @@ pub enum PullOrigin {
 }
 
 /// What a write to a pull request is asking for.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PrAction {
     /// Merge it, with the options the form named.
     Complete(CompletionOptions),
     Abandon,
     /// Turn auto-complete on or off.
     AutoComplete(bool),
+}
+
+/// The document one pull-request action is written as. Completing carries the
+/// head commit the copy being acted on was read at, so a merge that raced
+/// somebody else's push is refused by Azure DevOps rather than landing over it.
+#[must_use]
+pub fn pull_request_patch(action: &PrAction, me: Option<&str>) -> Value {
+    match action {
+        PrAction::Complete(options) => serde_json::json!({
+            "status": "completed",
+            "lastMergeSourceCommit": { "commitId": options.last_merge_source_commit },
+            "completionOptions": {
+                "mergeStrategy": options.strategy.as_api(),
+                "deleteSourceBranch": options.delete_source,
+                "transitionWorkItems": options.transition_work_items,
+            },
+        }),
+        PrAction::Abandon => serde_json::json!({ "status": "abandoned" }),
+        PrAction::AutoComplete(true) => {
+            serde_json::json!({ "autoCompleteSetBy": { "id": me.unwrap_or_default() } })
+        }
+        PrAction::AutoComplete(false) => serde_json::json!({ "autoCompleteSetBy": null }),
+    }
 }
 
 /// Work for the sync thread, done in the order it arrives: an edit queued
@@ -697,6 +720,24 @@ impl WorkItemSource for AzureClient {
 
     fn vote_pull_request(&self, repo_id: &str, id: i64, reviewer_id: &str, vote: i8) -> Result<()> {
         self.vote_pull_request(repo_id, id, reviewer_id, vote)
+    }
+
+    fn pull_request_action(
+        &self,
+        repo_id: &str,
+        id: i64,
+        action: PrAction,
+        me: Option<&str>,
+    ) -> Result<PullRequest> {
+        self.patch_pull_request(repo_id, id, &pull_request_patch(&action, me))
+    }
+
+    fn comment_on_pull_request(&self, repo_id: &str, id: i64, text: &str) -> Result<PrThread> {
+        self.post_pull_request_comment(repo_id, id, text)
+    }
+
+    fn pull_request_threads(&self, repo_id: &str, id: i64) -> Result<Vec<PrThread>> {
+        self.fetch_pull_request_threads(repo_id, id)
     }
 
     fn pull_changed_since(&self, watermark: Timestamp) -> Result<SyncBatch> {
@@ -2258,21 +2299,7 @@ mod tests {
             action: PrAction,
             me: Option<&str>,
         ) -> Result<PullRequest> {
-            let body = match action {
-                PrAction::Complete(options) => serde_json::json!({
-                    "status": "completed",
-                    "completionOptions": {
-                        "mergeStrategy": options.strategy.as_api(),
-                        "deleteSourceBranch": options.delete_source,
-                        "transitionWorkItems": options.transition_work_items,
-                    },
-                }),
-                PrAction::Abandon => serde_json::json!({ "status": "abandoned" }),
-                PrAction::AutoComplete(true) => {
-                    serde_json::json!({ "autoCompleteSetBy": { "id": me.unwrap_or_default() } })
-                }
-                PrAction::AutoComplete(false) => serde_json::json!({ "autoCompleteSetBy": null }),
-            };
+            let body = pull_request_patch(&action, me);
             self.pr_patches.lock().unwrap().push(body.to_string());
             Ok(pull_request(id, "commit-a", PrStatus::Active))
         }
@@ -3273,6 +3300,7 @@ mod tests {
                 strategy: crate::model::MergeStrategy::Merge,
                 delete_source: false,
                 transition_work_items: true,
+                last_merge_source_commit: "commit-a".into(),
             }),
             PrAction::Abandon,
             PrAction::AutoComplete(true),

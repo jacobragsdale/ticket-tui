@@ -350,8 +350,8 @@ impl PullRequestsScreen {
 
     /// The completion options as the form has them.
     #[must_use]
-    pub const fn completion(&self) -> CompletionOptions {
-        self.completion
+    pub fn completion(&self) -> CompletionOptions {
+        self.completion.clone()
     }
 
     #[must_use]
@@ -369,7 +369,12 @@ impl PullRequestsScreen {
         AppAction::PullRequestAction {
             repo_id: row.request.repo_id.clone(),
             id: row.request.id,
-            action: PrAction::Complete(self.completion),
+            action: PrAction::Complete(CompletionOptions {
+                // The head the row on screen was read at: a source branch that
+                // has moved since is a merge Azure DevOps should refuse.
+                last_merge_source_commit: row.request.last_merge_source_commit.clone(),
+                ..self.completion.clone()
+            }),
         }
     }
 
