@@ -33,6 +33,7 @@ pub enum ScrollSurface {
     EditMenu,
     StatePicker,
     PriorityPicker,
+    AssigneePicker,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,6 +44,8 @@ pub enum TextEditor {
     /// The single-line field editor the Edit menu opens for a title or a tag
     /// list.
     Prompt,
+    /// The assignee picker's filter field.
+    Assignee,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,6 +116,12 @@ pub enum PointerTarget {
     PriorityOption {
         index: usize,
     },
+    /// One person in the assignee picker, `Unassigned` included.
+    AssigneeOption {
+        index: usize,
+    },
+    /// The filter field of the assignee picker.
+    AssigneeQuery,
     /// The text field of the title or tags prompt.
     PromptInput,
     SubmitPrompt,

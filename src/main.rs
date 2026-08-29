@@ -198,6 +198,7 @@ fn run() -> Result<()> {
     let mut app = App::new(tickets);
     app.set_workspace_graph(graph);
     app.set_state_catalog(repository.load_type_states()?);
+    app.set_identities(repository.load_identities()?);
     app.set_me(resolve_me(
         repository.meta(db::ME_DISPLAY_NAME_KEY)?,
         std::env::var("TICKET_TUI_ME").ok(),
@@ -434,6 +435,7 @@ fn handle_action(
         AppAction::None => {}
         AppAction::Sync => start_sync(app, runtime),
         AppAction::Edit(request) => start_edit(app, runtime, request),
+        AppAction::FetchIdentities => send_identities(runtime),
         AppAction::OpenUrl(raw_url) => match open_https_url(&raw_url, opener) {
             Ok(()) => app.set_status(format!("Opened {raw_url}")),
             Err(error) => app.set_error(format!("Could not open ticket: {error:#}")),
@@ -525,6 +527,15 @@ fn start_edit(app: &mut App, runtime: &mut SyncRuntime, request: EditRequest) {
     });
 }
 
+/// Asks the worker for the project's team members, for the assignee picker. A
+/// worker that is gone changes nothing and says nothing: the picker already
+/// offers everybody the database has seen.
+fn send_identities(runtime: &SyncRuntime) {
+    if let Some(worker) = runtime.worker.as_ref() {
+        drop(worker.send(SyncRequest::Identities));
+    }
+}
+
 fn send_pull(app: &mut App, runtime: &mut SyncRuntime, origin: PullOrigin) {
     let sent = runtime
         .worker
@@ -609,6 +620,7 @@ fn poll_sync(
                     app.reject_edit(&rejection);
                 }
             },
+            SyncEvent::Identities(identities) => app.merge_identities(identities),
             SyncEvent::Stopped => {
                 runtime.stop(app, "the Azure DevOps sync worker stopped");
             }

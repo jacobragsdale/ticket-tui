@@ -192,6 +192,7 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::StatePicker => render_state_picker(frame, app),
         AppMode::PriorityPicker => render_priority_picker(frame, app),
         AppMode::Prompt => render_prompt(frame, app),
+        AppMode::AssigneePicker => render_assignee_picker(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
 }
@@ -939,6 +940,9 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 .prompt
                 .as_ref()
                 .map_or("Enter save  Esc cancel", |prompt| prompt.field.hint()),
+            AppMode::AssigneePicker => {
+                "Type to filter  \u{2191}\u{2193} select  Enter assign  Esc cancel"
+            }
             AppMode::Browse if app.focus == Focus::Family => "↑↓ move  Enter select  Tab details",
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
@@ -1748,6 +1752,93 @@ fn render_priority_picker(frame: &mut Frame<'_>, app: &mut App) {
             rows,
             row_hit_width: None,
             target: &|index| PointerTarget::PriorityOption { index },
+            decorate: None,
+        },
+    );
+}
+
+/// The assignee picker: a filter field over everybody worth offering, with
+/// `Unassigned` first, the signed-in user named as such, and whoever holds the
+/// work item already marked and under the cursor.
+fn render_assignee_picker(frame: &mut Frame<'_>, app: &mut App) {
+    let candidates = app.assignee_matches();
+    let current = app.assignee_picker.current.clone();
+    let height = u16::try_from(candidates.len().saturating_add(3))
+        .unwrap_or(u16::MAX)
+        .clamp(5, 18);
+    let area = centered_rect(frame.area(), 52, height);
+    frame.render_widget(Clear, area);
+    let title = format!(" Assignee \u{b7} #{} ", app.assignee_picker.id);
+    let inner = render_modal_frame(frame, app, area, &title);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
+    let query_area = chunks[0];
+    let query = if app.assignee_picker.query.is_empty() {
+        Line::styled("Filter people\u{2026}", Style::default().fg(theme().muted))
+    } else {
+        Line::from(app.assignee_picker.query.text().to_owned())
+    };
+    frame.render_widget(
+        Paragraph::new(query).style(Style::default().fg(theme().text)),
+        query_area,
+    );
+    app.hit_regions.push(region(
+        query_area,
+        PointerTarget::AssigneeQuery,
+        PointerLayer::Modal,
+        Some(SelectableSurface::Overlay),
+        None,
+    ));
+    capture_selectable(frame, app, SelectableSurface::Overlay, query_area, false);
+    let cursor_x = query_area.x.saturating_add(
+        u16::try_from(app.assignee_picker.query.cursor())
+            .unwrap_or(u16::MAX)
+            .min(query_area.width.saturating_sub(1)),
+    );
+    frame.set_cursor_position((cursor_x, query_area.y));
+    let selected = app.assignee_picker.index;
+    let rows: Vec<Line> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let marker = if index == selected { "\u{203a}" } else { " " };
+            let here = if candidate.is_current(current.as_deref()) {
+                "\u{2022}"
+            } else {
+                " "
+            };
+            let name = Style::default().fg(if candidate.unassigned {
+                theme().muted
+            } else {
+                theme().text
+            });
+            let mut spans = vec![
+                Span::raw(format!("{marker}{here} ")),
+                Span::styled(candidate.display.clone(), name),
+            ];
+            if candidate.me {
+                spans.push(Span::styled(
+                    " (me)",
+                    Style::default()
+                        .fg(theme().accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: chunks[1],
+            surface: ScrollSurface::AssigneePicker,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: false,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::AssigneeOption { index },
             decorate: None,
         },
     );
@@ -4222,6 +4313,81 @@ mod tests {
             "{priorities}"
         );
         assert!(priorities.contains("Clear"), "{priorities}");
+    }
+
+    /// How many people the picker last painted, counted from the rows a click
+    /// can land on rather than from the text, which the table shares.
+    fn clickable_assignees(app: &App) -> usize {
+        (0..)
+            .take_while(|index| {
+                app.hit_regions
+                    .find_target(|target| {
+                        matches!(target, PointerTarget::AssigneeOption { index: at } if at == index)
+                    })
+                    .is_some()
+            })
+            .count()
+    }
+
+    #[test]
+    fn the_assignee_picker_renders_a_filter_field_over_the_people_it_offers() {
+        let mut first = ticket_at(
+            10_001,
+            "Fix ticket search",
+            "Issue",
+            "To Do",
+            "2026-03-03T00:00:00Z",
+        );
+        first.assigned_to = Some("Avery Chen".into());
+        let mut second = ticket_at(
+            10_002,
+            "Trim the toolbar",
+            "Issue",
+            "To Do",
+            "2026-02-02T00:00:00Z",
+        );
+        second.assigned_to = Some("Priya Nair".into());
+        let mut app = App::new(vec![first, second]);
+        app.enable_sync();
+        app.set_me(Some("Jacob Ragsdale".into()));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::AssigneePicker);
+
+        let picker = render_text(90, 24, &mut app);
+        assert!(picker.contains("Assignee \u{b7} #10001"), "{picker}");
+        assert!(picker.contains("Filter people"), "{picker}");
+        assert!(picker.contains("Unassigned"), "{picker}");
+        assert!(
+            picker.contains("Jacob Ragsdale (me)"),
+            "the signed-in user is named as such: {picker}"
+        );
+        assert!(
+            picker.contains("Enter assign"),
+            "the footer explains the picker: {picker}"
+        );
+        assert_eq!(
+            clickable_assignees(&app),
+            4,
+            "nobody, me, and the two people the rows name"
+        );
+
+        // Typing narrows the list, and the row left is still clickable.
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        let filtered = render_text(90, 24, &mut app);
+        assert!(filtered.contains("Priya Nair"), "{filtered}");
+        assert_eq!(clickable_assignees(&app), 1, "{filtered}");
+
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::AssigneeOption { index: 0 }))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("the person left should be clickable");
+        let crate::app::AppAction::Edit(request) = click(&mut app, x, y) else {
+            panic!("clicking somebody else should dispatch an edit");
+        };
+        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(request.edit.value_text(), "Priya Nair");
     }
 
     #[test]
