@@ -24,6 +24,9 @@ const BODY_LIMIT: u64 = 64 * 1024 * 1024;
 /// Profiles live on the identity host, not on `dev.azure.com/{org}`.
 const PROFILE_URL: &str =
     "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1";
+/// Every work item in the project, which both pulls narrow in their own way.
+const PROJECT_IDS_WIQL: &str =
+    "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AzureConfig {
@@ -148,7 +151,31 @@ impl AzureClient {
 
     /// Pull every work item in the configured project.
     pub fn fetch_all_work_items(&self) -> Result<SyncBatch> {
-        let ids = self.query_ids()?;
+        self.fetch_work_items(&self.query_ids()?)
+    }
+
+    /// Pull only the work items edited at or after `watermark`. The comparison
+    /// is inclusive, so the work item the watermark came from is read once
+    /// more; that costs one row and is what keeps two edits made in the same
+    /// second from hiding behind each other.
+    pub fn fetch_changed_work_items(&self, watermark: Timestamp) -> Result<SyncBatch> {
+        let wiql = format!(
+            "{PROJECT_IDS_WIQL} AND [System.ChangedDate] >= '{}' ORDER BY [System.Id]",
+            watermark.to_iso8601_utc()
+        );
+        self.fetch_work_items(&self.query_work_item_ids(&wiql)?)
+    }
+
+    /// Every work item id the project still has. A pull compares this against
+    /// the ids it already holds, because a deleted work item is not reported as
+    /// changed — it simply stops being listed.
+    pub fn query_ids(&self) -> Result<Vec<i64>> {
+        self.query_work_item_ids(&format!("{PROJECT_IDS_WIQL} ORDER BY [System.Id]"))
+    }
+
+    /// Read the named work items, relations and all, in batches the endpoint
+    /// accepts. An empty id list makes no request at all.
+    fn fetch_work_items(&self, ids: &[i64]) -> Result<SyncBatch> {
         let mut batch = SyncBatch::default();
         for chunk in ids.chunks(BATCH_SIZE) {
             let joined = chunk
@@ -251,16 +278,13 @@ impl AzureClient {
             .and_then(profile_display_name))
     }
 
-    fn query_ids(&self) -> Result<Vec<i64>> {
+    fn query_work_item_ids(&self, wiql: &str) -> Result<Vec<i64>> {
         let url = format!(
             "{}/{}/_apis/wit/wiql?api-version={API_VERSION}",
             self.config.base_url(),
             self.config.project
         );
-        let query = json!({
-            "query": "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project ORDER BY [System.Id]"
-        });
-        let response = self.post(&url, &query)?;
+        let response = self.post(&url, &json!({ "query": wiql }))?;
         response
             .get("workItems")
             .and_then(Value::as_array)

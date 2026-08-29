@@ -10,6 +10,8 @@ const CALENDAR_DAY: &[time::format_description::FormatItem<'static>] =
     format_description!("[month repr:short] [day padding:none]");
 const EXACT_UTC: &[time::format_description::FormatItem<'static>] =
     format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
+const ISO_UTC: &[time::format_description::FormatItem<'static>] =
+    format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
 
 /// A UTC instant parsed from ticket data.
 ///
@@ -83,6 +85,17 @@ impl Timestamp {
     pub fn exact_utc(self) -> String {
         self.instant
             .format(EXACT_UTC)
+            .unwrap_or_else(|_| self.to_rfc3339())
+    }
+
+    /// The instant as an ISO 8601 UTC literal down to the second, which is the
+    /// form a WIQL date comparison takes. Sub-second precision is dropped
+    /// rather than rounded, so a `>=` watermark can only ever look further
+    /// back than the instant it came from, never past an edit.
+    #[must_use]
+    pub fn to_iso8601_utc(self) -> String {
+        self.instant
+            .format(ISO_UTC)
             .unwrap_or_else(|_| self.to_rfc3339())
     }
 
@@ -168,6 +181,19 @@ mod tests {
 
         assert_eq!(ts("2026-08-26 18:00:00"), ts("2026-08-26T18:00:00Z"));
         assert_eq!(ts("2026-08-26"), ts("2026-08-26T00:00:00Z"));
+    }
+
+    #[test]
+    fn iso8601_literals_are_utc_and_truncated_to_the_second() {
+        assert_eq!(
+            ts("2026-08-26T13:00:00-05:00").to_iso8601_utc(),
+            "2026-08-26T18:00:00Z"
+        );
+        assert_eq!(
+            ts("2026-08-26T18:00:00.987654Z").to_iso8601_utc(),
+            "2026-08-26T18:00:00Z",
+            "truncating never steps past an edit made in the same second"
+        );
     }
 
     #[test]

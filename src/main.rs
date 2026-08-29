@@ -23,7 +23,8 @@ use ticket_tui::edit::{EditRejection, EditRequest};
 use ticket_tui::model::TicketGraph;
 use ticket_tui::session;
 use ticket_tui::sync::{
-    AzureConnector, PullOrigin, SyncEvent, SyncHandle, SyncOutcome, SyncRequest, SyncScheduler,
+    self, AzureConnector, PullOrigin, SyncEvent, SyncHandle, SyncMode, SyncOutcome, SyncRequest,
+    SyncScheduler,
 };
 use url::Url;
 
@@ -60,15 +61,18 @@ struct SyncRuntime {
 }
 
 impl SyncRuntime {
-    fn status_for(&self, count: usize) -> String {
+    /// What a pull the user asked for reports. A full pull counts the work
+    /// items it stored; an incremental one counts what actually moved, which
+    /// on a quiet project is usually a handful or none.
+    fn status_for(&self, mode: SyncMode, count: usize) -> String {
+        let synced = match mode {
+            SyncMode::Full => format!("Synced {count} work items"),
+            SyncMode::Incremental if count == 1 => "Synced 1 change".to_owned(),
+            SyncMode::Incremental => format!("Synced {count} changes"),
+        };
         self.config.as_ref().map_or_else(
-            || format!("Synced {count} work items"),
-            |config| {
-                format!(
-                    "Synced {count} work items from {}/{}",
-                    config.organization, config.project
-                )
-            },
+            || synced.clone(),
+            |config| format!("{synced} from {}/{}", config.organization, config.project),
         )
     }
 
@@ -269,9 +273,11 @@ fn run() -> Result<()> {
     result
 }
 
-/// The `--sync` pull, run before the TUI opens. Reports the status line to
-/// show, leaving the error to the caller: an unreachable Azure DevOps is a
-/// notification over the existing database, not a reason to refuse to start.
+/// The `--sync` pull, run before the TUI opens. Always a full pull: asking for
+/// one explicitly is how a database is rebuilt from scratch. Reports the status
+/// line to show, leaving the error to the caller: an unreachable Azure DevOps
+/// is a notification over the existing database, not a reason to refuse to
+/// start.
 fn blocking_sync(repository: &mut SqliteTicketRepository, config: &AzureConfig) -> Result<String> {
     let client = AzureClient::connect(config.clone())?;
     let batch = client.fetch_all_work_items()?;
@@ -280,6 +286,11 @@ fn blocking_sync(repository: &mut SqliteTicketRepository, config: &AzureConfig) 
         ..TicketGraph::default()
     };
     let count = repository.replace_all(&batch.tickets, &graph)?;
+    // Leaving the watermark behind is what lets the pulls that follow ask only
+    // for what changed.
+    if let Some(watermark) = sync::watermark_of(&batch.tickets) {
+        repository.set_meta(db::WATERMARK_KEY, &watermark.to_rfc3339())?;
+    }
     // The state picker reads these from the database, so the pull that fills it
     // fills them too. A type whose states cannot be read is skipped: the picker
     // falls back to the states the rows already carry.
@@ -545,7 +556,11 @@ fn poll_sync(
             SyncEvent::Finished { origin, outcome } => {
                 runtime.scheduler.finish(Instant::now());
                 match outcome {
-                    SyncOutcome::Pulled { prepared, count } => {
+                    SyncOutcome::Pulled {
+                        prepared,
+                        mode,
+                        count,
+                    } => {
                         app.replace_prepared_tickets(prepared);
                         app.finish_sync();
                         app.configure_database(
@@ -553,7 +568,17 @@ fn poll_sync(
                             db::data_signature(repository.path()),
                         );
                         if origin == PullOrigin::User {
-                            app.set_status(runtime.status_for(count));
+                            app.set_status(runtime.status_for(mode, count));
+                        }
+                    }
+                    // Nothing moved in Azure DevOps, so nothing was written and
+                    // there is nothing to reload. The signature stays as it was:
+                    // if another process wrote the file while this pull was out,
+                    // the watcher is free to notice it now.
+                    SyncOutcome::Unchanged => {
+                        app.finish_sync();
+                        if origin == PullOrigin::User {
+                            app.set_status("Nothing changed");
                         }
                     }
                     // A timer pull that keeps failing the same way says so in
@@ -812,6 +837,9 @@ mod tests {
         failure: Option<String>,
         stored: Option<Ticket>,
         refusal: Option<(u16, String)>,
+        /// Whether a changed-since query comes back empty: the project still
+        /// lists every one of `tickets`, but none of them has moved.
+        quiet: bool,
     }
 
     impl FakeAzure {
@@ -821,6 +849,15 @@ mod tests {
                 failure: None,
                 stored: None,
                 refusal: None,
+                quiet: false,
+            }
+        }
+
+        /// Still holds `tickets`, but nothing in it has changed.
+        fn quiet(tickets: Vec<Ticket>) -> Self {
+            Self {
+                quiet: true,
+                ..Self::returning(tickets)
             }
         }
 
@@ -856,6 +893,22 @@ mod tests {
                     tickets: self.tickets.clone(),
                     relations: Vec::new(),
                 }),
+            }
+        }
+
+        /// The same work items whichever way they are asked for, unless the
+        /// fake was told the project has gone quiet.
+        fn pull_changed_since(&self, _watermark: Timestamp) -> Result<SyncBatch> {
+            if self.quiet {
+                return Ok(SyncBatch::default());
+            }
+            self.pull()
+        }
+
+        fn list_ids(&self) -> Result<Vec<i64>> {
+            match &self.failure {
+                Some(message) => bail!("{message}"),
+                None => Ok(self.tickets.iter().map(|ticket| ticket.key.id).collect()),
             }
         }
 
@@ -1109,6 +1162,50 @@ mod tests {
         assert!(
             !poll_watch(&mut app, &repository, &mut ReloadEngine::default()),
             "the watcher does not chase the database our own worker just wrote"
+        );
+    }
+
+    #[test]
+    fn a_pull_that_finds_nothing_says_so_and_reloads_nothing() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let (mut app, mut repository, mut runtime) =
+            synced_app(&path, FakeAzure::quiet((1..=3).map(ticket).collect()));
+        // The watermark an earlier pull left is what makes this one incremental.
+        repository
+            .set_meta(db::WATERMARK_KEY, "2026-01-01T00:00:00Z")
+            .unwrap();
+        app.configure_database(path.clone(), db::data_signature(&path));
+
+        start_sync(&mut app, &mut runtime);
+        await_sync(&mut app, &mut repository, &mut runtime);
+
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Nothing changed")
+        );
+        assert_eq!(
+            app.activity_label().as_deref(),
+            Some("Synced just now"),
+            "the pull still happened, so the title moves"
+        );
+        assert_eq!(app.tickets().len(), 3, "the rows were never replaced");
+        assert!(
+            !poll_watch(&mut app, &repository, &mut ReloadEngine::default()),
+            "an unchanged pull writes nothing, so there is nothing to reload"
+        );
+
+        assert_eq!(
+            runtime.status_for(SyncMode::Incremental, 1),
+            "Synced 1 change from example-org/atlas"
+        );
+        assert_eq!(
+            runtime.status_for(SyncMode::Incremental, 3),
+            "Synced 3 changes from example-org/atlas"
+        );
+        assert_eq!(
+            runtime.status_for(SyncMode::Full, 52),
+            "Synced 52 work items from example-org/atlas"
         );
     }
 
