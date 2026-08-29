@@ -340,14 +340,11 @@ mod tests {
                 .iter()
                 .any(|command| command.id == CommandId::Reload)
         );
-    }
-
-    #[test]
-    fn palette_hides_commands_that_only_work_from_browse_mode() {
         assert!(
             !matching_commands("")
                 .iter()
-                .any(|command| command.id == CommandId::Search)
+                .any(|command| command.id == CommandId::Search),
+            "commands that only work from browse mode stay out of the palette"
         );
     }
 
@@ -402,10 +399,7 @@ mod tests {
                 bound.push(*key);
             }
         }
-    }
 
-    #[test]
-    fn labels_render_modifiers_and_alternatives() {
         assert_eq!(key('s').label(), "s");
         assert_eq!(ctrl('c').label(), "Ctrl-C");
         let palette = COMMANDS

@@ -239,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn toggling_and_reordering_disables_auto_hide() {
+    fn toggling_disables_auto_hide_while_title_stays_visible() {
         let mut layout = TableLayout::default();
         let org = layout
             .columns
@@ -253,14 +253,12 @@ mod tests {
 
         let moved = layout.move_column(org, -1);
         assert_eq!(layout.columns[moved].id, SortField::Organization);
-    }
 
-    #[test]
-    fn title_stays_visible_and_is_not_resized() {
-        let mut layout = TableLayout::default();
-        layout.resize(1, 10);
-        assert_eq!(layout.columns[1].width, 0);
-        layout.toggle_visible(1);
-        assert!(layout.columns[1].visible);
+        let title = 1;
+        assert_eq!(layout.columns[title].id, SortField::Title);
+        layout.resize(title, 10);
+        assert_eq!(layout.columns[title].width, 0);
+        layout.toggle_visible(title);
+        assert!(layout.columns[title].visible);
     }
 }

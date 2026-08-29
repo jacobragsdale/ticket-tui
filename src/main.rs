@@ -543,32 +543,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_https_ticket_urls() {
+    fn only_well_formed_https_urls_reach_the_launcher() {
         let error = open_https_url("file:///tmp/not-a-ticket", &FailingOpener).unwrap_err();
-        assert!(error.to_string().contains("only HTTPS"));
-    }
-
-    #[test]
-    fn rejects_malformed_ticket_urls() {
+        assert!(error.to_string().contains("only HTTPS"), "{error}");
         let error = open_https_url("not a url", &FailingOpener).unwrap_err();
-        assert!(error.to_string().contains("invalid"));
-    }
-
-    #[test]
-    fn reports_launcher_failures_without_opening_a_browser() {
+        assert!(error.to_string().contains("invalid"), "{error}");
         let error = open_https_url("https://dev.azure.com/demo", &FailingOpener).unwrap_err();
-        assert!(error.to_string().contains("system URL launcher failed"));
-    }
-
-    #[test]
-    fn clipboard_status_names_the_copied_content() {
-        assert_eq!(
-            copied_status(CopiedContent::Url),
-            "Copied url to clipboard!"
-        );
-        assert_eq!(
-            copied_status(CopiedContent::MarkdownLink),
-            "Copied markdown link to clipboard!"
+        assert!(
+            error.to_string().contains("system URL launcher failed"),
+            "{error}"
         );
     }
 

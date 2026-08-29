@@ -272,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn searches_core_fields_and_ranks_best_title_match_first() {
+    fn search_ranks_the_best_title_match_first_and_the_latest_query_wins() {
         let tickets = vec![
             ticket(1, "Fix ticket search", "nothing special"),
             ticket(2, "Update deployment", "ticket search only appears here"),
@@ -285,6 +285,14 @@ mod tests {
 
         assert_eq!(result.matches.len(), 1);
         assert_eq!(result.matches[0].ticket_index, 0);
+
+        engine.submit("update");
+        let generation = engine.submit("indexing");
+        let result = await_result(&engine, generation);
+        assert_eq!(
+            result.matches[0].ticket_index, 2,
+            "the newest query replaces the one still in flight"
+        );
     }
 
     fn matched_chars(query: &str, haystack: &str) -> String {
@@ -296,16 +304,12 @@ mod tests {
     }
 
     #[test]
-    fn match_char_indices_marks_fuzzy_hits_in_a_single_field() {
+    fn match_char_indices_highlights_one_atom_of_a_multi_word_query() {
         assert_eq!(
             matched_chars("search", "Fix ticket search").to_ascii_lowercase(),
             "search"
         );
         assert!(match_char_indices("bug", "Fix ticket search").is_empty());
-    }
-
-    #[test]
-    fn match_char_indices_can_highlight_one_atom_of_a_multi_word_query() {
         assert_eq!(
             matched_chars("bug search", "Fix ticket search").to_ascii_lowercase(),
             "search"
@@ -314,17 +318,5 @@ mod tests {
             matched_chars("bug search", "Bug").to_ascii_lowercase(),
             "bug"
         );
-    }
-
-    #[test]
-    fn latest_generation_can_replace_an_older_query() {
-        let tickets = vec![ticket(1, "Alpha", ""), ticket(2, "Beta", "")];
-        let mut engine = SearchEngine::new(&tickets);
-        engine.submit("alpha");
-        let generation = engine.submit("beta");
-
-        let result = await_result(&engine, generation);
-
-        assert_eq!(result.matches[0].ticket_index, 1);
     }
 }

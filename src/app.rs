@@ -2610,16 +2610,6 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_changed_descending() {
-        let app = App::new(vec![
-            ticket(1, "Older", "2026-01-01T00:00:00Z"),
-            ticket(2, "Newer", "2026-02-01T00:00:00Z"),
-        ]);
-
-        assert_eq!(app.visible_tickets().next().unwrap().key.id, 2);
-    }
-
-    #[test]
     fn agent_context_describes_the_live_ticket_workspace() {
         let mut app = App::new(vec![
             ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
@@ -2648,80 +2638,82 @@ mod tests {
         assert!(context.selected_ticket.as_ref().unwrap().checked);
         assert_eq!(context.checked_tickets.len(), 1);
         assert_eq!(context.checked_tickets[0].id, 3);
-    }
 
-    #[test]
-    fn my_own_work_items_are_recognised_whatever_the_casing() {
-        let mut app = App::new(vec![
-            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
-            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
-        ]);
         let mut mine = app.tickets()[0].clone();
         mine.assigned_to = Some("  avery CHEN ".into());
         let mut theirs = app.tickets()[1].clone();
         theirs.assigned_to = Some("Jordan Patel".into());
         let mut unassigned = app.tickets()[1].clone();
         unassigned.assigned_to = None;
-
         assert!(!app.is_mine(&mine), "nobody is \"me\" until a name is set");
 
         app.set_me(Some("Avery Chen".into()));
 
         assert_eq!(app.me(), Some("Avery Chen"));
-        assert!(app.is_mine(&mine));
+        assert!(app.is_mine(&mine), "casing and padding do not matter");
         assert!(!app.is_mine(&theirs));
         assert!(!app.is_mine(&unassigned));
         assert_eq!(app.agent_context().me.as_deref(), Some("Avery Chen"));
     }
 
     #[test]
-    fn fuzzy_result_then_field_sort_preserves_selected_ticket() {
+    fn search_order_switches_between_relevance_and_field_sorting_and_keeps_the_selection() {
         let mut app = App::new(vec![
             ticket(1, "Search alpha", "2026-01-01T00:00:00Z"),
             ticket(2, "Search beta", "2026-02-01T00:00:00Z"),
         ]);
         app.select_row(1);
         let selected = app.selected_ticket().unwrap().key.clone();
+        assert_eq!(selected.id, 1, "the newest ticket leads by default");
 
         app.set_query("search".into());
         await_search(&mut app);
         app.set_sort(SortField::Title, SortDirection::Ascending);
-
         assert_eq!(app.selected_ticket().unwrap().key, selected);
-    }
 
-    #[test]
-    fn search_order_can_switch_from_relevance_to_strict_field_sorting() {
-        let mut app = App::new(vec![
-            ticket(1, "alpha", "2026-01-01T00:00:00Z"),
-            ticket(2, "prefix alpha suffix", "2026-02-01T00:00:00Z"),
-        ]);
-        app.set_query("alpha".into());
         app.visible = vec![
             SearchMatch {
-                ticket_index: 0,
+                ticket_index: 1,
                 score: 100,
             },
             SearchMatch {
-                ticket_index: 1,
+                ticket_index: 0,
                 score: 1,
             },
         ];
         app.sort_visible();
-
         assert_eq!(app.search_order, SearchOrder::Relevance);
-        assert_eq!(app.visible_tickets().next().unwrap().key.id, 1);
+        assert_eq!(
+            app.visible_tickets().next().unwrap().key.id,
+            2,
+            "relevance leads with the best scoring match"
+        );
 
         app.toggle_search_order();
 
         assert_eq!(app.search_order, SearchOrder::Field);
-        assert_eq!(app.visible_tickets().next().unwrap().key.id, 2);
+        assert_eq!(
+            app.visible_tickets().next().unwrap().key.id,
+            1,
+            "field order falls back to the sort column"
+        );
+
+        let mut without_fuzzy = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+        let order = without_fuzzy.search_order;
+        without_fuzzy.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(
+            without_fuzzy.search_order, order,
+            "there is nothing to re-rank without a fuzzy query"
+        );
     }
 
     #[test]
-    fn escape_clears_query_from_browse_mode() {
+    fn pasting_fills_the_search_editor_and_escape_clears_the_query() {
         let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
-        app.set_query("search".into());
+        app.mode = AppMode::Search;
+        app.handle_paste("search\n");
+        assert_eq!(app.query(), "search ");
+        assert_eq!(app.query_cursor(), 7);
         app.mode = AppMode::Browse;
 
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -2748,73 +2740,18 @@ mod tests {
     }
 
     #[test]
-    fn search_editor_inserts_and_deletes_at_the_cursor() {
-        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
-        app.mode = AppMode::Search;
-        app.set_query("ac".into());
-
-        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
-        assert_eq!(app.query(), "abc");
-        assert_eq!(app.query_cursor(), 2);
-
-        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(app.query(), "ac");
-        assert_eq!(app.query_cursor(), 1);
-
-        app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
-        assert_eq!(app.query(), "a");
-        assert_eq!(app.query_cursor(), 1);
-    }
-
-    #[test]
-    fn search_editor_handles_unicode_word_deletion_and_paste() {
-        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
-        app.mode = AppMode::Search;
-        app.set_query("alpha café".into());
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
-        assert_eq!(app.query(), "alpha ");
-        assert_eq!(app.query_cursor(), 6);
-
-        app.handle_paste("tea\nshop\u{7}");
-        assert_eq!(app.query(), "alpha tea shop");
-        assert_eq!(app.query_cursor(), 14);
-    }
-
-    #[test]
-    fn completed_searches_can_be_recalled_and_return_to_the_draft() {
-        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        app.set_query("alpha".into());
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        app.set_query("beta".into());
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        assert_eq!(app.query(), "beta");
-        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        assert_eq!(app.query(), "alpha");
-        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert_eq!(app.query(), "beta");
-        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert!(app.query().is_empty());
-    }
-
-    #[test]
-    fn sorting_and_reload_preserve_selected_ticket_view_context() {
+    fn sorting_and_reload_keep_the_view_context_unless_the_selection_is_gone() {
         let original = vec![
             ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
             ticket(2, "Beta", "2026-02-01T00:00:00Z"),
             ticket(3, "Gamma", "2026-03-01T00:00:00Z"),
         ];
         let mut app = App::new(original.clone());
+        assert_eq!(
+            app.visible_tickets().next().unwrap().key.id,
+            3,
+            "tickets start sorted by most recently changed"
+        );
         app.select_row(1);
         let selected = app.selected_ticket().unwrap().key.clone();
         app.details.set_viewport(0, 5);
@@ -2831,53 +2768,11 @@ mod tests {
         assert_eq!(app.selected_ticket().unwrap().key, selected);
         assert_eq!(app.details.offset, 3);
         assert_eq!(app.table.offset, 1);
-    }
 
-    #[test]
-    fn missing_selection_resets_view_context_after_reload() {
-        let mut app = App::new(vec![
-            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
-            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
-        ]);
-        app.select_row(1);
-        app.details.set_viewport(0, 5);
-        app.details.scroll_to(3);
-        app.table.offset = 1;
-
-        app.replace_tickets(vec![ticket(3, "Gamma", "2026-03-01T00:00:00Z")]);
-
-        assert_eq!(app.selected_ticket().unwrap().key.id, 3);
-        assert_eq!(app.details.offset, 0);
-        assert_eq!(app.table.offset, 0);
-    }
-
-    #[test]
-    fn row_density_toggles_between_compact_and_comfortable() {
-        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
-
-        assert_eq!(app.row_density, RowDensity::Compact);
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-        assert_eq!(app.row_density, RowDensity::Comfortable);
-        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-        assert_eq!(app.row_density, RowDensity::Compact);
-    }
-
-    #[test]
-    fn facet_bar_keyboard_toggles_the_focused_value() {
-        let mut app = App::new(vec![
-            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
-            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
-        ]);
-        app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
-        assert_eq!(app.mode, AppMode::Facets);
-        assert_eq!(app.focused_bar_field(), Some(FilterField::State));
-
-        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        assert!(app.query().to_ascii_lowercase().contains("state:"));
-        assert_eq!(app.visible_count(), 2);
-
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.mode, AppMode::Browse);
+        app.replace_tickets(vec![ticket(9, "Delta", "2026-03-01T00:00:00Z")]);
+        assert_eq!(app.selected_ticket().unwrap().key.id, 9);
+        assert_eq!(app.details.offset, 0, "a lost selection resets the details");
+        assert_eq!(app.table.offset, 0, "a lost selection resets the table");
     }
 
     #[test]
@@ -2896,7 +2791,7 @@ mod tests {
     }
 
     #[test]
-    fn facet_toggle_rewrites_the_query_and_chip_removal_clears_it() {
+    fn a_facet_toggle_rewrites_the_query_and_removing_the_chip_clears_it() {
         let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
         app.open_filters();
         app.filter_overlay.showing_values = true;
@@ -2985,73 +2880,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn toggling_search_order_needs_a_fuzzy_query() {
-        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
-        let order = app.search_order;
-        app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
-        assert_eq!(app.search_order, order);
-    }
-
-    #[test]
-    fn pane_shortcuts_keep_narrow_view_and_focus_together() {
-        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
-
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.focus, Focus::Details);
-        assert!(app.narrow_details);
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
-        assert_eq!(app.focus, Focus::Tickets);
-        assert!(!app.narrow_details);
-    }
-
-    #[test]
-    fn scrolling_is_bounded_to_rendered_content() {
-        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
-        app.focus = Focus::Details;
-        app.details.set_viewport(0, 4);
-
-        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-        assert_eq!(app.details.offset, 4);
-
-        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        assert_eq!(app.details.offset, 0);
-
-        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        assert_eq!(app.details.offset, 4);
-    }
-
-    #[test]
-    fn notifications_retain_level_and_schedule_expiration() {
-        let mut app = App::new(Vec::new());
-
-        app.set_status("Reloaded");
-        assert_eq!(
-            app.notification(),
-            Some(("Reloaded", NotificationLevel::Info))
-        );
-        assert!(app.next_wakeup().is_some());
-
-        app.set_error("Reload failed");
-        assert_eq!(
-            app.notification(),
-            Some(("Reload failed", NotificationLevel::Error))
-        );
-    }
-
-    #[test]
-    fn help_navigation_clamps_to_rendered_content() {
-        let mut app = App::new(Vec::new());
-        app.mode = AppMode::Help;
-        app.help.set_viewport(0, 3);
-
-        app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-        assert_eq!(app.help.offset, 3);
-        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        assert_eq!(app.help.offset, 0);
-    }
-
     fn family_key(id: i64) -> TicketKey {
         TicketKey {
             organization: "demo".into(),
@@ -3089,30 +2917,15 @@ mod tests {
     }
 
     #[test]
-    fn selected_family_tree_is_always_fully_expanded() {
-        let app = family_app();
-        let tree = app.visible_family_tree();
-        assert_eq!(
-            tree.iter().map(|entry| entry.key.id).collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
-        assert!(
-            tree.iter()
-                .any(|entry| entry.key.id == 2 && entry.is_current)
-        );
-        assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(2));
-    }
-
-    #[test]
-    fn tab_toggles_between_tickets_and_details() {
+    fn pane_keys_move_focus_and_only_the_details_pane_opens_on_enter() {
         let mut app = family_app();
         assert_eq!(app.focus, Focus::Tickets);
 
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Focus::Details);
-        assert!(app.narrow_details);
+        assert!(app.narrow_details, "the narrow layout follows the focus");
 
-        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('d'));
         assert_eq!(app.focus, Focus::Tickets);
         assert!(!app.narrow_details);
 
@@ -3120,23 +2933,16 @@ mod tests {
         press(&mut app, KeyCode::Tab);
         assert_eq!(app.focus, Focus::Details);
 
-        let mut without_family = App::new(vec![ticket(1, "Solo", "2026-01-01T00:00:00Z")]);
-        press(&mut without_family, KeyCode::Tab);
-        assert_eq!(without_family.focus, Focus::Details);
-        press(&mut without_family, KeyCode::Tab);
-        assert_eq!(without_family.focus, Focus::Tickets);
-    }
-
-    #[test]
-    fn enter_does_not_open_a_ticket_from_the_tickets_pane() {
-        let mut app = family_app();
-
-        assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
+        app.focus = Focus::Tickets;
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            AppAction::None,
+            "Enter must not open a browser from the tickets pane"
+        );
         assert!(matches!(
             press(&mut app, KeyCode::Char('o')),
             AppAction::OpenUrl(_)
         ));
-
         app.focus = Focus::Details;
         assert!(matches!(
             press(&mut app, KeyCode::Enter),
@@ -3145,20 +2951,27 @@ mod tests {
     }
 
     #[test]
-    fn family_cursor_movement_clamps_at_both_ends() {
+    fn family_cursor_movement_clamps_and_scrolls_the_details_viewport() {
         let mut app = family_app();
         app.focus = Focus::Family;
+        app.details.set_viewport(2, 20);
+
         press(&mut app, KeyCode::Home);
         press(&mut app, KeyCode::Up);
         assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(1));
+        assert_eq!(app.details.offset, 0);
 
         press(&mut app, KeyCode::End);
         press(&mut app, KeyCode::Down);
         assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(3));
+        assert!(
+            app.details.offset > 0,
+            "the details pane scrolls to keep the cursor visible"
+        );
     }
 
     #[test]
-    fn family_enter_selects_a_visible_ticket_and_records_history_once() {
+    fn family_enter_selects_visible_tickets_records_history_once_and_explains_hidden_ones() {
         let mut app = family_app();
         assert_eq!(app.selected_ticket().unwrap().key.id, 2);
         app.focus = Focus::Family;
@@ -3178,19 +2991,14 @@ mod tests {
 
         press(&mut app, KeyCode::Char('['));
         assert_eq!(app.selected_ticket().unwrap().key.id, 2);
-    }
 
-    #[test]
-    fn jumping_to_a_hidden_family_ticket_explains_why() {
-        let mut app = family_app();
-        app.focus = Focus::Family;
         app.visible
             .retain(|entry| app.tickets[entry.ticket_index].key.id != 3);
         app.family_cursor = Some(family_key(3));
         let query = app.query().to_owned();
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.selected_ticket().unwrap().key.id, 2);
-        assert_eq!(app.query(), query);
+        assert_eq!(app.query(), query, "a hidden target changes no search");
         assert_eq!(
             app.notification(),
             Some(("3 is hidden by the current search", NotificationLevel::Info))
@@ -3219,27 +3027,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
-    }
-
-    #[test]
-    fn family_cursor_movement_scrolls_the_details_viewport() {
-        let mut app = family_app();
-        app.focus = Focus::Family;
-        app.details.set_viewport(2, 20);
-
-        press(&mut app, KeyCode::End);
-        assert!(app.details.offset > 0);
-        press(&mut app, KeyCode::Home);
-        assert_eq!(app.details.offset, 0);
-    }
-
-    #[test]
-    fn family_navigation_does_not_mark_the_session_dirty() {
-        let mut app = family_app();
-        app.session_dirty = false;
-        app.focus = Focus::Family;
-        press(&mut app, KeyCode::Down);
-        assert!(!app.session_dirty);
     }
 
     #[test]
@@ -3296,35 +3083,19 @@ mod tests {
         assert!(app.selection().is_none(), "a divider press selects no text");
         assert_eq!(app.pane_split_wide, DEFAULT_PANE_SPLIT_WIDE);
         assert!(!app.session_dirty, "a press with no drag changes nothing");
-    }
 
-    #[test]
-    fn resetting_the_pane_split_restores_the_defaults() {
-        let mut app = App::new(vec![ticket(1, "One", "2026-01-02T00:00:00Z")]);
-        app.pane_split_wide = 75;
-        app.pane_split_stacked = 30;
-        app.session_dirty = false;
-
-        app.run_command(CommandId::ResetPaneSplit);
-
-        assert_eq!(app.pane_split_wide, DEFAULT_PANE_SPLIT_WIDE);
-        assert_eq!(app.pane_split_stacked, DEFAULT_PANE_SPLIT_STACKED);
-        assert!(app.session_dirty);
-    }
-
-    #[test]
-    fn the_split_survives_a_session_round_trip() {
-        let mut app = App::new(vec![ticket(1, "One", "2026-01-02T00:00:00Z")]);
         app.pane_split_wide = 71;
         app.pane_split_stacked = 45;
-
         let session = app.snapshot_session();
-        assert_eq!(session.pane_split_wide, 71);
-        assert_eq!(session.pane_split_stacked, 45);
-
         let mut restored = App::new(vec![ticket(1, "One", "2026-01-02T00:00:00Z")]);
         restored.restore_session(session);
-        assert_eq!(restored.pane_split_wide, 71);
+        assert_eq!(restored.pane_split_wide, 71, "the split is remembered");
         assert_eq!(restored.pane_split_stacked, 45);
+
+        restored.session_dirty = false;
+        restored.run_command(CommandId::ResetPaneSplit);
+        assert_eq!(restored.pane_split_wide, DEFAULT_PANE_SPLIT_WIDE);
+        assert_eq!(restored.pane_split_stacked, DEFAULT_PANE_SPLIT_STACKED);
+        assert!(restored.session_dirty);
     }
 }

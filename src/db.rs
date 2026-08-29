@@ -520,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_all_round_trips_tickets_and_relations() {
+    fn replace_all_round_trips_tickets_and_relations_without_touching_sync_meta() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tickets.sqlite3");
         let mut repository = SqliteTicketRepository::open(&path).unwrap();
@@ -562,10 +562,36 @@ mod tests {
             .unwrap();
         assert_eq!(repository.load_all().unwrap(), survivor);
         assert_eq!(repository.load_graph().unwrap(), TicketGraph::default());
+
+        assert_eq!(repository.meta(ME_DISPLAY_NAME_KEY).unwrap(), None);
+        repository
+            .set_meta(ME_DISPLAY_NAME_KEY, "Jacob Ragsdale")
+            .unwrap();
+        repository
+            .replace_all(&survivor, &TicketGraph::default())
+            .unwrap();
+        assert_eq!(
+            repository.meta(ME_DISPLAY_NAME_KEY).unwrap().as_deref(),
+            Some("Jacob Ragsdale"),
+            "a pull replaces work items, not who is signed in"
+        );
+        repository
+            .set_meta(ME_DISPLAY_NAME_KEY, "Avery Chen")
+            .unwrap();
+        drop(repository);
+        assert_eq!(
+            SqliteTicketRepository::open(&path)
+                .unwrap()
+                .meta(ME_DISPLAY_NAME_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("Avery Chen"),
+            "the signed-in name outlives a reopen"
+        );
     }
 
     #[test]
-    fn stale_schema_version_rebuilds_the_cache_instead_of_migrating() {
+    fn a_stale_schema_is_rebuilt_by_open_but_refused_by_open_existing() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("stale.sqlite3");
         let connection = Connection::open(&path).unwrap();
@@ -582,54 +608,40 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let repository = SqliteTicketRepository::open(&path).unwrap();
-
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
         assert!(repository.load_all().unwrap().is_empty());
         assert_eq!(
             schema_version(&repository.connection).unwrap(),
             SCHEMA_VERSION
         );
-    }
-
-    #[test]
-    fn sync_meta_round_trips_and_outlives_a_pull() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("meta.sqlite3");
-        let mut repository = SqliteTicketRepository::open(&path).unwrap();
-
-        assert_eq!(repository.meta(ME_DISPLAY_NAME_KEY).unwrap(), None);
-
-        repository
-            .set_meta(ME_DISPLAY_NAME_KEY, "Jacob Ragsdale")
-            .unwrap();
-        assert_eq!(
-            repository.meta(ME_DISPLAY_NAME_KEY).unwrap().as_deref(),
-            Some("Jacob Ragsdale")
-        );
 
         repository
             .replace_all(&[ticket(1)], &TicketGraph::default())
             .unwrap();
-        assert_eq!(
-            repository.meta(ME_DISPLAY_NAME_KEY).unwrap().as_deref(),
-            Some("Jacob Ragsdale"),
-            "a pull replaces work items, not who is signed in"
-        );
-
-        repository
-            .set_meta(ME_DISPLAY_NAME_KEY, "Avery Chen")
-            .unwrap();
-        assert_eq!(
-            repository.meta(ME_DISPLAY_NAME_KEY).unwrap().as_deref(),
-            Some("Avery Chen")
-        );
-
         drop(repository);
-        let reopened = SqliteTicketRepository::open(&path).unwrap();
         assert_eq!(
-            reopened.meta(ME_DISPLAY_NAME_KEY).unwrap().as_deref(),
-            Some("Avery Chen")
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .load_all()
+                .unwrap()
+                .len(),
+            1
         );
+
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        let error = format!(
+            "{:#}",
+            SqliteTicketRepository::open_existing(&path).unwrap_err()
+        );
+        assert!(error.contains("restart ticket-tui"), "{error}");
+        let rows: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM work_items", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "a version mismatch must not drop the cached rows");
     }
 
     #[test]
@@ -662,40 +674,5 @@ mod tests {
         let error = format!("{:#}", repository.load_all().unwrap_err());
         assert!(error.contains("10001"), "{error}");
         assert!(error.contains("created_at"), "{error}");
-    }
-
-    #[test]
-    fn open_existing_never_rebuilds_a_foreign_schema() {
-        let directory = tempdir().unwrap();
-        let path = directory.path().join("tickets.sqlite3");
-        let mut repository = SqliteTicketRepository::open(&path).unwrap();
-        repository
-            .replace_all(&[ticket(1)], &TicketGraph::default())
-            .unwrap();
-        drop(repository);
-
-        assert_eq!(
-            SqliteTicketRepository::open_existing(&path)
-                .unwrap()
-                .load_all()
-                .unwrap()
-                .len(),
-            1
-        );
-
-        Connection::open(&path)
-            .unwrap()
-            .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
-            .unwrap();
-        let error = format!(
-            "{:#}",
-            SqliteTicketRepository::open_existing(&path).unwrap_err()
-        );
-        assert!(error.contains("restart ticket-tui"), "{error}");
-        let rows: i64 = Connection::open(&path)
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM work_items", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(rows, 1, "a version mismatch must not drop the cached rows");
     }
 }
