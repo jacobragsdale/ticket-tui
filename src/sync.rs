@@ -73,6 +73,12 @@ pub enum SyncRequest {
     TriggerRun { pipeline_id: i64, branch: String },
     /// Stop one run, or retry the jobs that failed in it.
     RunAction { run_id: i64, retry: bool },
+    /// Approve or reject one approval, with an optional word about why.
+    AnswerApproval {
+        id: String,
+        approve: bool,
+        comment: String,
+    },
     /// Read the project's iteration and area trees, for the two node pickers.
     /// Asked for once a session, the first time either one opens on a cache
     /// that is empty or over an hour old.
@@ -117,6 +123,8 @@ pub enum SyncEvent {
     },
     /// A run this session started, stopped or retried, or why it could not be.
     RunStarted(Result<Run, String>),
+    /// One approval this session answered, or why it could not be.
+    ApprovalAnswered(Result<String, String>),
     /// A request finished, successfully or not.
     Finished {
         origin: PullOrigin,
@@ -451,6 +459,10 @@ pub trait WorkItemSource {
     fn run_action(&self, _run_id: i64, _retry: bool) -> Result<Run> {
         Err(anyhow!("this source cannot act on runs"))
     }
+    /// Approves or rejects one approval.
+    fn answer_approval(&self, _id: &str, _approve: bool, _comment: &str) -> Result<()> {
+        Err(anyhow!("this source cannot answer approvals"))
+    }
     /// The project's build definitions, and the newest window of runs. Two
     /// requests, made on every pull; a source with neither answers with none.
     fn pipelines(&self) -> Result<Vec<Pipeline>> {
@@ -564,6 +576,10 @@ impl WorkItemSource for AzureClient {
 
     fn run_action(&self, run_id: i64, retry: bool) -> Result<Run> {
         self.patch_run(run_id, retry)
+    }
+
+    fn answer_approval(&self, id: &str, approve: bool, comment: &str) -> Result<()> {
+        self.answer_approval(id, approve, comment)
     }
 
     fn pull_changed_since(&self, watermark: Timestamp) -> Result<SyncBatch> {
@@ -807,6 +823,17 @@ fn work(
                 worker
                     .source(events)
                     .and_then(|source| source.trigger_run(pipeline_id, &branch))
+                    .map_err(|error| format!("{error:#}")),
+            ),
+            SyncRequest::AnswerApproval {
+                id,
+                approve,
+                comment,
+            } => SyncEvent::ApprovalAnswered(
+                worker
+                    .source(events)
+                    .and_then(|source| source.answer_approval(&id, approve, &comment))
+                    .map(|()| id)
                     .map_err(|error| format!("{error:#}")),
             ),
             SyncRequest::RunAction { run_id, retry } => SyncEvent::RunStarted(
@@ -3276,6 +3303,7 @@ mod tests {
                 SyncEvent::DisplayName(_)
                 | SyncEvent::Branches { .. }
                 | SyncEvent::RunStarted(_)
+                | SyncEvent::ApprovalAnswered(_)
                 | SyncEvent::Details(_)
                 | SyncEvent::Identities(_)
                 | SyncEvent::ClassificationNodes(_)

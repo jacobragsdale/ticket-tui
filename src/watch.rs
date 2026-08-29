@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use crate::model::{Run, TimelineRecord};
+use crate::model::{Approval, Run, TimelineRecord};
 
 /// How often the live runs of the whole project are read while anything is
 /// worth reading them for.
@@ -26,6 +26,10 @@ pub const LIVE_RUNS_CADENCE: Duration = Duration::from_secs(15);
 /// How often the timeline of the run on screen is read while it is going. A
 /// finished run's timeline is read once and kept for the session.
 pub const TIMELINE_CADENCE: Duration = Duration::from_secs(5);
+
+/// How often the project's pending approvals are read. They change on a human
+/// timescale, so once a minute is often enough.
+pub const APPROVALS_CADENCE: Duration = Duration::from_secs(60);
 
 /// How often the log of the node on screen is read while it is being written.
 pub const LOG_CADENCE: Duration = Duration::from_secs(2);
@@ -68,6 +72,9 @@ pub enum WatchRequest {
     },
     /// Nothing is on screen worth reading a timeline for.
     Blur,
+    /// Read the pending approvals now, which is what opening the overlay asks
+    /// for rather than waiting out the minute.
+    RefreshApprovals,
     /// Keep following one run wherever the user goes. #685 puts this behind a
     /// key; the watcher only has to know it is asked for.
     Watch(i64),
@@ -95,6 +102,8 @@ pub enum WatchEvent {
         run_id: i64,
         records: Vec<TimelineRecord>,
     },
+    /// Every approval the project is waiting on.
+    Approvals(Vec<Approval>),
     /// A watched run has stopped. The shell toasts this whatever tab is
     /// showing, which is the point of watching one.
     RunFinished(Run),
@@ -116,6 +125,11 @@ pub trait PipelineSource: Send {
 
     /// One run's timeline: its stages, jobs and tasks.
     fn timeline(&self, _run_id: i64) -> Result<Vec<TimelineRecord>> {
+        Ok(Vec::new())
+    }
+
+    /// Every approval the project is waiting on.
+    fn approvals(&self) -> Result<Vec<Approval>> {
         Ok(Vec::new())
     }
 
@@ -219,6 +233,7 @@ pub struct Watcher {
     /// The node whose log is on screen, and where its next fetch starts.
     node: Option<LogTarget>,
     log: Cadence,
+    approvals: Cadence,
     /// Polls in a row that brought back nothing, which is what turns the log
     /// cadence down to the quiet one.
     quiet_polls: u32,
@@ -243,6 +258,7 @@ impl Watcher {
             focus: None,
             node: None,
             log: Cadence::new(LOG_CADENCE),
+            approvals: Cadence::new(APPROVALS_CADENCE),
             quiet_polls: 0,
             settled_logs: Vec::new(),
             settled: Vec::new(),
@@ -290,6 +306,7 @@ impl Watcher {
                 }
                 self.node = *node;
             }
+            WatchRequest::RefreshApprovals => self.approvals = Cadence::new(APPROVALS_CADENCE),
             WatchRequest::Blur => {
                 self.focus = None;
                 self.node = None;
@@ -409,6 +426,12 @@ impl Watcher {
             }
             self.log.polled(now);
         }
+        if self.approvals.is_due(now) {
+            if let Ok(approvals) = self.source.approvals() {
+                events.push(WatchEvent::Approvals(approvals));
+            }
+            self.approvals.polled(now);
+        }
         if let Some(wait) = self.source.throttled_for() {
             self.live.stretch();
             self.timeline.stretch();
@@ -434,7 +457,11 @@ impl Watcher {
             .filter(|run| !self.settled.contains(run))
             .map_or(live, |_| self.timeline.until_due(now));
         let log = self.node.map_or(live, |_| self.log.until_due(now));
-        Some(live.min(timeline).min(log))
+        Some(
+            live.min(timeline)
+                .min(log)
+                .min(self.approvals.until_due(now)),
+        )
     }
 }
 
@@ -453,6 +480,10 @@ impl PipelineSource for crate::azure::AzureClient {
 
     fn run(&self, run_id: i64) -> Result<Option<Run>> {
         self.fetch_run(run_id)
+    }
+
+    fn approvals(&self) -> Result<Vec<Approval>> {
+        self.fetch_approvals()
     }
 
     fn throttled_for(&self) -> Option<Duration> {
@@ -581,6 +612,8 @@ mod tests {
         /// The waits the source reports having been asked for.
         throttles: Arc<Mutex<Vec<Duration>>>,
         reads: Arc<Mutex<usize>>,
+        /// How many times the approvals were read.
+        approval_reads: Arc<Mutex<usize>>,
     }
 
     impl PipelineSource for FakeRuns {
@@ -620,6 +653,11 @@ mod tests {
             Ok(self.log.lock().unwrap().clone())
         }
 
+        fn approvals(&self) -> Result<Vec<Approval>> {
+            *self.approval_reads.lock().unwrap() += 1;
+            Ok(Vec::new())
+        }
+
         fn throttled_for(&self) -> Option<Duration> {
             self.throttles.lock().unwrap().pop()
         }
@@ -654,6 +692,7 @@ mod tests {
         finished: Arc<Mutex<bool>>,
         log: Arc<Mutex<Vec<String>>>,
         log_reads: Arc<Mutex<Vec<usize>>>,
+        approval_reads: Arc<Mutex<usize>>,
     }
 
     fn watcher() -> Harness {
@@ -664,6 +703,7 @@ mod tests {
         let finished = Arc::new(Mutex::new(false));
         let log = Arc::new(Mutex::new(Vec::new()));
         let log_reads = Arc::new(Mutex::new(Vec::new()));
+        let approval_reads = Arc::new(Mutex::new(0));
         let source = FakeRuns {
             runs: Arc::new(Mutex::new(vec![run(14)])),
             failures: Arc::clone(&failures),
@@ -673,6 +713,7 @@ mod tests {
             finished: Arc::clone(&finished),
             log: Arc::clone(&log),
             log_reads: Arc::clone(&log_reads),
+            approval_reads: Arc::clone(&approval_reads),
         };
         Harness {
             watcher: Watcher::new(Box::new(source)),
@@ -683,6 +724,7 @@ mod tests {
             finished,
             log,
             log_reads,
+            approval_reads,
         }
     }
 
@@ -720,7 +762,10 @@ mod tests {
 
         let events = watcher.poll(start);
         assert!(
-            matches!(events.as_slice(), [WatchEvent::LiveRuns(runs)] if runs[0].id == 14),
+            events.iter().any(|event| matches!(
+                event,
+                WatchEvent::LiveRuns(runs) if runs[0].id == 14
+            )),
             "the first read happens the moment the tab opens"
         );
 
@@ -786,13 +831,19 @@ mod tests {
         let start = Instant::now();
 
         let events = watcher.poll(start);
-        assert!(
-            matches!(events.as_slice(), [WatchEvent::Failed(message)] if message.contains("unreachable")),
-        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            WatchEvent::Failed(message) if message.contains("unreachable")
+        )),);
         assert_eq!(watcher.live_cadence(), Duration::from_secs(30));
 
         let events = watcher.poll(start + Duration::from_secs(31));
-        assert!(events.is_empty(), "the same failure is not said twice");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, WatchEvent::Failed(_))),
+            "the same failure is not said twice"
+        );
         assert_eq!(
             watcher.live_cadence(),
             MAX_CADENCE.min(Duration::from_secs(60))
@@ -800,7 +851,9 @@ mod tests {
 
         let events = watcher.poll(start + Duration::from_secs(120));
         assert!(
-            matches!(events.as_slice(), [WatchEvent::LiveRuns(_)]),
+            events
+                .iter()
+                .any(|event| matches!(event, WatchEvent::LiveRuns(_))),
             "and it reports again the moment it works"
         );
         assert_eq!(watcher.live_cadence(), LIVE_RUNS_CADENCE);
@@ -970,6 +1023,43 @@ mod tests {
             1,
             "a finished node's log is never asked for twice"
         );
+    }
+
+    #[test]
+    fn the_approvals_are_read_once_a_minute_and_when_the_overlay_asks() {
+        let Harness {
+            mut watcher,
+            approval_reads,
+            ..
+        } = watcher();
+        watcher.handle(&WatchRequest::TabShowing(true));
+        let start = Instant::now();
+
+        let events = watcher.poll(start);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, WatchEvent::Approvals(_))),
+            "read once the moment there is anything to watch for"
+        );
+        assert!(
+            watcher
+                .poll(start + Duration::from_secs(30))
+                .iter()
+                .all(|event| !matches!(event, WatchEvent::Approvals(_))),
+            "and not again for a minute"
+        );
+        assert_eq!(*approval_reads.lock().unwrap(), 1);
+
+        // Opening the overlay asks for a fresh read rather than waiting.
+        watcher.handle(&WatchRequest::RefreshApprovals);
+        let events = watcher.poll(start + Duration::from_secs(31));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, WatchEvent::Approvals(_))),
+        );
+        assert_eq!(*approval_reads.lock().unwrap(), 2);
     }
 
     #[test]

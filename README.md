@@ -956,6 +956,12 @@ that is going asks `Cancel 20260829.4?` and a second `x` stops it; `R` on one
 that has stopped retries the jobs that failed, in place. A refusal is a toast
 and nothing changes.
 
+`A` opens the approvals the project is waiting on — pipeline, run, stage, what
+the approver is asked to check, and how long it has waited. `a` approves and
+`x` rejects, each through a prompt for a word about why, which may be left
+empty. The watcher reads them once a minute and again the moment the overlay
+opens, and the tab badge adds `◇1` beside the `◐2` of anything running.
+
 `W` on a run — or on a pipeline, meaning the run it is having now — follows it:
 the row wears a `◉` in its gutter, the watcher keeps polling it whatever tab is
 showing, and when it stops the footer says so for eight seconds, `✓ Build

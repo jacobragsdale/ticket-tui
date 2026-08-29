@@ -636,3 +636,101 @@ fn x_asks_before_cancelling_and_r_retries_a_run_that_has_stopped() {
         "a run still going cannot be retried"
     );
 }
+
+fn approval(id: &str, stage: &str) -> crate::model::Approval {
+    crate::model::Approval {
+        id: id.to_owned(),
+        pipeline: "ticket-tui CI".to_owned(),
+        run_id: Some(14),
+        build_number: "20260829.14".to_owned(),
+        stage: stage.to_owned(),
+        instructions: "Check the release notes".to_owned(),
+        requested_at: Some(crate::timestamp::ts("2026-08-29T10:02:00Z")),
+    }
+}
+
+#[test]
+fn a_opens_the_approvals_waiting_and_answers_one_with_a_word() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    app.pipelines
+        .set_approvals(vec![approval("approval-1", "Deploy")]);
+
+    let action = app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
+    assert!(
+        matches!(action, crate::app::AppAction::RefreshApprovals),
+        "opening asks for a fresh read rather than waiting out the minute"
+    );
+    let text = render_text(140, 30, &mut app);
+    assert!(text.contains("Approvals"), "{text}");
+    assert!(text.contains("20260829.14"), "{text}");
+    assert!(text.contains("Deploy"), "{text}");
+    assert!(
+        text.contains("Check the release notes"),
+        "the instructions are shown for the one under the cursor: {text}"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    let text = render_text(140, 30, &mut app);
+    assert!(text.contains("Approve"), "the comment prompt opens: {text}");
+    for character in "looks fine".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        matches!(
+            action,
+            crate::app::AppAction::AnswerApproval { ref id, approve: true, ref comment }
+                if id == "approval-1" && comment == "looks fine"
+        ),
+        "and Enter sends the answer, got {action:?}"
+    );
+
+    app.pipelines.approval_answered("approval-1");
+    assert!(
+        app.pipelines.approvals().is_empty(),
+        "the answered one goes"
+    );
+}
+
+#[test]
+fn the_tab_badge_counts_the_runs_going_and_the_approvals_waiting() {
+    let mut app = pipelines_app();
+    assert_eq!(Screen::badge(&app.pipelines), Some("\u{25d0}1".to_owned()));
+
+    app.pipelines
+        .set_approvals(vec![approval("approval-1", "Deploy")]);
+    assert_eq!(
+        Screen::badge(&app.pipelines),
+        Some("\u{25d0}1 \u{25c7}1".to_owned()),
+        "both, when both"
+    );
+
+    let mut quiet = App::new(Vec::new());
+    quiet
+        .pipelines
+        .set_approvals(vec![approval("approval-2", "Deploy")]);
+    assert_eq!(
+        Screen::badge(&quiet.pipelines),
+        Some("\u{25c7}1".to_owned())
+    );
+}
+
+#[test]
+fn x_in_the_approvals_overlay_rejects_rather_than_cancelling_a_run() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    app.pipelines
+        .set_approvals(vec![approval("approval-1", "Deploy")]);
+    app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        matches!(
+            action,
+            crate::app::AppAction::AnswerApproval { approve: false, .. }
+        ),
+        "got {action:?}"
+    );
+}

@@ -648,6 +648,24 @@ fn handle_action(
                 app.shell.set_error(refusal);
             }
         }
+        AppAction::RefreshApprovals => {
+            if let Some(watcher) = runtime.pipelines.as_ref() {
+                let _ = watcher.send(WatchRequest::RefreshApprovals);
+            }
+        }
+        AppAction::AnswerApproval {
+            id,
+            approve,
+            comment,
+        } => {
+            if let Err(refusal) = runtime.send(SyncRequest::AnswerApproval {
+                id,
+                approve,
+                comment,
+            }) {
+                app.shell.set_error(refusal);
+            }
+        }
         AppAction::RunAction { run_id, retry } => {
             if let Err(refusal) = runtime.send(SyncRequest::RunAction { run_id, retry }) {
                 app.shell.set_error(refusal);
@@ -1054,6 +1072,7 @@ fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
         redraw = true;
         match event {
             WatchEvent::LiveRuns(runs) => app.pipelines.merge_live_runs(runs),
+            WatchEvent::Approvals(approvals) => app.pipelines.set_approvals(approvals),
             // A watched run has stopped: say so wherever the user is, which is
             // the whole point of having watched it.
             WatchEvent::RunFinished(run) => {
@@ -1109,6 +1128,13 @@ fn poll_sync(
     while let Some(event) = runtime.worker.as_ref().and_then(SyncHandle::try_event) {
         redraw = true;
         match event {
+            SyncEvent::ApprovalAnswered(result) => match result {
+                Ok(id) => {
+                    app.pipelines.approval_answered(&id);
+                    app.shell.set_status("Approval sent");
+                }
+                Err(refusal) => app.shell.set_error(refusal),
+            },
             SyncEvent::Branches { repo_id, branches } => {
                 app.pipelines.set_branches(&repo_id, branches);
             }

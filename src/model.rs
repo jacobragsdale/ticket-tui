@@ -442,6 +442,21 @@ impl TimelineRecord {
     }
 }
 
+/// One approval a stage is waiting on.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Approval {
+    pub id: String,
+    /// The pipeline and run it is holding up, when the API says which.
+    pub pipeline: String,
+    pub run_id: Option<i64>,
+    pub build_number: String,
+    /// The stage the approval gates.
+    pub stage: String,
+    /// What whoever set it up asked approvers to check.
+    pub instructions: String,
+    pub requested_at: Option<Timestamp>,
+}
+
 /// Somewhere worth going, wherever it lives. The shell resolves one by
 /// switching to the tab that holds it and asking that screen to select it, so
 /// a work item's pull request and a run's branch are one keystroke apart.

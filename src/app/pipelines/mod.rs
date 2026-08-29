@@ -14,7 +14,7 @@ use super::{AppAction, Focus, Screen, Shell, TabId};
 use crate::columns::{ColumnId, ColumnLayout, TableLayout};
 use crate::command::{CommandId, command_for_key};
 use crate::filter::{MatchContext, ParsedQuery, parse_query};
-use crate::model::{Jump, Pipeline, Run, TimelineRecord};
+use crate::model::{Approval, Jump, Pipeline, Run, TimelineRecord};
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 use crate::session::TabSession;
 use crate::timestamp::Timestamp;
@@ -55,6 +55,10 @@ pub enum PipelineMode {
     #[default]
     Browse,
     Search,
+    /// The approvals waiting on the project, and what to do about them.
+    Approvals,
+    /// The word that goes with an approval, before it is sent.
+    ApprovalComment,
     /// The branch picker a run is started from.
     BranchPicker,
     /// `Cancel 20260829.4? · x again`, the delete-style confirmation.
@@ -115,6 +119,13 @@ pub struct PipelinesScreen {
     branch_cache: Vec<(String, Vec<String>, Timestamp)>,
     /// The run the cancel confirmation is about.
     pub cancelling: Option<i64>,
+    /// Every approval the project is waiting on, as the watcher last read
+    /// them, and where the overlay's cursor is.
+    approvals: Vec<Approval>,
+    pub approval_cursor: ListCursor,
+    /// The approval being answered, and whether the answer is yes.
+    pending_answer: Option<(String, bool)>,
+    pub approval_comment: TextInput,
 }
 
 impl Default for PipelinesScreen {
@@ -146,6 +157,10 @@ impl Default for PipelinesScreen {
             branch_picker: BranchPicker::default(),
             branch_cache: Vec::new(),
             cancelling: None,
+            approvals: Vec::new(),
+            approval_cursor: ListCursor::default(),
+            pending_answer: None,
+            approval_comment: TextInput::default(),
         }
     }
 }
@@ -674,6 +689,8 @@ impl Screen for PipelinesScreen {
             PipelineMode::Search => return self.handle_search_key(shell, key),
             PipelineMode::BranchPicker => return self.handle_branch_key(shell, key),
             PipelineMode::ConfirmCancel => return self.handle_cancel_key(shell, key),
+            PipelineMode::Approvals => return self.handle_approvals_key(shell, key),
+            PipelineMode::ApprovalComment => return self.handle_comment_key(shell, key),
             PipelineMode::Browse => {}
         }
         if shell.focus == Focus::Details {
@@ -754,6 +771,7 @@ impl Screen for PipelinesScreen {
             }
             KeyCode::Backspace | KeyCode::Char('h') => self.close_runs(),
             KeyCode::Char('t') => return self.open_branch_picker(shell),
+            KeyCode::Char('A') => return self.open_approvals(),
             KeyCode::Char('x') => self.confirm_cancel(shell),
             KeyCode::Char('R') => return self.retry_run(shell),
             KeyCode::Char('W') => {
@@ -838,6 +856,9 @@ impl Screen for PipelinesScreen {
             }
             PointerTarget::SortHeader(key) => self.toggle_sort(key),
             // The branch picker's own rows and filter field.
+            PointerTarget::ApprovalRow { index } => {
+                self.approval_cursor.focus(index);
+            }
             PointerTarget::NodeOption { index } => {
                 self.branch_picker.cursor.focus(index);
                 return self.choose_branch(shell);
@@ -873,6 +894,7 @@ impl Screen for PipelinesScreen {
         match self.mode {
             PipelineMode::Search => Some(TextEditor::Search),
             PipelineMode::BranchPicker => Some(TextEditor::Node),
+            PipelineMode::ApprovalComment => Some(TextEditor::Prompt),
             _ => None,
         }
     }
@@ -941,9 +963,22 @@ impl Screen for PipelinesScreen {
         }
     }
 
+    /// `◐2` while runs are going, `◇1` while an approval waits, both when
+    /// both.
     fn badge(&self) -> Option<String> {
         let live = self.runs.iter().filter(|run| run.status.is_live()).count();
-        (live > 0).then(|| format!("\u{25d0}{live}"))
+        let waiting = self.approvals.len();
+        let mut badge = String::new();
+        if live > 0 {
+            badge.push_str(&format!("\u{25d0}{live}"));
+        }
+        if waiting > 0 {
+            if !badge.is_empty() {
+                badge.push(' ');
+            }
+            badge.push_str(&format!("\u{25c7}{waiting}"));
+        }
+        (!badge.is_empty()).then_some(badge)
     }
 
     fn snapshot(&self) -> TabSession {
@@ -974,6 +1009,8 @@ impl Screen for PipelinesScreen {
                 "Type to filter  ↑↓ choose  Enter run it  Esc cancel"
             }
             (PipelineMode::ConfirmCancel, _) => "x cancel the run  Esc leave it",
+            (PipelineMode::Approvals, _) => "↑↓ choose  a approve  x reject  Esc close",
+            (PipelineMode::ApprovalComment, _) => "Type a word  Enter send  Esc back",
             (_, Level::Pipelines) => "↑↓/jk move  Enter runs  / search  o open  ? help  q quit",
             (_, Level::Runs(_)) => "↑↓/jk move  Backspace/h back  / search  o open  ? help  q quit",
         }
@@ -1031,6 +1068,42 @@ impl PipelinesScreen {
                 run_id,
                 retry: false,
             };
+        }
+        AppAction::None
+    }
+
+    /// The approvals overlay: `a` approves, `x` rejects, both through the
+    /// comment prompt.
+    fn handle_approvals_key(&mut self, _shell: &mut Shell, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('A') => self.mode = PipelineMode::Browse,
+            KeyCode::Down | KeyCode::Char('j') => {
+                let count = self.approvals.len();
+                self.approval_cursor.move_by(1, count);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let count = self.approvals.len();
+                self.approval_cursor.move_by(-1, count);
+            }
+            KeyCode::Char('a') => self.begin_answer(true),
+            KeyCode::Char('x') => self.begin_answer(false),
+            _ => {}
+        }
+        AppAction::None
+    }
+
+    /// The word that goes with an answer. Empty is fine: not every approval
+    /// needs a reason.
+    fn handle_comment_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.pending_answer = None;
+                self.mode = PipelineMode::Approvals;
+            }
+            KeyCode::Enter => return self.send_answer(shell),
+            _ => {
+                self.approval_comment.handle_key(key);
+            }
         }
         AppAction::None
     }
@@ -1220,5 +1293,85 @@ impl PipelinesScreen {
             .iter()
             .find(|run| run.id == id)
             .map(|run| self.run_row(run))
+    }
+}
+
+impl PipelinesScreen {
+    /// What the watcher last read. The cursor holds its place, so an overlay
+    /// open while the list is refreshed does not jump under the hand.
+    pub fn set_approvals(&mut self, approvals: Vec<Approval>) {
+        self.approvals = approvals;
+        self.approval_cursor.clamp(self.approvals.len());
+    }
+
+    #[must_use]
+    pub fn approvals(&self) -> &[Approval] {
+        &self.approvals
+    }
+
+    /// `A`: the approvals overlay, which asks for a fresh read on the way up.
+    pub fn open_approvals(&mut self) -> AppAction {
+        self.mode = PipelineMode::Approvals;
+        self.approval_cursor.clamp(self.approvals.len());
+        AppAction::RefreshApprovals
+    }
+
+    /// The approval the cursor is on, or the one gating the stage the timeline
+    /// cursor is on, which is what `a` in the tree answers.
+    #[must_use]
+    pub fn selected_approval(&self) -> Option<&Approval> {
+        self.approvals.get(self.approval_cursor.index)
+    }
+
+    /// The approval gating the run on screen, if one is.
+    #[must_use]
+    pub fn approval_for_focused_run(&self) -> Option<&Approval> {
+        let run = self.focused_run()?;
+        self.approvals
+            .iter()
+            .find(|approval| approval.run_id == Some(run))
+    }
+
+    /// Starts answering one approval: the comment prompt opens over it, and
+    /// `Enter` sends whatever is in it, empty or not.
+    pub fn begin_answer(&mut self, approve: bool) {
+        let Some(id) = self.selected_approval().map(|approval| approval.id.clone()) else {
+            return;
+        };
+        self.pending_answer = Some((id, approve));
+        self.approval_comment = TextInput::default();
+        self.mode = PipelineMode::ApprovalComment;
+    }
+
+    /// Whether the prompt open is an approval or a rejection, for its title.
+    #[must_use]
+    pub fn answering_approval(&self) -> Option<bool> {
+        self.pending_answer.as_ref().map(|(_, approve)| *approve)
+    }
+
+    /// Sends the answer.
+    pub fn send_answer(&mut self, shell: &mut Shell) -> AppAction {
+        let Some((id, approve)) = self.pending_answer.take() else {
+            self.mode = PipelineMode::Browse;
+            return AppAction::None;
+        };
+        let comment = self.approval_comment.text().trim().to_owned();
+        self.mode = PipelineMode::Approvals;
+        shell.set_status(if approve {
+            "Approving…"
+        } else {
+            "Rejecting…"
+        });
+        AppAction::AnswerApproval {
+            id,
+            approve,
+            comment,
+        }
+    }
+
+    /// Takes an approval off the list once Azure DevOps has taken the answer.
+    pub fn approval_answered(&mut self, id: &str) {
+        self.approvals.retain(|approval| approval.id != id);
+        self.approval_cursor.clamp(self.approvals.len());
     }
 }

@@ -385,7 +385,9 @@ impl WorkItemsScreen {
             // before the click reaches a screen.
             // The work items screen draws no tree the pointer can pick a row
             // out of; its family rows are Follow targets.
-            PointerTarget::SelectTab { .. } | PointerTarget::TreeRow { .. } => {}
+            PointerTarget::SelectTab { .. }
+            | PointerTarget::TreeRow { .. }
+            | PointerTarget::ApprovalRow { .. } => {}
             PointerTarget::DismissOverlay => self.close_overlay(shell),
             PointerTarget::PromptInput => {
                 self.place_caret(shell, TextEditor::Prompt, column, row);

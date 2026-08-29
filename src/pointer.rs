@@ -197,6 +197,10 @@ pub enum PointerTarget {
     },
     /// The filter field of the assignee picker.
     AssigneeQuery,
+    /// One approval in the approvals overlay.
+    ApprovalRow {
+        index: usize,
+    },
     /// One node of the iteration or area picker.
     NodeOption {
         index: usize,

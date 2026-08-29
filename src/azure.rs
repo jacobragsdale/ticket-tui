@@ -17,9 +17,9 @@ use url::Url;
 use crate::classification::{self, ClassificationNode};
 use crate::html::html_to_text;
 use crate::model::{
-    CommentRecord, HistoryRecord, Identity, Issue, Pipeline, RelationKind, RelationRecord, Repo,
-    Run, RunResult, RunStatus, StateCategory, StateOption, Ticket, TicketKey, TimelineKind,
-    TimelineRecord, WorkItemDetails,
+    Approval, CommentRecord, HistoryRecord, Identity, Issue, Pipeline, RelationKind,
+    RelationRecord, Repo, Run, RunResult, RunStatus, StateCategory, StateOption, Ticket, TicketKey,
+    TimelineKind, TimelineRecord, WorkItemDetails,
 };
 use crate::timestamp::Timestamp;
 
@@ -805,6 +805,41 @@ impl AzureClient {
             .ok_or_else(|| anyhow!("Azure DevOps answered with a run that could not be read"))
     }
 
+    /// Every approval the project is waiting on. The endpoint is a preview
+    /// one, which is the only one there is.
+    pub fn fetch_approvals(&self) -> Result<Vec<Approval>> {
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "pipelines",
+            "approvals",
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(
+            "state=pending&$expand=steps&api-version=7.1-preview.1",
+        ));
+        Ok(parse_approvals(&self.get(url.as_str())?))
+    }
+
+    /// Approves or rejects one approval, with an optional word about why.
+    pub fn answer_approval(&self, id: &str, approve: bool, comment: &str) -> Result<()> {
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "pipelines",
+            "approvals",
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some("api-version=7.1-preview.1"));
+        let body = serde_json::json!([{
+            "approvalId": id,
+            "status": if approve { "approved" } else { "rejected" },
+            "comment": comment,
+        }]);
+        self.patch(url.as_str(), &body)?;
+        Ok(())
+    }
+
     /// The teams hang off `_apis/projects` rather than off the project. `tail`
     /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {
@@ -1101,6 +1136,42 @@ fn parse_timeline(response: &Value) -> Vec<TimelineRecord> {
         .collect();
     records.sort_by_key(|record| record.order);
     records
+}
+
+/// The approvals in a pending-approvals response.
+fn parse_approvals(response: &Value) -> Vec<Approval> {
+    response["value"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| {
+            Some(Approval {
+                id: entry["id"].as_str()?.to_owned(),
+                pipeline: entry["pipeline"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                run_id: entry["pipeline"]["owner"]["id"].as_i64(),
+                build_number: entry["pipeline"]["owner"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                stage: entry["executionOrder"]
+                    .as_str()
+                    .or_else(|| entry["blockedApprovers"][0]["displayName"].as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+                instructions: entry["instructions"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                requested_at: entry["createdOn"]
+                    .as_str()
+                    .and_then(|raw| Timestamp::parse(raw).ok()),
+            })
+        })
+        .collect()
 }
 
 /// The repositories in a `GET .../_apis/git/repositories` response, and the

@@ -90,6 +90,14 @@ pub enum AppAction {
         run_id: i64,
         retry: bool,
     },
+    /// Read the pending approvals now rather than at the next poll.
+    RefreshApprovals,
+    /// Approve or reject one approval, with an optional word about why.
+    AnswerApproval {
+        id: String,
+        approve: bool,
+        comment: String,
+    },
     /// `[` and `]`: back and forward through everywhere this run has been,
     /// across tabs.
     HistoryBack,

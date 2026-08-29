@@ -32,8 +32,101 @@ pub(crate) fn render(
     match screen.mode {
         PipelineMode::BranchPicker => render_branch_picker(frame, screen, shell),
         PipelineMode::ConfirmCancel => render_cancel_confirm(frame, screen, shell),
+        PipelineMode::Approvals => render_approvals(frame, screen, shell),
+        PipelineMode::ApprovalComment => render_approval_comment(frame, screen, shell),
         _ => {}
     }
+}
+
+/// Every approval the project is waiting on: what it gates, what it asks, and
+/// how long it has been waiting.
+fn render_approvals(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut Shell) {
+    let now = Timestamp::now();
+    let approvals = screen.approvals().to_vec();
+    let area = centered_rect(frame.area(), 72, 16);
+    frame.render_widget(Clear, area);
+    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, " Approvals ");
+    if approvals.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Nothing is waiting on an approval")
+                .style(Style::default().fg(theme().muted)),
+            inner,
+        );
+        return;
+    }
+    let selected = screen.approval_cursor.index;
+    let rows: Vec<Line> = approvals
+        .iter()
+        .enumerate()
+        .map(|(index, approval)| {
+            let marker = if index == selected { "\u{203a}" } else { " " };
+            let age = approval
+                .requested_at
+                .map_or_else(String::new, |at| format!("  {}", relative_age(at, now)));
+            Line::from(vec![
+                Span::styled(
+                    format!("{marker} \u{25c7} "),
+                    Style::default().fg(theme().state_in_progress),
+                ),
+                Span::raw(format!(
+                    "{} \u{00b7} {} \u{00b7} {}",
+                    approval.pipeline, approval.build_number, approval.stage
+                )),
+                Span::styled(age, Style::default().fg(theme().muted)),
+            ])
+        })
+        .collect();
+    let mut lines = rows;
+    if let Some(approval) = approvals.get(selected)
+        && !approval.instructions.is_empty()
+    {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            approval.instructions.clone(),
+            Style::default().fg(theme().muted),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    for index in 0..approvals.len() {
+        let y = inner
+            .y
+            .saturating_add(u16::try_from(index).unwrap_or(u16::MAX));
+        if y >= inner.y.saturating_add(inner.height) {
+            break;
+        }
+        shell.hit_regions.push(region(
+            Rect::new(inner.x, y, inner.width, 1),
+            PointerTarget::ApprovalRow { index },
+            PointerLayer::Modal,
+            None,
+            None,
+        ));
+    }
+}
+
+/// The word that goes with an answer, which may be nothing at all.
+fn render_approval_comment(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut Shell) {
+    let approve = screen.answering_approval().unwrap_or(true);
+    let area = centered_rect(frame.area(), 60, 6);
+    frame.render_widget(Clear, area);
+    let title = if approve { " Approve " } else { " Reject " };
+    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, title);
+    render_query_field(
+        frame,
+        shell,
+        Rect::new(inner.x, inner.y, inner.width, 1),
+        screen.approval_comment.text(),
+        screen.approval_comment.cursor(),
+        "A word about why, or nothing",
+        PointerTarget::PromptInput,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "Enter sends it  \u{00b7}  Esc goes back",
+            Style::default().fg(theme().muted),
+        )),
+        Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1),
+    );
 }
 
 /// The branch picker a run is started from: a filter field over the
