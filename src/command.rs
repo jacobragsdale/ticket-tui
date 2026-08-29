@@ -10,6 +10,9 @@ pub enum CommandId {
     Views,
     EditMenu,
     ChangeState,
+    EditTitle,
+    EditPriority,
+    EditTags,
     Sort,
     Help,
     Sync,
@@ -147,6 +150,24 @@ pub const COMMANDS: &[Command] = &[
         title: "Change state",
         keys: &[key('S')],
         help: "Move the work item",
+    },
+    Command {
+        id: CommandId::EditTitle,
+        title: "Edit title",
+        keys: &[],
+        help: "Rename the work item",
+    },
+    Command {
+        id: CommandId::EditPriority,
+        title: "Edit priority",
+        keys: &[],
+        help: "1\u{2013}4, or clear it",
+    },
+    Command {
+        id: CommandId::EditTags,
+        title: "Edit tags",
+        keys: &[],
+        help: "Semicolon separated",
     },
     Command {
         id: CommandId::SaveView,
@@ -304,10 +325,24 @@ pub struct EditMenuEntry {
     pub command: CommandId,
 }
 
-pub const EDIT_MENU: &[EditMenuEntry] = &[EditMenuEntry {
-    label: "State",
-    command: CommandId::ChangeState,
-}];
+pub const EDIT_MENU: &[EditMenuEntry] = &[
+    EditMenuEntry {
+        label: "State",
+        command: CommandId::ChangeState,
+    },
+    EditMenuEntry {
+        label: "Title",
+        command: CommandId::EditTitle,
+    },
+    EditMenuEntry {
+        label: "Priority",
+        command: CommandId::EditPriority,
+    },
+    EditMenuEntry {
+        label: "Tags",
+        command: CommandId::EditTags,
+    },
+];
 
 /// The bindings one command answers to, for menus that name a command rather
 /// than a key.

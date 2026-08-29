@@ -32,6 +32,7 @@ pub enum ScrollSurface {
     Sort,
     EditMenu,
     StatePicker,
+    PriorityPicker,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -39,6 +40,9 @@ pub enum TextEditor {
     Search,
     Palette,
     ViewName,
+    /// The single-line field editor the Edit menu opens for a title or a tag
+    /// list.
+    Prompt,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -105,6 +109,14 @@ pub enum PointerTarget {
     StateOption {
         index: usize,
     },
+    /// One priority in the priority picker, `Clear` included.
+    PriorityOption {
+        index: usize,
+    },
+    /// The text field of the title or tags prompt.
+    PromptInput,
+    SubmitPrompt,
+    CancelPrompt,
     SaveView,
     DeleteView,
     ViewName,

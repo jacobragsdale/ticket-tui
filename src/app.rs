@@ -14,7 +14,7 @@ use crate::agent_context::{
 use crate::columns::TableLayout;
 use crate::command::{Command, CommandId, EDIT_MENU, command_for_key, matching_commands};
 pub use crate::edit::FieldEdit;
-use crate::edit::{EditApplied, EditRejection, EditRequest};
+use crate::edit::{EditApplied, EditRejection, EditRequest, normalize_tags};
 use crate::export;
 pub use crate::filter::FacetTarget;
 use crate::filter::{
@@ -51,6 +51,10 @@ pub enum AppMode {
     Edit,
     /// The states the selected work item can be moved to.
     StatePicker,
+    /// The priorities the selected work item can be given, `Clear` included.
+    PriorityPicker,
+    /// A single-line field editor, for the Title and Tags rows of the Edit menu.
+    Prompt,
 }
 
 /// Percentage of the workspace given to the tickets pane when the panes sit
@@ -223,6 +227,61 @@ pub struct StatePicker {
     pub id: i64,
 }
 
+/// The priorities the picker offers, in the order it lists them. `None` is the
+/// `Clear` row, which takes the field off the work item rather than writing an
+/// empty value.
+pub const PRIORITY_CHOICES: [Option<i64>; 5] = [Some(1), Some(2), Some(3), Some(4), None];
+
+/// The priority picker, built when it opens from the row it was opened on.
+#[derive(Clone, Debug, Default)]
+pub struct PriorityPicker {
+    pub index: usize,
+    pub scroll: ScrollState,
+    /// The priority the work item already has, which `Enter` treats as a no-op.
+    pub current: Option<i64>,
+    /// The work item the picker was opened for, shown in its title.
+    pub id: i64,
+}
+
+/// Which field a [`TextPrompt`] is editing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptField {
+    Title,
+    Tags,
+}
+
+impl PromptField {
+    /// What the prompt calls the field, in its title and its notifications.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Title => "Title",
+            Self::Tags => "Tags",
+        }
+    }
+
+    /// What the footer says while the prompt is open.
+    #[must_use]
+    pub const fn hint(self) -> &'static str {
+        match self {
+            Self::Title => "Type a title  Enter save  Esc cancel",
+            Self::Tags => "Semicolon separated  Enter save  Esc cancel",
+        }
+    }
+}
+
+/// A single-line field editor, prefilled with what the work item says now. The
+/// Title and Tags rows of the Edit menu both open one.
+#[derive(Clone, Debug)]
+pub struct TextPrompt {
+    pub field: PromptField,
+    pub input: TextInput,
+    /// The work item the prompt was opened for, shown in its title.
+    pub id: i64,
+    /// The text the prompt opened with; saving that back writes nothing.
+    pub original: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ViewsOverlay {
     pub index: usize,
@@ -337,6 +396,9 @@ pub struct App {
     pub facet_bar: FacetBar,
     pub edit_menu: EditMenu,
     pub state_picker: StatePicker,
+    pub priority_picker: PriorityPicker,
+    /// The open single-line field editor, if there is one.
+    pub prompt: Option<TextPrompt>,
     bookmarks: HashSet<TicketKey>,
     selected_keys: HashSet<TicketKey>,
     recent: Vec<TicketKey>,
@@ -435,6 +497,8 @@ impl App {
             facet_bar: FacetBar::default(),
             edit_menu: EditMenu::default(),
             state_picker: StatePicker::default(),
+            priority_picker: PriorityPicker::default(),
+            prompt: None,
             bookmarks: HashSet::new(),
             selected_keys: HashSet::new(),
             recent: Vec::new(),
@@ -1087,6 +1151,11 @@ impl App {
                     name.paste(pasted, false);
                 }
             }
+            Some(TextEditor::Prompt) => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    prompt.input.paste(pasted, false);
+                }
+            }
             None => {}
         }
     }
@@ -1133,6 +1202,7 @@ impl App {
             AppMode::Search => Some(TextEditor::Search),
             AppMode::Palette => Some(TextEditor::Palette),
             AppMode::Views if self.views_overlay.naming.is_some() => Some(TextEditor::ViewName),
+            AppMode::Prompt => Some(TextEditor::Prompt),
             _ => None,
         }
     }
@@ -1160,6 +1230,7 @@ impl App {
             ScrollSurface::FacetMenu => self.facet_bar.scroll,
             ScrollSurface::EditMenu => self.edit_menu.scroll,
             ScrollSurface::StatePicker => self.state_picker.scroll,
+            ScrollSurface::PriorityPicker => self.priority_picker.scroll,
         }
     }
 
@@ -1179,6 +1250,7 @@ impl App {
             ScrollSurface::FacetMenu => &mut self.facet_bar.scroll,
             ScrollSurface::EditMenu => &mut self.edit_menu.scroll,
             ScrollSurface::StatePicker => &mut self.state_picker.scroll,
+            ScrollSurface::PriorityPicker => &mut self.priority_picker.scroll,
         }
     }
 
@@ -1279,6 +1351,8 @@ impl App {
             }
             AppMode::Edit => self.handle_edit_menu_key(key),
             AppMode::StatePicker => self.handle_state_picker_key(key),
+            AppMode::PriorityPicker => self.handle_priority_picker_key(key),
+            AppMode::Prompt => self.handle_prompt_key(key),
         }
     }
 
@@ -1718,6 +1792,15 @@ impl App {
                 self.state_picker.index = index;
                 return self.choose_state(index);
             }
+            PointerTarget::PriorityOption { index } => {
+                self.priority_picker.index = index;
+                return self.choose_priority(index);
+            }
+            PointerTarget::PromptInput => {
+                self.place_caret(TextEditor::Prompt, column, row);
+            }
+            PointerTarget::SubmitPrompt => return self.submit_prompt(),
+            PointerTarget::CancelPrompt => self.close_prompt(),
             PointerTarget::ViewRow { index } => {
                 self.views_overlay.index = index;
                 self.apply_view_at(index);
@@ -1760,6 +1843,7 @@ impl App {
             AppMode::Views if self.views_overlay.naming.is_some() => {
                 self.views_overlay.naming = None;
             }
+            AppMode::Prompt => self.close_prompt(),
             AppMode::Facets => self.mode = AppMode::Browse,
             AppMode::Filter if self.filter_overlay.showing_values => {
                 self.filter_overlay.showing_values = false;
@@ -1782,7 +1866,9 @@ impl App {
             .hit_regions
             .selectable(match editor {
                 TextEditor::Search => SelectableSurface::Search,
-                TextEditor::Palette | TextEditor::ViewName => SelectableSurface::Overlay,
+                TextEditor::Palette | TextEditor::ViewName | TextEditor::Prompt => {
+                    SelectableSurface::Overlay
+                }
             })
             .and_then(|snapshot| snapshot.pos_at(column, row))
             .or_else(|| {
@@ -1801,6 +1887,11 @@ impl App {
             TextEditor::ViewName => {
                 if let Some(name) = self.views_overlay.naming.as_mut() {
                     name.set_cursor(index);
+                }
+            }
+            TextEditor::Prompt => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    prompt.input.set_cursor(index);
                 }
             }
         }
@@ -2445,6 +2536,139 @@ impl App {
         self.edit_selected(FieldEdit::state(&option.name))
     }
 
+    /// The Edit menu's Priority row: 1 to 4 and a `Clear` row, with the
+    /// priority the work item already has under the cursor.
+    fn open_priority_picker(&mut self) {
+        let Some(ticket) = self.selected_ticket() else {
+            self.set_error("No work item is selected");
+            return;
+        };
+        let current = ticket.priority;
+        let id = ticket.key.id;
+        let index = PRIORITY_CHOICES
+            .iter()
+            .position(|choice| *choice == current)
+            .unwrap_or_default();
+        self.priority_picker = PriorityPicker {
+            index,
+            scroll: ScrollState::default(),
+            current,
+            id,
+        };
+        self.priority_picker.scroll.ensure_visible(index);
+        self.mode = AppMode::PriorityPicker;
+    }
+
+    fn handle_priority_picker_key(&mut self, key: KeyEvent) -> AppAction {
+        let last = PRIORITY_CHOICES.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc => self.mode = AppMode::Browse,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.focus_priority(self.priority_picker.index.saturating_sub(1));
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.focus_priority((self.priority_picker.index + 1).min(last));
+            }
+            KeyCode::Home => self.focus_priority(0),
+            KeyCode::End => self.focus_priority(last),
+            KeyCode::Enter => return self.choose_priority(self.priority_picker.index),
+            _ => {}
+        }
+        AppAction::None
+    }
+
+    fn focus_priority(&mut self, index: usize) {
+        self.priority_picker.index = index;
+        self.priority_picker.scroll.ensure_visible(index);
+    }
+
+    /// Confirms one priority. The priority the work item already has is a
+    /// no-op, and `Clear` takes the field off it rather than writing an empty
+    /// value, so the Pri cell empties.
+    fn choose_priority(&mut self, index: usize) -> AppAction {
+        let Some(choice) = PRIORITY_CHOICES.get(index).copied() else {
+            self.mode = AppMode::Browse;
+            return AppAction::None;
+        };
+        self.mode = AppMode::Browse;
+        if choice == self.priority_picker.current {
+            return AppAction::None;
+        }
+        match choice {
+            Some(priority) => self.edit_selected(FieldEdit::priority(priority)),
+            None => self.edit_selected(FieldEdit::clear_priority()),
+        }
+    }
+
+    /// The Edit menu's Title and Tags rows: a single-line field prefilled with
+    /// what the work item says now, edited with the same keys as the
+    /// named-view editor.
+    fn open_prompt(&mut self, field: PromptField) {
+        let Some(ticket) = self.selected_ticket() else {
+            self.set_error("No work item is selected");
+            return;
+        };
+        let original = match field {
+            PromptField::Title => ticket.title.clone(),
+            PromptField::Tags => ticket.tags.join("; "),
+        };
+        let id = ticket.key.id;
+        self.prompt = Some(TextPrompt {
+            field,
+            input: TextInput::new(original.clone()),
+            id,
+            original,
+        });
+        self.mode = AppMode::Prompt;
+    }
+
+    fn handle_prompt_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => self.close_prompt(),
+            KeyCode::Enter => return self.submit_prompt(),
+            _ => {
+                if let Some(prompt) = self.prompt.as_mut() {
+                    prompt.input.handle_key(key);
+                }
+            }
+        }
+        AppAction::None
+    }
+
+    fn close_prompt(&mut self) {
+        self.prompt = None;
+        self.mode = AppMode::Browse;
+    }
+
+    /// Saves what the prompt holds. A title is trimmed, and one that is empty
+    /// or only whitespace is refused here rather than sent, with the prompt
+    /// left open on it. A tag list is normalised. Text that comes back to what
+    /// the work item already says closes the prompt without a write.
+    fn submit_prompt(&mut self) -> AppAction {
+        let Some(prompt) = self.prompt.as_ref() else {
+            self.mode = AppMode::Browse;
+            return AppAction::None;
+        };
+        let field = prompt.field;
+        let original = prompt.original.trim().to_owned();
+        let edited = match field {
+            PromptField::Title => prompt.input.text().trim().to_owned(),
+            PromptField::Tags => normalize_tags(prompt.input.text()),
+        };
+        if field == PromptField::Title && edited.is_empty() {
+            self.set_error(format!("#{} title cannot be empty", prompt.id));
+            return AppAction::None;
+        }
+        self.close_prompt();
+        if edited == original {
+            return AppAction::None;
+        }
+        match field {
+            PromptField::Title => self.edit_selected(FieldEdit::title(&edited)),
+            PromptField::Tags => self.edit_selected(FieldEdit::tags(&edited)),
+        }
+    }
+
     fn handle_filter_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc if self.filter_overlay.showing_values => {
@@ -2627,6 +2851,18 @@ impl App {
             }
             CommandId::ChangeState => {
                 self.open_state_picker();
+                AppAction::None
+            }
+            CommandId::EditTitle => {
+                self.open_prompt(PromptField::Title);
+                AppAction::None
+            }
+            CommandId::EditPriority => {
+                self.open_priority_picker();
+                AppAction::None
+            }
+            CommandId::EditTags => {
+                self.open_prompt(PromptField::Tags);
                 AppAction::None
             }
             CommandId::SaveView => {
@@ -2991,6 +3227,8 @@ const fn mode_name(mode: AppMode) -> &'static str {
         AppMode::Facets => "facets",
         AppMode::Edit => "edit",
         AppMode::StatePicker => "state-picker",
+        AppMode::PriorityPicker => "priority-picker",
+        AppMode::Prompt => "prompt",
     }
 }
 
@@ -3928,7 +4166,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.label)
                 .collect::<Vec<_>>(),
-            ["State"],
+            ["State", "Title", "Priority", "Tags"],
             "later field editors append their own row"
         );
         assert_eq!(app.edit_menu.index, 0);
@@ -3945,6 +4183,246 @@ mod tests {
         assert_eq!(app.mode, AppMode::Edit);
         press(&mut app, KeyCode::Char('e'));
         assert_eq!(app.mode, AppMode::Browse, "e closes the menu it opened");
+    }
+
+    /// An editable app whose selected row — the most recently changed one — has
+    /// a priority and a tag to open the field editors on.
+    fn edit_app() -> App {
+        let mut gamma = ticket(3, "Gamma", "2026-03-01T00:00:00Z");
+        gamma.priority = Some(1);
+        gamma.tags = vec!["rust".into()];
+        let mut app = App::new(vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+            gamma,
+        ]);
+        app.enable_sync();
+        app.set_table_viewport(3);
+        app
+    }
+
+    /// Opens the Edit menu and runs the row at `index`, the way a hand does.
+    fn open_editor(app: &mut App, index: usize) {
+        press(app, KeyCode::Char('e'));
+        for _ in 0..index {
+            press(app, KeyCode::Down);
+        }
+        press(app, KeyCode::Enter);
+    }
+
+    fn prompt_text(app: &App) -> String {
+        app.prompt
+            .as_ref()
+            .expect("a prompt should be open")
+            .input
+            .text()
+            .to_owned()
+    }
+
+    /// Clears the prompt and types `text` into it, one key at a time.
+    fn type_over(app: &mut App, text: &str) {
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        for character in text.chars() {
+            press(app, KeyCode::Char(character));
+        }
+    }
+
+    #[test]
+    fn the_title_prompt_opens_on_the_current_title_and_saves_a_trimmed_one() {
+        let mut app = edit_app();
+
+        open_editor(&mut app, 1);
+        assert_eq!(app.mode, AppMode::Prompt);
+        assert_eq!(prompt_text(&app), "Gamma", "the prompt opens prefilled");
+
+        type_over(&mut app, "  Renamed gamma  ");
+        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+            panic!("a new title should dispatch an edit");
+        };
+
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.prompt.is_none());
+        assert_eq!(request.key.id, 3);
+        assert_eq!(
+            request.document(),
+            vec![
+                serde_json::json!({"op": "test", "path": "/rev", "value": 1}),
+                serde_json::json!({
+                    "op": "add",
+                    "path": "/fields/System.Title",
+                    "value": "Renamed gamma",
+                }),
+            ],
+            "the title is trimmed before it is sent"
+        );
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.title.as_str()),
+            Some("Renamed gamma"),
+            "the row shows the new title without waiting for Azure DevOps"
+        );
+    }
+
+    #[test]
+    fn an_empty_title_is_refused_locally_and_an_unchanged_one_writes_nothing() {
+        let mut app = edit_app();
+
+        open_editor(&mut app, 1);
+        type_over(&mut app, "   ");
+        assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
+        assert_eq!(
+            app.mode,
+            AppMode::Prompt,
+            "a blank title leaves the prompt open to fix"
+        );
+        assert!(!app.edits_pending(), "nothing was sent");
+        let (message, level) = app.notification().expect("a refusal is reported");
+        assert!(message.contains("title cannot be empty"), "{message}");
+        assert_eq!(level, NotificationLevel::Error);
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.title.as_str()),
+            Some("Gamma"),
+            "cancelling leaves the row exactly as it was"
+        );
+
+        let mut app = edit_app();
+        open_editor(&mut app, 1);
+        assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(!app.edits_pending());
+        assert_eq!(
+            app.notification(),
+            None,
+            "an unchanged title closes silently"
+        );
+    }
+
+    #[test]
+    fn the_priority_picker_opens_on_the_current_value_and_writes_the_one_chosen() {
+        let mut app = edit_app();
+
+        open_editor(&mut app, 2);
+        assert_eq!(app.mode, AppMode::PriorityPicker);
+        assert_eq!(app.priority_picker.current, Some(1));
+        assert_eq!(
+            app.priority_picker.index, 0,
+            "the priority the work item has starts under the cursor"
+        );
+        assert_eq!(app.priority_picker.id, 3);
+
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            AppAction::None,
+            "the priority it already has is a no-op"
+        );
+        assert!(!app.edits_pending());
+        assert_eq!(app.notification(), None);
+
+        open_editor(&mut app, 2);
+        press(&mut app, KeyCode::Down);
+        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+            panic!("another priority should dispatch an edit");
+        };
+        assert_eq!(
+            request.document(),
+            vec![
+                serde_json::json!({"op": "test", "path": "/rev", "value": 1}),
+                serde_json::json!({
+                    "op": "add",
+                    "path": "/fields/Microsoft.VSTS.Common.Priority",
+                    "value": 2,
+                }),
+            ]
+        );
+        assert_eq!(
+            app.selected_ticket().and_then(|ticket| ticket.priority),
+            Some(2),
+            "the Pri cell shows the new priority at once"
+        );
+    }
+
+    #[test]
+    fn clearing_the_priority_removes_the_field_and_empties_the_cell() {
+        let mut app = edit_app();
+
+        open_editor(&mut app, 2);
+        press(&mut app, KeyCode::End);
+        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+            panic!("Clear should dispatch an edit");
+        };
+        assert_eq!(
+            request.document(),
+            vec![
+                serde_json::json!({"op": "test", "path": "/rev", "value": 1}),
+                serde_json::json!({
+                    "op": "remove",
+                    "path": "/fields/Microsoft.VSTS.Common.Priority",
+                }),
+            ],
+            "a priority goes back to unset by being removed"
+        );
+        assert_eq!(
+            app.selected_ticket().and_then(|ticket| ticket.priority),
+            None
+        );
+    }
+
+    #[test]
+    fn the_tags_prompt_trims_deduplicates_and_rejoins_what_it_saves() {
+        let mut app = edit_app();
+
+        open_editor(&mut app, 3);
+        assert_eq!(app.mode, AppMode::Prompt);
+        assert_eq!(
+            prompt_text(&app),
+            "rust",
+            "the prompt opens on the tags held"
+        );
+
+        type_over(&mut app, "rust; Rust ;; tui");
+        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+            panic!("a new tag list should dispatch an edit");
+        };
+        assert_eq!(
+            request.document(),
+            vec![
+                serde_json::json!({"op": "test", "path": "/rev", "value": 1}),
+                serde_json::json!({
+                    "op": "add",
+                    "path": "/fields/System.Tags",
+                    "value": "rust; tui",
+                }),
+            ]
+        );
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.tags.clone()),
+            Some(vec!["rust".to_owned(), "tui".to_owned()]),
+            "the Tags cell shows the normalised list at once"
+        );
+    }
+
+    #[test]
+    fn a_tag_list_that_normalises_to_what_is_there_writes_nothing() {
+        let mut app = edit_app();
+
+        open_editor(&mut app, 3);
+        type_over(&mut app, "  rust ;; RUST ");
+        assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(!app.edits_pending());
+        assert_eq!(app.notification(), None);
+    }
+
+    #[test]
+    fn a_prompt_takes_a_paste_at_its_caret() {
+        let mut app = edit_app();
+
+        open_editor(&mut app, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.handle_paste("Pasted\ttitle");
+        assert_eq!(prompt_text(&app), "Pastedtitle");
     }
 
     #[test]

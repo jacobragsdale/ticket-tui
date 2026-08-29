@@ -12,7 +12,8 @@ use ratatui::widgets::{
 use time::OffsetDateTime;
 
 use crate::app::{
-    App, AppMode, DividerOrientation, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder,
+    App, AppMode, DividerOrientation, Focus, HitRegions, NotificationLevel, PRIORITY_CHOICES,
+    PromptField, RowDensity, SearchOrder,
 };
 use crate::command::{COMMANDS, EDIT_MENU, key_label_for};
 use crate::filter::{FacetTarget, FilterField};
@@ -189,6 +190,8 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::Facets => render_facet_menu(frame, app),
         AppMode::Edit => render_edit_menu(frame, app),
         AppMode::StatePicker => render_state_picker(frame, app),
+        AppMode::PriorityPicker => render_priority_picker(frame, app),
+        AppMode::Prompt => render_prompt(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
 }
@@ -929,7 +932,13 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             AppMode::Views => "↑↓ choose  Enter load  n save  d delete  Esc close",
             AppMode::Info => "Esc/i close",
             AppMode::Edit => "\u{2191}\u{2193}/jk choose  Enter open  Esc close",
-            AppMode::StatePicker => "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel",
+            AppMode::StatePicker | AppMode::PriorityPicker => {
+                "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel"
+            }
+            AppMode::Prompt => app
+                .prompt
+                .as_ref()
+                .map_or("Enter save  Esc cancel", |prompt| prompt.field.hint()),
             AppMode::Browse if app.focus == Focus::Family => "↑↓ move  Enter select  Tab details",
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
@@ -1699,6 +1708,122 @@ fn render_state_picker(frame: &mut Frame<'_>, app: &mut App) {
             target: &|index| PointerTarget::StateOption { index },
             decorate: None,
         },
+    );
+}
+
+/// The priority picker: 1 to 4 in the colours the Pri column uses, then a
+/// `Clear` row that takes the field off the work item, with the priority it
+/// already has marked and under the cursor.
+fn render_priority_picker(frame: &mut Frame<'_>, app: &mut App) {
+    let current = app.priority_picker.current;
+    let height = u16::try_from(PRIORITY_CHOICES.len().saturating_add(2)).unwrap_or(u16::MAX);
+    let area = centered_rect(frame.area(), 40, height);
+    frame.render_widget(Clear, area);
+    let title = format!(" Priority \u{b7} #{} ", app.priority_picker.id);
+    let inner = render_modal_frame(frame, app, area, &title);
+    let selected = app.priority_picker.index;
+    let rows: Vec<Line> = PRIORITY_CHOICES
+        .iter()
+        .enumerate()
+        .map(|(index, choice)| {
+            let marker = if index == selected { "\u{203a}" } else { " " };
+            let here = if *choice == current { "\u{2022}" } else { " " };
+            let label = choice.map_or_else(|| "Clear".to_owned(), |value| value.to_string());
+            Line::from(vec![
+                Span::raw(format!("{marker}{here} ")),
+                Span::styled(label, priority_style(*choice)),
+            ])
+        })
+        .collect();
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: inner,
+            surface: ScrollSurface::PriorityPicker,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: true,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::PriorityOption { index },
+            decorate: None,
+        },
+    );
+}
+
+/// The title and tags prompt: one line of text prefilled with what the work
+/// item says now, edited with the same keys as the named-view editor.
+fn render_prompt(frame: &mut Frame<'_>, app: &mut App) {
+    let Some((field, text, cursor, id)) = app.prompt.as_ref().map(|prompt| {
+        (
+            prompt.field,
+            prompt.input.text().to_owned(),
+            prompt.input.cursor(),
+            prompt.id,
+        )
+    }) else {
+        return;
+    };
+    let area = centered_rect(frame.area(), 64, 5);
+    frame.render_widget(Clear, area);
+    let title = format!(" {} \u{b7} #{id} ", field.label());
+    let inner = render_modal_frame(frame, app, area, &title);
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .split(inner);
+    let prefix = format!("{}: ", field.label());
+    let offset = u16::try_from(prefix.chars().count()).unwrap_or(u16::MAX);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(prefix, Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(text.clone()),
+        ])),
+        chunks[0],
+    );
+    let editable = Rect::new(
+        chunks[0].x.saturating_add(offset),
+        chunks[0].y,
+        chunks[0].width.saturating_sub(offset),
+        1,
+    );
+    app.hit_regions.push(region(
+        editable,
+        PointerTarget::PromptInput,
+        PointerLayer::Modal,
+        Some(SelectableSurface::Overlay),
+        None,
+    ));
+    capture_selectable(frame, app, SelectableSurface::Overlay, editable, false);
+    let cursor_x = editable
+        .x
+        .saturating_add(u16::try_from(cursor).unwrap_or(u16::MAX))
+        .min(editable.x.saturating_add(editable.width.saturating_sub(1)));
+    frame.set_cursor_position((cursor_x, editable.y));
+    // A title has to say something; a tag list is allowed to end up empty,
+    // which clears the tags.
+    let savable = field == PromptField::Tags || !text.trim().is_empty();
+    render_control(
+        frame,
+        app,
+        Rect::new(chunks[1].x, chunks[1].y, 6, 1),
+        "[Save]",
+        PointerTarget::SubmitPrompt,
+        PointerLayer::Modal,
+        savable,
+    );
+    render_control(
+        frame,
+        app,
+        Rect::new(chunks[1].x.saturating_add(7), chunks[1].y, 8, 1),
+        "[Cancel]",
+        PointerTarget::CancelPrompt,
+        PointerLayer::Modal,
+        true,
     );
 }
 
@@ -2877,6 +3002,7 @@ fn paint_hover(frame: &mut Frame<'_>, app: &App) {
             | PointerTarget::DismissFacet
             | PointerTarget::PaletteQuery
             | PointerTarget::ViewName
+            | PointerTarget::PromptInput
     ) {
         return;
     }
@@ -4049,6 +4175,53 @@ mod tests {
         click(&mut app, x, y);
         assert!(app.filter_overlay.showing_values);
         assert_eq!(app.filter_overlay.field_index, 2);
+    }
+
+    #[test]
+    fn the_title_prompt_renders_a_prefilled_field_with_save_and_cancel() {
+        let mut app = App::new(vec![ticket_at(
+            10_001,
+            "Fix ticket search",
+            "Issue",
+            "To Do",
+            "2026-03-03T00:00:00Z",
+        )]);
+        app.enable_sync();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Prompt);
+
+        let prompt = render_text(80, 20, &mut app);
+        assert!(prompt.contains("Title \u{b7} #10001"), "{prompt}");
+        assert!(prompt.contains("Title: Fix ticket search"), "{prompt}");
+        assert!(prompt.contains("[Save]"), "{prompt}");
+        assert!(prompt.contains("[Cancel]"), "{prompt}");
+        assert!(
+            prompt.contains("Enter save"),
+            "the footer explains the prompt: {prompt}"
+        );
+
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::CancelPrompt))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("the prompt should offer a Cancel button");
+        click(&mut app, x, y);
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.prompt.is_none());
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let priorities = render_text(80, 20, &mut app);
+        assert!(
+            priorities.contains("Priority \u{b7} #10001"),
+            "{priorities}"
+        );
+        assert!(priorities.contains("Clear"), "{priorities}");
     }
 
     #[test]
