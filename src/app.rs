@@ -12,7 +12,7 @@ use crate::agent_context::{
     AgentContext, SearchContext, SortContext, TicketContext, TicketReference, TicketsContext,
 };
 use crate::columns::TableLayout;
-use crate::command::{Command, CommandId, command_for_key, matching_commands};
+use crate::command::{Command, CommandId, EDIT_MENU, command_for_key, matching_commands};
 pub use crate::edit::FieldEdit;
 use crate::edit::{EditApplied, EditRejection, EditRequest};
 use crate::export;
@@ -22,7 +22,7 @@ use crate::filter::{
 };
 use crate::model::{
     CommentRecord, FamilySnapshot, FamilyTreeEntry, HistoryRecord, RelationRecord, SortDirection,
-    SortField, Ticket, TicketGraph, TicketKey, compare_tickets,
+    SortField, StateCatalog, StateOption, Ticket, TicketGraph, TicketKey, compare_tickets,
 };
 pub use crate::model::{RowDensity, SearchOrder};
 use crate::pointer::{
@@ -47,6 +47,10 @@ pub enum AppMode {
     Views,
     Info,
     Facets,
+    /// The list of field editors `e` opens.
+    Edit,
+    /// The states the selected work item can be moved to.
+    StatePicker,
 }
 
 /// Percentage of the workspace given to the tickets pane when the panes sit
@@ -199,6 +203,26 @@ pub struct PaletteState {
     pub scroll: ScrollState,
 }
 
+/// The Edit menu's cursor. The entries themselves are [`EDIT_MENU`].
+#[derive(Clone, Debug, Default)]
+pub struct EditMenu {
+    pub index: usize,
+    pub scroll: ScrollState,
+}
+
+/// The state picker, built when it opens so it never reads the network.
+#[derive(Clone, Debug, Default)]
+pub struct StatePicker {
+    /// Every state the selected work item's type allows.
+    pub options: Vec<StateOption>,
+    pub index: usize,
+    pub scroll: ScrollState,
+    /// The state the work item is already in, which `Enter` treats as a no-op.
+    pub current: String,
+    /// The work item the picker was opened for, shown in its title.
+    pub id: i64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ViewsOverlay {
     pub index: usize,
@@ -229,6 +253,8 @@ pub struct PreparedTickets {
     tickets: Vec<Ticket>,
     search_documents: SearchDocuments,
     graph: TicketGraph,
+    /// The states each work item type allows, empty until a sync cached them.
+    states: StateCatalog,
 }
 
 impl PreparedTickets {
@@ -244,12 +270,27 @@ impl PreparedTickets {
             tickets,
             search_documents,
             graph,
+            states: StateCatalog::default(),
         }
+    }
+
+    /// The cached work item type states that came out of the same database
+    /// read, so the state picker and the rows never disagree.
+    #[must_use]
+    pub fn with_states(mut self, states: StateCatalog) -> Self {
+        self.states = states;
+        self
     }
 
     #[must_use]
     pub fn ticket_count(&self) -> usize {
         self.tickets.len()
+    }
+
+    /// The work item type states read alongside these rows.
+    #[must_use]
+    pub const fn states(&self) -> &StateCatalog {
+        &self.states
     }
 }
 
@@ -294,6 +335,8 @@ pub struct App {
     pub palette: PaletteState,
     pub views_overlay: ViewsOverlay,
     pub facet_bar: FacetBar,
+    pub edit_menu: EditMenu,
+    pub state_picker: StatePicker,
     bookmarks: HashSet<TicketKey>,
     selected_keys: HashSet<TicketKey>,
     recent: Vec<TicketKey>,
@@ -301,6 +344,9 @@ pub struct App {
     views: Vec<NamedView>,
     pub active_view: Option<String>,
     graph: TicketGraph,
+    /// The states Azure DevOps allows for each work item type. Empty until a
+    /// sync has fetched them, which is what [`App::states_for`] falls back for.
+    state_catalog: StateCatalog,
     pub loaded_at: Instant,
     pub database_path: PathBuf,
     pub stale: bool,
@@ -387,6 +433,8 @@ impl App {
             palette: PaletteState::default(),
             views_overlay: ViewsOverlay::default(),
             facet_bar: FacetBar::default(),
+            edit_menu: EditMenu::default(),
+            state_picker: StatePicker::default(),
             bookmarks: HashSet::new(),
             selected_keys: HashSet::new(),
             recent: Vec::new(),
@@ -394,6 +442,7 @@ impl App {
             views: Vec::new(),
             active_view: None,
             graph: prepared.graph,
+            state_catalog: prepared.states,
             loaded_at: Instant::now(),
             database_path: PathBuf::new(),
             stale: false,
@@ -634,6 +683,42 @@ impl App {
         self.stale = false;
     }
 
+    /// The states Azure DevOps allows for a work item type, cached by a sync.
+    pub fn set_state_catalog(&mut self, catalog: StateCatalog) {
+        self.state_catalog = catalog;
+    }
+
+    /// What the state picker offers for one work item type: the states Azure
+    /// DevOps listed for it, in the order its process template runs them.
+    ///
+    /// Until a sync has cached those, the states already in the database stand
+    /// in, ordered by category and then by name, so the picker still opens on a
+    /// database that has never seen the states endpoint.
+    #[must_use]
+    pub fn states_for(&self, work_item_type: &str) -> Vec<StateOption> {
+        let cached = self.state_catalog.states_for(work_item_type);
+        if !cached.is_empty() {
+            return cached.to_vec();
+        }
+        let mut seen: Vec<StateOption> = Vec::new();
+        for ticket in self
+            .tickets
+            .iter()
+            .filter(|ticket| ticket.work_item_type == work_item_type)
+        {
+            if !seen.iter().any(|state| state.name == ticket.state) {
+                seen.push(StateOption::of(&ticket.state));
+            }
+        }
+        seen.sort_by(|left, right| {
+            left.category
+                .rank()
+                .cmp(&right.category.rank())
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        seen
+    }
+
     pub fn set_workspace_graph(&mut self, graph: crate::model::TicketGraph) {
         self.graph = graph;
         self.sync_family_state();
@@ -772,6 +857,11 @@ impl App {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.tickets = Arc::new(prepared.tickets);
         self.graph = prepared.graph;
+        // A pull that has not cached the states yet must not throw away the
+        // ones an earlier pull did.
+        if !prepared.states.is_empty() {
+            self.state_catalog = prepared.states;
+        }
         self.search.replace_documents(prepared.search_documents);
         self.reapply_pending_edits();
         self.loaded_at = Instant::now();
@@ -1068,6 +1158,8 @@ impl App {
             ScrollSurface::Palette => self.palette.scroll,
             ScrollSurface::Views => self.views_overlay.scroll,
             ScrollSurface::FacetMenu => self.facet_bar.scroll,
+            ScrollSurface::EditMenu => self.edit_menu.scroll,
+            ScrollSurface::StatePicker => self.state_picker.scroll,
         }
     }
 
@@ -1085,6 +1177,8 @@ impl App {
             ScrollSurface::Palette => &mut self.palette.scroll,
             ScrollSurface::Views => &mut self.views_overlay.scroll,
             ScrollSurface::FacetMenu => &mut self.facet_bar.scroll,
+            ScrollSurface::EditMenu => &mut self.edit_menu.scroll,
+            ScrollSurface::StatePicker => &mut self.state_picker.scroll,
         }
     }
 
@@ -1183,6 +1277,8 @@ impl App {
                 self.handle_facet_key(key);
                 AppAction::None
             }
+            AppMode::Edit => self.handle_edit_menu_key(key),
+            AppMode::StatePicker => self.handle_state_picker_key(key),
         }
     }
 
@@ -1613,6 +1709,14 @@ impl App {
             }
             PointerTarget::PaletteQuery => {
                 self.place_caret(TextEditor::Palette, column, row);
+            }
+            PointerTarget::EditMenuRow { index } => {
+                self.edit_menu.index = index;
+                return self.run_edit_menu_entry(index);
+            }
+            PointerTarget::StateOption { index } => {
+                self.state_picker.index = index;
+                return self.choose_state(index);
             }
             PointerTarget::ViewRow { index } => {
                 self.views_overlay.index = index;
@@ -2228,6 +2332,119 @@ impl App {
         self.mode = AppMode::Views;
     }
 
+    /// `e`: the list of field editors. Every editor is one row of
+    /// [`EDIT_MENU`], so a new one appears here by being added there.
+    fn open_edit_menu(&mut self) {
+        self.edit_menu = EditMenu::default();
+        self.mode = AppMode::Edit;
+    }
+
+    fn handle_edit_menu_key(&mut self, key: KeyEvent) -> AppAction {
+        let last = EDIT_MENU.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('e') => self.mode = AppMode::Browse,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.focus_edit_entry(self.edit_menu.index.saturating_sub(1));
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.focus_edit_entry((self.edit_menu.index + 1).min(last));
+            }
+            KeyCode::Home => self.focus_edit_entry(0),
+            KeyCode::End => self.focus_edit_entry(last),
+            KeyCode::Enter => return self.run_edit_menu_entry(self.edit_menu.index),
+            _ => {}
+        }
+        AppAction::None
+    }
+
+    fn focus_edit_entry(&mut self, index: usize) {
+        self.edit_menu.index = index;
+        self.edit_menu.scroll.ensure_visible(index);
+    }
+
+    /// Runs one Edit menu entry, which is the command it names. Each editor
+    /// opens itself, so nothing here knows what a state or a title is.
+    fn run_edit_menu_entry(&mut self, index: usize) -> AppAction {
+        let Some(entry) = EDIT_MENU.get(index) else {
+            self.mode = AppMode::Browse;
+            return AppAction::None;
+        };
+        self.mode = AppMode::Browse;
+        self.run_command(entry.command)
+    }
+
+    /// `S`, and the Edit menu's State row: the states this work item's type
+    /// allows, with the one it is in already under the cursor. The list is
+    /// whatever is cached or already in the database, so this never waits.
+    fn open_state_picker(&mut self) {
+        let Some(ticket) = self.selected_ticket() else {
+            self.set_error("No work item is selected");
+            return;
+        };
+        let current = ticket.state.clone();
+        let work_item_type = ticket.work_item_type.clone();
+        let id = ticket.key.id;
+        let options = self.states_for(&work_item_type);
+        if options.is_empty() {
+            self.set_error(format!("No states are known for {work_item_type}"));
+            return;
+        }
+        let index = options
+            .iter()
+            .position(|option| option.name == current)
+            .unwrap_or_default();
+        self.state_picker = StatePicker {
+            options,
+            index,
+            scroll: ScrollState::default(),
+            current,
+            id,
+        };
+        self.state_picker.scroll.ensure_visible(index);
+        self.mode = AppMode::StatePicker;
+    }
+
+    fn handle_state_picker_key(&mut self, key: KeyEvent) -> AppAction {
+        let last = self.state_picker.options.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('S') => self.mode = AppMode::Browse,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.focus_state(self.state_picker.index.saturating_sub(1));
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.focus_state((self.state_picker.index + 1).min(last));
+            }
+            KeyCode::PageUp => self.focus_state(self.state_picker.index.saturating_sub(5)),
+            KeyCode::PageDown => self.focus_state((self.state_picker.index + 5).min(last)),
+            KeyCode::Home => self.focus_state(0),
+            KeyCode::End => self.focus_state(last),
+            KeyCode::Enter => return self.choose_state(self.state_picker.index),
+            _ => {}
+        }
+        AppAction::None
+    }
+
+    fn focus_state(&mut self, index: usize) {
+        self.state_picker.index = index;
+        self.state_picker.scroll.ensure_visible(index);
+    }
+
+    /// Confirms one state. Choosing the state the work item is already in
+    /// closes the picker and writes nothing; anything else takes the ordinary
+    /// write-through path, so the row changes at once and reverts if Azure
+    /// DevOps refuses the transition.
+    fn choose_state(&mut self, index: usize) -> AppAction {
+        let Some(option) = self.state_picker.options.get(index).cloned() else {
+            self.mode = AppMode::Browse;
+            return AppAction::None;
+        };
+        self.mode = AppMode::Browse;
+        if option.name == self.state_picker.current {
+            return AppAction::None;
+        }
+        self.edit_selected(FieldEdit::state(&option.name))
+    }
+
     fn handle_filter_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc if self.filter_overlay.showing_values => {
@@ -2402,6 +2619,14 @@ impl App {
             }
             CommandId::Views => {
                 self.open_views();
+                AppAction::None
+            }
+            CommandId::EditMenu => {
+                self.open_edit_menu();
+                AppAction::None
+            }
+            CommandId::ChangeState => {
+                self.open_state_picker();
                 AppAction::None
             }
             CommandId::SaveView => {
@@ -2764,6 +2989,8 @@ const fn mode_name(mode: AppMode) -> &'static str {
         AppMode::Views => "views",
         AppMode::Info => "info",
         AppMode::Facets => "facets",
+        AppMode::Edit => "edit",
+        AppMode::StatePicker => "state-picker",
     }
 }
 
@@ -2822,6 +3049,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::model::StateCategory;
 
     fn ticket(id: i64, title: &str, changed_at: &str) -> Ticket {
         Ticket {
@@ -3118,6 +3346,8 @@ mod tests {
                     CommandId::Search => Some(AppMode::Search),
                     CommandId::Filters => Some(AppMode::Facets),
                     CommandId::MoreFilters => Some(AppMode::Filter),
+                    CommandId::EditMenu => Some(AppMode::Edit),
+                    CommandId::ChangeState => Some(AppMode::StatePicker),
                     _ => None,
                 };
                 if let Some(mode) = expected {
@@ -3580,5 +3810,213 @@ mod tests {
             ),
             "the next edit goes out once the first has answered"
         );
+    }
+
+    /// The states a Basic-process Task moves through, as a sync would have
+    /// cached them.
+    fn task_states() -> Vec<StateOption> {
+        vec![
+            StateOption::new("To Do", StateCategory::Proposed),
+            StateOption::new("Doing", StateCategory::InProgress),
+            StateOption::new("Done", StateCategory::Completed),
+        ]
+    }
+
+    /// An editable app whose rows are all in the first state, with the states
+    /// their type allows already cached.
+    fn picker_app() -> App {
+        let mut tickets = vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+            ticket(3, "Gamma", "2026-03-01T00:00:00Z"),
+        ];
+        for ticket in &mut tickets {
+            ticket.state = "To Do".into();
+        }
+        let mut app = App::new(tickets);
+        app.enable_sync();
+        app.set_table_viewport(3);
+        let mut catalog = StateCatalog::default();
+        catalog.insert("Task", task_states());
+        app.set_state_catalog(catalog);
+        app
+    }
+
+    fn state_names(options: &[StateOption]) -> Vec<&str> {
+        options.iter().map(|option| option.name.as_str()).collect()
+    }
+
+    fn shift(app: &mut App, ch: char) -> AppAction {
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT))
+    }
+
+    #[test]
+    fn the_state_picker_opens_on_the_current_state_and_enter_writes_the_one_chosen() {
+        let mut app = picker_app();
+
+        assert_eq!(shift(&mut app, 'S'), AppAction::None);
+        assert_eq!(app.mode, AppMode::StatePicker);
+        assert_eq!(
+            state_names(&app.state_picker.options),
+            ["To Do", "Doing", "Done"]
+        );
+        assert_eq!(app.state_picker.current, "To Do");
+        assert_eq!(
+            app.state_picker.index, 0,
+            "the state the work item is in starts under the cursor"
+        );
+        assert_eq!(app.state_picker.id, 3, "the picker names the selected row");
+
+        press(&mut app, KeyCode::Down);
+        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+            panic!("choosing another state should dispatch an edit");
+        };
+
+        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(request.key.id, 3);
+        assert_eq!(
+            request.document(),
+            vec![
+                serde_json::json!({"op": "test", "path": "/rev", "value": 1}),
+                serde_json::json!({"op": "add", "path": "/fields/System.State", "value": "Doing"}),
+            ]
+        );
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.state.as_str()),
+            Some("Doing"),
+            "the row shows the new state without waiting for Azure DevOps"
+        );
+        assert!(app.edits_pending());
+    }
+
+    #[test]
+    fn choosing_the_current_state_or_pressing_escape_writes_nothing() {
+        let mut app = picker_app();
+
+        shift(&mut app, 'S');
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            AppAction::None,
+            "the state it is already in is a no-op"
+        );
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(!app.edits_pending());
+        assert_eq!(app.notification(), None, "a no-op closes silently");
+
+        shift(&mut app, 'S');
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(!app.edits_pending());
+        assert_eq!(app.notification(), None);
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.state.as_str()),
+            Some("To Do"),
+            "cancelling leaves the row exactly as it was"
+        );
+    }
+
+    #[test]
+    fn the_edit_menu_lists_the_field_editors_and_opens_the_one_chosen() {
+        let mut app = picker_app();
+
+        assert_eq!(press(&mut app, KeyCode::Char('e')), AppAction::None);
+        assert_eq!(app.mode, AppMode::Edit);
+        assert_eq!(
+            EDIT_MENU
+                .iter()
+                .map(|entry| entry.label)
+                .collect::<Vec<_>>(),
+            ["State"],
+            "later field editors append their own row"
+        );
+        assert_eq!(app.edit_menu.index, 0);
+
+        assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
+        assert_eq!(app.mode, AppMode::StatePicker);
+        assert_eq!(
+            state_names(&app.state_picker.options),
+            ["To Do", "Doing", "Done"]
+        );
+
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('e'));
+        assert_eq!(app.mode, AppMode::Edit);
+        press(&mut app, KeyCode::Char('e'));
+        assert_eq!(app.mode, AppMode::Browse, "e closes the menu it opened");
+    }
+
+    #[test]
+    fn the_picker_lists_cached_states_and_otherwise_the_ones_already_in_the_database() {
+        let typed = |id: i64, work_item_type: &str, state: &str| {
+            let mut ticket = ticket(id, "Row", "2026-01-01T00:00:00Z");
+            ticket.work_item_type = work_item_type.to_owned();
+            ticket.state = state.to_owned();
+            ticket
+        };
+        let mut app = App::new(vec![
+            typed(1, "Bug", "Done"),
+            typed(2, "Bug", "New"),
+            typed(3, "Bug", "Active"),
+            typed(4, "Bug", "New"),
+            typed(5, "Bug", "Approved"),
+            typed(6, "Task", "Doing"),
+        ]);
+
+        assert_eq!(
+            state_names(&app.states_for("Bug")),
+            ["Approved", "New", "Active", "Done"],
+            "the fallback runs Proposed, InProgress, Resolved, Completed, Removed, then name"
+        );
+        assert_eq!(state_names(&app.states_for("Task")), ["Doing"]);
+        assert!(
+            app.states_for("Epic").is_empty(),
+            "a type with no rows and nothing cached has no states"
+        );
+
+        let mut catalog = StateCatalog::default();
+        catalog.insert(
+            "Bug",
+            vec![
+                StateOption::new("New", StateCategory::Proposed),
+                StateOption::new("Active", StateCategory::InProgress),
+                StateOption::new("Resolved", StateCategory::Resolved),
+                StateOption::new("Closed", StateCategory::Completed),
+            ],
+        );
+        app.set_state_catalog(catalog);
+
+        assert_eq!(
+            state_names(&app.states_for("Bug")),
+            ["New", "Active", "Resolved", "Closed"],
+            "cached states win, in the order the process template runs them"
+        );
+        assert_eq!(
+            state_names(&app.states_for("Task")),
+            ["Doing"],
+            "a type without cached states still falls back"
+        );
+    }
+
+    #[test]
+    fn a_pull_without_cached_states_keeps_the_ones_an_earlier_pull_brought() {
+        let mut app = picker_app();
+        let tickets = app.tickets().to_vec();
+
+        app.replace_prepared_tickets(PreparedTickets::new(tickets.clone()));
+        assert_eq!(
+            state_names(&app.states_for("Task")),
+            ["To Do", "Doing", "Done"],
+            "a pull that has not read the states endpoint must not empty the picker"
+        );
+
+        let mut catalog = StateCatalog::default();
+        catalog.insert(
+            "Task",
+            vec![StateOption::new("Cut", StateCategory::Removed)],
+        );
+        app.replace_prepared_tickets(PreparedTickets::new(tickets).with_states(catalog));
+        assert_eq!(state_names(&app.states_for("Task")), ["Cut"]);
     }
 }

@@ -8,10 +8,11 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
+use url::Url;
 
-use crate::model::{RelationKind, RelationRecord, Ticket, TicketKey};
+use crate::model::{RelationKind, RelationRecord, StateCategory, StateOption, Ticket, TicketKey};
 use crate::timestamp::Timestamp;
 
 /// Azure DevOps resource id accepted by `az account get-access-token`.
@@ -190,6 +191,53 @@ impl AzureClient {
         );
         let item = self.send(&url, Request::Patch(patch))?;
         parse_work_item(&item, &self.config)
+    }
+
+    /// The states one work item type allows, in the order the process template
+    /// lists them, which is the order the state picker offers. A state carries
+    /// the category Azure DevOps assigned it rather than one guessed from its
+    /// name, so a custom state is still coloured correctly.
+    pub fn fetch_work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>> {
+        let url = self.work_item_type_states_url(work_item_type)?;
+        let response = self.get(&url)?;
+        let states = response
+            .get("value")
+            .and_then(Value::as_array)
+            .with_context(|| format!("{work_item_type} states response has no value array"))?;
+        Ok(states
+            .iter()
+            .filter_map(|state| {
+                let name = state.get("name").and_then(Value::as_str)?.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                let category = state
+                    .get("category")
+                    .and_then(Value::as_str)
+                    .map_or(StateCategory::of(name), StateCategory::parse);
+                Some(StateOption::new(name, category))
+            })
+            .collect())
+    }
+
+    /// A work item type is a path segment and its name has spaces in it — `User
+    /// Story`, `Product Backlog Item` — so the URL is assembled rather than
+    /// formatted.
+    fn work_item_type_states_url(&self, work_item_type: &str) -> Result<String> {
+        let mut url = Url::parse(&self.config.base_url())
+            .with_context(|| format!("invalid Azure DevOps URL {}", self.config.base_url()))?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?
+            .extend([
+                self.config.project.as_str(),
+                "_apis",
+                "wit",
+                "workitemtypes",
+                work_item_type,
+                "states",
+            ]);
+        url.set_query(Some(&format!("api-version={API_VERSION}")));
+        Ok(url.into())
     }
 
     /// Display name of the signed-in user, used to mark their own work items.

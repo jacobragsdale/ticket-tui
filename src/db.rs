@@ -7,11 +7,12 @@ use directories::ProjectDirs;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::model::{
-    CommentRecord, HistoryRecord, RelationKind, RelationRecord, Ticket, TicketGraph, TicketKey,
+    CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateCatalog, StateCategory,
+    StateOption, Ticket, TicketGraph, TicketKey,
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -23,6 +24,7 @@ DROP TABLE IF EXISTS work_items;
 DROP TABLE IF EXISTS work_item_relations;
 DROP TABLE IF EXISTS work_item_comments;
 DROP TABLE IF EXISTS work_item_history;
+DROP TABLE IF EXISTS work_item_type_states;
 DROP TABLE IF EXISTS sync_meta;
 CREATE TABLE work_items (
     organization   TEXT NOT NULL,
@@ -75,14 +77,22 @@ CREATE TABLE work_item_history (
     new_value    TEXT,
     PRIMARY KEY (organization, work_item_id, revision, field_name)
 );
+CREATE TABLE work_item_type_states (
+    work_item_type TEXT NOT NULL,
+    name           TEXT NOT NULL,
+    category       TEXT NOT NULL,
+    position       INTEGER NOT NULL,
+    PRIMARY KEY (work_item_type, name)
+);
 CREATE TABLE sync_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 ";
 
-/// `sync_meta` is deliberately absent: it describes the sync itself, not the
-/// work items a pull replaces.
+/// `sync_meta` and `work_item_type_states` are deliberately absent: they
+/// describe the sync and the project's process, not the work items a pull
+/// replaces.
 const CLEAR_CACHE: &str = "DELETE FROM work_items;
 DELETE FROM work_item_relations;
 DELETE FROM work_item_comments;
@@ -230,6 +240,65 @@ impl SqliteTicketRepository {
             )
             .optional()
             .with_context(|| format!("failed to read the {key} cache setting"))
+    }
+
+    /// Records the states one work item type allows, in the order Azure DevOps
+    /// listed them. A type is written whole, so a state retired in the process
+    /// template stops being offered.
+    pub fn replace_type_states(
+        &mut self,
+        work_item_type: &str,
+        states: &[StateOption],
+    ) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "DELETE FROM work_item_type_states WHERE work_item_type = ?1",
+            params![work_item_type],
+        )?;
+        for (position, state) in states.iter().enumerate() {
+            transaction.execute(
+                "INSERT OR REPLACE INTO work_item_type_states
+                    (work_item_type, name, category, position)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    work_item_type,
+                    state.name,
+                    state.category.as_str(),
+                    i64::try_from(position).unwrap_or(i64::MAX)
+                ],
+            )?;
+        }
+        transaction
+            .commit()
+            .with_context(|| format!("failed to store the {work_item_type} states"))
+    }
+
+    /// Every work item type's states, each in the order they were stored.
+    pub fn load_type_states(&self) -> Result<StateCatalog> {
+        let mut statement = self.connection.prepare(
+            "SELECT work_item_type, name, category FROM work_item_type_states
+             ORDER BY work_item_type, position",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let work_item_type: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let category: String = row.get(2)?;
+            Ok((work_item_type, name, category))
+        })?;
+        let mut grouped: Vec<(String, Vec<StateOption>)> = Vec::new();
+        for row in rows {
+            let (work_item_type, name, category) = row.context("failed to load type states")?;
+            let option = StateOption::new(name, StateCategory::parse(&category));
+            match grouped.last_mut() {
+                Some((current, states)) if *current == work_item_type => states.push(option),
+                _ => grouped.push((work_item_type, vec![option])),
+            }
+        }
+        let mut catalog = StateCatalog::default();
+        for (work_item_type, states) in grouped {
+            catalog.insert(work_item_type, states);
+        }
+        Ok(catalog)
     }
 
     /// Replaces the cached work items and their graph with a freshly pulled set.
@@ -771,6 +840,57 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM work_items", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 1, "a version mismatch must not drop the cached rows");
+    }
+
+    #[test]
+    fn type_states_round_trip_in_order_and_survive_a_pull() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("states.sqlite3");
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+        assert_eq!(
+            repository.load_type_states().unwrap(),
+            StateCatalog::default(),
+            "a fresh database knows no states, which is what the picker falls back for"
+        );
+
+        let issue = vec![
+            StateOption::new("To Do", StateCategory::Proposed),
+            StateOption::new("Doing", StateCategory::InProgress),
+            StateOption::new("Done", StateCategory::Completed),
+        ];
+        repository.replace_type_states("Issue", &issue).unwrap();
+        repository
+            .replace_type_states("Task", &[StateOption::new("Cut", StateCategory::Removed)])
+            .unwrap();
+
+        let stored = repository.load_type_states().unwrap();
+        assert_eq!(
+            stored.states_for("Issue"),
+            issue,
+            "the process template's own order is kept"
+        );
+        assert_eq!(
+            stored.states_for("Task"),
+            [StateOption::new("Cut", StateCategory::Removed)]
+        );
+        assert!(stored.states_for("Epic").is_empty());
+
+        repository
+            .replace_all(&[ticket(1)], &TicketGraph::default())
+            .unwrap();
+        assert_eq!(
+            repository.load_type_states().unwrap(),
+            stored,
+            "a pull replaces work items, not the states their type allows"
+        );
+
+        let renamed = vec![StateOption::new("Open", StateCategory::Proposed)];
+        repository.replace_type_states("Issue", &renamed).unwrap();
+        assert_eq!(
+            repository.load_type_states().unwrap().states_for("Issue"),
+            renamed,
+            "a type is rewritten whole, so a retired state stops being offered"
+        );
     }
 
     #[test]

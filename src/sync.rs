@@ -3,6 +3,7 @@
 //! main thread, which owns the timer that decides when to ask.
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
@@ -15,7 +16,7 @@ use crate::app::PreparedTickets;
 use crate::azure::{self, AzureClient, AzureConfig, SyncBatch};
 use crate::db::SqliteTicketRepository;
 use crate::edit::{EditApplied, EditRejection, EditRequest};
-use crate::model::{RelationRecord, Ticket, TicketGraph};
+use crate::model::{RelationRecord, StateOption, Ticket, TicketGraph};
 
 /// What asked for a pull. A timer pull is silent unless it fails; a keypress
 /// reports itself either way.
@@ -72,6 +73,9 @@ pub trait WorkItemSource {
     /// Write one work item with a JSON Patch document, answering with the copy
     /// the server stored.
     fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<(Ticket, Vec<RelationRecord>)>;
+    /// The states one work item type allows, which is what the state picker
+    /// offers once a pull has cached them.
+    fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>>;
 }
 
 impl WorkItemSource for AzureClient {
@@ -85,6 +89,10 @@ impl WorkItemSource for AzureClient {
 
     fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<(Ticket, Vec<RelationRecord>)> {
         self.update_work_item(id, patch)
+    }
+
+    fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>> {
+        self.fetch_work_item_type_states(work_item_type)
     }
 }
 
@@ -168,6 +176,7 @@ fn work(
         connector,
         source: None,
         repository: None,
+        typed_states: HashSet::new(),
     };
     while let Ok(request) = requests.recv() {
         let event = match request {
@@ -192,6 +201,9 @@ struct Worker {
     connector: Box<dyn SourceConnector>,
     source: Option<Box<dyn WorkItemSource>>,
     repository: Option<SqliteTicketRepository>,
+    /// Work item types whose states are already cached, so the states endpoint
+    /// is asked once per type per run rather than once per pull.
+    typed_states: HashSet<String>,
 }
 
 impl Worker {
@@ -241,11 +253,44 @@ impl Worker {
             relations: batch.relations,
             ..TicketGraph::default()
         };
+        let mut types: Vec<String> = Vec::new();
+        for ticket in &batch.tickets {
+            if !self.typed_states.contains(&ticket.work_item_type)
+                && !types.contains(&ticket.work_item_type)
+            {
+                types.push(ticket.work_item_type.clone());
+            }
+        }
         let repository = self.repository()?;
         let count = repository.replace_all(&batch.tickets, &graph)?;
+        self.cache_type_states(&types, events)?;
+        let repository = self.repository()?;
         let tickets = repository.load_all()?;
         let graph = repository.load_graph()?;
-        Ok((PreparedTickets::with_graph(tickets, graph), count))
+        let states = repository.load_type_states()?;
+        Ok((
+            PreparedTickets::with_graph(tickets, graph).with_states(states),
+            count,
+        ))
+    }
+
+    /// Reads the states of every work item type this pull saw for the first
+    /// time and stores them. A type whose states could not be read is left
+    /// uncached rather than failing the pull: the picker falls back to the
+    /// states already in the database, and the next pull asks again.
+    fn cache_type_states(&mut self, types: &[String], events: &Sender<SyncEvent>) -> Result<()> {
+        for work_item_type in types {
+            let Ok(states) = self.source(events)?.work_item_type_states(work_item_type) else {
+                continue;
+            };
+            if states.is_empty() {
+                continue;
+            }
+            self.repository()?
+                .replace_type_states(work_item_type, &states)?;
+            self.typed_states.insert(work_item_type.clone());
+        }
+        Ok(())
     }
 
     /// The work-item source, connecting on first use. The signed-in display
@@ -364,9 +409,10 @@ mod tests {
     use super::*;
     use crate::azure::RequestRejected;
     use crate::edit::FieldEdit;
-    use crate::model::{RelationKind, RelationRecord, Ticket, TicketKey};
+    use crate::model::{RelationKind, RelationRecord, StateCategory, Ticket, TicketKey};
     use crate::timestamp::ts;
     use serde_json::json;
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tempfile::{TempDir, tempdir};
 
@@ -409,6 +455,10 @@ mod tests {
         /// Every patch document the worker sent.
         patches: Arc<Mutex<Vec<SentPatch>>>,
         display_name: Option<String>,
+        /// The states each work item type answers with.
+        type_states: Arc<Mutex<HashMap<String, Vec<StateOption>>>>,
+        /// Every work item type whose states were asked for.
+        asked_types: Arc<Mutex<Vec<String>>>,
     }
 
     impl FakeSource {
@@ -432,6 +482,14 @@ mod tests {
                 refusal: Some((status, message.to_owned())),
                 ..Self::with(vec![Ok(SyncBatch::default())])
             }
+        }
+
+        fn with_states(self, work_item_type: &str, states: Vec<StateOption>) -> Self {
+            self.type_states
+                .lock()
+                .unwrap()
+                .insert(work_item_type.to_owned(), states);
+            self
         }
     }
 
@@ -464,6 +522,19 @@ mod tests {
             self.stored
                 .clone()
                 .context("the fake source was not given a stored copy")
+        }
+
+        fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>> {
+            self.asked_types
+                .lock()
+                .unwrap()
+                .push(work_item_type.to_owned());
+            self.type_states
+                .lock()
+                .unwrap()
+                .get(work_item_type)
+                .cloned()
+                .with_context(|| format!("no states for {work_item_type}"))
         }
     }
 
@@ -516,6 +587,18 @@ mod tests {
             }
             assert!(Instant::now() < deadline, "the sync worker timed out");
             thread::yield_now();
+        }
+    }
+
+    /// The outcome of the next pull, past the display name the first connect
+    /// reports.
+    fn pulled(handle: &SyncHandle) -> SyncOutcome {
+        loop {
+            match next_event(handle) {
+                SyncEvent::Finished { outcome, .. } => return outcome,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected a finished pull, got {other:?}"),
+            }
         }
     }
 
@@ -574,6 +657,54 @@ mod tests {
             origin,
             PullOrigin::User,
             "the display name is reported once, not on every pull"
+        );
+    }
+
+    #[test]
+    fn a_pull_caches_the_states_of_every_work_item_type_it_saw_once() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let mut bug = ticket(9, "A bug");
+        bug.work_item_type = "Bug".into();
+        let batch = || SyncBatch {
+            tickets: vec![ticket(7, "Pulled"), ticket(8, "Also pulled"), bug.clone()],
+            relations: Vec::new(),
+        };
+        let task_states = vec![
+            StateOption::new("To Do", StateCategory::Proposed),
+            StateOption::new("Doing", StateCategory::InProgress),
+            StateOption::new("Done", StateCategory::Completed),
+        ];
+        let source = FakeSource::with(vec![Ok(batch()), Ok(batch())])
+            .with_states("Task", task_states.clone());
+        let asked = Arc::clone(&source.asked_types);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let SyncOutcome::Pulled { prepared, .. } = pulled(&handle) else {
+            panic!("expected a successful pull");
+        };
+        assert_eq!(
+            prepared.states().states_for("Task"),
+            task_states,
+            "the rows and the states they allow come out of the same read"
+        );
+        assert_eq!(
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .load_type_states()
+                .unwrap()
+                .states_for("Task"),
+            task_states,
+            "the worker wrote them where the picker reads them"
+        );
+
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        pulled(&handle);
+        assert_eq!(
+            *asked.lock().unwrap(),
+            ["Task", "Bug", "Bug"],
+            "a cached type is asked once; a type whose states failed is asked again"
         );
     }
 
