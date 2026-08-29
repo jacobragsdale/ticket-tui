@@ -799,6 +799,69 @@ child half typed under one work item is never offered under another, and neither
 the child appears under its parent in the family tree at once, because the copy
 Azure DevOps stored comes back carrying the link.
 
+## Deleting work items
+
+Occasionally a ticket is filed by mistake. The Edit menu's **Delete work item…**
+row — or `Delete work item…` in the palette — takes it back out again. There is
+no key bound to it: every other editor is a keypress away because the worst it
+can do is a value somebody types over, and this one takes the work item off the
+board.
+
+Nothing goes anywhere until a confirmation says what is about to happen:
+
+```
+┌ Delete ────────────────────────────────────────────────────── [×] ┐
+│ Delete #595 Tech debt and architecture foundation?                │
+│                                                                   │
+│ Its 8 children are not deleted — left with no parent.             │
+│ It goes to the Azure DevOps recycle bin and can be restored from  │
+│ there.                                                            │
+│                                                                   │
+│ [Delete]  [Cancel]                                                │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+The child count is the point of the whole overlay. A delete takes the one work
+item and nothing under it, so an Epic over eight issues leaves eight issues
+hanging under nothing — which is the moment somebody wants telling, before the
+delete rather than after it. A work item nobody broke down says nothing about
+children at all.
+
+`d` confirms and `Esc` cancels; `Enter` is deliberately not it, so a stray
+`Enter` never deletes anything. Both buttons are clickable, and cancelling
+closes silently: nothing was written, so there is nothing to report.
+
+Confirming sends `DELETE /_apis/wit/workitems/<id>` with no `destroy`
+parameter, which is the **soft** delete: Azure DevOps takes the work item out of
+every query and every board and keeps it in the project's recycle bin, where
+somebody who deleted the wrong thing restores it. The overlay says so, because a
+confirmation more frightening than the action warrants is its own kind of wrong.
+
+Like a comment and a create, this is not an optimistic write. The row stays on
+the table while the delete is out — a row dropped for a delete that was refused
+is a lie the next pull undoes — and leaves when Azure DevOps answers. When it
+does, the row, its links in both directions, its discussion, and its history all
+go from memory and from SQLite, its parent's child-progress ratio drops by one,
+and the status line reads
+`Deleted #613 · restore it from the Azure DevOps recycle bin`. The cursor takes
+the row that moved up into its place, so deleting a run of rows reads as working
+down the list, and the details pane reads that work item from the top rather
+than pointing at one that is gone. A refusal changes nothing at all and says
+`#613 not deleted: TF401232: read only`.
+
+A delete is not undoable. It never reaches the `u` stack, and an edit already on
+the stack for the work item is dropped with it, because there is no longer a row
+to put anything back on. The way back is the recycle bin, in the browser.
+
+With two or more rows checked the confirmation covers all of them —
+`Delete 2 tickets?`, with their children counted together — and one `d` sends
+them, one request each, in the order the table holds them. A child going the
+same way is not an orphan, so deleting a parent and its children together warns
+about neither. The whole thing speaks once, when the last answer is in:
+`Deleted 5 tickets`, or `Deleted 4 of 5 · #612 failed: read only` when something
+did not land, naming the first three refusals and counting the rest. A work item
+that was refused stays exactly where it was.
+
 ## Controls
 
 | Input | Action |
@@ -830,9 +893,10 @@ Azure DevOps stored comes back carrying the link.
 | `e` → Add comment | Leave a one-line comment on the selected work item; also `Add comment` in the palette |
 | `n` | Open the new work item form; `↑`/`↓` or `Tab` moves between fields, `Enter` opens a field's picker, `Ctrl-S` creates, `Esc` keeps the draft |
 | `N` | Open the same form as a child of the selected work item: the type it breaks down into, the parent fixed, the area and iteration inherited; also `New child` in the Edit menu and the palette |
+| `e` → Delete work item… | Send the selected work item, or every checked one, to the Azure DevOps recycle bin; `d` confirms, `Esc` cancels. No key of its own; also `Delete work item…` in the palette |
 | `u` | Undo the last edit, putting the value back; a bulk change goes back under one press |
 | `m` | Bookmark or unbookmark the selected ticket |
-| `Space` | Toggle ticket multi-select; two or more make `S`, `a`, and Iteration bulk edits |
+| `Space` | Toggle ticket multi-select; two or more make `S`, `a`, Iteration, and Delete act on all of them |
 | `y` | Copy selected (or current) ticket IDs |
 | `[` / `]` | Jump to the previous or next recently viewed ticket |
 | `Tab` | Toggle focus between tickets and details |

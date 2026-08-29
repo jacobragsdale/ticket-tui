@@ -22,6 +22,7 @@ pub enum CommandId {
     AddComment,
     NewWorkItem,
     NewChild,
+    DeleteWorkItem,
     UndoEdit,
     Sort,
     Help,
@@ -234,6 +235,15 @@ pub const COMMANDS: &[Command] = &[
         title: "New child",
         keys: &[key('N')],
         help: "Under the selected one",
+    },
+    // Deliberately unbound. Every other editor is a keypress away because the
+    // worst it can do is a wrong value somebody types over; this one takes the
+    // work item off the board, so it is reached by name and confirmed.
+    Command {
+        id: CommandId::DeleteWorkItem,
+        title: "Delete work item…",
+        keys: &[],
+        help: "To the recycle bin",
     },
     Command {
         id: CommandId::UndoEdit,
@@ -466,6 +476,10 @@ pub const EDIT_MENU: &[EditMenuEntry] = &[
     EditMenuEntry {
         label: "New child",
         command: CommandId::NewChild,
+    },
+    EditMenuEntry {
+        label: "Delete work item\u{2026}",
+        command: CommandId::DeleteWorkItem,
     },
 ];
 

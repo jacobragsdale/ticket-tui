@@ -76,6 +76,8 @@ pub enum AppMode {
     TypePicker,
     /// The work items the selected one can be filed under, filtered by typing.
     ParentPicker,
+    /// The last word before a work item goes to the recycle bin.
+    ConfirmDelete,
 }
 
 /// How long a work item may sit untouched before the Changed column flags it,
@@ -166,6 +168,11 @@ pub enum AppAction {
         key: TicketKey,
         new_parent: Option<i64>,
     },
+    /// Send work items to the project's recycle bin, one request each, which
+    /// the worker takes in the order they are listed. Nothing leaves the table
+    /// until Azure DevOps has taken the delete: a row dropped for a delete that
+    /// was refused is a lie the next pull undoes.
+    Delete(Vec<TicketKey>),
     /// Leave one comment on one work item. Nothing appears on the work item
     /// until Azure DevOps has stored it, so this is the one write the table
     /// does not make optimistically.
@@ -927,6 +934,61 @@ pub struct TextPrompt {
     pub original: String,
 }
 
+/// The confirmation a delete asks for: what is about to go, and what it leaves
+/// behind. It is built when the overlay opens and read straight by the
+/// renderer, so nothing about it is worked out again a frame.
+///
+/// The child count is the point of the whole overlay. A delete takes the one
+/// work item and nothing under it, so an Epic with eight issues leaves eight
+/// issues hanging under nothing — which is the moment somebody wants to be
+/// told, before the delete rather than after it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DeleteConfirm {
+    /// The work items the confirm covers, in the order the table holds them.
+    pub keys: Vec<TicketKey>,
+    /// The id and title of the one work item, for a delete of a single row.
+    /// `None` for a checked set, which is counted rather than named.
+    pub subject: Option<(i64, String)>,
+    /// The direct children the work items have between them, which the delete
+    /// leaves behind rather than taking with it.
+    pub children: usize,
+}
+
+impl DeleteConfirm {
+    /// What the overlay asks, in a line: the work item by id and title, or the
+    /// checked rows by count.
+    #[must_use]
+    pub fn question(&self) -> String {
+        match &self.subject {
+            Some((id, title)) => format!("Delete #{id} {title}?"),
+            None => format!("Delete {} tickets?", self.keys.len()),
+        }
+    }
+
+    /// What the delete leaves behind, or nothing at all when it leaves nothing.
+    /// The wording is deliberately about the children rather than about the
+    /// delete: what is at stake is the work under the row, not the row.
+    #[must_use]
+    pub fn orphans(&self) -> Option<String> {
+        if self.children == 0 {
+            return None;
+        }
+        let whose = if self.subject.is_some() {
+            "Its"
+        } else {
+            "Their"
+        };
+        let (children, verb) = if self.children == 1 {
+            ("1 child".to_owned(), "is")
+        } else {
+            (format!("{} children", self.children), "are")
+        };
+        Some(format!(
+            "{whose} {children} {verb} not deleted \u{2014} left with no parent."
+        ))
+    }
+}
+
 /// A view the app always offers, above whatever the user has saved: one of the
 /// questions asked every morning, each written as a query somebody could have
 /// typed themselves.
@@ -1148,6 +1210,9 @@ enum BulkHeadline {
     Changed(String),
     /// The whole line an undo says for itself.
     Undone(String),
+    /// A set of work items sent to the recycle bin, which has nothing to say
+    /// for itself beyond how many went.
+    Deleted,
 }
 
 impl BulkHeadline {
@@ -1156,6 +1221,7 @@ impl BulkHeadline {
         match self {
             Self::Changed(summary) => format!("Updated {updated} tickets · {summary}"),
             Self::Undone(line) => line.clone(),
+            Self::Deleted => format!("Deleted {updated} tickets"),
         }
     }
 
@@ -1164,6 +1230,7 @@ impl BulkHeadline {
         match self {
             Self::Changed(_) => "Updated",
             Self::Undone(_) => "Undid",
+            Self::Deleted => "Deleted",
         }
     }
 }
@@ -1494,6 +1561,8 @@ pub struct App {
     /// can put it back with everything still in it, and it is what stops a
     /// second create being sent on top of the first.
     pending_create: Option<FormOverlay>,
+    /// What the open delete confirmation is about, if one is open.
+    pub delete_confirm: Option<DeleteConfirm>,
     /// The open single-line field editor, if there is one.
     pub prompt: Option<TextPrompt>,
     /// Where the open picker or prompt is drawn: centred, as every
@@ -1542,6 +1611,11 @@ pub struct App {
     /// optimistic, so this is only what stops a second one being typed on top
     /// of the first.
     pending_comments: HashSet<TicketKey>,
+    /// Work items sent to the recycle bin and not answered yet. A delete is not
+    /// optimistic either — the row stays until Azure DevOps has taken it — so
+    /// this is what stops the same work item being deleted twice and what keeps
+    /// the cursor off a row that is on its way out.
+    pending_deletes: HashSet<TicketKey>,
     /// Why there is nothing to write to, reported when an edit is attempted
     /// without a configured Azure DevOps project.
     offline_reason: Option<String>,
@@ -1720,6 +1794,8 @@ impl App {
             undo_stack: Vec::new(),
             undo_groups: 0,
             pending_comments: HashSet::new(),
+            pending_deletes: HashSet::new(),
+            delete_confirm: None,
             type_picker: TypePicker::default(),
             form: None,
             form_scroll: ScrollState::default(),
@@ -3253,6 +3329,7 @@ impl App {
             AppMode::NodePicker => self.handle_node_picker_key(key),
             AppMode::Form => self.handle_form_key(key),
             AppMode::TypePicker => self.handle_type_picker_key(key),
+            AppMode::ConfirmDelete => self.handle_delete_confirm_key(key),
         }
     }
 
@@ -3732,6 +3809,8 @@ impl App {
             }
             PointerTarget::SubmitForm => return self.submit_form(),
             PointerTarget::CancelForm => self.cancel_form(),
+            PointerTarget::ConfirmDelete => return self.confirm_delete(),
+            PointerTarget::CancelDelete => self.cancel_delete(),
             PointerTarget::TypeOption { index } => {
                 self.type_picker.index = index;
                 self.choose_work_item_type(index);
@@ -3817,6 +3896,7 @@ impl App {
             }
             AppMode::Prompt => self.close_prompt(),
             AppMode::Form => self.cancel_form(),
+            AppMode::ConfirmDelete => self.cancel_delete(),
             AppMode::AssigneePicker => self.close_picker(self.assignee_picker.scope),
             AppMode::NodePicker => self.close_picker(self.node_picker.scope),
             AppMode::TypePicker => self.close_picker(EditScope::Form(self.type_picker.field)),
@@ -5986,6 +6066,224 @@ impl App {
         self.set_error(format!("Work item not created: {message}"));
     }
 
+    /// The Edit menu's **Delete work item…** row, and the same by name in the
+    /// palette. There is no key bound to it: every other editor is a keypress
+    /// away because the worst it can do is a value somebody types over, and
+    /// this one takes the work item off the board.
+    ///
+    /// The confirmation is opened over every checked row when two or more are
+    /// checked, and over the row under the cursor otherwise — the rule the
+    /// bulk editors already follow.
+    fn open_delete_confirm(&mut self) {
+        if !self.sync_enabled {
+            let reason = self
+                .offline_reason
+                .clone()
+                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned());
+            self.set_error(reason);
+            return;
+        }
+        let checked = self.checked_keys();
+        let keys = if checked.len() >= 2 {
+            checked
+        } else {
+            self.selected_ticket()
+                .map(|ticket| ticket.key.clone())
+                .into_iter()
+                .collect()
+        };
+        if keys.is_empty() {
+            self.set_error("No work item is selected");
+            return;
+        }
+        if keys.iter().any(|key| self.pending_deletes.contains(key)) {
+            self.set_error("That work item is already being deleted");
+            return;
+        }
+        // A child going the same way is not an orphan, so a delete of a parent
+        // and its children together warns about neither.
+        let doomed: HashSet<TicketKey> = keys.iter().cloned().collect();
+        let children = keys
+            .iter()
+            .flat_map(|key| self.graph.children_of(key))
+            .filter(|child| !doomed.contains(child))
+            .count();
+        let subject = match keys.as_slice() {
+            [key] => self
+                .ticket_by_key(key)
+                .map(|ticket| (ticket.key.id, ticket.title.clone())),
+            _ => None,
+        };
+        self.delete_confirm = Some(DeleteConfirm {
+            keys,
+            subject,
+            children,
+        });
+        self.mode = AppMode::ConfirmDelete;
+        self.overlay_anchor = OverlayAnchor::Centered;
+    }
+
+    fn handle_delete_confirm_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            // Enter is not it. The confirmation of a delete should take a
+            // letter nobody presses on the way past, and `Esc` should be the
+            // reflex that gets out of it.
+            KeyCode::Char('d') | KeyCode::Char('D') => self.confirm_delete(),
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.cancel_delete();
+                AppAction::None
+            }
+            _ => AppAction::None,
+        }
+    }
+
+    /// Sends the confirmed work items to the recycle bin, one request each,
+    /// which the worker takes in the order the table holds them. Nothing leaves
+    /// the table here: a row is dropped when Azure DevOps says the work item is
+    /// gone, so a refusal leaves it exactly where it was.
+    pub fn confirm_delete(&mut self) -> AppAction {
+        self.mode = AppMode::Browse;
+        let Some(confirm) = self.delete_confirm.take() else {
+            return AppAction::None;
+        };
+        let keys = confirm.keys;
+        match keys.as_slice() {
+            [] => return AppAction::None,
+            [key] => self.set_status(format!("Deleting #{}\u{2026}", key.id)),
+            keys => {
+                // The same tracker a bulk edit uses, so a checked-set delete
+                // speaks once when the last answer is in rather than once a row.
+                self.bulk_edits.push(BulkEdit {
+                    headline: BulkHeadline::Deleted,
+                    total: keys.len(),
+                    updated: 0,
+                    failures: Vec::new(),
+                    outstanding: keys.iter().cloned().collect(),
+                });
+                self.set_status(format!("Deleting {} tickets\u{2026}", keys.len()));
+            }
+        }
+        self.pending_deletes.extend(keys.iter().cloned());
+        AppAction::Delete(keys)
+    }
+
+    /// Closes the confirmation without deleting anything. Nothing was written
+    /// and nothing was changed on screen, so there is nothing to say about it.
+    pub fn cancel_delete(&mut self) {
+        self.delete_confirm = None;
+        self.mode = AppMode::Browse;
+    }
+
+    /// Whether a work item is on its way to the recycle bin. The database
+    /// watcher stands down while one is, because the sync worker is taking that
+    /// row out of the file itself.
+    #[must_use]
+    pub fn deletes_pending(&self) -> bool {
+        !self.pending_deletes.is_empty()
+    }
+
+    /// Takes a deleted work item off the table. Azure DevOps has it in the
+    /// recycle bin and the sync worker has already taken it out of SQLite, so
+    /// this is where memory catches up: the row, its links in both directions,
+    /// and everything the session was holding about it.
+    pub fn apply_deleted(&mut self, key: &TicketKey) {
+        self.pending_deletes.remove(key);
+        self.forget_ticket(key);
+        if !self.record_bulk_outcome(key, None) {
+            self.set_status(format!(
+                "Deleted #{} \u{b7} restore it from the Azure DevOps recycle bin",
+                key.id
+            ));
+        }
+    }
+
+    /// A work item that is still there. Nothing was taken off the table for it,
+    /// so nothing has to be put back — only the refusal has to be reported.
+    pub fn reject_delete(&mut self, key: &TicketKey, message: &str) {
+        self.pending_deletes.remove(key);
+        if !self.record_bulk_outcome(key, Some(format!("#{} failed: {message}", key.id))) {
+            self.set_error(format!("#{} not deleted: {message}", key.id));
+        }
+    }
+
+    /// Drops one work item out of memory: the row, its links, its discussion,
+    /// and every set the session keeps work items in. Its children are left
+    /// where they are — a delete takes the one work item — so only the links
+    /// naming it go, which is what leaves them parentless rather than gone.
+    ///
+    /// A delete is not undoable, so nothing is filed for it; an edit already on
+    /// the undo stack for this work item is dropped instead, because there is
+    /// no longer a row to put anything back on.
+    fn forget_ticket(&mut self, key: &TicketKey) {
+        let Some(index) = self.index_of(key) else {
+            return;
+        };
+        let next = self.next_after_removal(key);
+        let was_on_screen = self
+            .selected_ticket()
+            .is_some_and(|ticket| ticket.key == *key);
+        Arc::make_mut(&mut self.tickets).remove(index);
+        self.graph.forget(key);
+        self.bookmarks.remove(key);
+        self.selected_keys.remove(key);
+        self.pending_edits.remove(key);
+        self.pending_comments.remove(key);
+        self.recent.retain(|held| held != key);
+        self.future.retain(|held| held != key);
+        if self.details_pending.as_ref() == Some(key) {
+            self.details_pending = None;
+        }
+        for entry in &mut self.undo_stack {
+            entry.steps.retain(|step| step.key != *key);
+        }
+        self.undo_stack.retain(|entry| !entry.steps.is_empty());
+        // Every row index the search documents held moved with the row, so
+        // they are built again rather than patched.
+        self.search.replace_tickets(&self.tickets);
+        self.refresh_child_progress();
+        if self.fuzzy_query().is_empty() {
+            self.show_all(next.as_ref());
+        } else {
+            self.pending_selection = next;
+            self.visible.clear();
+            self.table_state.select(None);
+            self.submit_search();
+        }
+        if was_on_screen {
+            // The details pane is now over a different work item, so it reads
+            // from the top rather than from wherever the last one was scrolled
+            // to.
+            self.details.scroll_to(0);
+        }
+    }
+
+    /// Where the cursor goes when one work item leaves. It stays on the work
+    /// item it is on unless that is the one going, in which case it takes the
+    /// next row down — the one about to move up into its place, so deleting a
+    /// run of rows reads as working down the list — and the row above only
+    /// when there is nothing below. Rows already on their way to the recycle
+    /// bin are passed over, so a checked-set delete never parks the cursor on
+    /// a row that is about to go too.
+    fn next_after_removal(&self, key: &TicketKey) -> Option<TicketKey> {
+        let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
+        if selected.as_ref().is_some_and(|held| held != key) {
+            return selected;
+        }
+        let row = self.visible_row(key)?;
+        let rows: Vec<TicketKey> = self
+            .visible
+            .iter()
+            .map(|entry| self.tickets[entry.ticket_index].key.clone())
+            .collect();
+        let survives =
+            |candidate: &&TicketKey| *candidate != key && !self.pending_deletes.contains(candidate);
+        rows.iter()
+            .skip(row.saturating_add(1))
+            .find(survives)
+            .or_else(|| rows.iter().take(row).rev().find(survives))
+            .cloned()
+    }
+
     /// The work item type picker, over the type the form names now.
     fn open_type_picker(&mut self, field: FormFieldId, current: String) {
         let options = self.work_item_type_options();
@@ -6255,6 +6553,10 @@ impl App {
             }
             CommandId::NewWorkItem => self.open_create_form(),
             CommandId::NewChild => self.open_child_form(),
+            CommandId::DeleteWorkItem => {
+                self.open_delete_confirm();
+                AppAction::None
+            }
             CommandId::SaveView => {
                 self.open_views();
                 self.views_overlay.naming =
@@ -6700,6 +7002,7 @@ const fn mode_name(mode: AppMode) -> &'static str {
         AppMode::Form => "form",
         AppMode::TypePicker => "type-picker",
         AppMode::ParentPicker => "parent-picker",
+        AppMode::ConfirmDelete => "confirm-delete",
     }
 }
 
@@ -7294,7 +7597,7 @@ mod tests {
     fn the_edit_menus_new_child_row_opens_the_same_form_the_key_does() {
         let mut app = parent_app("Epic");
         press(&mut app, KeyCode::Char('e'));
-        for _ in 0..menu_row(CommandId::NewChild) {
+        for _ in 0..menu_row(&app, CommandId::NewChild) {
             press(&mut app, KeyCode::Down);
         }
         press(&mut app, KeyCode::Enter);
@@ -9946,9 +10249,11 @@ mod tests {
                 "Set parent\u{2026}",
                 "Description",
                 "Add comment",
-                "New child"
+                "New child",
+                "Delete work item\u{2026}"
             ],
-            "later field editors append their own row above New child"
+            "later field editors append their own row above the two that act on
+             the work item as a whole"
         );
         assert_eq!(app.edit_menu.index, 0);
 
@@ -10202,8 +10507,11 @@ mod tests {
 
     /// The Edit menu row for one command, found by the command itself so a new
     /// field editor above it moves nothing here.
-    fn menu_row(command: CommandId) -> usize {
-        EDIT_MENU
+    /// Where a row sits in the Edit menu *as this app draws it*: the menu is
+    /// dynamic — `Remove parent` only appears when the selection has one — so a
+    /// position taken from the static table walks to the wrong row.
+    fn menu_row(app: &App, command: CommandId) -> usize {
+        app.edit_menu_entries()
             .iter()
             .position(|entry| entry.command == command)
             .expect("the Edit menu offers the row")
@@ -10224,7 +10532,7 @@ mod tests {
         let key = app.selected_ticket().unwrap().key.clone();
 
         press(&mut app, KeyCode::Char('e'));
-        for _ in 0..menu_row(CommandId::EditDescription) {
+        for _ in 0..menu_row(&app, CommandId::EditDescription) {
             press(&mut app, KeyCode::Down);
         }
         let action = press(&mut app, KeyCode::Enter);
@@ -10250,7 +10558,8 @@ mod tests {
         let mut app = App::new(vec![ticket(3, "Gamma", "2026-03-01T00:00:00Z")]);
         app.set_table_viewport(3);
 
-        open_editor(&mut app, menu_row(CommandId::EditDescription));
+        let row = menu_row(&app, CommandId::EditDescription);
+        open_editor(&mut app, row);
 
         let (message, level) = app.notification().expect("an offline run says so");
         assert!(message.contains("#3 description not saved"), "{message}");
@@ -11230,5 +11539,363 @@ mod tests {
         );
         app.replace_prepared_tickets(PreparedTickets::new(tickets).with_states(catalog));
         assert_eq!(state_names(&app.states_for("Task")), ["Cut"]);
+    }
+
+    /// An Epic over two issues, one of which has a task of its own. Everything
+    /// is open, so every row is on the table and the child counts read the
+    /// family rather than what the finished filter left of it.
+    fn deletable_tickets() -> Vec<Ticket> {
+        let mut epic = ticket(1, "Auth rewrite", "2026-01-04T00:00:00Z");
+        epic.work_item_type = "Epic".into();
+        let mut login = ticket(2, "Login form", "2026-01-03T00:00:00Z");
+        login.work_item_type = "Issue".into();
+        let mut session = ticket(3, "Session notes", "2026-01-02T00:00:00Z");
+        session.work_item_type = "Issue".into();
+        vec![
+            epic,
+            login,
+            session,
+            ticket(4, "Validate email", "2026-01-01T00:00:00Z"),
+        ]
+    }
+
+    /// An editable app over that family, so a delete has children to leave
+    /// behind and a ratio to move.
+    fn deleting_app() -> App {
+        let mut app = App::new(deletable_tickets());
+        app.set_workspace_graph(TicketGraph {
+            relations: vec![child_of(2, 1), child_of(3, 1), child_of(4, 3)],
+            ..TicketGraph::default()
+        });
+        app.enable_sync();
+        app.set_table_viewport(4);
+        app
+    }
+
+    /// The ids on the table, in the order it holds them.
+    fn rows_of(app: &App) -> Vec<i64> {
+        app.visible_tickets().map(|ticket| ticket.key.id).collect()
+    }
+
+    /// Opens the confirmation the way somebody would, through the Edit menu.
+    fn open_delete_menu(app: &mut App) {
+        press(app, KeyCode::Char('e'));
+        for _ in 0..menu_row(app, CommandId::DeleteWorkItem) {
+            press(app, KeyCode::Down);
+        }
+        press(app, KeyCode::Enter);
+    }
+
+    #[test]
+    fn the_delete_confirmation_names_the_work_item_and_the_children_it_leaves_behind() {
+        let mut app = deleting_app();
+
+        open_delete_menu(&mut app);
+
+        assert_eq!(app.mode, AppMode::ConfirmDelete);
+        let confirm = app
+            .delete_confirm
+            .clone()
+            .expect("the Edit menu row opens the confirmation");
+        assert_eq!(confirm.keys, vec![family_key(1)]);
+        assert_eq!(confirm.question(), "Delete #1 Auth rewrite?");
+        assert_eq!(
+            confirm.children, 2,
+            "the epic's two issues are counted, and the task under one of them is not"
+        );
+        assert_eq!(
+            confirm.orphans().as_deref(),
+            Some("Its 2 children are not deleted \u{2014} left with no parent."),
+            "what is at stake is the work under the row, so the overlay says so"
+        );
+        assert_eq!(rows_of(&app), [1, 2, 3, 4], "and nothing has gone yet");
+        assert!(!app.deletes_pending());
+    }
+
+    #[test]
+    fn a_work_item_with_nothing_under_it_is_confirmed_without_an_orphan_warning() {
+        let mut app = deleting_app();
+        app.select_row(1);
+
+        open_delete_menu(&mut app);
+
+        let confirm = app
+            .delete_confirm
+            .clone()
+            .expect("the confirmation is open");
+        assert_eq!(confirm.question(), "Delete #2 Login form?");
+        assert_eq!(confirm.children, 0);
+        assert_eq!(
+            confirm.orphans(),
+            None,
+            "an issue nobody broke down leaves nothing behind to warn about"
+        );
+    }
+
+    #[test]
+    fn escaping_the_delete_confirmation_changes_nothing_at_all() {
+        let mut app = deleting_app();
+        open_delete_menu(&mut app);
+
+        assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
+
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.delete_confirm.is_none());
+        assert!(!app.deletes_pending());
+        assert_eq!(app.notification(), None, "cancelling closes silently");
+        assert_eq!(rows_of(&app), [1, 2, 3, 4]);
+        assert_eq!(
+            app.family_of(&family_key(1)).children,
+            vec![family_key(2), family_key(3)],
+            "and the family is exactly as it was"
+        );
+    }
+
+    #[test]
+    fn a_delete_that_lands_takes_the_row_and_its_links_and_moves_the_cursor_on() {
+        let mut app = deleting_app();
+        app.select_row(2);
+        open_delete_menu(&mut app);
+
+        let action = press(&mut app, KeyCode::Char('d'));
+
+        assert_eq!(action, AppAction::Delete(vec![family_key(3)]));
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.deletes_pending());
+        assert_eq!(
+            rows_of(&app),
+            [1, 2, 3, 4],
+            "nothing leaves the table until Azure DevOps has taken the delete"
+        );
+
+        app.apply_deleted(&family_key(3));
+
+        assert_eq!(rows_of(&app), [1, 2, 4]);
+        assert!(!app.deletes_pending());
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.key.id),
+            Some(4),
+            "the cursor takes the row that moved up into its place"
+        );
+        assert!(
+            app.relations_from(&family_key(4)).is_empty(),
+            "the task it was over stops claiming a parent that is gone"
+        );
+        assert_eq!(
+            app.family_of(&family_key(1)).children,
+            vec![family_key(2)],
+            "and the epic is left with the one issue it still has"
+        );
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Deleted #3 \u{b7} restore it from the Azure DevOps recycle bin"),
+            "a soft delete is recoverable, and the line reporting it says so"
+        );
+    }
+
+    #[test]
+    fn deleting_the_last_row_leaves_the_cursor_on_the_one_above_it() {
+        let mut app = deleting_app();
+        app.select_row(3);
+        open_delete_menu(&mut app);
+        press(&mut app, KeyCode::Char('d'));
+
+        app.apply_deleted(&family_key(4));
+
+        assert_eq!(rows_of(&app), [1, 2, 3]);
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.key.id),
+            Some(3),
+            "with nothing below it, the cursor takes the row above"
+        );
+    }
+
+    #[test]
+    fn deleting_a_child_leaves_its_parent_counting_the_children_it_still_has() {
+        let mut app = deleting_app();
+        assert_eq!(progress_of(&app, 1), Some((0, 2)));
+        assert_eq!(progress_of(&app, 3), Some((0, 1)));
+
+        app.select_row(2);
+        open_delete_menu(&mut app);
+        press(&mut app, KeyCode::Char('d'));
+        app.apply_deleted(&family_key(3));
+
+        assert_eq!(
+            progress_of(&app, 1),
+            Some((0, 1)),
+            "the epic's ratio counts the issue it has left"
+        );
+        assert_eq!(
+            progress_of(&app, 3),
+            None,
+            "and the work item that went has no ratio at all"
+        );
+    }
+
+    #[test]
+    fn a_refused_delete_says_so_and_leaves_the_row_on_the_table() {
+        let mut app = deleting_app();
+        open_delete_menu(&mut app);
+        press(&mut app, KeyCode::Char('d'));
+
+        app.reject_delete(&family_key(1), "TF401232: the work item does not exist");
+
+        assert!(!app.deletes_pending());
+        assert_eq!(
+            rows_of(&app),
+            [1, 2, 3, 4],
+            "the row is exactly where it was"
+        );
+        assert_eq!(
+            app.family_of(&family_key(1)).children,
+            vec![family_key(2), family_key(3)],
+            "and so are the links under it"
+        );
+        assert_eq!(
+            app.notification(),
+            Some((
+                "#1 not deleted: TF401232: the work item does not exist",
+                NotificationLevel::Error
+            ))
+        );
+    }
+
+    #[test]
+    fn a_checked_set_deletes_one_at_a_time_and_speaks_once_at_the_end() {
+        let mut app = deleting_app();
+        app.select_row(1);
+        press(&mut app, KeyCode::Char(' '));
+        app.select_row(2);
+        press(&mut app, KeyCode::Char(' '));
+
+        open_delete_menu(&mut app);
+        let confirm = app
+            .delete_confirm
+            .clone()
+            .expect("the confirmation is open");
+        assert_eq!(confirm.question(), "Delete 2 tickets?");
+        assert_eq!(
+            confirm.orphans().as_deref(),
+            Some("Their 1 child is not deleted \u{2014} left with no parent."),
+            "the checked rows are counted together, and so is the work under them"
+        );
+
+        let action = press(&mut app, KeyCode::Char('d'));
+        assert_eq!(
+            action,
+            AppAction::Delete(vec![family_key(2), family_key(3)]),
+            "one request each, in the order the table holds them"
+        );
+
+        app.apply_deleted(&family_key(2));
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Deleting 2 tickets\u{2026}"),
+            "the first answer says nothing of its own"
+        );
+
+        app.apply_deleted(&family_key(3));
+
+        assert_eq!(rows_of(&app), [1, 4]);
+        assert_eq!(
+            app.notification(),
+            Some(("Deleted 2 tickets", NotificationLevel::Info)),
+            "the whole change speaks once, when the last answer is in"
+        );
+    }
+
+    #[test]
+    fn a_checked_set_that_only_partly_lands_counts_what_went_and_names_what_stayed() {
+        let mut app = deleting_app();
+        app.select_row(1);
+        press(&mut app, KeyCode::Char(' '));
+        app.select_row(2);
+        press(&mut app, KeyCode::Char(' '));
+        open_delete_menu(&mut app);
+        press(&mut app, KeyCode::Char('d'));
+
+        app.apply_deleted(&family_key(2));
+        app.reject_delete(&family_key(3), "it is locked");
+
+        assert_eq!(
+            app.notification(),
+            Some((
+                "Deleted 1 of 2 \u{b7} #3 failed: it is locked",
+                NotificationLevel::Error
+            ))
+        );
+        assert_eq!(rows_of(&app), [1, 3, 4], "the one that was refused stays");
+    }
+
+    #[test]
+    fn a_delete_never_reaches_the_undo_stack() {
+        let mut app = deleting_app();
+        app.select_row(2);
+        let AppAction::Edit(requests) = app.edit_selected(FieldEdit::state("Doing")) else {
+            panic!("an ordinary edit should dispatch a request");
+        };
+        accept(&mut app, &only(requests));
+        assert_eq!(app.undo_stack.len(), 1, "an edit is undoable");
+
+        open_delete_menu(&mut app);
+        press(&mut app, KeyCode::Char('d'));
+        app.apply_deleted(&family_key(3));
+
+        assert!(
+            app.undo_stack.is_empty(),
+            "the delete files nothing, and the edit under it has no row left to go back to"
+        );
+        assert_eq!(press(&mut app, KeyCode::Char('u')), AppAction::None);
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Nothing to undo")
+        );
+        assert_eq!(rows_of(&app), [1, 2, 4], "and the row stays gone");
+    }
+
+    #[test]
+    fn a_delete_is_refused_before_the_confirmation_when_there_is_nothing_to_write_to() {
+        let mut app = App::new(deletable_tickets());
+        app.set_offline_reason(Some("no Azure DevOps organization is configured".into()));
+
+        app.run_command(CommandId::DeleteWorkItem);
+
+        assert_eq!(app.mode, AppMode::Browse, "the confirmation never opens");
+        assert!(app.delete_confirm.is_none());
+        assert_eq!(
+            app.notification(),
+            Some((
+                "no Azure DevOps organization is configured",
+                NotificationLevel::Error
+            ))
+        );
+    }
+
+    #[test]
+    fn deleting_the_work_item_the_details_pane_is_showing_leaves_it_over_the_next_one() {
+        let mut app = deleting_app();
+        app.select_row(2);
+        app.details.set_viewport(4, 40);
+        app.details.scroll_to(12);
+        open_delete_menu(&mut app);
+        press(&mut app, KeyCode::Char('d'));
+
+        app.apply_deleted(&family_key(3));
+
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.key.id),
+            Some(4),
+            "the pane is over a work item that is still there"
+        );
+        assert_eq!(
+            app.details.offset, 0,
+            "and reads from the top of it rather than from where the last one was"
+        );
+        assert_eq!(
+            app.family_cursor,
+            Some(family_key(4)),
+            "the family cursor follows the selection rather than the work item that went"
+        );
     }
 }

@@ -204,6 +204,9 @@ pub enum PointerTarget {
     /// A form's `[Create]` and `[Cancel]` buttons.
     SubmitForm,
     CancelForm,
+    /// The delete confirmation's `[Delete]` and `[Cancel]` buttons.
+    ConfirmDelete,
+    CancelDelete,
     /// One editable value on the details pane, which opens its editor as a
     /// dropdown anchored under it.
     EditField {

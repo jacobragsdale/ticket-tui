@@ -655,6 +655,13 @@ fn handle_action(
                 start_edit(app, runtime, request);
             }
         }
+        // One request a work item, taken in the order the confirmation listed
+        // them, so a checked-set delete runs sequentially like a bulk edit.
+        AppAction::Delete(keys) => {
+            for key in keys {
+                start_delete(app, runtime, key);
+            }
+        }
         AppAction::FetchIdentities => send_identities(runtime),
         AppAction::FetchClassificationNodes => send_classification_nodes(runtime),
         AppAction::FetchWorkItemTypes => send_work_item_types(runtime),
@@ -922,6 +929,25 @@ fn start_comment(app: &mut App, runtime: &mut SyncRuntime, key: TicketKey, text:
             .unwrap_or_else(|| "Azure DevOps is not configured".to_owned()),
     };
     app.reject_comment(&key, &error);
+}
+
+/// Hands one delete to the sync worker. Nothing has left the table yet — a row
+/// is dropped when Azure DevOps says the work item is gone — so a worker that
+/// is gone only has to say the work item is still there.
+fn start_delete(app: &mut App, runtime: &mut SyncRuntime, key: TicketKey) {
+    let sent = runtime
+        .worker
+        .as_ref()
+        .map(|worker| worker.send(SyncRequest::Delete(key.clone())));
+    let error = match sent {
+        Some(Ok(())) => return,
+        Some(Err(error)) => format!("{error:#}"),
+        None => runtime
+            .offline_reason
+            .clone()
+            .unwrap_or_else(|| "Azure DevOps is not configured".to_owned()),
+    };
+    app.reject_delete(&key, &error);
 }
 
 /// Asks the worker for the project's team members, for the assignee picker. A
@@ -1192,6 +1218,18 @@ fn poll_sync(
                     app.reject_reparent(&rejection);
                 }
             },
+            // The worker took this work item out of the file itself, so the
+            // signature moves with it and the watcher below leaves it alone.
+            SyncEvent::Deleted(result) => match *result {
+                Ok(key) => {
+                    app.apply_deleted(&key);
+                    app.configure_database(
+                        repository.path().to_path_buf(),
+                        db::data_signature(repository.path()),
+                    );
+                }
+                Err(rejection) => app.reject_delete(&rejection.key, &rejection.message),
+            },
             SyncEvent::Stopped => {
                 runtime.stop(app, "the Azure DevOps sync worker stopped");
             }
@@ -1216,6 +1254,7 @@ fn poll_watch(
         || app.comments_pending()
         || app.creates_pending()
         || app.reparents_pending()
+        || app.deletes_pending()
         || app.details_pending.is_some()
     {
         return false;
