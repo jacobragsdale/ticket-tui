@@ -50,6 +50,11 @@ pub struct Cli {
     /// defaults to TICKET_TUI_QUERY
     #[arg(long, value_name = "WIQL")]
     pub query: Option<String>,
+    /// Days a work item may sit untouched before the Changed column flags it
+    /// as stale; defaults to TICKET_TUI_STALE_DAYS, then whatever the session
+    /// remembers, then 14
+    #[arg(long, value_name = "DAYS")]
+    pub stale_days: Option<u16>,
     #[command(subcommand)]
     pub command: Option<Command>,
 }

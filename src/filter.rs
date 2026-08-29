@@ -305,6 +305,54 @@ impl MatchContext {
     }
 }
 
+/// The `changed:` comparison a stale-item highlight is, written the way the
+/// query language spells it: `>14d`, an age of more than fourteen days.
+///
+/// The highlight and the filter cannot disagree about which items are old,
+/// because this is the text they both parse.
+#[must_use]
+pub fn stale_bound(days: u16) -> String {
+    format!(">{days}d")
+}
+
+/// The whole query a stale-item highlight stands for, which is what the
+/// palette reports back after moving the threshold and what the built-in
+/// **Stale** view asks for.
+#[must_use]
+pub fn stale_query(days: u16) -> String {
+    format!(
+        "{}:{} {}:@open",
+        FilterField::Changed.key(),
+        stale_bound(days),
+        FilterField::State.key()
+    )
+}
+
+/// Whether nobody has touched a work item for longer than `days` and the
+/// workflow is still expecting somebody to.
+///
+/// Finished work is never stale however long it has sat: nothing is waiting on
+/// a work item that is done or removed, so the state category is asked before
+/// the clock is. The age half is [`DatePredicate`] reading [`stale_bound`], so
+/// a flagged row is exactly a row `changed:>14d` lists.
+///
+/// The bound is exclusive, as `>` is everywhere else: a work item touched
+/// exactly `days` ago has not yet crossed it.
+#[must_use]
+pub fn is_stale(ticket: &Ticket, days: u16, now: Timestamp) -> bool {
+    !is_finished(&ticket.state)
+        && DatePredicate::parse(&stale_bound(days))
+            .is_some_and(|predicate| predicate.matches(ticket.changed_at, now))
+}
+
+/// Whole days since a work item was last touched, which is the number the
+/// details pane reports beside the instant. An item changed in the future —
+/// clocks disagree — reads as zero rather than as a negative age.
+#[must_use]
+pub fn days_untouched(ticket: &Ticket, now: Timestamp) -> i64 {
+    ticket.changed_at.seconds_until(now) / (24 * 60 * 60)
+}
+
 /// Whether a state means the work is over. Completed and removed both are:
 /// neither is waiting on anybody.
 fn is_finished(state: &str) -> bool {
@@ -956,6 +1004,107 @@ mod tests {
             "a saved query reads against the clock, not the day it was written"
         );
         assert!(stale.matches_at(&ticket, false, three_weeks_on));
+    }
+
+    #[test]
+    fn the_stale_threshold_is_exclusive_so_the_boundary_day_is_not_yet_stale() {
+        let now = ts("2026-08-29T12:00:00Z");
+        let changed = |changed: &str| dated("2026-01-01T00:00:00Z", changed);
+
+        assert!(
+            !is_stale(&changed("2026-08-15T12:00:00Z"), 14, now),
+            "exactly fourteen days is the bound, and > does not take its edge"
+        );
+        assert!(
+            is_stale(&changed("2026-08-15T11:59:59Z"), 14, now),
+            "a second past the bound crosses it"
+        );
+        assert!(is_stale(&changed("2026-08-14T12:00:00Z"), 14, now));
+        assert!(!is_stale(&changed("2026-08-28T12:00:00Z"), 14, now));
+    }
+
+    #[test]
+    fn finished_work_is_never_stale_however_long_it_has_sat() {
+        let now = ts("2026-08-29T12:00:00Z");
+        let ancient = |state: &str| Ticket {
+            changed_at: ts("2025-01-01T00:00:00Z"),
+            ..ticket(state, "Bug", Some("Avery"), "rust")
+        };
+
+        assert!(is_stale(&ancient("To Do"), 14, now));
+        assert!(is_stale(&ancient("Active"), 14, now));
+        assert!(is_stale(&ancient("Resolved"), 14, now));
+        assert!(
+            !is_stale(&ancient("Done"), 14, now),
+            "nobody is waiting on completed work"
+        );
+        assert!(!is_stale(&ancient("Closed"), 14, now));
+        assert!(!is_stale(&ancient("Removed"), 14, now));
+    }
+
+    #[test]
+    fn the_stale_highlight_and_the_changed_filter_agree_on_the_same_data() {
+        let now = ts("2026-08-29T12:00:00Z");
+        let items = [
+            dated("2026-01-01T00:00:00Z", "2026-08-29T11:00:00Z"),
+            dated("2026-01-01T00:00:00Z", "2026-08-15T12:00:00Z"),
+            dated("2026-01-01T00:00:00Z", "2026-08-14T12:00:00Z"),
+            dated("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"),
+        ];
+        let age_only = parse_query("changed:>14d").filters;
+        let whole = parse_query(&stale_query(14)).filters;
+
+        for item in &items {
+            assert_eq!(
+                is_stale(item, 14, now),
+                age_only.matches_at(item, false, now),
+                "the highlight is the changed:>14d comparison for open work: {item:?}"
+            );
+            assert_eq!(
+                is_stale(item, 14, now),
+                whole.matches_at(item, false, now),
+                "and the whole query for it is what the palette reports: {item:?}"
+            );
+        }
+
+        let finished = Ticket {
+            state: "Done".into(),
+            ..dated("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")
+        };
+        assert!(
+            age_only.matches_at(&finished, false, now) && !is_stale(&finished, 14, now),
+            "the age halves agree; only state:@open holds the finished item back"
+        );
+        assert!(!whole.matches_at(&finished, false, now));
+    }
+
+    #[test]
+    fn the_stale_query_reads_as_the_built_in_view_writes_it() {
+        assert_eq!(stale_bound(21), ">21d");
+        assert_eq!(stale_query(21), "changed:>21d state:@open");
+        assert!(
+            DatePredicate::parse(&stale_bound(21)).is_some(),
+            "the bound the highlight builds is one the query language parses"
+        );
+    }
+
+    #[test]
+    fn days_untouched_counts_whole_days_and_never_goes_negative() {
+        let now = ts("2026-08-29T12:00:00Z");
+        let changed = |changed: &str| dated("2026-01-01T00:00:00Z", changed);
+
+        assert_eq!(days_untouched(&changed("2026-08-08T12:00:00Z"), now), 21);
+        assert_eq!(
+            days_untouched(&changed("2026-08-08T11:00:00Z"), now),
+            21,
+            "a part day does not round up to the next one"
+        );
+        assert_eq!(days_untouched(&changed("2026-08-29T11:00:00Z"), now), 0);
+        assert_eq!(
+            days_untouched(&changed("2026-09-30T12:00:00Z"), now),
+            0,
+            "a work item changed in the future has no age to report"
+        );
     }
 
     #[test]

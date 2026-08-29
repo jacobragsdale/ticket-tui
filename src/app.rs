@@ -21,8 +21,8 @@ use crate::edit::{EditApplied, EditRejection, EditRequest, normalize_tags};
 use crate::export;
 pub use crate::filter::FacetTarget;
 use crate::filter::{
-    FacetValue, FilterField, FilterToken, MatchContext, ParsedQuery, facet_values, format_query,
-    parse_query,
+    FacetValue, FilterField, FilterToken, MatchContext, ParsedQuery, days_untouched, facet_values,
+    format_query, is_stale, parse_query, stale_query,
 };
 use crate::model::{
     CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity,
@@ -71,6 +71,19 @@ pub enum AppMode {
     /// The work item types a form's Type field can name.
     TypePicker,
 }
+
+/// How long a work item may sit untouched before the Changed column flags it,
+/// when neither a flag, a variable, nor the session says otherwise.
+pub const DEFAULT_STALE_DAYS: u16 = 14;
+
+/// The thresholds the palette's **Set stale threshold** steps through, which
+/// is how the setting is changed without a number to type: a sprint, a
+/// fortnight, three weeks, a month.
+pub const STALE_DAY_CHOICES: [u16; 4] = [7, 14, 21, 30];
+
+/// A threshold of zero days would flag every open work item the moment it was
+/// touched, which is not a threshold at all, so one day is the floor.
+const MIN_STALE_DAYS: u16 = 1;
 
 /// Percentage of the workspace given to the tickets pane when the panes sit
 /// side by side, and when they are stacked.
@@ -1332,6 +1345,14 @@ pub struct App {
     pub narrow_details: bool,
     pub pane_split_wide: u16,
     pub pane_split_stacked: u16,
+    /// The remembered stale threshold: what the palette last set, and what the
+    /// session file carries between runs.
+    stale_days: u16,
+    /// The threshold this run was started under, from `--stale-days` or
+    /// `TICKET_TUI_STALE_DAYS`. It stands over the remembered value until the
+    /// palette moves the setting, and is never written back to the session: a
+    /// flag passed once should not quietly become the setting.
+    stale_days_override: Option<u16>,
     content_area: Rect,
     divider: Option<DividerOrientation>,
     pub reload_pending: bool,
@@ -1540,6 +1561,8 @@ impl App {
             narrow_details: false,
             pane_split_wide: DEFAULT_PANE_SPLIT_WIDE,
             pane_split_stacked: DEFAULT_PANE_SPLIT_STACKED,
+            stale_days: DEFAULT_STALE_DAYS,
+            stale_days_override: None,
             content_area: Rect::ZERO,
             divider: None,
             reload_pending: false,
@@ -1858,6 +1881,73 @@ impl App {
                 .eq(assignee.trim().chars().flat_map(char::to_lowercase)),
             _ => false,
         }
+    }
+
+    /// How long a work item may sit untouched before it is flagged.
+    ///
+    /// The run's `--stale-days` or `TICKET_TUI_STALE_DAYS` stands over the
+    /// value the session remembers, which stands over the built-in fortnight.
+    /// Moving the setting from the palette clears the override, so the palette
+    /// has the last word for the rest of the run and is what gets remembered.
+    #[must_use]
+    pub const fn stale_days(&self) -> u16 {
+        match self.stale_days_override {
+            Some(days) => days,
+            None => self.stale_days,
+        }
+    }
+
+    /// The threshold the session file carries, which is not the one in force
+    /// while a flag or a variable overrides it.
+    #[must_use]
+    pub const fn remembered_stale_days(&self) -> u16 {
+        self.stale_days
+    }
+
+    /// The threshold `--stale-days` or `TICKET_TUI_STALE_DAYS` asked for. It
+    /// is applied after the session has been restored, so a flag beats what
+    /// the last run left behind, and it is deliberately not remembered.
+    pub const fn override_stale_days(&mut self, days: u16) {
+        self.stale_days_override = Some(clamp_stale_days(days));
+    }
+
+    /// The palette's **Set stale threshold**: step to the next threshold above
+    /// the one in force, wrapping round at the end of the list. A value that
+    /// came from a flag is stepped away from and then forgotten, because the
+    /// setting has now been asked for explicitly.
+    pub fn cycle_stale_days(&mut self) {
+        let current = self.stale_days();
+        let next = STALE_DAY_CHOICES
+            .into_iter()
+            .find(|choice| *choice > current)
+            .unwrap_or(STALE_DAY_CHOICES[0]);
+        self.set_stale_days(next);
+    }
+
+    /// Moves the threshold and remembers it. The status line names the query
+    /// the highlight now stands for, so the filter and the colour are visibly
+    /// the same question.
+    pub fn set_stale_days(&mut self, days: u16) {
+        let days = clamp_stale_days(days);
+        self.stale_days = days;
+        self.stale_days_override = None;
+        self.session_dirty = true;
+        self.set_status(format!("Stale after {days} days · {}", stale_query(days)));
+    }
+
+    /// How many whole days a work item has been sitting when it counts as
+    /// stale, and `None` when it does not. The details pane reports the
+    /// number; the table only needs to know there is one.
+    #[must_use]
+    pub fn stale_age_days(&self, ticket: &Ticket) -> Option<i64> {
+        self.stale_age_days_at(ticket, Timestamp::now())
+    }
+
+    /// The same against a fixed instant, which is how the highlight is tested
+    /// without reaching for the clock.
+    #[must_use]
+    pub fn stale_age_days_at(&self, ticket: &Ticket, now: Timestamp) -> Option<i64> {
+        is_stale(ticket, self.stale_days(), now).then(|| days_untouched(ticket, now))
     }
 
     /// The people a previous session cached, read out of the database as the
@@ -5676,6 +5766,10 @@ impl App {
                 self.reset_pane_split();
                 AppAction::None
             }
+            CommandId::SetStaleThreshold => {
+                self.cycle_stale_days();
+                AppAction::None
+            }
         }
     }
 
@@ -5961,6 +6055,7 @@ impl App {
                 .map(|ticket| session::SessionKey::from(&ticket.key)),
             pane_split_wide: self.pane_split_wide,
             pane_split_stacked: self.pane_split_stacked,
+            stale_days: self.stale_days,
         }
     }
 
@@ -5976,6 +6071,7 @@ impl App {
         self.pane_split_stacked = session
             .pane_split_stacked
             .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
+        self.stale_days = clamp_stale_days(session.stale_days);
         self.bookmarks = session.bookmarks.iter().map(TicketKey::from).collect();
         self.recent = session.recent.iter().map(TicketKey::from).collect();
         self.views = session
@@ -6025,6 +6121,16 @@ const fn focus_name(focus: Focus) -> &'static str {
         Focus::Tickets => "tickets",
         Focus::Family => "family",
         Focus::Details => "details",
+    }
+}
+
+/// Holds a threshold at or above the one-day floor, wherever it came from: a
+/// flag, a variable, or a session file written by hand.
+const fn clamp_stale_days(days: u16) -> u16 {
+    if days < MIN_STALE_DAYS {
+        MIN_STALE_DAYS
+    } else {
+        days
     }
 }
 
@@ -9610,6 +9716,130 @@ mod tests {
             None,
             "an iteration nobody scheduled is never the current one"
         );
+    }
+
+    /// A work item in `state`, last touched `changed_at`.
+    fn aged(id: i64, state: &str, changed_at: &str) -> Ticket {
+        Ticket {
+            state: state.into(),
+            ..ticket(id, "Neglected", changed_at)
+        }
+    }
+
+    #[test]
+    fn the_stale_threshold_flags_open_work_past_it_and_never_finished_work() {
+        let now = crate::timestamp::ts("2026-08-29T12:00:00Z");
+        let app = App::new(vec![]);
+
+        assert_eq!(app.stale_days(), DEFAULT_STALE_DAYS);
+        assert_eq!(
+            BUILTIN_VIEWS
+                .iter()
+                .find(|view| view.name == "Stale")
+                .map(|view| view.query),
+            Some(stale_query(DEFAULT_STALE_DAYS).as_str()),
+            "the built-in view asks the question the highlight answers"
+        );
+        assert_eq!(
+            app.stale_age_days_at(&aged(1, "To Do", "2026-08-08T12:00:00Z"), now),
+            Some(21),
+            "three weeks untouched is flagged, and the pane says how long"
+        );
+        assert_eq!(
+            app.stale_age_days_at(&aged(2, "To Do", "2026-08-15T12:00:00Z"), now),
+            None,
+            "exactly fourteen days has not crossed the threshold yet"
+        );
+        assert_eq!(
+            app.stale_age_days_at(&aged(3, "To Do", "2026-08-15T11:59:59Z"), now),
+            Some(14),
+            "a second past it has"
+        );
+        for finished in ["Done", "Closed", "Removed"] {
+            assert_eq!(
+                app.stale_age_days_at(&aged(4, finished, "2025-01-01T00:00:00Z"), now),
+                None,
+                "{finished} work is never stale, whatever its age"
+            );
+        }
+    }
+
+    #[test]
+    fn the_stale_threshold_takes_the_flag_over_the_session_and_the_palette_over_both() {
+        let now = crate::timestamp::ts("2026-08-29T12:00:00Z");
+        let three_weeks_old = aged(1, "To Do", "2026-08-08T12:00:00Z");
+        let mut app = App::new(vec![]);
+
+        app.set_stale_days(30);
+        let session = app.snapshot_session();
+        let mut restored = App::new(vec![]);
+        restored.restore_session(session.clone());
+        assert_eq!(restored.stale_days(), 30, "the session remembers it");
+        assert_eq!(restored.stale_age_days_at(&three_weeks_old, now), None);
+
+        // `--stale-days`, or TICKET_TUI_STALE_DAYS, is applied after the
+        // session has been restored, and beats what it carried.
+        restored.override_stale_days(7);
+        assert_eq!(restored.stale_days(), 7);
+        assert_eq!(restored.stale_age_days_at(&three_weeks_old, now), Some(21));
+        assert_eq!(
+            restored.snapshot_session().stale_days,
+            30,
+            "a flag passed once does not quietly become the setting"
+        );
+
+        restored.run_command(CommandId::SetStaleThreshold);
+        assert_eq!(
+            restored.stale_days(),
+            14,
+            "the palette steps up from the seven days in force"
+        );
+        assert_eq!(
+            restored.snapshot_session().stale_days,
+            14,
+            "and the palette is what gets remembered"
+        );
+    }
+
+    #[test]
+    fn setting_the_stale_threshold_steps_through_the_choices_and_names_the_query() {
+        let mut app = App::new(vec![]);
+
+        let steps: Vec<u16> = (0..5)
+            .map(|_| {
+                app.run_command(CommandId::SetStaleThreshold);
+                app.stale_days()
+            })
+            .collect();
+        assert_eq!(
+            steps,
+            vec![21, 30, 7, 14, 21],
+            "the choices step upward and wrap round"
+        );
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Stale after 21 days · changed:>21d state:@open"),
+            "the status names the query the highlight stands for"
+        );
+        assert!(app.session_dirty, "moving the setting is worth saving");
+    }
+
+    #[test]
+    fn a_threshold_of_no_days_at_all_is_held_at_the_one_day_floor() {
+        let mut app = App::new(vec![]);
+
+        app.override_stale_days(0);
+        assert_eq!(app.stale_days(), 1);
+
+        app.set_stale_days(0);
+        assert_eq!(app.stale_days(), 1);
+
+        let mut restored = App::new(vec![]);
+        restored.restore_session(Session {
+            stale_days: 0,
+            ..Session::default()
+        });
+        assert_eq!(restored.stale_days(), 1, "including one edited by hand");
     }
 
     #[test]

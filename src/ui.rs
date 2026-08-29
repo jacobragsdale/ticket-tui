@@ -26,6 +26,7 @@ use crate::pointer::{
     SelectableSnapshot, SelectableSurface, ThumbGeometry, region,
 };
 use crate::search::QueryHighlighter;
+use crate::timestamp::Timestamp;
 
 const WIDE_BREAKPOINT: u16 = 110;
 const NARROW_BREAKPOINT: u16 = 70;
@@ -47,6 +48,10 @@ struct Theme {
     /// its colour-coded cells keep their own foregrounds.
     hover_background: Color,
     info: Color,
+    /// What the Changed column paints work nobody has touched in weeks. It is
+    /// deliberately not one of the state colours: staleness is a fact about
+    /// the clock, not about where the work item sits in the workflow.
+    warning: Color,
     error: Color,
     scrollbar: Color,
     search_match: Color,
@@ -81,6 +86,7 @@ impl Theme {
                 selected_background: Color::Reset,
                 hover_background: Color::Reset,
                 info: Color::Reset,
+                warning: Color::Reset,
                 error: Color::Reset,
                 scrollbar: Color::Reset,
                 search_match: Color::Reset,
@@ -110,6 +116,7 @@ impl Theme {
                 selected_background: Color::DarkGray,
                 hover_background: Color::Indexed(237),
                 info: Color::Yellow,
+                warning: Color::Yellow,
                 error: Color::Red,
                 scrollbar: Color::DarkGray,
                 search_match: Color::Yellow,
@@ -490,6 +497,9 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .bottom_margin(1);
 
     let now = OffsetDateTime::now_utc();
+    // The same instant the relative labels read against, so a row's age and
+    // whether it is flagged for that age are decided by one clock.
+    let table_now = Timestamp::from_offset_date_time(now);
     let density = app.row_density;
     let row_height = density.row_height();
     let body_height = inner.height.saturating_sub(2);
@@ -514,6 +524,7 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             tone: RowTone::of(&ticket.state),
             mine: app.is_mine(ticket),
             progress: app.child_progress(&ticket.key),
+            stale: app.stale_age_days_at(ticket, table_now).is_some(),
         };
         cells.extend(
             columns
@@ -833,7 +844,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         &mut highlighter,
     ));
     lines.push(field_line("Created", ticket.created_at.exact_utc()));
-    lines.push(field_line("Changed", ticket.changed_at.exact_utc()));
+    lines.push(changed_field_line(&ticket, app.stale_age_days(&ticket)));
 
     lines.push(Line::default());
     lines.push(section_line("Description"));
@@ -2859,13 +2870,14 @@ fn overlay_line(line: Line<'_>, selected: bool) -> Line<'_> {
 }
 
 /// What a row knows about itself beyond the work item: how strongly it is
-/// painted, whether it is the signed-in user's, and how far its children have
-/// got.
+/// painted, whether it is the signed-in user's, how far its children have got,
+/// and whether it has sat untouched past the stale threshold.
 #[derive(Clone, Copy)]
 struct RowContext {
     tone: RowTone,
     mine: bool,
     progress: Option<ChildProgress>,
+    stale: bool,
 }
 
 fn table_cell(
@@ -2880,6 +2892,7 @@ fn table_cell(
         tone,
         mine,
         progress,
+        stale,
     } = row;
     let plain = tone.apply(Style::default());
     let line = match field {
@@ -2920,7 +2933,7 @@ fn table_cell(
         .style(tone.apply(priority_style(ticket.priority))),
         SortField::Changed => Line::from(ticket.changed_at.relative_to(now))
             .right_aligned()
-            .style(plain),
+            .style(changed_style(plain, stale)),
         SortField::Created => Line::from(ticket.created_at.relative_to(now))
             .right_aligned()
             .style(plain),
@@ -3354,6 +3367,40 @@ fn progress_style(plain: Style, progress: Option<ChildProgress>) -> Style {
             .add_modifier(Modifier::BOLD);
     }
     plain
+}
+
+/// The Changed column's styling. Work nobody has touched past the stale
+/// threshold goes warning-coloured and bold; bold is what carries it under
+/// NO_COLOR, where the palette is all `Reset`.
+///
+/// Nothing else paints this cell, so the row's own tone is the only styling to
+/// rank against, and staleness wins it — but the two can never actually meet:
+/// [`RowTone::Muted`] is the finished rows, and a finished work item is never
+/// stale however long it has sat.
+fn changed_style(plain: Style, stale: bool) -> Style {
+    if stale {
+        return plain
+            .fg(theme().warning)
+            .add_modifier(Modifier::BOLD)
+            .remove_modifier(Modifier::DIM);
+    }
+    plain
+}
+
+/// The details pane's `Changed` line: the exact instant, and — when nobody has
+/// touched the work item past the threshold — how many whole days it has been
+/// sitting, in the same warning colour the column uses.
+fn changed_field_line(ticket: &Ticket, stale_for: Option<i64>) -> Line<'static> {
+    let mut line = field_line("Changed", ticket.changed_at.exact_utc());
+    if let Some(days) = stale_for {
+        line.spans.push(Span::styled(
+            format!(" (stale {days}d)"),
+            Style::default()
+                .fg(theme().warning)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    line
 }
 
 fn field_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
@@ -4525,6 +4572,169 @@ mod tests {
                     && span.content.contains("Chen")
             }),
             "the search match must still show through the mine styling: {matched:?}"
+        );
+    }
+
+    /// Foreground and modifiers of the painted text in one body row of one
+    /// column, found by stepping past the padding a right-aligned cell leaves.
+    fn painted_column_cell(
+        terminal: &Terminal<TestBackend>,
+        column: Rect,
+        y: u16,
+    ) -> (Color, Modifier) {
+        let buffer = terminal.backend().buffer();
+        for x in column.x..column.x.saturating_add(column.width) {
+            let cell = &buffer[(x, y)];
+            if cell.symbol().trim() != "" {
+                return (cell.fg, cell.modifier);
+            }
+        }
+        panic!("column at {} row {y} painted nothing", column.x);
+    }
+
+    #[test]
+    fn the_changed_cell_flags_work_left_untouched_and_never_finished_work() {
+        // Dated far enough back that the fortnight is crossed whenever this
+        // runs, so the assertions do not depend on the wall clock.
+        let now = OffsetDateTime::now_utc();
+        let touched = |id, title, ago: Duration| Ticket {
+            changed_at: Timestamp::from_offset_date_time(now - ago),
+            ..ticket_at(id, title, "Issue", "To Do", "2026-01-01T00:00:00Z")
+        };
+        let mut app = App::new(vec![
+            // The top row carries the selection, whose own bold would drown
+            // out the flag, so nothing is asked of it.
+            touched(10_001, "Selected", Duration::from_secs(60)),
+            touched(10_002, "Fresh", Duration::from_secs(3600)),
+            ticket_at(
+                10_003,
+                "Neglected",
+                "Issue",
+                "To Do",
+                "2020-01-02T00:00:00Z",
+            ),
+            ticket_at(10_004, "Finished", "Issue", "Done", "2020-01-01T00:00:00Z"),
+        ]);
+
+        let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let column = app
+            .hit_regions
+            .headers
+            .iter()
+            .find(|(_, id)| *id == SortField::Changed)
+            .expect("the Changed column should be visible")
+            .0;
+        let body = app.hit_regions.table_body.expect("table body should exist");
+        let cell = |row: u16| painted_column_cell(&terminal, column, body.y + row);
+
+        // Newest first, so the two recent rows lead and the old ones follow.
+        let (fresh_fg, fresh_modifier) = cell(1);
+        let (stale_fg, stale_modifier) = cell(2);
+        let (done_fg, done_modifier) = cell(3);
+
+        assert_eq!(
+            stale_fg,
+            theme().warning,
+            "work nobody has touched in years should be flagged"
+        );
+        assert!(
+            stale_modifier.contains(Modifier::BOLD),
+            "bold carries the flag where NO_COLOR leaves no palette"
+        );
+        assert_ne!(
+            (fresh_fg, fresh_modifier.contains(Modifier::BOLD)),
+            (stale_fg, true),
+            "a row touched today is not flagged"
+        );
+        assert_ne!(
+            (done_fg, done_modifier.contains(Modifier::BOLD)),
+            (stale_fg, true),
+            "a finished row is never flagged, however long it has sat"
+        );
+        assert!(
+            done_modifier.contains(Modifier::DIM) || done_fg == theme().muted,
+            "and it still recedes with the rest of its row"
+        );
+    }
+
+    #[test]
+    fn the_stale_changed_cell_goes_bold_where_there_is_no_palette_to_colour_it() {
+        let plain = Style::default();
+
+        assert_eq!(changed_style(plain, false), plain, "nothing else paints it");
+        let flagged = changed_style(plain, true);
+        assert_eq!(flagged.fg, Some(theme().warning));
+        assert!(
+            flagged.add_modifier.contains(Modifier::BOLD),
+            "bold is what survives the monochrome theme"
+        );
+        assert_eq!(
+            Theme::new(true).warning,
+            Color::Reset,
+            "NO_COLOR has no warning colour, so weight has to carry it alone"
+        );
+
+        // A finished row is never stale, so the flag and the fade never
+        // actually meet; were one ever handed in, the flag would still win.
+        let faded = changed_style(RowTone::Muted.apply(plain), true);
+        assert!(
+            faded.add_modifier.contains(Modifier::BOLD)
+                && !faded.add_modifier.contains(Modifier::DIM),
+            "the flag outranks the fade it can never actually meet: {faded:?}"
+        );
+    }
+
+    #[test]
+    fn the_details_changed_line_says_how_long_a_stale_work_item_has_sat() {
+        let item = ticket();
+
+        let quiet = changed_field_line(&item, None);
+        assert_eq!(
+            quiet.spans.len(),
+            2,
+            "an item nobody is waiting on gets no suffix"
+        );
+
+        let flagged = changed_field_line(&item, Some(21));
+        let suffix = flagged.spans.last().expect("a suffix span");
+        assert_eq!(suffix.content, " (stale 21d)");
+        assert_eq!(suffix.style.fg, Some(theme().warning));
+        assert!(
+            suffix.style.add_modifier.contains(Modifier::BOLD),
+            "the suffix reads under NO_COLOR too"
+        );
+        assert!(
+            flagged.spans[1]
+                .content
+                .contains(&item.changed_at.exact_utc()),
+            "the exact instant is still there to read: {flagged:?}"
+        );
+    }
+
+    #[test]
+    fn the_details_pane_flags_a_neglected_work_item_beside_its_changed_instant() {
+        let mut item = ticket();
+        item.state = "To Do".into();
+        item.changed_at = crate::timestamp::ts("2020-01-01T00:00:00Z");
+        let mut app = App::new(vec![item.clone()]);
+        app.narrow_details = true;
+        app.focus = Focus::Details;
+
+        assert!(
+            render_text(60, 44, &mut app).contains("(stale "),
+            "the details pane says the work item has been sitting"
+        );
+
+        let mut finished = App::new(vec![Ticket {
+            state: "Done".into(),
+            ..item
+        }]);
+        finished.narrow_details = true;
+        finished.focus = Focus::Details;
+        assert!(
+            !render_text(60, 44, &mut finished).contains("(stale "),
+            "and says nothing about work that is over"
         );
     }
 

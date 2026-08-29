@@ -36,6 +36,8 @@ pub struct Session {
     pub pane_split_wide: u16,
     #[serde(default = "stacked_split")]
     pub pane_split_stacked: u16,
+    #[serde(default = "stale_days")]
+    pub stale_days: u16,
 }
 
 /// Sessions written before the divider was draggable carry no split, so both
@@ -46,6 +48,12 @@ const fn wide_split() -> u16 {
 
 const fn stacked_split() -> u16 {
     crate::app::DEFAULT_PANE_SPLIT_STACKED
+}
+
+/// Sessions written before the Changed column flagged neglected work carry no
+/// threshold, so they fall back to the built-in fortnight.
+const fn stale_days() -> u16 {
+    crate::app::DEFAULT_STALE_DAYS
 }
 
 impl Default for Session {
@@ -65,6 +73,7 @@ impl Default for Session {
             selected: None,
             pane_split_wide: wide_split(),
             pane_split_stacked: stacked_split(),
+            stale_days: stale_days(),
         }
     }
 }
@@ -175,6 +184,7 @@ mod tests {
             sort_direction: SortDirection::Ascending,
             pane_split_wide: 70,
             pane_split_stacked: 44,
+            stale_days: 21,
             ..Session::default()
         };
         session.bookmarks.push(SessionKey {
@@ -204,6 +214,7 @@ mod tests {
         assert_eq!(stored["views"][0]["columns"][0]["id"], "id");
         assert_eq!(stored["pane_split_wide"], 70);
         assert_eq!(stored["pane_split_stacked"], 44);
+        assert_eq!(stored["stale_days"], 21);
 
         assert_eq!(loaded.query, "state:active");
         assert_eq!(loaded.sort_field, SortField::Title);
@@ -217,6 +228,10 @@ mod tests {
         );
         assert_eq!(loaded.pane_split_wide, 70);
         assert_eq!(loaded.pane_split_stacked, 44);
+        assert_eq!(
+            loaded.stale_days, 21,
+            "the stale threshold survives a restart"
+        );
     }
 
     #[test]
@@ -280,6 +295,10 @@ mod tests {
             (loaded.pane_split_wide, loaded.pane_split_stacked),
             (62, 56),
             "a session written before the divider moved keeps the built-in split"
+        );
+        assert_eq!(
+            loaded.stale_days, 14,
+            "and one written before the Changed column flagged anything keeps the fortnight"
         );
         let ids: Vec<_> = loaded.columns.iter().map(|column| column.id).collect();
         assert_eq!(ids, vec![SortField::Id, SortField::Title]);
