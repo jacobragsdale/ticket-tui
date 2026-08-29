@@ -31,9 +31,12 @@ Creating (Epic 620, closed): a generic `FormOverlay` behind `n` (#621), `N` for
 a child with the type, area and iteration inherited (#622), Set parent /
 Remove parent through a cycle-safe picker, one PATCH with `test /rev` (#623).
 
-Agents (Epic 624, all but #643): context JSON v2 with a `sync` block and
+Agents (Epic 624, closed): context JSON v2 with a `sync` block and
 `pending_edits` (#625), CLI subcommands `sync|show|list|edit|comment|create`
-(#626), the rewritten `ticket-tui-context` skill (#627).
+(#626), the rewritten `ticket-tui-context` skill (#627). #643, the in-TUI agent
+chat pane, was closed on 2026-08-29 as decided against: an agent in its own
+terminal reading `tickets.context.json` through the skill and writing through
+the CLI covers the need, so the TUI stays a viewer and grows no chat UI.
 
 Manager workflows (Epic 628, closed): built-in views with `@me` / `@none` /
 `@current` / `@open` sentinels (#629), sprint summary overlay (#630), stale
@@ -47,13 +50,11 @@ used to do.
 
 ## What is left
 
-1. **#643 in-TUI agent chat pane** — parked pending a decision. It is the only
-   thing holding Epic 624 open; build it, or move it out and close the epic.
-2. **#654 backslashes do not survive `format_query`/`parse_query`** — found
-   while building #630. `quote_if_needed` quotes but does not escape `\`, and
-   `take_quoted` treats `\` as an escape, so `iteration:"development\Sprint 1"`
-   parses back as `developmentSprint 1`. Every iteration and area facet toggle
-   hits this; it is masked because a bare leaf also matches.
+Nothing. The backlog has no open work items. Query round-tripping was the last
+loose end and is fixed: `quote_if_needed` now escapes `\` and `take_quoted`
+unescapes it, so `iteration:"development\Sprint 1"` survives
+`format_query`/`parse_query` (#654), and a backslash typed once inside a quoted
+filter value stays a single backslash (#655).
 
 ## Known data issue, not a code bug
 
