@@ -112,6 +112,9 @@ pub enum AppAction {
         id: i64,
         vote: i8,
     },
+    /// Clone one repository into the workspace, or fetch or pull the one
+    /// already there. The local thread runs git; nothing here waits on it.
+    LocalGit(crate::local::LocalRequest),
     /// Read the pending approvals now rather than at the next poll.
     RefreshApprovals,
     /// Approve or reject one approval, with an optional word about why.

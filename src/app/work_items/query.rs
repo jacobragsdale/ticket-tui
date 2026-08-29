@@ -838,6 +838,8 @@ impl WorkItemsScreen {
             // walk can cross tabs.
             CommandId::HistoryBack => AppAction::HistoryBack,
             CommandId::HistoryForward => AppAction::HistoryForward,
+            // The Repos tab's own; the palette does not offer them here.
+            CommandId::CloneRepo | CommandId::FetchRepo | CommandId::PullRepo => AppAction::None,
             CommandId::SprintSummary => {
                 self.open_sprint_summary();
                 AppAction::None

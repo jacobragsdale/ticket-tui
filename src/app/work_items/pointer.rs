@@ -388,7 +388,8 @@ impl WorkItemsScreen {
             PointerTarget::SelectTab { .. }
             | PointerTarget::TreeRow { .. }
             | PointerTarget::ApprovalRow { .. }
-            | PointerTarget::CopyText(_) => {}
+            | PointerTarget::CopyText(_)
+            | PointerTarget::RunCommand(_) => {}
             PointerTarget::DismissOverlay => self.close_overlay(shell),
             PointerTarget::PromptInput => {
                 self.place_caret(shell, TextEditor::Prompt, column, row);

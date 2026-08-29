@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::app::repos::{RepoColumn, RepoRow, ReposScreen};
+use crate::command::CommandId;
 use crate::model::Jump;
 use crate::ui::details::section_line;
 use crate::ui::table::{TableSpec, render_list_table, table_geometry};
@@ -202,10 +203,20 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
             let mut status = vec![Span::raw("  ")];
             status.extend(local_line(&row).spans);
             lines.push(Line::from(status));
+            // A clone claimed by its name rather than its remote says where
+            // that remote actually points, because a fetch here goes there.
+            if crate::local::normalise_remote(&local.origin)
+                != crate::local::normalise_remote(&row.repo.remote_url)
+            {
+                lines.push(Line::styled(
+                    format!("  origin {} \u{2014} matched by name", local.origin),
+                    Style::default().fg(theme().muted),
+                ));
+            }
         }
         None => {
             lines.push(Line::styled(
-                screen.workspace().map_or_else(
+                shell.workspace().map_or_else(
                     || "  No workspace to look in".to_owned(),
                     |workspace| format!("  Not in {}", workspace.display()),
                 ),
@@ -238,15 +249,21 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
         ]));
     }
     lines.push(Line::from(""));
-    let controls = if row.local.is_some() {
-        vec!["[Fetch]", "[Pull]"]
+    let controls: Vec<(&str, CommandId)> = if row.local.is_some() {
+        vec![
+            ("[Fetch]", CommandId::FetchRepo),
+            ("[Pull]", CommandId::PullRepo),
+        ]
     } else {
-        vec!["[Clone]"]
+        vec![("[Clone]", CommandId::CloneRepo)]
     };
+    let buttons_row = inner.y + u16::try_from(lines.len()).unwrap_or(u16::MAX);
     lines.push(Line::from(
         controls
-            .into_iter()
-            .map(|button| Span::styled(format!(" {button} "), Style::default().fg(theme().muted)))
+            .iter()
+            .map(|(button, _)| {
+                Span::styled(format!(" {button} "), Style::default().fg(theme().muted))
+            })
             .collect::<Vec<_>>(),
     ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -281,6 +298,23 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
             None,
             None,
         ));
+    }
+    // The buttons stand for the keys they name, so clicking one is the key.
+    let mut x = inner.x;
+    for (button, command) in &controls {
+        let width = u16::try_from(button.chars().count() + 2).unwrap_or(u16::MAX);
+        if buttons_row < inner.y.saturating_add(inner.height)
+            && x.saturating_add(width) <= inner.x.saturating_add(inner.width)
+        {
+            shell.hit_regions.push(region(
+                Rect::new(x, buttons_row, width, 1),
+                PointerTarget::RunCommand(*command),
+                PointerLayer::Base,
+                None,
+                None,
+            ));
+        }
+        x = x.saturating_add(width);
     }
 }
 

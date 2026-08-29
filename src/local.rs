@@ -1,0 +1,638 @@
+//! The local side of the Repos tab: which of the project's repositories are
+//! checked out on this machine, what state each is in, and the three git
+//! commands the tab runs — clone, fetch and pull.
+//!
+//! It has a thread of its own rather than sharing the sync worker's, so a
+//! clone that takes a minute never holds up an edit, and it never fetches
+//! behind your back: a status read is `git status`, nothing more.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
+
+use anyhow::{Context, Result};
+
+use crate::model::{GitJob, LocalRepo};
+
+/// What the scan matches a directory against: the repository, the
+/// `org/project/name` its remote normalises to, and what it is called.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoKey {
+    pub id: String,
+    pub remote: Option<String>,
+    pub name: String,
+}
+
+/// What the local side can be asked to do.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LocalRequest {
+    /// Read the workspace: which of these repositories are here, and how each
+    /// stands.
+    Scan {
+        workspace: PathBuf,
+        repos: Vec<RepoKey>,
+    },
+    /// `git clone <url> <workspace>/<name>`.
+    Clone {
+        repo_id: String,
+        url: String,
+        into: PathBuf,
+    },
+    Fetch {
+        repo_id: String,
+        path: PathBuf,
+    },
+    /// `git pull --ff-only`, which is the only pull this offers: anything a
+    /// fast-forward cannot do belongs in a real git client.
+    Pull {
+        repo_id: String,
+        path: PathBuf,
+    },
+    Stop,
+}
+
+/// What the local side has found or done.
+#[derive(Clone, Debug)]
+pub enum LocalEvent {
+    /// The workspace as it stands, by repository id.
+    Scanned(Vec<(String, LocalRepo)>),
+    /// A git command has started on one repository.
+    Started {
+        repo_id: String,
+        job: GitJob,
+    },
+    /// It finished. `message` is what to say; `error` is whether it failed.
+    Finished {
+        repo_id: String,
+        message: String,
+        error: bool,
+    },
+    Stopped,
+}
+
+/// The handle the main thread holds.
+pub struct LocalHandle {
+    requests: Sender<LocalRequest>,
+    events: Receiver<LocalEvent>,
+    stopped: std::cell::Cell<bool>,
+}
+
+impl LocalHandle {
+    /// Starts the thread. It ends when the handle is dropped.
+    pub fn spawn() -> Result<Self> {
+        let (request_sender, request_receiver) = mpsc::channel();
+        let (event_sender, event_receiver) = mpsc::channel();
+        thread::Builder::new()
+            .name("ticket-local".into())
+            .spawn(move || work(&request_receiver, &event_sender))
+            .context("failed to start the local repositories thread")?;
+        Ok(Self {
+            requests: request_sender,
+            events: event_receiver,
+            stopped: std::cell::Cell::new(false),
+        })
+    }
+
+    pub fn send(&self, request: LocalRequest) -> Result<()> {
+        self.requests
+            .send(request)
+            .context("the local repositories thread stopped")
+    }
+
+    pub fn try_event(&self) -> Option<LocalEvent> {
+        match self.events.try_recv() {
+            Ok(event) => Some(event),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                (!self.stopped.replace(true)).then_some(LocalEvent::Stopped)
+            }
+        }
+    }
+}
+
+fn work(requests: &Receiver<LocalRequest>, events: &Sender<LocalEvent>) {
+    while let Ok(request) = requests.recv() {
+        let sent = match request {
+            LocalRequest::Stop => return,
+            LocalRequest::Scan { workspace, repos } => {
+                events.send(LocalEvent::Scanned(scan(&workspace, &repos)))
+            }
+            LocalRequest::Clone { repo_id, url, into } => {
+                run_job(events, &repo_id, GitJob::Cloning, || clone(&url, &into))
+            }
+            LocalRequest::Fetch { repo_id, path } => {
+                run_job(events, &repo_id, GitJob::Fetching, || {
+                    git(&path, &["fetch", "--prune"]).map(|_| "Fetched".to_owned())
+                })
+            }
+            LocalRequest::Pull { repo_id, path } => {
+                run_job(events, &repo_id, GitJob::Pulling, || {
+                    git(&path, &["pull", "--ff-only"]).map(|_| "Pulled".to_owned())
+                })
+            }
+        };
+        if sent.is_err() {
+            return;
+        }
+    }
+}
+
+/// Runs one git job, saying so before and after.
+fn run_job(
+    events: &Sender<LocalEvent>,
+    repo_id: &str,
+    job: GitJob,
+    run: impl FnOnce() -> Result<String>,
+) -> Result<(), mpsc::SendError<LocalEvent>> {
+    events.send(LocalEvent::Started {
+        repo_id: repo_id.to_owned(),
+        job,
+    })?;
+    let (message, error) = match run() {
+        Ok(message) => (message, false),
+        Err(error) => (last_line(&format!("{error:#}")), true),
+    };
+    events.send(LocalEvent::Finished {
+        repo_id: repo_id.to_owned(),
+        message,
+        error,
+    })
+}
+
+/// git says the most useful thing last.
+fn last_line(message: &str) -> String {
+    message
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .unwrap_or(message)
+        .trim()
+        .to_owned()
+}
+
+/// Every repository in `workspace` that is one of `repos`, with its state.
+/// A workspace that is not there is not an error: it is answered with nothing,
+/// and the tab says where it looked.
+///
+/// A directory is claimed by its `origin` first. One that no remote claimed is
+/// then offered to the repository of the same name, because a project whose
+/// repositories are mirrored somewhere else — the origin here is GitHub's —
+/// is still the code you have on this machine; the details pane says where
+/// such a clone's origin actually points.
+#[must_use]
+pub fn scan(workspace: &Path, repos: &[RepoKey]) -> Vec<(String, LocalRepo)> {
+    let Ok(entries) = std::fs::read_dir(workspace) else {
+        return Vec::new();
+    };
+    let mut clones: Vec<(PathBuf, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.join(".git").exists() {
+            continue;
+        }
+        if let Ok(origin) = git(&path, &["remote", "get-url", "origin"]) {
+            clones.push((path, origin.trim().to_owned()));
+        }
+    }
+    let mut claimed: Vec<(String, PathBuf, String)> = Vec::new();
+    for (path, origin) in &clones {
+        let Some(key) = normalise_remote(origin) else {
+            continue;
+        };
+        if let Some(repo) = repos.iter().find(|repo| {
+            repo.remote
+                .as_ref()
+                .is_some_and(|remote| remote.eq_ignore_ascii_case(&key))
+        }) {
+            claimed.push((repo.id.clone(), path.clone(), origin.clone()));
+        }
+    }
+    for (path, origin) in &clones {
+        if claimed.iter().any(|(_, held, _)| held == path) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if let Some(repo) = repos.iter().find(|repo| {
+            repo.name.eq_ignore_ascii_case(name) && !claimed.iter().any(|(id, _, _)| *id == repo.id)
+        }) {
+            claimed.push((repo.id.clone(), path.clone(), origin.clone()));
+        }
+    }
+    let mut found: Vec<(String, LocalRepo)> = claimed
+        .into_iter()
+        .filter_map(|(id, path, origin)| read_status(&path, &origin).map(|local| (id, local)))
+        .collect();
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    found
+}
+
+/// `git status --porcelain=v2 --branch`, read into the four things the column
+/// says. A directory git will not talk about is left out rather than guessed.
+#[must_use]
+pub fn read_status(path: &Path, origin: &str) -> Option<LocalRepo> {
+    let output = git(path, &["status", "--porcelain=v2", "--branch"]).ok()?;
+    let mut branch = String::new();
+    let mut dirty = false;
+    let (mut ahead, mut behind) = (0, 0);
+    for line in output.lines() {
+        if let Some(head) = line.strip_prefix("# branch.head ") {
+            branch = head.trim().to_owned();
+        } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            let mut parts = ab.split_whitespace();
+            ahead = parts
+                .next()
+                .and_then(|value| value.trim_start_matches('+').parse().ok())
+                .unwrap_or(0);
+            behind = parts
+                .next()
+                .and_then(|value| value.trim_start_matches('-').parse().ok())
+                .unwrap_or(0);
+        } else if !line.starts_with('#') && !line.trim().is_empty() {
+            dirty = true;
+        }
+    }
+    Some(LocalRepo {
+        path: path.to_path_buf(),
+        origin: origin.to_owned(),
+        branch,
+        dirty,
+        ahead,
+        behind,
+        busy: None,
+    })
+}
+
+/// `org/project/name`, whichever way the remote is spelled. Anything that is
+/// not an Azure DevOps remote answers with nothing.
+#[must_use]
+pub fn normalise_remote(remote: &str) -> Option<String> {
+    let remote = remote.trim_end_matches('/').trim_end_matches(".git");
+    // git@ssh.dev.azure.com:v3/org/project/name
+    if let Some((_, tail)) = remote.split_once(":v3/") {
+        return (tail.split('/').count() == 3).then(|| tail.to_owned());
+    }
+    // https://[user@]dev.azure.com/org/project/_git/name, and the older
+    // https://org.visualstudio.com/project/_git/name.
+    let (_, tail) = remote.split_once("://")?;
+    let (host, path) = tail.split_once('/')?;
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let git_at = parts.iter().position(|part| *part == "_git")?;
+    let name = parts.get(git_at + 1)?;
+    match parts.as_slice() {
+        [organization, project, ..] if git_at >= 2 => {
+            Some(format!("{organization}/{project}/{name}"))
+        }
+        [project, ..] if git_at == 1 => {
+            let organization = host.split('@').next_back()?.split('.').next()?;
+            Some(format!("{organization}/{project}/{name}"))
+        }
+        _ => None,
+    }
+}
+
+/// `git clone <url> <into>`, which is the one command that runs outside a
+/// repository.
+fn clone(url: &str, into: &Path) -> Result<String> {
+    if into.exists() {
+        anyhow::bail!("{} already exists", into.display());
+    }
+    let parent = into
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has nowhere to go", into.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to make {}", parent.display()))?;
+    let output = Command::new("git")
+        .arg("clone")
+        .arg(url)
+        .arg(into)
+        .output()
+        .context("git could not be run")?;
+    if output.status.success() {
+        Ok(format!(
+            "Cloned {}",
+            into.file_name().unwrap_or_default().to_string_lossy()
+        ))
+    } else {
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr))
+    }
+}
+
+/// One git command inside one repository.
+fn git(path: &Path, arguments: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(arguments)
+        .output()
+        .context("git could not be run")?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr))
+    }
+}
+
+/// Where clones are looked for and made: the flag, then the variable, then
+/// `~/Development`.
+#[must_use]
+pub fn workspace_root(flag: Option<PathBuf>) -> Option<PathBuf> {
+    flag.or_else(|| std::env::var_os("TICKET_TUI_WORKSPACE").map(PathBuf::from))
+        .or_else(|| directories::UserDirs::new().map(|dirs| dirs.home_dir().join("Development")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn every_way_a_remote_is_spelled_reads_as_one_repository() {
+        for remote in [
+            "https://dev.azure.com/jacobragsdale/development/_git/ticket-tui",
+            "https://jacobragsdale@dev.azure.com/jacobragsdale/development/_git/ticket-tui",
+            "https://dev.azure.com/jacobragsdale/development/_git/ticket-tui.git",
+            "git@ssh.dev.azure.com:v3/jacobragsdale/development/ticket-tui",
+        ] {
+            assert_eq!(
+                normalise_remote(remote).as_deref(),
+                Some("jacobragsdale/development/ticket-tui"),
+                "{remote}"
+            );
+        }
+        assert_eq!(
+            normalise_remote("https://jacobragsdale.visualstudio.com/development/_git/ticket-tui")
+                .as_deref(),
+            Some("jacobragsdale/development/ticket-tui"),
+            "the older host spells the organization in front"
+        );
+        assert_eq!(normalise_remote("git@github.com:jacob/other.git"), None);
+    }
+
+    /// A bare repository with one commit, which the clones below come from.
+    fn origin(root: &Path, name: &str) -> PathBuf {
+        let work = root.join(format!("{name}-work"));
+        fs::create_dir_all(&work).unwrap();
+        run(&work, &["init", "--initial-branch=main"]);
+        run(&work, &["config", "user.email", "test@example.com"]);
+        run(&work, &["config", "user.name", "Test"]);
+        fs::write(work.join("README.md"), "one\n").unwrap();
+        run(&work, &["add", "."]);
+        run(&work, &["commit", "-m", "first"]);
+        let bare = root.join(format!("{name}.git"));
+        Command::new("git")
+            .args(["clone", "--bare"])
+            .arg(&work)
+            .arg(&bare)
+            .output()
+            .unwrap();
+        bare
+    }
+
+    /// One repository as the scan is told about it.
+    fn key(id: &str, name: &str) -> RepoKey {
+        RepoKey {
+            id: id.to_owned(),
+            remote: Some(format!("demo/atlas/{name}")),
+            name: name.to_owned(),
+        }
+    }
+
+    fn run(path: &Path, arguments: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Sets `origin` to a remote that reads as an Azure DevOps one, so the
+    /// scan matches it the way it would a real clone.
+    fn pretend_azure(path: &Path, name: &str) {
+        run(
+            path,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                &format!("https://dev.azure.com/demo/atlas/_git/{name}"),
+            ],
+        );
+    }
+
+    #[test]
+    fn the_scan_reads_the_branch_the_dirt_and_how_far_behind_each_clone_is() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let bare = origin(root, "ticket-tui");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+
+        // One clean clone, and one that is dirty and a commit behind.
+        for name in ["ticket-tui", "skillbook"] {
+            let output = Command::new("git")
+                .args(["clone"])
+                .arg(&bare)
+                .arg(workspace.join(name))
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        }
+        let dirty = workspace.join("skillbook");
+        fs::write(dirty.join("README.md"), "changed\n").unwrap();
+        // A commit lands on the remote, so the clone is one behind.
+        let pusher = workspace.join("ticket-tui");
+        run(&pusher, &["config", "user.email", "test@example.com"]);
+        run(&pusher, &["config", "user.name", "Test"]);
+        fs::write(pusher.join("NOTES.md"), "two\n").unwrap();
+        run(&pusher, &["add", "."]);
+        run(&pusher, &["commit", "-m", "second"]);
+        run(&pusher, &["push", "origin", "main"]);
+        // And one more it keeps to itself, so it reads as a commit ahead.
+        fs::write(pusher.join("LATER.md"), "three\n").unwrap();
+        run(&pusher, &["add", "."]);
+        run(&pusher, &["commit", "-m", "third"]);
+        run(&dirty, &["fetch"]);
+        // Only now do the remotes read as Azure DevOps ones: the git above
+        // has to talk to the bare repository next door.
+        for name in ["ticket-tui", "skillbook"] {
+            pretend_azure(&workspace.join(name), name);
+        }
+
+        let repos = vec![
+            key("aaa-111", "ticket-tui"),
+            key("bbb-222", "skillbook"),
+            key("ccc-333", "home-server"),
+        ];
+        let found = scan(&workspace, &repos);
+
+        assert_eq!(found.len(), 2, "one nobody has here is simply not there");
+        let ticket_tui = &found
+            .iter()
+            .find(|(id, _)| id == "aaa-111")
+            .expect("the clean clone")
+            .1;
+        assert_eq!(ticket_tui.branch, "main");
+        assert!(!ticket_tui.dirty);
+        assert_eq!(ticket_tui.ahead, 1, "the commit it pushed is still ahead");
+
+        let skillbook = &found
+            .iter()
+            .find(|(id, _)| id == "bbb-222")
+            .expect("the dirty clone")
+            .1;
+        assert!(skillbook.dirty, "an uncommitted change is dirt");
+        assert_eq!(skillbook.behind, 1, "and it is a commit behind");
+    }
+
+    #[test]
+    fn a_clone_whose_origin_is_somewhere_else_is_claimed_by_its_name() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let bare = origin(root, "ticket-tui");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        for name in ["ticket-tui", "skillbook"] {
+            Command::new("git")
+                .arg("clone")
+                .arg(&bare)
+                .arg(workspace.join(name))
+                .output()
+                .unwrap();
+        }
+        // Mirrored on GitHub, which is where these origins point.
+        for name in ["ticket-tui", "skillbook"] {
+            run(
+                &workspace.join(name),
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    &format!("https://github.com/jacobragsdale/{name}.git"),
+                ],
+            );
+        }
+
+        let found = scan(&workspace, &[key("aaa-111", "ticket-tui")]);
+        assert_eq!(found.len(), 1, "only the one the project knows about");
+        let (id, local) = &found[0];
+        assert_eq!(id, "aaa-111");
+        assert_eq!(local.branch, "main");
+        assert!(
+            local.origin.contains("github.com"),
+            "and it carries where its origin really points: {}",
+            local.origin
+        );
+
+        // A remote that does match wins the directory it names, so a name
+        // that happens to collide cannot take it.
+        run(
+            &workspace.join("skillbook"),
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://dev.azure.com/demo/atlas/_git/ticket-tui",
+            ],
+        );
+        let found = scan(&workspace, &[key("aaa-111", "ticket-tui")]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].1.path.file_name().unwrap(),
+            "skillbook",
+            "the remote is what the repository is, whatever the directory is called"
+        );
+    }
+
+    #[test]
+    fn a_clone_lands_in_the_workspace_and_a_failing_one_says_what_git_said() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let bare = origin(root, "ticket-tui");
+        let workspace = root.join("workspace");
+        let into = workspace.join("ticket-tui");
+
+        let message = clone(&format!("file://{}", bare.display()), &into).expect("the clone");
+        assert_eq!(message, "Cloned ticket-tui");
+        let status = read_status(&into, "").expect("a clone has a status");
+        assert_eq!(status.branch, "main");
+        assert!(!status.dirty);
+
+        let refused = clone(&format!("file://{}", bare.display()), &into)
+            .expect_err("cloning over one already there is refused");
+        assert!(refused.to_string().contains("already exists"), "{refused}");
+
+        let missing = clone("file:///nowhere/at/all.git", &workspace.join("other"))
+            .expect_err("a clone of nothing fails");
+        assert!(
+            format!("{missing:#}").contains("repository"),
+            "git's own words come back: {missing:#}"
+        );
+    }
+
+    #[test]
+    fn a_pull_clears_what_it_was_behind_and_a_diverged_one_is_refused() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        let bare = origin(root, "ticket-tui");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let clone_path = workspace.join("ticket-tui");
+        Command::new("git")
+            .arg("clone")
+            .arg(&bare)
+            .arg(&clone_path)
+            .output()
+            .unwrap();
+        run(&clone_path, &["config", "user.email", "test@example.com"]);
+        run(&clone_path, &["config", "user.name", "Test"]);
+
+        // Somebody else pushes.
+        let other = root.join("other");
+        Command::new("git")
+            .arg("clone")
+            .arg(&bare)
+            .arg(&other)
+            .output()
+            .unwrap();
+        run(&other, &["config", "user.email", "test@example.com"]);
+        run(&other, &["config", "user.name", "Test"]);
+        fs::write(other.join("NOTES.md"), "theirs\n").unwrap();
+        run(&other, &["add", "."]);
+        run(&other, &["commit", "-m", "theirs"]);
+        run(&other, &["push", "origin", "main"]);
+
+        run(&clone_path, &["fetch"]);
+        assert_eq!(read_status(&clone_path, "").unwrap().behind, 1);
+        git(&clone_path, &["pull", "--ff-only"]).expect("a fast-forward pull");
+        let status = read_status(&clone_path, "").unwrap();
+        assert_eq!((status.ahead, status.behind), (0, 0), "it is level now");
+
+        // Both sides move: the pull can no longer fast-forward.
+        fs::write(clone_path.join("MINE.md"), "mine\n").unwrap();
+        run(&clone_path, &["add", "."]);
+        run(&clone_path, &["commit", "-m", "mine"]);
+        fs::write(other.join("THEIRS.md"), "theirs again\n").unwrap();
+        run(&other, &["add", "."]);
+        run(&other, &["commit", "-m", "theirs again"]);
+        run(&other, &["push", "origin", "main"]);
+        run(&clone_path, &["fetch"]);
+
+        let refused = git(&clone_path, &["pull", "--ff-only"])
+            .expect_err("a diverged pull cannot fast-forward");
+        assert!(
+            format!("{refused:#}").to_lowercase().contains("fast"),
+            "git says why: {refused:#}"
+        );
+    }
+}

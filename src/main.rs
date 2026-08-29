@@ -25,6 +25,7 @@ use ticket_tui::azure::AzureConfig;
 use ticket_tui::cli::{self, Cli, resolve_me};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
 use ticket_tui::edit::{EditRejection, EditRequest, FieldEdit};
+use ticket_tui::local::{self, LocalEvent, LocalHandle, LocalRequest};
 use ticket_tui::markdown;
 use ticket_tui::model::{Run, RunResult, Ticket, TicketKey};
 use ticket_tui::session;
@@ -40,6 +41,23 @@ use url::Url;
 
 /// How often the background pull runs when nothing says otherwise.
 const DEFAULT_REFRESH_SECONDS: u64 = 60;
+
+/// How often the workspace is read while the Repos tab is showing. It is a
+/// handful of `git status` calls, and none of them touches the network.
+const LOCAL_SCAN_CADENCE: Duration = Duration::from_secs(60);
+
+/// The local side of the Repos tab: the thread that reads the workspace and
+/// runs git in it, and when it last looked.
+#[derive(Default)]
+struct LocalRuntime {
+    worker: Option<LocalHandle>,
+    /// When the workspace was last read. `None` asks for a read on the next
+    /// turn, which is how a finished clone or pull shows its result.
+    scanned: Option<Instant>,
+    /// Whether the Repos tab was showing last turn, so opening it reads the
+    /// workspace at once rather than up to a minute later.
+    showing: bool,
+}
 
 /// Everything the event loop needs to keep the database in step with Azure
 /// DevOps: the worker thread, the timer that feeds it, and why there is no
@@ -58,6 +76,9 @@ struct SyncRuntime {
     watching_run: (Option<i64>, Option<LogTarget>),
     /// The runs the watcher has been asked to follow.
     watched_runs: Vec<i64>,
+    /// Clones on this machine: their own thread, so a clone that takes a
+    /// minute never holds up an edit.
+    local: LocalRuntime,
     scheduler: SyncScheduler,
     config: Option<AzureConfig>,
     /// Why Azure DevOps could not be resolved, reported when the user asks for
@@ -314,6 +335,8 @@ fn run() -> Result<()> {
     app.work_items
         .set_state_catalog(repository.load_type_states()?);
     app.shell.set_repos(repository.load_repos()?);
+    app.shell
+        .set_workspace(local::workspace_root(cli.workspace.clone()));
     let (pipelines, runs) = (repository.load_pipelines()?, repository.load_runs()?);
     let shell = &app.shell;
     app.pipelines.set_pipelines(pipelines, runs, shell);
@@ -369,6 +392,10 @@ fn run() -> Result<()> {
         watching_tab: false,
         watching_run: (None, None),
         watched_runs: Vec::new(),
+        local: LocalRuntime {
+            worker: LocalHandle::spawn().ok(),
+            ..LocalRuntime::default()
+        },
     };
     if let Some(config) = config.filter(|_| wrong_project.is_none()) {
         runtime.worker = Some(SyncHandle::spawn(
@@ -538,6 +565,7 @@ fn run_terminal(
         redraw |= poll_sync(app, repository, runtime);
         redraw |= poll_watch(app, repository, &mut reloader);
         redraw |= poll_pipelines(app, runtime);
+        redraw |= poll_local(app, runtime);
         redraw |= dispatch_due_pull(app, runtime);
         redraw |= dispatch_due_details(app, runtime);
         redraw |= persist_session(app, repository);
@@ -677,6 +705,16 @@ fn handle_action(
                     .vote_rejected(&mut app.shell, id, &refusal);
             }
         }
+        // git runs on the local thread; the screen hears back through its
+        // events, so nothing waits here.
+        AppAction::LocalGit(request) => match runtime.local.worker.as_ref() {
+            Some(worker) => {
+                let _ = worker.send(request);
+            }
+            None => app
+                .shell
+                .set_error("The local repositories thread is not running".to_owned()),
+        },
         AppAction::RefreshApprovals => {
             if let Some(watcher) = runtime.pipelines.as_ref() {
                 let _ = watcher.send(WatchRequest::RefreshApprovals);
@@ -1046,6 +1084,65 @@ fn run_finished_summary(run: &Run) -> String {
         _ => String::new(),
     };
     format!("{glyph} Build {} {word}{duration}", run.build_number)
+}
+
+/// Reads the workspace while the Repos tab is showing, and folds in whatever
+/// the local thread has found or done. Nothing here is written to SQLite: what
+/// is on this machine is not the project's business, and a rescan is cheap.
+fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
+    let Some(worker) = runtime.local.worker.as_ref() else {
+        return false;
+    };
+    let showing = app.tab == TabId::Repos;
+    let opened = showing && !runtime.local.showing;
+    runtime.local.showing = showing;
+    let due = runtime
+        .local
+        .scanned
+        .is_none_or(|at| at.elapsed() >= LOCAL_SCAN_CADENCE);
+    if showing
+        && (opened || due)
+        && let Some(workspace) = app.shell.workspace().map(std::path::Path::to_path_buf)
+    {
+        runtime.local.scanned = Some(Instant::now());
+        let repos = app
+            .shell
+            .repos()
+            .iter()
+            .map(|repo| local::RepoKey {
+                id: repo.id.clone(),
+                remote: local::normalise_remote(&repo.remote_url),
+                name: repo.name.clone(),
+            })
+            .collect();
+        let _ = worker.send(LocalRequest::Scan { workspace, repos });
+    }
+    // Drained first, so the events can be answered without holding a borrow of
+    // the thread that sent them.
+    let events: Vec<LocalEvent> = std::iter::from_fn(|| worker.try_event()).collect();
+    let redraw = !events.is_empty();
+    for event in events {
+        match event {
+            LocalEvent::Scanned(local) => app.repos.set_local(local),
+            LocalEvent::Started { repo_id, job } => app.repos.set_job(&repo_id, Some(job)),
+            LocalEvent::Finished {
+                repo_id,
+                message,
+                error,
+            } => {
+                app.repos.set_job(&repo_id, None);
+                if error {
+                    app.shell.set_error(message);
+                } else {
+                    app.shell.set_news(message);
+                }
+                // Whatever git did, the workspace is not what it was.
+                runtime.local.scanned = None;
+            }
+            LocalEvent::Stopped => runtime.local.worker = None,
+        }
+    }
+    redraw
 }
 
 /// Tells the pipeline watcher what is worth polling and folds in what it has
@@ -1461,7 +1558,8 @@ fn mouse_pointer_for_hover(
         Some(
             PointerTarget::OpenInBrowser { .. }
             | PointerTarget::OpenSelectedUrl
-            | PointerTarget::EditField { .. },
+            | PointerTarget::EditField { .. }
+            | PointerTarget::RunCommand(_),
         ) => MousePointerShape::Link,
         Some(PointerTarget::PaneDivider) => match divider {
             Some(DividerOrientation::Vertical) => MousePointerShape::ColResize,
@@ -1849,6 +1947,7 @@ mod tests {
             watching_tab: false,
             watching_run: (None, None),
             watched_runs: Vec::new(),
+            local: LocalRuntime::default(),
         };
         (app, repository, runtime)
     }
@@ -2136,6 +2235,7 @@ mod tests {
             watching_tab: false,
             watching_run: (None, None),
             watched_runs: Vec::new(),
+            local: LocalRuntime::default(),
         };
 
         handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
@@ -2398,6 +2498,7 @@ mod tests {
             watching_tab: false,
             watching_run: (None, None),
             watched_runs: Vec::new(),
+            local: LocalRuntime::default(),
         };
 
         handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
@@ -3105,6 +3206,7 @@ mod tests {
             watching_tab: false,
             watching_run: (None, None),
             watched_runs: Vec::new(),
+            local: LocalRuntime::default(),
         }
     }
 

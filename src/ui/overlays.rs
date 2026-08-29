@@ -126,19 +126,23 @@ pub(super) fn render_help_popup(
             .filter(|command| !command.keys.is_empty() && command.scope == Scope::Global)
             .map(described),
     );
-    lines.push(Line::from(""));
-    lines.push(Line::styled(
-        TabId::WorkItems.label(),
-        Style::default().add_modifier(Modifier::BOLD),
-    ));
-    lines.extend(
-        COMMANDS
+    // Then a section per tab, for the keys that only work on one of them.
+    for tab in TabId::ALL {
+        let owned: Vec<Line<'_>> = COMMANDS
             .iter()
-            .filter(|command| {
-                !command.keys.is_empty() && command.scope == Scope::Tab(TabId::WorkItems)
-            })
-            .map(described),
-    );
+            .filter(|command| !command.keys.is_empty() && command.scope == Scope::Tab(tab))
+            .map(described)
+            .collect();
+        if owned.is_empty() {
+            continue;
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            tab.label(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        lines.extend(owned);
+    }
     lines.extend([
         Line::from(""),
         Line::styled("Mouse", Style::default().add_modifier(Modifier::BOLD)),
@@ -998,7 +1002,7 @@ pub(super) fn render_info_overlay(
     screen: &mut WorkItemsScreen,
     shell: &mut Shell,
 ) {
-    let area = centered_rect(frame.area(), 62, 13);
+    let area = centered_rect(frame.area(), 62, 14);
     let stale = if shell.stale { "stale" } else { "current" };
     // What the difference between the count and the total is made of, so the
     // rows the table is leaving out are a number rather than a suspicion.
@@ -1020,6 +1024,13 @@ pub(super) fn render_info_overlay(
         field_line("Loaded", shell.freshness_label()),
         field_line("Freshness", stale),
         field_line("Sync", shell.sync_summary()),
+        field_line(
+            "Workspace",
+            shell.workspace().map_or_else(
+                || "(none)".to_owned(),
+                |workspace| workspace.display().to_string(),
+            ),
+        ),
         field_line(
             "Watcher",
             shell

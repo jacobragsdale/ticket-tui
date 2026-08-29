@@ -149,6 +149,18 @@ through 7, 14, 21, and 30 days, has the last word for the rest of the run, and
 is what gets saved. See [Stale-item
 highlighting](#stale-item-highlighting).
 
+### `--workspace` and `TICKET_TUI_WORKSPACE`
+
+Where the Repos tab looks for clones and makes new ones:
+
+```console
+cargo run --release -- --workspace ~/src
+```
+
+`TICKET_TUI_WORKSPACE` sets the same directory, and the flag wins when both are
+given. Without either it is `~/Development`. See [The
+workspace](#the-workspace).
+
 ### `--query`: how much of the project to sync
 
 A project too large to hold whole is narrowed with `--query`, or
@@ -941,17 +953,51 @@ Pipelines · Local`. The counts are the active pull requests and the pipelines
 that build each one; a repository the project has disabled stays on the table,
 faded, so a link naming it still resolves. The Local column says what is on
 this machine — `main ✓` clean, `feat/x *` dirty, `main ↑2 ↓1` ahead and behind,
-`—` not cloned — which #670 fills in.
+`—` not cloned.
 
 The details pane carries the name and project, the default branch and size, the
 three URLs (each copies what it says on click, and `y` copies the ssh one), the
 local copy and where it is, and what is open against the repository: its active
 pull requests and the pipelines that build it, each a jump. `[Clone]`, or
-`[Fetch]` and `[Pull]` where there is a clone, are drawn muted until #671 and
-#672 wire them. `o` opens the repository's page, and so does clicking its name.
+`[Fetch]` and `[Pull]` where there is a clone, run what they say on a click.
+`o` opens the repository's page, and so does clicking its name.
 
 Its grammar: `name:`, `branch:`, `local:` (`cloned`, `dirty`, `ahead`,
 `behind`, `missing`) and `disabled:`.
+
+### The workspace
+
+Clones are looked for, and made, in one directory: `--workspace PATH`, else
+`TICKET_TUI_WORKSPACE`, else `~/Development`. The `i` overlay says which. While
+the tab is showing, that directory is read on arrival and every 60 seconds
+after: its immediate subdirectories that are git repositories are matched to the
+project by their `origin` remote — both
+`https://…@dev.azure.com/org/project/_git/name` and
+`git@ssh.dev.azure.com:v3/org/project/name` read as the same repository — and
+each match is measured with `git status`. A directory no remote claimed is then
+offered to the repository of the same name, because a project whose
+repositories are mirrored somewhere else is still the code you have here; such
+a clone's details say `origin … — matched by name`, since a fetch in it goes
+wherever that points. A workspace that is not there is not an error: nothing is
+cloned, and the details pane says where it looked. The read never fetches, so
+what the column calls behind is what your last fetch knew.
+
+It runs on a thread of its own, so a clone that takes a minute holds up neither
+the pull nor an edit.
+
+| Key | Action |
+|---|---|
+| `C` | Clone the selected repository into the workspace |
+| `G` | `git fetch --prune` in the clone |
+| `P` | `git pull --ff-only` in the clone |
+
+`C` clones over ssh, or over https when `TICKET_TUI_CLONE_PROTOCOL=https` or
+Azure DevOps gave no ssh URL. Each is refused, with a word about why, when it
+cannot be what you meant: cloning what is already here, fetching or pulling what
+is not, pulling a tree with uncommitted changes, or asking for a second command
+while one is still running. A pull that cannot fast-forward is refused by git
+itself and the refusal is shown — this is not a git client, and a divergence
+wants one.
 
 ## Pull requests
 

@@ -10,6 +10,7 @@ pub mod edit;
 pub mod export;
 pub mod filter;
 pub mod html;
+pub mod local;
 pub mod markdown;
 pub mod model;
 pub mod pointer;

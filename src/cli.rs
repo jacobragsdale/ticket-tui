@@ -52,6 +52,10 @@ pub struct Cli {
     /// remembers, then 14
     #[arg(long, value_name = "DAYS")]
     pub stale_days: Option<u16>,
+    /// Directory the Repos tab looks for clones in and makes new ones under;
+    /// defaults to TICKET_TUI_WORKSPACE, then ~/Development
+    #[arg(long, global = true, value_name = "PATH", value_hint = ValueHint::DirPath)]
+    pub workspace: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Option<Command>,
 }

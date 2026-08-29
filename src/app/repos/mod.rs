@@ -10,7 +10,8 @@ use super::{AppAction, CopiedContent, Focus, ListCursor, Screen, Shell, TabId};
 use crate::columns::{ColumnLayout, TableLayout};
 use crate::command::{CommandId, command_for_key};
 use crate::filter::{MatchContext, ParsedQuery, parse_query};
-use crate::model::{Jump, LocalRepo, Repo};
+use crate::local::LocalRequest;
+use crate::model::{GitJob, Jump, LocalRepo, Repo};
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 use crate::session::TabSession;
 use crate::text_input::TextInput;
@@ -48,8 +49,9 @@ pub struct ReposScreen {
     pub sort: (RepoColumn, bool),
     pub cursor: ListCursor,
     pub details: ScrollState,
-    /// The directory clones are looked for and made in.
-    workspace: Option<std::path::PathBuf>,
+    /// What git is doing to a repository right now, by repository id. Held
+    /// apart from `local` because a clone has no local entry to hang it on.
+    jobs: Vec<(String, GitJob)>,
 }
 
 impl Default for ReposScreen {
@@ -67,7 +69,7 @@ impl Default for ReposScreen {
             sort: (RepoColumn::Name, false),
             cursor: ListCursor::default(),
             details: ScrollState::default(),
-            workspace: None,
+            jobs: Vec::new(),
         }
     }
 }
@@ -92,19 +94,44 @@ impl ReposScreen {
         self.pipelines = pipelines;
     }
 
-    /// Where clones are looked for and made.
-    pub fn set_workspace(&mut self, workspace: Option<std::path::PathBuf>) {
-        self.workspace = workspace;
+    /// What git has started or finished doing to one repository. The busy
+    /// state outlives the command by a moment: it is cleared by the rescan
+    /// that follows, so the row never blinks back to a status that is stale.
+    pub fn set_job(&mut self, repo_id: &str, job: Option<GitJob>) {
+        self.jobs.retain(|(held, _)| held != repo_id);
+        if let Some(job) = job {
+            self.jobs.push((repo_id.to_owned(), job));
+        }
     }
 
+    /// What git is doing to one repository, if anything.
     #[must_use]
-    pub fn workspace(&self) -> Option<&std::path::Path> {
-        self.workspace.as_deref()
+    pub fn job_for(&self, repo_id: &str) -> Option<GitJob> {
+        self.jobs
+            .iter()
+            .find(|(held, _)| held == repo_id)
+            .map(|(_, job)| *job)
     }
 
     /// What the local-repos thread found. Keyed by repository id.
     pub fn set_local(&mut self, local: Vec<(String, LocalRepo)>) {
         self.local = local;
+    }
+
+    /// The same, with whatever git is doing to it folded in. A clone has no
+    /// local entry yet, so it borrows one whose only content is the job.
+    fn local_with_job(&self, repo_id: &str) -> Option<LocalRepo> {
+        let job = self.job_for(repo_id);
+        match self.local_for(repo_id) {
+            Some(local) => Some(LocalRepo {
+                busy: job,
+                ..local.clone()
+            }),
+            None => job.map(|job| LocalRepo {
+                busy: Some(job),
+                ..LocalRepo::default()
+            }),
+        }
     }
 
     /// What one repository looks like on this machine, if it is here at all.
@@ -159,7 +186,7 @@ impl ReposScreen {
         self.repos
             .iter()
             .map(|repo| RepoRow {
-                local: self.local_for(&repo.id).cloned(),
+                local: self.local_with_job(&repo.id),
                 pull_requests: count_for(&self.pull_request_counts, &repo.id),
                 pipelines: count_for(&self.pipeline_counts, &repo.id),
                 repo: repo.clone(),
@@ -227,6 +254,83 @@ impl ReposScreen {
             })
     }
 
+    /// `C`: clone the selected repository into the workspace. Refusals are
+    /// notifications, not errors in the log: there is always something else
+    /// to do with the row.
+    pub fn clone_selected(&mut self, shell: &mut Shell) -> AppAction {
+        let Some(row) = self.selected(shell) else {
+            return AppAction::None;
+        };
+        if let Some(local) = row.local.as_ref() {
+            shell.set_error(format!(
+                "{} is already at {}",
+                row.repo.name,
+                local.path.display()
+            ));
+            return AppAction::None;
+        }
+        let Some(workspace) = shell.workspace().map(std::path::Path::to_path_buf) else {
+            shell.set_error(
+                "Nowhere to clone into \u{2014} pass --workspace or set TICKET_TUI_WORKSPACE"
+                    .to_owned(),
+            );
+            return AppAction::None;
+        };
+        let Some(url) = clone_url(&row.repo) else {
+            shell.set_error(format!("Azure DevOps gave {} no clone URL", row.repo.name));
+            return AppAction::None;
+        };
+        shell.set_news(format!(
+            "Cloning {} into {}",
+            row.repo.name,
+            workspace.display()
+        ));
+        AppAction::LocalGit(LocalRequest::Clone {
+            repo_id: row.repo.id,
+            url,
+            into: workspace.join(&row.repo.name),
+        })
+    }
+
+    /// `G` and `P`: fetch the selected clone, or fast-forward it. Neither is
+    /// offered for a repository that is not on the machine, and a pull is
+    /// refused while anything is uncommitted rather than being attempted and
+    /// failing halfway.
+    pub fn git_selected(&mut self, shell: &mut Shell, pull: bool) -> AppAction {
+        let Some(row) = self.selected(shell) else {
+            return AppAction::None;
+        };
+        let Some(local) = row.local.as_ref() else {
+            shell.set_error(format!(
+                "{} is not on this machine \u{2014} C clones it",
+                row.repo.name
+            ));
+            return AppAction::None;
+        };
+        if let Some(job) = local.busy {
+            shell.set_error(format!(
+                "Already {} {}",
+                job.label().trim_end_matches('\u{2026}'),
+                row.repo.name
+            ));
+            return AppAction::None;
+        }
+        if pull && local.dirty {
+            shell.set_error(format!(
+                "{} has uncommitted changes \u{2014} commit or stash them first",
+                row.repo.name
+            ));
+            return AppAction::None;
+        }
+        let path = local.path.clone();
+        let repo_id = row.repo.id.clone();
+        AppAction::LocalGit(if pull {
+            LocalRequest::Pull { repo_id, path }
+        } else {
+            LocalRequest::Fetch { repo_id, path }
+        })
+    }
+
     fn handle_search_key(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
             KeyCode::Enter | KeyCode::Esc => self.mode = RepoMode::Browse,
@@ -246,6 +350,9 @@ impl ReposScreen {
             }
             Some(CommandId::Open) => self.open_in_browser(shell),
             Some(CommandId::CopyUrl | CommandId::CopyId) => self.copy_ssh_url(shell),
+            Some(CommandId::CloneRepo) => self.clone_selected(shell),
+            Some(CommandId::FetchRepo) => self.git_selected(shell, false),
+            Some(CommandId::PullRepo) => self.git_selected(shell, true),
             Some(CommandId::Sync) => AppAction::Sync,
             Some(CommandId::HistoryBack) => AppAction::HistoryBack,
             Some(CommandId::HistoryForward) => AppAction::HistoryForward,
@@ -256,6 +363,23 @@ impl ReposScreen {
             _ => AppAction::None,
         }
     }
+}
+
+/// What a clone reads from: ssh by default, because that is what a developer
+/// with an SSH key set up wants, and https when `TICKET_TUI_CLONE_PROTOCOL`
+/// says so or there is no ssh URL on file.
+fn clone_url(repo: &Repo) -> Option<String> {
+    let https = std::env::var("TICKET_TUI_CLONE_PROTOCOL")
+        .is_ok_and(|protocol| protocol.eq_ignore_ascii_case("https"));
+    let (first, second) = if https {
+        (&repo.remote_url, &repo.ssh_url)
+    } else {
+        (&repo.ssh_url, &repo.remote_url)
+    };
+    [first, second]
+        .into_iter()
+        .find(|url| !url.is_empty())
+        .cloned()
 }
 
 /// How many of something each repository has.
@@ -344,6 +468,14 @@ impl Screen for ReposScreen {
                 return self.open_in_browser(shell);
             }
             PointerTarget::SortHeader(key) => self.toggle_sort(key),
+            // The details pane's buttons stand for the keys they name.
+            PointerTarget::RunCommand(CommandId::CloneRepo) => return self.clone_selected(shell),
+            PointerTarget::RunCommand(CommandId::FetchRepo) => {
+                return self.git_selected(shell, false);
+            }
+            PointerTarget::RunCommand(CommandId::PullRepo) => {
+                return self.git_selected(shell, true);
+            }
             PointerTarget::Follow(jump) => return AppAction::Follow(jump),
             // Every URL line copies what it says.
             PointerTarget::CopyText(text) => {

@@ -67,6 +67,40 @@ fn a_repository_nobody_has_here_offers_to_clone_it() {
 }
 
 #[test]
+fn clicking_clone_runs_it_and_a_running_job_says_so_in_the_column() {
+    let mut app = repos_app();
+    // home-server, which is not on this machine.
+    app.repos.cursor.focus(1);
+    render_text(170, 44, &mut app);
+
+    let button = app
+        .shell
+        .hit_regions
+        .find_target(|target| {
+            matches!(
+                target,
+                PointerTarget::RunCommand(crate::command::CommandId::CloneRepo)
+            )
+        })
+        .expect("the clone button")
+        .rect;
+    let action = click(&mut app, button.x + 2, button.y);
+    assert!(
+        matches!(
+            action,
+            crate::app::AppAction::LocalGit(crate::local::LocalRequest::Clone { .. })
+        ),
+        "the button is the key, got {action:?}"
+    );
+
+    // And while git is at it, the column says so where the status would be.
+    app.repos
+        .set_job("ccc-333", Some(crate::model::GitJob::Cloning));
+    let text = render_text(170, 44, &mut app);
+    assert!(text.contains("cloning\u{2026}"), "{text}");
+}
+
+#[test]
 fn clicking_a_url_copies_it_and_y_copies_the_ssh_one() {
     let mut app = repos_app();
     app.repos.cursor.focus(3);

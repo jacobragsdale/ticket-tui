@@ -163,6 +163,9 @@ pub struct Shell {
     /// reads these: a pull request, a run and an artifact link all name a
     /// repository by its GUID.
     pub(crate) repos: Vec<Repo>,
+    /// The directory the Repos tab looks for clones in and makes new ones
+    /// under. `None` when there is no home directory to fall back on.
+    pub(crate) workspace: Option<std::path::PathBuf>,
     /// What each work item is called, by id, so the tabs that only carry ids
     /// — a pull request's linked items, a run's — can name them.
     pub(crate) work_item_titles: Vec<(i64, String)>,
@@ -223,6 +226,7 @@ impl Default for Shell {
             data_signature: 0,
             sync_pending: false,
             repos: Vec::new(),
+            workspace: None,
             work_item_titles: Vec::new(),
             watch_state: None,
             history: Vec::new(),
@@ -279,6 +283,17 @@ impl Shell {
     #[must_use]
     pub fn repos(&self) -> &[Repo] {
         &self.repos
+    }
+
+    /// Where clones are looked for and made: `--workspace`, then
+    /// `TICKET_TUI_WORKSPACE`, then `~/Development`.
+    pub fn set_workspace(&mut self, workspace: Option<std::path::PathBuf>) {
+        self.workspace = workspace;
+    }
+
+    #[must_use]
+    pub fn workspace(&self) -> Option<&std::path::Path> {
+        self.workspace.as_deref()
     }
 
     /// What a repository GUID is called, for the tabs that only ever see the

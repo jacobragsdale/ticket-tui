@@ -200,6 +200,9 @@ pub enum PointerTarget {
     /// A line that copies what it says when it is clicked: a repository's
     /// URLs today.
     CopyText(String),
+    /// A button that stands for a keystroke: clicking it runs the command the
+    /// key would have.
+    RunCommand(crate::command::CommandId),
     /// One approval in the approvals overlay.
     ApprovalRow {
         index: usize,

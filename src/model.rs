@@ -658,10 +658,13 @@ impl PullRequest {
 }
 
 /// What one repository looks like on this machine.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalRepo {
     /// Where the clone is.
     pub path: std::path::PathBuf,
+    /// What its `origin` points at, which is not always the Azure DevOps
+    /// repository it was matched to: a mirrored project is claimed by name.
+    pub origin: String,
     /// The branch it is on, or the detached head's short id.
     pub branch: String,
     /// Whether anything is uncommitted.
