@@ -389,6 +389,26 @@ others stay changed — and the checked set survives the whole thing, ready for
 the next change. Every other editor stays on the row under the cursor: the same
 title or the same description on ten work items is never what was meant.
 
+`u` takes the last edit back. Every change is immediate, so a mis-click on the
+state picker needs a way out that is just as quick: `u` reads the value the work
+item carried before the edit and writes it back down the path above — an
+ordinary JSON Patch with its own fresh revision test, so a work item somebody
+else has moved since refuses the undo exactly as it would refuse any other edit,
+and reports it the same way. When it lands the status line reads `Undid State on
+#613 (Doing → To Do)`. A field that was empty before the edit goes back to
+*empty* rather than to an empty value: an undone priority or assignee is the
+same `remove` the `Clear` and `Unassigned` rows send.
+
+A bulk change is one entry on the stack however many work items it touched, so
+one `u` puts all of them back and one summary reports it — `Undid State on 3
+tickets`, or `Undid 2 of 3 · #613 failed: it changed in Azure DevOps` when part
+of it did not land, so an undo is never left half done in silence. The stack
+holds the last twenty edits and is kept in memory only, so it starts empty every
+run and `u` with nothing on it says `Nothing to undo`. An undo is not itself
+undoable — taking one back would make `u` a toggle between the last two values,
+and the edit under it would never be reached — and a comment cannot be undone at
+all, being a post rather than a field.
+
 Every editor is reachable two ways. Clicking a field's value in the details
 pane opens that field's editor where the value is, as a dropdown anchored under
 it — one click, not two — and `Enter` does the same for the value under the
@@ -600,6 +620,7 @@ against the server.
 | `e` → Title/Priority/Tags/Iteration/Area | Edit the title, priority, tags, iteration, or area; also `Edit title`, `Edit priority`, `Edit tags`, `Change iteration`, `Change area`, and `Change assignee` in the palette |
 | `e` → Description | Edit the description in `$VISUAL`/`$EDITOR`/`vi` as Markdown; also `Edit description` in the palette |
 | `e` → Add comment | Leave a one-line comment on the selected work item; also `Add comment` in the palette |
+| `u` | Undo the last edit, putting the value back; a bulk change goes back under one press |
 | `m` | Bookmark or unbookmark the selected ticket |
 | `Space` | Toggle ticket multi-select; two or more make `S`, `a`, and Iteration bulk edits |
 | `y` | Copy selected (or current) ticket IDs |

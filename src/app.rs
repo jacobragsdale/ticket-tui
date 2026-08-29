@@ -544,6 +544,8 @@ struct PendingEdit {
     /// When the edit was dispatched, so the agent context can say how long it
     /// has been in flight.
     since: Timestamp,
+    /// What this edit means for the undo stack once it lands.
+    undo: UndoRole,
 }
 
 impl PendingEdit {
@@ -551,6 +553,68 @@ impl PendingEdit {
         let mut ticket = self.original.clone();
         self.edit.apply(&mut ticket);
         ticket
+    }
+}
+
+/// What an edit in flight is to the undo stack.
+#[derive(Clone, Debug)]
+enum UndoRole {
+    /// An ordinary edit, filed under the dispatch that made it once it lands.
+    /// The work items of one bulk change share a number, so they gather into
+    /// a single entry and one `u` takes the whole change back.
+    Undoable(u64),
+    /// An edit that is itself an undo, which is not filed: taking one back
+    /// would only put the change on again, and the edit under it on the stack
+    /// would never be reached. The line is what the status says when this
+    /// lands, and is `None` for one work item of an undo whose summary speaks
+    /// for the whole of it.
+    Undoing(Option<String>),
+}
+
+/// How many edits back `u` can go in one session. Twenty is far more than a
+/// mis-click needs, and short enough that the stack never becomes a memory of
+/// the session in its own right.
+const UNDO_DEPTH: usize = 20;
+
+/// One work item on the undo stack: the change that puts its field back the
+/// way it was before the edit that is being taken back.
+#[derive(Clone, Debug)]
+struct UndoStep {
+    key: TicketKey,
+    edit: FieldEdit,
+}
+
+/// Everything one press of `u` takes back. An ordinary edit is one work item;
+/// a bulk change over the checked rows is all of them under a single entry, so
+/// `u` puts the whole change back rather than unpicking it a row at a time.
+#[derive(Clone, Debug)]
+struct UndoEntry {
+    /// The dispatch these came from, so a bulk change's work items gather here
+    /// as their answers arrive rather than stacking up one entry apiece.
+    group: u64,
+    /// What the field is called, such as `State`.
+    label: String,
+    /// The value the edit wrote, which is the half of the story the work items
+    /// share however different the values they are going back to are.
+    wrote: String,
+    steps: Vec<UndoStep>,
+}
+
+impl UndoEntry {
+    /// What the status line says once the undo has landed. One work item names
+    /// the value both ways — `Undid State on #613 (Doing → To Do)`; a bulk
+    /// change put several different values back, so it counts them instead.
+    fn headline(&self) -> String {
+        match self.steps.as_slice() {
+            [step] => format!(
+                "Undid {} on #{} ({} → {})",
+                self.label,
+                step.key.id,
+                self.wrote,
+                step.edit.value_text()
+            ),
+            steps => format!("Undid {} on {} tickets", self.label, steps.len()),
+        }
     }
 }
 
@@ -570,14 +634,45 @@ pub struct SyncTarget {
 /// Three is enough to act on and short enough to read in one notification.
 const NAMED_BULK_FAILURES: usize = 3;
 
+/// How a change of several work items reads once the last answer is in. A
+/// bulk change counts what landed; an undo of one says what it took back
+/// instead, which the count would only get in the way of.
+#[derive(Clone, Debug)]
+enum BulkHeadline {
+    /// The change as a notification says it, such as `State → Doing`, with the
+    /// tally put in front of it.
+    Changed(String),
+    /// The whole line an undo says for itself.
+    Undone(String),
+}
+
+impl BulkHeadline {
+    /// The line for a change every work item took.
+    fn all_landed(&self, updated: usize) -> String {
+        match self {
+            Self::Changed(summary) => format!("Updated {updated} tickets · {summary}"),
+            Self::Undone(line) => line.clone(),
+        }
+    }
+
+    /// What the tally of a change that did not land everywhere leads with.
+    const fn verb(&self) -> &'static str {
+        match self {
+            Self::Changed(_) => "Updated",
+            Self::Undone(_) => "Undid",
+        }
+    }
+}
+
 /// One change asked of several work items at once, and what has come back of
 /// it. Each edit is its own request with its own revision test, so they land
 /// one at a time; this counts the answers so the change speaks once, when the
-/// last of them is in, rather than once a row.
+/// last of them is in, rather than once a row. An undo of a bulk change is
+/// gathered the same way, so it too is never left half done in silence.
 #[derive(Clone, Debug)]
 struct BulkEdit {
-    /// The change as a notification says it, such as `State → Doing`.
-    summary: String,
+    /// What the whole change says for itself once every answer is in.
+    headline: BulkHeadline,
     /// How many work items it was asked of, answered or not.
     total: usize,
     /// How many of them Azure DevOps accepted.
@@ -609,7 +704,7 @@ impl BulkEdit {
     /// and which work items did not.
     fn notification(&self) -> String {
         if self.failures.is_empty() {
-            return format!("Updated {} tickets · {}", self.updated, self.summary);
+            return self.headline.all_landed(self.updated);
         }
         let mut named: Vec<String> = self
             .failures
@@ -622,7 +717,8 @@ impl BulkEdit {
             named.push(format!("+{unnamed} more"));
         }
         format!(
-            "Updated {} of {} · {}",
+            "{} {} of {} · {}",
+            self.headline.verb(),
             self.updated,
             self.total,
             named.join(" · ")
@@ -758,6 +854,13 @@ pub struct App {
     /// at most one, but a second started before the first has finished is
     /// counted on its own rather than taking the first one's place.
     bulk_edits: Vec<BulkEdit>,
+    /// The edits this session has landed, oldest first, each one ready to be
+    /// put back by `u`. Capped at [`UNDO_DEPTH`]; it is not written anywhere,
+    /// so it starts empty every run.
+    undo_stack: Vec<UndoEntry>,
+    /// How many dispatches this session has made, which is where an undo entry
+    /// gets the number that gathers a bulk change's work items into one.
+    undo_groups: u64,
     /// Work items with a comment posted and not answered yet. A comment is not
     /// optimistic, so this is only what stops a second one being typed on top
     /// of the first.
@@ -924,6 +1027,8 @@ impl App {
             details_pending: None,
             pending_edits: HashMap::new(),
             bulk_edits: Vec::new(),
+            undo_stack: Vec::new(),
+            undo_groups: 0,
             pending_comments: HashSet::new(),
             offline_reason: None,
             sync_enabled: false,
@@ -1541,7 +1646,8 @@ impl App {
     /// [`Self::edit_selected`] for a work item that is not the selected row.
     pub fn edit_ticket(&mut self, key: &TicketKey, edit: FieldEdit) -> AppAction {
         let label = edit.label().to_owned();
-        match self.begin_edit(key, edit) {
+        let undo = UndoRole::Undoable(self.next_undo_group());
+        match self.begin_edit(key, edit, undo) {
             Ok(request) => AppAction::Edit(vec![request]),
             Err(reason) => {
                 self.set_error(format!("#{} {label} not saved: {reason}", key.id));
@@ -1564,13 +1670,16 @@ impl App {
         }
         let mut requests = Vec::new();
         let mut failures = Vec::new();
+        // One number for the whole change, so `u` puts every row of it back at
+        // once rather than a row a press.
+        let group = self.next_undo_group();
         for key in targets {
             // The picker's no-op rule, applied a row at a time: a work item
             // already carrying the value is left alone rather than written to.
             if !self.would_change(&key, &edit) {
                 continue;
             }
-            match self.begin_edit(&key, edit.clone()) {
+            match self.begin_edit(&key, edit.clone(), UndoRole::Undoable(group)) {
                 Ok(request) => requests.push(request),
                 Err(reason) => failures.push(format!("#{} failed: {reason}", key.id)),
             }
@@ -1581,7 +1690,7 @@ impl App {
             return AppAction::None;
         }
         let bulk = BulkEdit {
-            summary: edit.summary(),
+            headline: BulkHeadline::Changed(edit.summary()),
             total,
             updated: 0,
             failures,
@@ -1599,7 +1708,12 @@ impl App {
     /// Starts one edit: the row takes the change at once, the copy it had is
     /// kept for a refusal, and the request to send comes back. `Err` is why
     /// the work item cannot be written, phrased to follow `not saved:`.
-    fn begin_edit(&mut self, key: &TicketKey, edit: FieldEdit) -> Result<EditRequest, String> {
+    fn begin_edit(
+        &mut self,
+        key: &TicketKey,
+        edit: FieldEdit,
+        undo: UndoRole,
+    ) -> Result<EditRequest, String> {
         if !self.sync_enabled {
             // Nothing to write to, so the row is left exactly as it is.
             return Err(self
@@ -1619,6 +1733,7 @@ impl App {
             original: self.tickets[index].clone(),
             edit: edit.clone(),
             since: Timestamp::now(),
+            undo,
         };
         let request = EditRequest {
             key: key.clone(),
@@ -1677,15 +1792,115 @@ impl App {
     /// changed date the server settled on rather than the optimistic guess.
     pub fn apply_edit(&mut self, applied: EditApplied) {
         let key = applied.ticket.key.clone();
-        self.pending_edits.remove(&key);
+        let pending = self.pending_edits.remove(&key);
         self.graph.replace_relations_from(&key, applied.relations);
         if let Some(index) = self.index_of(&key) {
             self.set_ticket(index, applied.ticket);
             self.resettle_rows();
         }
-        if !self.record_bulk_outcome(&key, None) {
-            self.set_status(format!("Updated #{} · {}", key.id, applied.edit.summary()));
+        let mut landed = format!("Updated #{} · {}", key.id, applied.edit.summary());
+        if let Some(PendingEdit { original, undo, .. }) = pending {
+            match undo {
+                UndoRole::Undoable(group) => self.record_undo(group, &original, &applied.edit),
+                UndoRole::Undoing(Some(line)) => landed = line,
+                UndoRole::Undoing(None) => {}
+            }
         }
+        if !self.record_bulk_outcome(&key, None) {
+            self.set_status(landed);
+        }
+    }
+
+    /// A number no other dispatch shares, so the work items of one bulk change
+    /// gather under one undo entry and nothing else joins them.
+    fn next_undo_group(&mut self) -> u64 {
+        self.undo_groups += 1;
+        self.undo_groups
+    }
+
+    /// Files an edit that landed on the undo stack, so `u` can put the work
+    /// item back. The value restored comes off `before`, the copy the row
+    /// carried until the write, so a field that was empty then goes back to
+    /// cleared rather than emptied. An edit whose field a row does not model
+    /// is not filed: nothing could be read back off it to restore.
+    fn record_undo(&mut self, group: u64, before: &Ticket, edit: &FieldEdit) {
+        let Some(undo) = edit.undoing(before) else {
+            return;
+        };
+        let step = UndoStep {
+            key: before.key.clone(),
+            edit: undo,
+        };
+        if let Some(entry) = self
+            .undo_stack
+            .iter_mut()
+            .find(|entry| entry.group == group)
+        {
+            entry.steps.push(step);
+            return;
+        }
+        if self.undo_stack.len() == UNDO_DEPTH {
+            // The oldest goes, so the stack stays a way back out of a
+            // mis-click rather than a log of the session.
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(UndoEntry {
+            group,
+            label: edit.label().to_owned(),
+            wrote: edit.value_text(),
+            steps: vec![step],
+        });
+    }
+
+    /// Takes back the last edit that landed: `u`. Every work item it changed
+    /// goes to the value it carried before, sent down the ordinary edit path
+    /// with a fresh revision test, so a work item that has moved on in Azure
+    /// DevOps since refuses the undo exactly as it would refuse any other
+    /// edit. An undo of several work items is gathered like a bulk change, so
+    /// one that only partly lands says which rows are still where they were
+    /// rather than leaving it half done in silence.
+    ///
+    /// An undo is not itself undoable. Filing one would make `u` a toggle
+    /// between the last two values, and the edit under it on the stack would
+    /// never be reached; a refused undo is dropped from the stack too, because
+    /// the value it was going to restore is exactly what the conflict says is
+    /// no longer to be trusted.
+    pub fn undo_last_edit(&mut self) -> AppAction {
+        let Some(entry) = self.undo_stack.pop() else {
+            self.set_status("Nothing to undo");
+            return AppAction::None;
+        };
+        let headline = entry.headline();
+        let mut requests = Vec::new();
+        let mut failures = Vec::new();
+        for step in &entry.steps {
+            // An undo of one work item says its line as it lands, like any
+            // other edit; an undo of several is spoken for by its summary.
+            let line = (entry.steps.len() == 1).then(|| headline.clone());
+            match self.begin_edit(&step.key, step.edit.clone(), UndoRole::Undoing(line)) {
+                Ok(request) => requests.push(request),
+                Err(reason) => failures.push(format!("#{} failed: {reason}", step.key.id)),
+            }
+        }
+        let bulk = BulkEdit {
+            headline: BulkHeadline::Undone(headline),
+            total: requests.len() + failures.len(),
+            updated: 0,
+            failures,
+            outstanding: requests.iter().map(|request| request.key.clone()).collect(),
+        };
+        if bulk.outstanding.is_empty() {
+            // Nothing could even be asked, so nothing was taken back: the
+            // change goes back on the stack, to try again once whatever is in
+            // the way has cleared.
+            self.set_error(bulk.notification());
+            self.undo_stack.push(entry);
+            return AppAction::None;
+        }
+        if entry.steps.len() > 1 {
+            self.bulk_edits.push(bulk);
+        }
+        AppAction::Edit(requests)
     }
 
     /// Puts a refused edit back the way it was and says which field did not
@@ -4157,6 +4372,7 @@ impl App {
             CommandId::EditIteration => self.open_node_picker(NodeKind::Iteration),
             CommandId::EditArea => self.open_node_picker(NodeKind::Area),
             CommandId::EditDescription => self.edit_description(),
+            CommandId::UndoEdit => self.undo_last_edit(),
             CommandId::AddComment => {
                 self.open_prompt(PromptField::Comment);
                 AppAction::None
@@ -5310,6 +5526,30 @@ mod tests {
         ticket
     }
 
+    /// Azure DevOps accepting whatever a request asked for. The optimistic row
+    /// already carries the field it wrote, so the stored copy is that row on
+    /// the next revision.
+    fn accept_edit(app: &mut App, request: &EditRequest) {
+        let mut ticket = app
+            .ticket_by_key(&request.key)
+            .expect("the row is loaded")
+            .clone();
+        ticket.revision += 1;
+        app.apply_edit(EditApplied {
+            ticket,
+            relations: Vec::new(),
+            edit: request.edit.clone(),
+        });
+    }
+
+    /// One press of `u`, and the requests it dispatched.
+    fn undo(app: &mut App) -> Vec<EditRequest> {
+        match press(app, KeyCode::Char('u')) {
+            AppAction::Edit(requests) => requests,
+            other => panic!("an undo should be dispatched like any other edit, got {other:?}"),
+        }
+    }
+
     #[test]
     fn an_edit_shows_at_once_and_the_stored_copy_replaces_it() {
         let mut app = editing_app();
@@ -5826,6 +6066,262 @@ mod tests {
                 .count(),
             1,
             "and only that row is renamed"
+        );
+    }
+
+    #[test]
+    fn an_undo_puts_the_value_back_and_writes_it_to_azure_devops_to_do_it() {
+        let mut app = editing_app();
+        let request = edit_request(&mut app, FieldEdit::state("Doing"));
+        let key = request.key.clone();
+        accept_edit(&mut app, &request);
+
+        let undone = only(undo(&mut app));
+        assert_eq!(undone.key, key, "the work item the edit was made on");
+        assert_eq!(
+            undone.document(),
+            vec![
+                serde_json::json!({"op": "test", "path": "/rev", "value": 2}),
+                serde_json::json!({
+                    "op": "add",
+                    "path": "/fields/System.State",
+                    "value": "Active",
+                }),
+            ],
+            "an undo is an ordinary edit, guarded by the revision the write settled on"
+        );
+        assert_eq!(
+            app.ticket_by_key(&key).unwrap().state,
+            "Active",
+            "the row goes back without waiting for the network"
+        );
+
+        accept_edit(&mut app, &undone);
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Undid State on #3 (Doing \u{2192} Active)")
+        );
+        assert_eq!(
+            press(&mut app, KeyCode::Char('u')),
+            AppAction::None,
+            "an undo is not itself undoable, or u would only ever toggle"
+        );
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Nothing to undo")
+        );
+    }
+
+    #[test]
+    fn undoing_an_edit_of_a_field_that_was_empty_clears_it_rather_than_emptying_it() {
+        let mut unset = ticket(1, "Alpha", "2026-01-01T00:00:00Z");
+        unset.priority = None;
+        let mut app = App::new(vec![unset]);
+        app.enable_sync();
+        app.set_table_viewport(1);
+
+        let request = edit_request(&mut app, FieldEdit::priority(1));
+        accept_edit(&mut app, &request);
+        assert_eq!(app.tickets()[0].priority, Some(1));
+
+        let undone = only(undo(&mut app));
+        assert_eq!(
+            undone.document(),
+            vec![
+                serde_json::json!({"op": "test", "path": "/rev", "value": 2}),
+                serde_json::json!({
+                    "op": "remove",
+                    "path": "/fields/Microsoft.VSTS.Common.Priority",
+                }),
+            ],
+            "a field that was unset goes back to unset, not to an empty value"
+        );
+
+        accept_edit(&mut app, &undone);
+        assert_eq!(app.tickets()[0].priority, None);
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Undid Priority on #1 (1 \u{2192} (none))")
+        );
+    }
+
+    #[test]
+    fn pressing_undo_with_nothing_to_take_back_says_so() {
+        let mut app = editing_app();
+
+        assert_eq!(press(&mut app, KeyCode::Char('u')), AppAction::None);
+        let (message, level) = app.notification().expect("a key that did nothing says why");
+        assert_eq!(message, "Nothing to undo");
+        assert_eq!(level, NotificationLevel::Info);
+        assert!(!app.edits_pending(), "and nothing went out");
+    }
+
+    #[test]
+    fn a_refused_edit_never_reaches_the_undo_stack() {
+        let mut app = editing_app();
+        let request = edit_request(&mut app, FieldEdit::state("Doing"));
+
+        app.reject_edit(&EditRejection {
+            key: request.key.clone(),
+            label: "State".into(),
+            conflict: true,
+            message: "the test operation on /rev failed".into(),
+        });
+
+        assert_eq!(
+            press(&mut app, KeyCode::Char('u')),
+            AppAction::None,
+            "an edit that left nothing behind has nothing to take back"
+        );
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Nothing to undo")
+        );
+    }
+
+    #[test]
+    fn a_refused_undo_is_reported_like_any_other_conflict() {
+        let mut app = editing_app();
+        let request = edit_request(&mut app, FieldEdit::state("Doing"));
+        let key = request.key.clone();
+        accept_edit(&mut app, &request);
+
+        let undone = only(undo(&mut app));
+        app.reject_edit(&EditRejection {
+            key: undone.key.clone(),
+            label: "State".into(),
+            conflict: true,
+            message: "the test operation on /rev failed".into(),
+        });
+
+        let (message, level) = app.notification().expect("a refused undo is never dropped");
+        assert!(message.contains("#3 changed in Azure DevOps"), "{message}");
+        assert!(message.contains("State not saved"), "{message}");
+        assert_eq!(level, NotificationLevel::Error);
+        assert_eq!(
+            app.ticket_by_key(&key).unwrap().state,
+            "Doing",
+            "the row stays where the edit left it"
+        );
+        assert_eq!(
+            press(&mut app, KeyCode::Char('u')),
+            AppAction::None,
+            "and the value is not offered again on a copy that has moved on"
+        );
+    }
+
+    #[test]
+    fn the_undo_stack_remembers_twenty_edits_and_forgets_the_ones_before_them() {
+        let mut app = editing_app();
+        let key = app
+            .selected_ticket()
+            .expect("a row is selected")
+            .key
+            .clone();
+
+        for round in 1..=UNDO_DEPTH + 1 {
+            let title = FieldEdit::title(&format!("Alpha {round}"));
+            let AppAction::Edit(requests) = app.edit_ticket(&key, title) else {
+                panic!("a rename should be dispatched");
+            };
+            let request = only(requests);
+            accept_edit(&mut app, &request);
+        }
+
+        for _ in 0..UNDO_DEPTH {
+            let request = only(undo(&mut app));
+            accept_edit(&mut app, &request);
+        }
+
+        assert_eq!(
+            app.ticket_by_key(&key).unwrap().title,
+            "Alpha 1",
+            "twenty edits back is as far as it goes; the title before them is forgotten"
+        );
+        assert_eq!(press(&mut app, KeyCode::Char('u')), AppAction::None);
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Nothing to undo")
+        );
+    }
+
+    #[test]
+    fn one_press_takes_a_whole_bulk_change_back() {
+        let mut app = picker_app();
+        let requests = bulk_state_change(&mut app);
+        for request in &requests {
+            accept(&mut app, request);
+        }
+        assert_eq!(states_of(&app), ["Doing", "Doing", "Doing"]);
+
+        let undone = undo(&mut app);
+        assert_eq!(
+            undone
+                .iter()
+                .map(|request| request.key.id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3],
+            "every work item the change touched, under one press"
+        );
+        assert_eq!(
+            states_of(&app),
+            ["To Do", "To Do", "To Do"],
+            "and every row goes back at once"
+        );
+
+        for request in &undone {
+            assert_eq!(
+                request.expected_revision, 2,
+                "each carries the revision its own write settled on"
+            );
+            accept(&mut app, request);
+        }
+        let (message, level) = app.notification().expect("the tally goes up at the end");
+        assert_eq!(message, "Undid State on 3 tickets");
+        assert_eq!(level, NotificationLevel::Info);
+        assert_eq!(
+            press(&mut app, KeyCode::Char('u')),
+            AppAction::None,
+            "the whole change went back as one, so there is nothing left of it"
+        );
+    }
+
+    #[test]
+    fn a_bulk_undo_that_only_partly_lands_names_the_rows_left_where_they_were() {
+        let mut app = picker_app();
+        let requests = bulk_state_change(&mut app);
+        for request in &requests {
+            accept(&mut app, request);
+        }
+
+        let undone = undo(&mut app);
+        accept(&mut app, &undone[0]);
+        accept(&mut app, &undone[1]);
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Updated 3 tickets \u{b7} State \u{2192} Doing"),
+            "the change's own summary still stands: an undo speaks once, not once a row"
+        );
+
+        app.reject_edit(&EditRejection {
+            key: undone[2].key.clone(),
+            label: "State".into(),
+            conflict: true,
+            message: "the test operation on /rev failed".into(),
+        });
+
+        let (message, level) = app
+            .notification()
+            .expect("a half-done undo is never silent");
+        assert_eq!(
+            message,
+            "Undid 2 of 3 \u{b7} #3 failed: it changed in Azure DevOps"
+        );
+        assert_eq!(level, NotificationLevel::Error);
+        assert_eq!(
+            states_of(&app),
+            ["To Do", "To Do", "Doing"],
+            "only the work item that was refused is left where the change put it"
         );
     }
 

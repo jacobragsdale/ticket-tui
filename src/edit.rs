@@ -206,6 +206,40 @@ impl FieldEdit {
         Self::clearing(ASSIGNED_TO_FIELD, "Assignee")
     }
 
+    /// The edit that puts this one's field back the way `before` had it, for
+    /// the undo stack. The value comes off the copy the row carried before the
+    /// write, so a field that was empty then goes back to *cleared* rather
+    /// than to an empty value — the only way a priority or an assignee is
+    /// unset again. `None` for a field a work item in memory does not model,
+    /// which nothing can be read back off it: there is nothing to put back.
+    #[must_use]
+    pub fn undoing(&self, before: &Ticket) -> Option<Self> {
+        let field = self.field.as_str();
+        let label = self.label.as_str();
+        let restore = |value: &str| Self::new(field, label, value);
+        Some(match field {
+            STATE_FIELD => restore(&before.state),
+            TITLE_FIELD => restore(&before.title),
+            ITERATION_PATH_FIELD => restore(&before.iteration_path),
+            AREA_PATH_FIELD => restore(&before.area_path),
+            // An empty tag list is an empty string rather than a clear,
+            // because that is how `System.Tags` is emptied in the first place.
+            TAGS_FIELD => restore(&before.tags.join("; ")),
+            DESCRIPTION_FIELD => Self::description(&before.description_html),
+            // Only the display name survives on a row, and Azure DevOps
+            // resolves that as readily as the sign-in address.
+            ASSIGNED_TO_FIELD => match before.assigned_to.as_deref() {
+                Some(name) => Self::assignee(name, None),
+                None => Self::clearing(field, label),
+            },
+            PRIORITY_FIELD => match before.priority {
+                Some(priority) => Self::new(field, label, priority),
+                None => Self::clearing(field, label),
+            },
+            _ => return None,
+        })
+    }
+
     #[must_use]
     pub fn field(&self) -> &str {
         &self.field
@@ -659,6 +693,85 @@ mod tests {
         assert_eq!(unassign.summary(), "Assignee → (none)");
         unassign.apply(&mut assigned);
         assert_eq!(assigned.assigned_to, None);
+    }
+
+    #[test]
+    fn an_undo_reads_the_value_the_work_item_carried_before_the_edit() {
+        let before = ticket();
+
+        let undo = FieldEdit::state("Doing")
+            .undoing(&before)
+            .expect("a state can be put back");
+        assert_eq!(undo.summary(), "State → To Do");
+        assert_eq!(
+            undo.patch(),
+            vec![json!({"op": "add", "path": "/fields/System.State", "value": "To Do"})]
+        );
+
+        let undo = FieldEdit::assignee("Jordan Patel", Some("jordan@example.com"))
+            .undoing(&before)
+            .expect("an assignee can be put back");
+        assert_eq!(
+            undo.patch(),
+            vec![json!({
+                "op": "add",
+                "path": "/fields/System.AssignedTo",
+                "value": "Avery Chen",
+            })],
+            "the display name is all a row keeps, and Azure DevOps resolves it"
+        );
+
+        assert_eq!(
+            FieldEdit::description("<p>New</p>")
+                .undoing(&before)
+                .map(|undo| undo.summary()),
+            Some("Description → (none)".to_owned()),
+            "the markup goes back, not the reading of it"
+        );
+
+        assert_eq!(
+            FieldEdit::new("System.History", "History", "Later").undoing(&before),
+            None,
+            "a field a row does not model has nothing to put back"
+        );
+    }
+
+    #[test]
+    fn undoing_a_field_that_was_empty_clears_it_rather_than_emptying_it() {
+        let unset = Ticket {
+            priority: None,
+            assigned_to: None,
+            tags: Vec::new(),
+            ..ticket()
+        };
+
+        let undo = FieldEdit::priority(1)
+            .undoing(&unset)
+            .expect("a priority can be put back");
+        assert_eq!(undo.value(), &FieldValue::Clear);
+        assert_eq!(
+            undo.patch(),
+            vec![json!({"op": "remove", "path": "/fields/Microsoft.VSTS.Common.Priority"})],
+            "there is no empty number, so the field comes off the work item"
+        );
+        assert_eq!(undo.summary(), "Priority → (none)");
+
+        let undo = FieldEdit::assignee("Jordan Patel", None)
+            .undoing(&unset)
+            .expect("an assignee can be put back");
+        assert_eq!(
+            undo.patch(),
+            vec![json!({"op": "remove", "path": "/fields/System.AssignedTo"})]
+        );
+
+        let undo = FieldEdit::tags("rust")
+            .undoing(&unset)
+            .expect("tags can be put back");
+        assert_eq!(
+            undo.patch(),
+            vec![json!({"op": "add", "path": "/fields/System.Tags", "value": ""})],
+            "System.Tags is emptied with an empty string, so that is how it goes back"
+        );
     }
 
     #[test]
