@@ -49,6 +49,15 @@ impl Ticket {
     }
 }
 
+/// The last segment of an area or iteration path: `demo\Sprint 1` -> `Sprint 1`.
+///
+/// Azure DevOps writes these paths with backslashes, but hand-written filters
+/// and imported data use forward slashes, so both separate segments.
+#[must_use]
+pub fn path_leaf(path: &str) -> &str {
+    path.rsplit(['\\', '/']).next().unwrap_or(path)
+}
+
 /// Where a work item state sits in the Azure DevOps state-category model.
 ///
 /// Every process template (Agile, Basic, Scrum, CMMI) names its states
@@ -827,6 +836,14 @@ mod tests {
         assert_eq!(StateCategory::of("DONE"), StateCategory::Completed);
         assert_eq!(StateCategory::of("Removed"), StateCategory::Removed);
         assert_eq!(StateCategory::of("Needs triage"), StateCategory::Unknown);
+    }
+
+    #[test]
+    fn path_leaf_keeps_only_the_last_segment() {
+        assert_eq!(path_leaf("development\\Sprint 1"), "Sprint 1");
+        assert_eq!(path_leaf("Atlas/Platform/Web"), "Web");
+        assert_eq!(path_leaf("Sprint 1"), "Sprint 1");
+        assert_eq!(path_leaf(""), "");
     }
 
     #[test]

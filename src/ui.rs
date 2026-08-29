@@ -15,6 +15,7 @@ use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel, RowDensity,
 use crate::filter::{FacetTarget, FilterField};
 use crate::model::{
     FamilySnapshot, FamilyTreeEntry, SortDirection, SortField, StateCategory, Ticket, TicketKey,
+    path_leaf,
 };
 use crate::pointer::{
     PointerLayer, PointerTarget, ScrollMetrics, ScrollSurface, SelectableSnapshot,
@@ -2085,8 +2086,11 @@ fn table_cell(
             highlight_searchable(&ticket.key.organization, plain, highlighter)
         }
         SortField::Project => highlight_searchable(&ticket.project, plain, highlighter),
-        SortField::Area => highlight_searchable(&ticket.area_path, plain, highlighter),
-        SortField::Iteration => highlight_searchable(&ticket.iteration_path, plain, highlighter),
+        // Only the leaf fits a table column; the details pane keeps the full path.
+        SortField::Area => highlight_searchable(path_leaf(&ticket.area_path), plain, highlighter),
+        SortField::Iteration => {
+            highlight_searchable(path_leaf(&ticket.iteration_path), plain, highlighter)
+        }
         SortField::Tags => Line::from(tag_badge_spans(&ticket.tags, tone, highlighter)),
     };
 
@@ -3058,6 +3062,43 @@ mod tests {
             assert_eq!(selected_fg, theme().muted);
             assert_eq!(selected_bg, theme().selected_background);
         }
+    }
+
+    #[test]
+    fn table_columns_show_only_the_leaf_of_a_path() {
+        let mut app = App::new(vec![ticket()]);
+        for field in [SortField::Area, SortField::Iteration] {
+            let index = app
+                .layout
+                .columns
+                .iter()
+                .position(|column| column.id == field)
+                .expect("path column");
+            app.layout.toggle_visible(index);
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(150, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let body = app.hit_regions.table_body.expect("table body");
+        let details = app.hit_regions.details.expect("details pane");
+        let buffer = terminal.backend().buffer();
+
+        assert!(
+            find_buffer_text_in(buffer, body, "Sprint 1").is_some(),
+            "the table should show the iteration leaf"
+        );
+        assert!(
+            find_buffer_text_in(buffer, body, "Platform").is_some(),
+            "the table should show the area leaf"
+        );
+        assert!(
+            find_buffer_text_in(buffer, body, "Atlas\\").is_none(),
+            "the table should not repeat the parent path"
+        );
+        assert!(
+            find_buffer_text_in(buffer, details, "Atlas\\Sprint 1").is_some(),
+            "the details pane keeps the full path"
+        );
     }
 
     fn await_search(app: &mut App) {
