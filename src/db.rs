@@ -4,14 +4,17 @@ use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::model::{
     CommentRecord, HistoryRecord, RelationKind, RelationRecord, Ticket, TicketGraph, TicketKey,
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
+
+/// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
+pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
 
 /// SQLite is a disposable cache of Azure DevOps, so any database that is not at
 /// the current schema version is dropped and recreated instead of migrated.
@@ -20,6 +23,7 @@ DROP TABLE IF EXISTS work_items;
 DROP TABLE IF EXISTS work_item_relations;
 DROP TABLE IF EXISTS work_item_comments;
 DROP TABLE IF EXISTS work_item_history;
+DROP TABLE IF EXISTS sync_meta;
 CREATE TABLE work_items (
     organization   TEXT NOT NULL,
     project        TEXT NOT NULL,
@@ -71,8 +75,14 @@ CREATE TABLE work_item_history (
     new_value    TEXT,
     PRIMARY KEY (organization, work_item_id, revision, field_name)
 );
+CREATE TABLE sync_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ";
 
+/// `sync_meta` is deliberately absent: it describes the sync itself, not the
+/// work items a pull replaces.
 const CLEAR_CACHE: &str = "DELETE FROM work_items;
 DELETE FROM work_item_relations;
 DELETE FROM work_item_comments;
@@ -162,6 +172,28 @@ impl SqliteTicketRepository {
             comments: self.load_comments()?,
             history: self.load_history()?,
         })
+    }
+
+    /// Records one fact about the cache, such as who ran the last sync.
+    pub fn set_meta(&mut self, key: &str, value: &str) -> Result<()> {
+        self.connection
+            .execute(
+                "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )
+            .with_context(|| format!("failed to store the {key} cache setting"))?;
+        Ok(())
+    }
+
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT value FROM sync_meta WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .with_context(|| format!("failed to read the {key} cache setting"))
     }
 
     /// Replaces the cached work items and their graph with a freshly pulled set.
@@ -526,7 +558,7 @@ mod tests {
                     title TEXT NOT NULL
                 );
                 INSERT INTO work_items VALUES ('example-org', 10001, 'Stale');
-                PRAGMA user_version = 4;",
+                PRAGMA user_version = 5;",
             )
             .unwrap();
         drop(connection);
@@ -537,6 +569,47 @@ mod tests {
         assert_eq!(
             schema_version(&repository.connection).unwrap(),
             SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn sync_meta_round_trips_and_outlives_a_pull() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("meta.sqlite3");
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+
+        assert_eq!(repository.meta(ME_DISPLAY_NAME_KEY).unwrap(), None);
+
+        repository
+            .set_meta(ME_DISPLAY_NAME_KEY, "Jacob Ragsdale")
+            .unwrap();
+        assert_eq!(
+            repository.meta(ME_DISPLAY_NAME_KEY).unwrap().as_deref(),
+            Some("Jacob Ragsdale")
+        );
+
+        repository
+            .replace_all(&[ticket(1)], &TicketGraph::default())
+            .unwrap();
+        assert_eq!(
+            repository.meta(ME_DISPLAY_NAME_KEY).unwrap().as_deref(),
+            Some("Jacob Ragsdale"),
+            "a pull replaces work items, not who is signed in"
+        );
+
+        repository
+            .set_meta(ME_DISPLAY_NAME_KEY, "Avery Chen")
+            .unwrap();
+        assert_eq!(
+            repository.meta(ME_DISPLAY_NAME_KEY).unwrap().as_deref(),
+            Some("Avery Chen")
+        );
+
+        drop(repository);
+        let reopened = SqliteTicketRepository::open(&path).unwrap();
+        assert_eq!(
+            reopened.meta(ME_DISPLAY_NAME_KEY).unwrap().as_deref(),
+            Some("Avery Chen")
         );
     }
 
