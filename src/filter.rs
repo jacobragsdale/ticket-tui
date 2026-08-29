@@ -801,6 +801,17 @@ fn take_term(input: &str) -> (String, &str) {
     )
 }
 
+/// One quoted value, with the quotes taken off and the escapes undone, and the
+/// rest of the input after the closing quote. `None` when the input does not
+/// open with a quote or never closes it, which is what sends the caller to the
+/// bare reader.
+///
+/// A backslash escapes only another backslash or the quote that opened the
+/// value. Before anything else it is a literal backslash, because every area
+/// and iteration path Azure DevOps hands back is backslash-separated and
+/// `iteration:"development\Sprint 1"` is what somebody types. The escaped
+/// spelling keeps its meaning, so what [`quote_if_needed`] writes still reads
+/// back unchanged.
 fn take_quoted(input: &str) -> Option<(String, &str)> {
     let quote = input.chars().next()?;
     if quote != '"' && quote != '\'' {
@@ -810,6 +821,9 @@ fn take_quoted(input: &str) -> Option<(String, &str)> {
     let mut escaped = false;
     for (index, character) in input.char_indices().skip(1) {
         if escaped {
+            if character != '\\' && character != quote {
+                output.push('\\');
+            }
             output.push(character);
             escaped = false;
             continue;
@@ -934,6 +948,44 @@ mod tests {
             );
             assert!(read.fuzzy.is_empty(), "{value:?} leaked into {written:?}");
         }
+    }
+
+    #[test]
+    fn a_backslash_typed_once_in_a_quoted_value_is_kept() {
+        // What somebody types by hand, and what the writer emits for the same
+        // value, both have to land on the path itself.
+        for typed in [
+            "iteration:\"Atlas\\Sprint 1\"",
+            "iteration:\"Atlas\\\\Sprint 1\"",
+        ] {
+            let parsed = parse_query(typed);
+            assert!(
+                parsed
+                    .filters
+                    .contains(FilterField::Iteration, "Atlas\\Sprint 1"),
+                "{typed} should select the Sprint 1 path, got {:?}",
+                parsed.filters
+            );
+            assert!(parsed.fuzzy.is_empty(), "{typed} left fuzzy text behind");
+        }
+
+        // The quote character keeps its escape, so a value can still hold one.
+        let quoted = parse_query("state:\"say \\\"when\\\"\"");
+        assert!(quoted.filters.contains(FilterField::State, "say \"when\""));
+
+        // A quote that never closes is not a quoted value at all, and the bare
+        // reader takes it as written.
+        let unterminated = parse_query("state:\"Atlas\\Sprint");
+        assert!(
+            unterminated
+                .filters
+                .contains(FilterField::State, "\"Atlas\\Sprint"),
+            "{:?}",
+            unterminated.filters
+        );
+
+        // take_term shares the reader, so a fuzzy term behaves the same way.
+        assert_eq!(parse_query("\"Atlas\\Sprint 1\"").fuzzy, "Atlas\\Sprint 1");
     }
 
     #[test]
