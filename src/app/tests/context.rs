@@ -1,0 +1,147 @@
+use super::*;
+
+#[test]
+fn agent_context_describes_the_live_ticket_workspace() {
+    let mut app = App::new(vec![
+        ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+        ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+        ticket(3, "Gamma", "2026-03-01T00:00:00Z"),
+    ]);
+    app.configure_database(PathBuf::from("/tmp/tickets.sqlite3"), 0);
+    app.set_table_viewport(2);
+    app.set_query("state:Active".into());
+    app.toggle_row_selection();
+    app.focus = Focus::Details;
+    app.mode = AppMode::Filter;
+    app.active_view = Some("Active work".into());
+
+    let context = app.agent_context();
+
+    assert_eq!(context.database_path, "/tmp/tickets.sqlite3");
+    assert_eq!(context.mode, "filter");
+    assert_eq!(context.focus, "details");
+    assert_eq!(context.active_view.as_deref(), Some("Active work"));
+    assert_eq!(context.search.filters, vec!["state:Active"]);
+    assert_eq!(context.tickets.total_count, 3);
+    assert_eq!(context.tickets.matching_count, 3);
+    assert_eq!(context.tickets.visible_rows.len(), 2);
+    assert_eq!(context.selected_ticket.as_ref().unwrap().id, 3);
+    assert!(context.selected_ticket.as_ref().unwrap().checked);
+    assert_eq!(context.checked_tickets.len(), 1);
+    assert_eq!(context.checked_tickets[0].id, 3);
+
+    let mut mine = app.tickets()[0].clone();
+    mine.assigned_to = Some("  avery CHEN ".into());
+    let mut theirs = app.tickets()[1].clone();
+    theirs.assigned_to = Some("Jordan Patel".into());
+    let mut unassigned = app.tickets()[1].clone();
+    unassigned.assigned_to = None;
+    assert!(!app.is_mine(&mine), "nobody is \"me\" until a name is set");
+
+    app.set_me(Some("Avery Chen".into()));
+
+    assert_eq!(app.me(), Some("Avery Chen"));
+    assert!(app.is_mine(&mine), "casing and padding do not matter");
+    assert!(!app.is_mine(&theirs));
+    assert!(!app.is_mine(&unassigned));
+    assert_eq!(app.agent_context().me.as_deref(), Some("Avery Chen"));
+}
+
+#[test]
+fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() {
+    let mut app = App::new(vec![ticket(1, "Alpha", "2026-01-01T00:00:00Z")]);
+
+    let offline = app.agent_context().sync;
+    assert!(offline.offline, "a run with no organization cannot sync");
+    assert_eq!(offline.organization, None);
+    assert_eq!(offline.project, None);
+    assert_eq!(offline.refresh_seconds, 0);
+    assert_eq!(offline.last_success_at, None);
+    assert_eq!(offline.last_error, None);
+
+    app.enable_sync();
+    app.set_sync_target(Some(SyncTarget {
+        organization: "example-org".into(),
+        project: "atlas".into(),
+        refresh_seconds: 60,
+    }));
+    app.begin_sync();
+
+    let running = app.agent_context().sync;
+    assert!(!running.offline);
+    assert_eq!(running.organization.as_deref(), Some("example-org"));
+    assert_eq!(running.project.as_deref(), Some("atlas"));
+    assert_eq!(running.refresh_seconds, 60);
+    assert!(running.in_progress, "a pull is out");
+
+    app.finish_sync();
+
+    let succeeded = app.agent_context().sync;
+    assert!(!succeeded.in_progress);
+    assert_eq!(succeeded.last_error, None);
+    let landed = succeeded.last_success_at.expect("a pull landed");
+    assert!(
+        Timestamp::parse(&landed).is_ok(),
+        "the last sync is RFC 3339: {landed}"
+    );
+
+    app.begin_sync();
+    app.fail_sync("network unreachable", true);
+
+    let failed = app.agent_context().sync;
+    assert!(!failed.in_progress);
+    assert_eq!(failed.last_error.as_deref(), Some("network unreachable"));
+    assert_eq!(
+        failed.last_success_at.as_deref(),
+        Some(landed.as_str()),
+        "a failure does not erase when the rows last arrived"
+    );
+
+    app.finish_sync();
+    assert_eq!(
+        app.agent_context().sync.last_error,
+        None,
+        "the next success clears the error"
+    );
+}
+
+#[test]
+fn pending_edits_are_published_while_in_flight_and_gone_once_answered() {
+    let mut app = editing_app();
+    let request = edit_request(&mut app, FieldEdit::state("Doing"));
+
+    let pending = app.agent_context().pending_edits;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, request.key.id);
+    assert_eq!(pending[0].field, "State");
+    assert_eq!(pending[0].value, "Doing");
+    assert!(
+        Timestamp::parse(&pending[0].since).is_ok(),
+        "the dispatch time is RFC 3339: {}",
+        pending[0].since
+    );
+
+    app.apply_edit(EditApplied {
+        ticket: stored_copy(&app, &request.key, "Doing"),
+        relations: Vec::new(),
+        edit: request.edit,
+    });
+    assert!(
+        app.agent_context().pending_edits.is_empty(),
+        "an edit that landed is no longer in flight"
+    );
+
+    let refused = edit_request(&mut app, FieldEdit::priority(1));
+    assert_eq!(app.agent_context().pending_edits.len(), 1);
+
+    app.reject_edit(&EditRejection {
+        key: refused.key,
+        label: "Priority".into(),
+        conflict: false,
+        message: "field is read only".into(),
+    });
+    assert!(
+        app.agent_context().pending_edits.is_empty(),
+        "a refused edit is no longer in flight either"
+    );
+}

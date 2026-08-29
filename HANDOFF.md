@@ -6,13 +6,39 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
 
 ## State of `main`
 
-- Every implementable ticket in the roadmap is merged and Done. `cargo fmt
-  --check`, `cargo clippy --all-targets --all-features -D warnings`, `cargo test
-  --all-targets` (415 tests, and again under `NO_COLOR=1`) and `cargo build
-  --release` are clean.
+- The four-tab roadmap is under way: #661 is Done, #662 is next. Everything
+  before it is merged. `cargo fmt --check`, `cargo clippy --all-targets
+  --all-features -D warnings`, `cargo test --all-targets` (415 tests, and again
+  under `NO_COLOR=1`) and `cargo build --release` are clean.
 - Database schema is `PRAGMA user_version = 12`. The first launch of this build
   rebuilds any older database and does one full pull automatically.
-- Nothing is in Doing. No worktree branches carry unmerged work.
+
+## The module tree (#661)
+
+`src/app.rs` and `src/ui.rs` are directory modules now; every file is under
+1,500 lines. Rust allows several `impl App` blocks across the files of one
+module, so each file below carries its own. Siblings reach each other through
+`use super::*` and the import block at the top of each `mod.rs`; what a sibling
+needs is `pub(super)`, and what the crate needs stays `pub`.
+
+    src/app/mod.rs      App, its state, the key map and the mouse entry point
+        context.rs      the JSON context file agents read
+        edits.rs        edits, undo, bulk, comments, reparenting, deletion
+        family.rs       the family tree, its cursor, child progress
+        forms.rs        the new-work-item form
+        history.rs      bookmarks, the checked set, copy, export, the session
+        pickers.rs      state, priority, assignee, parent, node, type pickers
+        pointer.rs      hover, press, drag, release, the divider
+        query.rs        the search box, filters, facets, columns, commands
+        views.rs        saved and built-in views, the sprint summary, staleness
+        tests/          the same split, plus tests/deletes.rs
+    src/ui/mod.rs       render, the layout, the theme, the footer, anchoring
+        details.rs      the details pane and the family tree it draws
+        overlays.rs     the list overlays, chips and facet bar
+        pickers.rs      pickers, the prompt, the form, the delete confirmation
+        table.rs        the table, its cells and their colours
+        widgets.rs      the modal frame, query field, controls, scrollbar, paint
+        tests/          the same split
 
 ## Shipped 2026-08-29
 
@@ -93,8 +119,9 @@ subcommands and context v3.
 
 ## What is left
 
-The roadmap above; nothing is in Doing. Start at 661. Query round-tripping was the last
-loose end and is fixed: `quote_if_needed` now escapes `\` and `take_quoted`
+The roadmap above. #661 is Done; start at **#662**, then the rest of Epic 656 in
+order, then #668 before anything in Epic 659. Query round-tripping was an
+earlier loose end and is fixed: `quote_if_needed` now escapes `\` and `take_quoted`
 unescapes it, so `iteration:"development\Sprint 1"` survives
 `format_query`/`parse_query` (#654), and a backslash typed once inside a quoted
 filter value stays a single backslash (#655).
@@ -109,12 +136,7 @@ iteration. Setting the dates on the iteration makes both work.
 ## Working agreement
 
 Each ticket carries Problem / Approach / Done-when. Flow: set the ticket to
-Doing, implement in an isolated worktree starting from `git merge main`, keep
-fmt/clippy/test/release green, merge to `main`, verify there, set Done. Two or
-three concurrent tickets are fine when they touch disjoint regions.
-
-One lesson from this round: an agent's `git merge main` can report "already up
-to date" against a stale `main` and still merge textually clean. Have each agent
-verify the merge landed by grepping for a symbol the previous ticket added, and
-always re-run the full suite after merging rather than trusting a clean
-auto-merge.
+Doing (`ticket-tui edit N --state Doing`), implement it on `main`, keep
+fmt/clippy/test/release green, commit and push at each working checkpoint, then
+comment on the ticket saying what shipped and set it Done. One ticket at a time,
+in the build order; no worktrees and no feature branches.
