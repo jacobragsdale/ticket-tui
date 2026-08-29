@@ -533,6 +533,7 @@ fn handle_action(
         AppAction::Edit(request) => start_edit(app, runtime, request),
         AppAction::FetchIdentities => send_identities(runtime),
         AppAction::FetchClassificationNodes => send_classification_nodes(runtime),
+        AppAction::Comment { key, text } => start_comment(app, runtime, key, text),
         AppAction::OpenUrl(raw_url) => match open_https_url(&raw_url, opener) {
             Ok(()) => app.set_status(format!("Opened {raw_url}")),
             Err(error) => app.set_error(format!("Could not open ticket: {error:#}")),
@@ -645,6 +646,30 @@ fn start_edit(app: &mut App, runtime: &mut SyncRuntime, request: EditRequest) {
         conflict: false,
         message: error,
     });
+}
+
+/// Hands one comment to the sync worker. Nothing is shown on the work item
+/// until Azure DevOps has stored it, so a worker that is gone only has to say
+/// the comment was not posted.
+fn start_comment(app: &mut App, runtime: &mut SyncRuntime, key: TicketKey, text: String) {
+    let sent = runtime.worker.as_ref().map(|worker| {
+        worker.send(SyncRequest::Comment {
+            key: key.clone(),
+            text,
+        })
+    });
+    let error = match sent {
+        Some(Ok(())) => {
+            app.set_status(format!("Posting comment on #{}\u{2026}", key.id));
+            return;
+        }
+        Some(Err(error)) => format!("{error:#}"),
+        None => runtime
+            .offline_reason
+            .clone()
+            .unwrap_or_else(|| "Azure DevOps is not configured".to_owned()),
+    };
+    app.reject_comment(&key, &error);
 }
 
 /// Asks the worker for the project's team members, for the assignee picker. A
@@ -774,6 +799,20 @@ fn poll_sync(
                 }
             }
             SyncEvent::Identities(identities) => app.merge_identities(identities),
+            // The worker inserted this comment itself, so the signature moves
+            // with it and the watcher below leaves the file alone. Nothing else
+            // about the work item changed: its own `details_rev` is untouched,
+            // so the next details fetch still settles the discussion.
+            SyncEvent::Commented(result) => match *result {
+                Ok(comment) => {
+                    app.apply_comment(comment);
+                    app.configure_database(
+                        repository.path().to_path_buf(),
+                        db::data_signature(repository.path()),
+                    );
+                }
+                Err(rejection) => app.reject_comment(&rejection.key, &rejection.message),
+            },
             SyncEvent::ClassificationNodes(nodes) => app.merge_classification_nodes(nodes),
             SyncEvent::Stopped => {
                 runtime.stop(app, "the Azure DevOps sync worker stopped");
@@ -795,6 +834,7 @@ fn poll_watch(
         || app.reload_pending
         || app.sync_pending
         || app.edits_pending()
+        || app.comments_pending()
         || app.details_pending.is_some()
     {
         return false;
@@ -1013,6 +1053,8 @@ mod tests {
         /// The one work item whose comments and history can be read, and what
         /// they say.
         details: Option<(i64, WorkItemDetails)>,
+        /// The comment a post answers with, if this fake takes comments at all.
+        comment: Option<CommentRecord>,
     }
 
     impl FakeAzure {
@@ -1024,6 +1066,7 @@ mod tests {
                 refusal: None,
                 quiet: false,
                 details: None,
+                comment: None,
             }
         }
 
@@ -1055,6 +1098,14 @@ mod tests {
             Self {
                 refusal: Some((status, message.to_owned())),
                 ..Self::returning(tickets)
+            }
+        }
+
+        /// Accepts the next comment and answers with `comment`.
+        fn commenting(comment: CommentRecord) -> Self {
+            Self {
+                comment: Some(comment),
+                ..Self::returning(Vec::new())
             }
         }
 
@@ -1128,6 +1179,13 @@ mod tests {
                 _ => Ok(WorkItemDetails::default()),
             }
         }
+
+        fn post_comment(&self, _id: i64, _html: &str) -> Result<CommentRecord> {
+            match self.comment.clone() {
+                Some(comment) => Ok(comment),
+                None => bail!("HTTP 403: the work item is read only"),
+            }
+        }
     }
 
     impl SourceConnector for FakeAzure {
@@ -1177,6 +1235,20 @@ mod tests {
     ) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while app.edits_pending() {
+            poll_sync(app, repository, runtime);
+            assert!(Instant::now() < deadline, "the sync worker timed out");
+            thread::yield_now();
+        }
+    }
+
+    /// Pumps the event loop's sync polling until the comment in flight answers.
+    fn await_comment(
+        app: &mut App,
+        repository: &mut SqliteTicketRepository,
+        runtime: &mut SyncRuntime,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.comments_pending() {
             poll_sync(app, repository, runtime);
             assert!(Instant::now() < deadline, "the sync worker timed out");
             thread::yield_now();
@@ -1468,6 +1540,65 @@ mod tests {
         assert_eq!(app.activity_label(), None);
         assert!(offline_status(true).contains("--sync"));
         assert!(offline_status(false).contains("offline"));
+    }
+
+    #[test]
+    fn a_posted_comment_reaches_the_discussion_and_a_refused_one_only_the_toast() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let stored = CommentRecord {
+            ticket: TicketKey {
+                organization: "example-org".into(),
+                id: 3,
+            },
+            comment_id: 11,
+            created_at: Timestamp::parse("2026-03-04T09:15:00Z").unwrap(),
+            author: Some("Jacob Ragsdale".into()),
+            text: "Merged into main".into(),
+        };
+        let (mut app, mut repository, mut runtime) =
+            synced_app(&path, FakeAzure::commenting(stored.clone()));
+        let selected = app.selected_ticket().unwrap().key.clone();
+        assert_eq!(selected.id, 3, "the newest work item starts selected");
+
+        let action = app.comment_selected("Merged into main".into());
+        assert!(matches!(action, AppAction::Comment { .. }));
+        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Posting comment on #3\u{2026}")
+        );
+        assert!(
+            app.comments_for(&selected).is_empty(),
+            "nothing shows until Azure DevOps has stored it"
+        );
+        await_comment(&mut app, &mut repository, &mut runtime);
+
+        assert_eq!(app.comments_for(&selected), vec![&stored]);
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Commented on #3")
+        );
+        assert_eq!(
+            app.data_signature,
+            db::data_signature(&path),
+            "the worker wrote that row, so the watcher leaves the file alone"
+        );
+
+        let (mut app, mut repository, mut runtime) =
+            synced_app(&path, FakeAzure::returning(Vec::new()));
+        let action = app.comment_selected("Merged into main".into());
+        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        await_comment(&mut app, &mut repository, &mut runtime);
+
+        let (message, level) = app.notification().expect("a refusal is reported");
+        assert!(message.contains("comment not posted"), "{message}");
+        assert!(message.contains("read only"), "{message}");
+        assert_eq!(level, NotificationLevel::Error);
+        assert!(
+            app.comments_for(&selected).is_empty(),
+            "a refused comment files nothing"
+        );
     }
 
     #[test]

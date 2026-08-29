@@ -301,10 +301,10 @@ In Progress, Resolved, Completed, Removed — then by name, so it opens instantl
 on a database that has never reached Azure DevOps.
 
 The Edit menu's remaining rows are the edits that would otherwise mean opening a
-browser. Title, Priority, Tags, Iteration, and Area have no key of their own;
-they are reached through `e`, or by name in the command palette as `Edit title`,
-`Edit priority`, `Edit tags`, `Change iteration`, and `Change area`. Assignee is
-reached the same way, and also directly with `a`.
+browser. Title, Priority, Tags, Iteration, Area, and Add comment have no key of
+their own; they are reached through `e`, or by name in the command palette as
+`Edit title`, `Edit priority`, `Edit tags`, `Change iteration`, `Change area`,
+and `Add comment`. Assignee is reached the same way, and also directly with `a`.
 
 **Title** opens a one-line field prefilled with the title, edited with the same
 keys as the named-view editor — `←`/`→`, `Home`/`End`, `Ctrl-W`, `Ctrl-U`, and
@@ -380,6 +380,40 @@ nothing at all. Before anything is cached, and whenever the trees cannot be
 read, both pickers list the distinct iteration and area paths the work items in
 the database already carry, which is every sprint actually in use.
 
+**Add comment** is the last Edit menu row, and `Add comment` in the palette. It
+opens a one-line box — empty, because there is nothing to edit, only something
+to say — titled `Comment on #613` and edited with the same keys as the other
+prompts. `Enter` posts, `Esc` changes nothing, and a comment that is empty or
+only whitespace is refused here rather than sent, with the box left open on it.
+One line is the whole of it: long-form comments still belong in the browser.
+
+A comment is not a field, so it is not a JSON Patch and carries no revision
+test. What was typed is escaped — `&`, `<`, and `>`, the three characters that
+would otherwise be read as markup — wrapped in a paragraph, and sent as
+`POST /<project>/_apis/wit/workItems/<id>/comments` with a body of
+`{"text": "<p>merged into main</p>"}`.
+
+It is also the one write that is not optimistic. A comment has no id, date, or
+author until Azure DevOps gives it one, and a line that turned out never to have
+been posted is worse than a moment's wait, so nothing appears until the server
+answers. The status line reads `Posting comment on #613…` while it is out and
+`Commented on #613` when it lands, at which point the comment is written to
+`work_item_comments` on its own and appears at the foot of the details pane's
+Comments section. A refusal writes nothing at all and says so:
+`#613 comment not posted: HTTP 403: the work item is read only`. One comment
+per work item is in flight at a time; a second says `an earlier comment is
+still in flight`.
+
+The comment survives the next refresh either way. Posting one moves the work
+item's `System.CommentCount`, and with it its revision and `System.ChangedDate`,
+so the next incremental pull sees the work item as changed, refetches it, and
+replaces its comments with the server's list — which includes the new one. If a
+process template ever does not move the changed date, the pull does not name
+that work item at all, so nothing replaces its comments and the row inserted
+locally stays exactly where it was. The insert deliberately leaves `details_rev`
+alone, so the next lazy details fetch still reads the discussion and settles it
+against the server.
+
 ## Controls
 
 | Input | Action |
@@ -407,6 +441,7 @@ the database already carry, which is every sprint actually in use.
 | `S` | Change the selected work item's state; `Enter` applies, `Esc` cancels |
 | `a` | Change who the selected work item is assigned to; type to filter, `Enter` assigns |
 | `e` → Title/Priority/Tags/Iteration/Area | Edit the title, priority, tags, iteration, or area; also `Edit title`, `Edit priority`, `Edit tags`, `Change iteration`, `Change area`, and `Change assignee` in the palette |
+| `e` → Add comment | Leave a one-line comment on the selected work item; also `Add comment` in the palette |
 | `m` | Bookmark or unbookmark the selected ticket |
 | `Space` | Toggle ticket multi-select |
 | `y` | Copy selected (or current) ticket IDs |
@@ -432,8 +467,8 @@ visible control under the pointer on release: search, filter pills, sort
 headers, ticket rows, checkboxes, bookmark markers,
 underlined IDs and URLs, tabs, overlay rows, and close/action buttons. Dragging over visible text
 selects it and copies the plain text on release. Bracketed paste inserts at
-the caret in search, the command palette, the named-view editor, and the title
-and tags prompts.
+the caret in search, the command palette, the named-view editor, and the title,
+tags, and comment prompts.
 Scrollbar tracks page by a viewport-minus-one step; thumbs can be
 dragged. Dragging the divider between the Tickets and Details panes resizes
 them, both side by side and stacked; the tickets pane keeps at least 40 columns
@@ -449,7 +484,7 @@ assignee:"Avery Chen" priority:1 tag:rust`, plus `project:`, `area:`, and
 are combined with AND. `is:bookmarked` limits the table to locally bookmarked
 tickets. Active filters appear as removable chips. The command palette copies
 IDs, URLs, titles, Markdown links, or summaries, edits the title, priority,
-tags, iteration, or area, and exports the selection as JSON or CSV. Press `i` for database path, row count, freshness, and the last
+tags, iteration, or area, leaves a comment, and exports the selection as JSON or CSV. Press `i` for database path, row count, freshness, and the last
 sync. A database another process writes reloads automatically; the table title
 shows `Stale` until that reload finishes, and `Syncing…`, `Synced 2m ago`, or
 `Sync failed` for the pulls from Azure DevOps.

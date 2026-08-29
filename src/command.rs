@@ -16,6 +16,7 @@ pub enum CommandId {
     EditAssignee,
     EditIteration,
     EditArea,
+    AddComment,
     Sort,
     Help,
     Sync,
@@ -189,6 +190,12 @@ pub const COMMANDS: &[Command] = &[
         title: "Change area",
         keys: &[],
         help: "Move it in the area tree",
+    },
+    Command {
+        id: CommandId::AddComment,
+        title: "Add comment",
+        keys: &[],
+        help: "One line on the discussion",
     },
     Command {
         id: CommandId::SaveView,
@@ -374,6 +381,10 @@ pub const EDIT_MENU: &[EditMenuEntry] = &[
     EditMenuEntry {
         label: "Area",
         command: CommandId::EditArea,
+    },
+    EditMenuEntry {
+        label: "Add comment",
+        command: CommandId::AddComment,
     },
 ];
 

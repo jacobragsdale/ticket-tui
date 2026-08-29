@@ -117,6 +117,13 @@ pub enum AppAction {
     /// either picker first opens on a cache that is empty or stale; the picker
     /// does not wait on it.
     FetchClassificationNodes,
+    /// Leave one comment on one work item. Nothing appears on the work item
+    /// until Azure DevOps has stored it, so this is the one write the table
+    /// does not make optimistically.
+    Comment {
+        key: TicketKey,
+        text: String,
+    },
     OpenUrl(String),
     Copy {
         text: String,
@@ -265,6 +272,9 @@ pub struct PriorityPicker {
 pub enum PromptField {
     Title,
     Tags,
+    /// A new comment on the work item, which starts empty rather than
+    /// prefilled: there is nothing to edit, only something to say.
+    Comment,
 }
 
 impl PromptField {
@@ -274,6 +284,18 @@ impl PromptField {
         match self {
             Self::Title => "Title",
             Self::Tags => "Tags",
+            Self::Comment => "Comment",
+        }
+    }
+
+    /// What the prompt's frame says, which always names the work item it is
+    /// for. A comment is left on a work item rather than in a field of it, so
+    /// it reads that way.
+    #[must_use]
+    pub fn title(self, id: i64) -> String {
+        match self {
+            Self::Comment => format!("Comment on #{id}"),
+            other => format!("{} \u{b7} #{id}", other.label()),
         }
     }
 
@@ -283,6 +305,7 @@ impl PromptField {
         match self {
             Self::Title => "Type a title  Enter save  Esc cancel",
             Self::Tags => "Semicolon separated  Enter save  Esc cancel",
+            Self::Comment => "Type a comment  Enter post  Esc cancel",
         }
     }
 }
@@ -591,6 +614,10 @@ pub struct App {
     pub details_pending: Option<TicketKey>,
     /// Edits sent to Azure DevOps and not answered yet, keyed by work item.
     pending_edits: HashMap<TicketKey, PendingEdit>,
+    /// Work items with a comment posted and not answered yet. A comment is not
+    /// optimistic, so this is only what stops a second one being typed on top
+    /// of the first.
+    pending_comments: HashSet<TicketKey>,
     /// Why there is nothing to write to, reported when an edit is attempted
     /// without a configured Azure DevOps project.
     offline_reason: Option<String>,
@@ -707,6 +734,7 @@ impl App {
             sync_pending: false,
             details_pending: None,
             pending_edits: HashMap::new(),
+            pending_comments: HashSet::new(),
             offline_reason: None,
             sync_enabled: false,
             synced_at: None,
@@ -3305,6 +3333,7 @@ impl App {
         let original = match field {
             PromptField::Title => ticket.title.clone(),
             PromptField::Tags => ticket.tags.join("; "),
+            PromptField::Comment => String::new(),
         };
         let id = ticket.key.id;
         self.prompt = Some(TextPrompt {
@@ -3346,21 +3375,83 @@ impl App {
         let field = prompt.field;
         let original = prompt.original.trim().to_owned();
         let edited = match field {
-            PromptField::Title => prompt.input.text().trim().to_owned(),
+            PromptField::Title | PromptField::Comment => prompt.input.text().trim().to_owned(),
             PromptField::Tags => normalize_tags(prompt.input.text()),
         };
-        if field == PromptField::Title && edited.is_empty() {
-            self.set_error(format!("#{} title cannot be empty", prompt.id));
-            return AppAction::None;
+        if edited.is_empty() {
+            match field {
+                PromptField::Title => {
+                    self.set_error(format!("#{} title cannot be empty", prompt.id));
+                    return AppAction::None;
+                }
+                PromptField::Comment => {
+                    self.set_error(format!("#{} comment cannot be empty", prompt.id));
+                    return AppAction::None;
+                }
+                PromptField::Tags => {}
+            }
         }
         self.close_prompt();
-        if edited == original {
+        if field != PromptField::Comment && edited == original {
             return AppAction::None;
         }
         match field {
             PromptField::Title => self.edit_selected(FieldEdit::title(&edited)),
             PromptField::Tags => self.edit_selected(FieldEdit::tags(&edited)),
+            PromptField::Comment => self.comment_selected(edited),
         }
+    }
+
+    /// Asks for a comment to be left on the selected work item. Unlike a field
+    /// edit nothing is shown until Azure DevOps has stored it: a comment has no
+    /// id, date, or author until the server gives it one, and a line that
+    /// turned out never to have been posted is worse than a moment's wait.
+    pub fn comment_selected(&mut self, text: String) -> AppAction {
+        let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
+            self.set_error("No work item is selected");
+            return AppAction::None;
+        };
+        let refusal = |reason: &str| format!("#{} comment not posted: {reason}", key.id);
+        if !self.sync_enabled {
+            let reason = self
+                .offline_reason
+                .clone()
+                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned());
+            let message = refusal(&reason);
+            self.set_error(message);
+            return AppAction::None;
+        }
+        if self.pending_comments.contains(&key) {
+            let message = refusal("an earlier comment is still in flight");
+            self.set_error(message);
+            return AppAction::None;
+        }
+        self.pending_comments.insert(key.clone());
+        AppAction::Comment { key, text }
+    }
+
+    /// Whether a comment is waiting on Azure DevOps. The database watcher
+    /// stands down while one is, because the sync worker is writing that row
+    /// itself.
+    #[must_use]
+    pub fn comments_pending(&self) -> bool {
+        !self.pending_comments.is_empty()
+    }
+
+    /// Files the comment Azure DevOps stored, so the details pane shows it at
+    /// once rather than waiting for the pull that would bring it back.
+    pub fn apply_comment(&mut self, comment: CommentRecord) {
+        self.pending_comments.remove(&comment.ticket);
+        let id = comment.ticket.id;
+        self.graph.add_comment(comment);
+        self.set_status(format!("Commented on #{id}"));
+    }
+
+    /// A comment that never landed. Nothing was shown for it and nothing is
+    /// stored, so only the notification is left to say so.
+    pub fn reject_comment(&mut self, key: &TicketKey, message: &str) {
+        self.pending_comments.remove(key);
+        self.set_error(format!("#{} comment not posted: {message}", key.id));
     }
 
     fn handle_filter_key(&mut self, key: KeyEvent) {
@@ -3562,6 +3653,10 @@ impl App {
             CommandId::EditAssignee => self.open_assignee_picker(),
             CommandId::EditIteration => self.open_node_picker(NodeKind::Iteration),
             CommandId::EditArea => self.open_node_picker(NodeKind::Area),
+            CommandId::AddComment => {
+                self.open_prompt(PromptField::Comment);
+                AppAction::None
+            }
             CommandId::SaveView => {
                 self.open_views();
                 self.views_overlay.naming =
@@ -4874,7 +4969,8 @@ mod tests {
                 "Tags",
                 "Assignee",
                 "Iteration",
-                "Area"
+                "Area",
+                "Add comment"
             ],
             "later field editors append their own row"
         );
@@ -5122,6 +5218,163 @@ mod tests {
         assert_eq!(app.mode, AppMode::Browse);
         assert!(!app.edits_pending());
         assert_eq!(app.notification(), None);
+    }
+
+    /// The Edit menu row that opens the comment box, found by the command it
+    /// runs so adding a field editor above it moves nothing here.
+    fn comment_row() -> usize {
+        EDIT_MENU
+            .iter()
+            .position(|entry| entry.command == CommandId::AddComment)
+            .expect("the Edit menu offers a comment row")
+    }
+
+    /// One comment as Azure DevOps hands it back, already carrying the id,
+    /// date, and author only the server can give it.
+    fn comment(id: i64, at: &str, text: &str) -> CommentRecord {
+        CommentRecord {
+            ticket: TicketKey {
+                organization: "demo".into(),
+                id: 3,
+            },
+            comment_id: id,
+            created_at: crate::timestamp::ts(at),
+            author: Some("Jacob Ragsdale".into()),
+            text: text.into(),
+        }
+    }
+
+    #[test]
+    fn the_comment_prompt_opens_empty_and_posts_what_was_typed() {
+        let mut app = edit_app();
+
+        open_editor(&mut app, comment_row());
+        assert_eq!(app.mode, AppMode::Prompt);
+        assert_eq!(
+            prompt_text(&app),
+            "",
+            "there is nothing to edit, only to say"
+        );
+        let prompt = app.prompt.as_ref().expect("a prompt should be open");
+        assert_eq!(prompt.field, PromptField::Comment);
+        assert_eq!(
+            prompt.field.title(prompt.id),
+            "Comment on #3",
+            "the prompt names the work item it is about"
+        );
+
+        type_over(&mut app, "  Merged into main  ");
+        let action = press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            action,
+            AppAction::Comment {
+                key: app.selected_ticket().unwrap().key.clone(),
+                text: "Merged into main".into(),
+            },
+            "the comment is trimmed before it is sent"
+        );
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.prompt.is_none());
+        assert!(
+            app.comments_pending(),
+            "the post is waiting on Azure DevOps"
+        );
+        assert!(
+            app.comments_for(&app.selected_ticket().unwrap().key)
+                .is_empty(),
+            "nothing is shown until the server has stored it"
+        );
+
+        assert_eq!(
+            app.comment_selected("And again".into()),
+            AppAction::None,
+            "one comment at a time"
+        );
+        let (message, level) = app.notification().expect("the second attempt says so");
+        assert!(message.contains("still in flight"), "{message}");
+        assert_eq!(level, NotificationLevel::Error);
+    }
+
+    #[test]
+    fn a_blank_comment_is_refused_locally_and_leaves_the_prompt_open() {
+        let mut app = edit_app();
+
+        open_editor(&mut app, comment_row());
+        type_over(&mut app, "   ");
+        assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
+        assert_eq!(
+            app.mode,
+            AppMode::Prompt,
+            "a blank comment leaves the prompt open to fix"
+        );
+        assert!(!app.comments_pending(), "nothing was sent");
+        let (message, level) = app.notification().expect("a refusal is reported");
+        assert!(message.contains("comment cannot be empty"), "{message}");
+        assert_eq!(level, NotificationLevel::Error);
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.prompt.is_none());
+    }
+
+    #[test]
+    fn a_stored_comment_joins_the_discussion_in_date_order() {
+        let mut app = edit_app();
+        let key = app.selected_ticket().unwrap().key.clone();
+
+        app.comment_selected("Merged into main".into());
+        app.apply_comment(comment(9, "2026-03-04T00:00:00Z", "Merged into main"));
+
+        assert!(!app.comments_pending(), "the post was answered");
+        assert_eq!(
+            app.comments_for(&key)
+                .iter()
+                .map(|held| held.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Merged into main"]
+        );
+        let (message, level) = app.notification().expect("the post reports itself");
+        assert_eq!(message, "Commented on #3");
+        assert_eq!(level, NotificationLevel::Info);
+
+        // A details fetch that lands afterwards brings the same comment back;
+        // it replaces the one already held rather than doubling it, and an
+        // older comment files ahead of it.
+        app.apply_comment(comment(5, "2026-03-01T00:00:00Z", "Blocked on the API"));
+        app.apply_comment(comment(9, "2026-03-04T00:00:00Z", "Merged into main"));
+        assert_eq!(
+            app.comments_for(&key)
+                .iter()
+                .map(|held| held.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Blocked on the API", "Merged into main"]
+        );
+    }
+
+    #[test]
+    fn a_refused_comment_changes_nothing_and_says_why() {
+        let mut app = edit_app();
+        let key = app.selected_ticket().unwrap().key.clone();
+
+        app.comment_selected("Merged into main".into());
+        app.reject_comment(&key, "HTTP 403: the work item is read only");
+
+        assert!(app.comments_for(&key).is_empty(), "nothing was filed");
+        assert!(!app.comments_pending(), "the row is free to try again");
+        let (message, level) = app.notification().expect("a refusal is reported");
+        assert_eq!(
+            message,
+            "#3 comment not posted: HTTP 403: the work item is read only"
+        );
+        assert_eq!(level, NotificationLevel::Error);
+
+        assert!(
+            matches!(
+                app.comment_selected("Merged into main".into()),
+                AppAction::Comment { .. }
+            ),
+            "a refusal does not block the next attempt"
+        );
     }
 
     #[test]
