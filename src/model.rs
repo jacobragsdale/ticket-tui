@@ -556,6 +556,9 @@ impl TicketGraph {
         self.comments.insert(at, comment);
     }
 
+    /// One work item's comments, newest first: the discussion is read from the
+    /// top, so the comment somebody just left is the one under the heading
+    /// rather than the one at the end of a scroll.
     #[must_use]
     pub fn comments_for(&self, key: &TicketKey) -> Vec<&CommentRecord> {
         let mut comments: Vec<_> = self
@@ -563,7 +566,12 @@ impl TicketGraph {
             .iter()
             .filter(|comment| comment.ticket == *key)
             .collect();
-        comments.sort_by_key(|left| left.created_at);
+        comments.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.comment_id.cmp(&left.comment_id))
+        });
         comments
     }
 

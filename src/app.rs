@@ -10920,7 +10920,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_comment_joins_the_discussion_in_date_order() {
+    fn a_stored_comment_joins_the_discussion_newest_first() {
         let mut app = edit_app();
         let key = app.selected_ticket().unwrap().key.clone();
 
@@ -10941,7 +10941,7 @@ mod tests {
 
         // A details fetch that lands afterwards brings the same comment back;
         // it replaces the one already held rather than doubling it, and an
-        // older comment files ahead of it.
+        // older comment files under it.
         app.apply_comment(comment(5, "2026-03-01T00:00:00Z", "Blocked on the API"));
         app.apply_comment(comment(9, "2026-03-04T00:00:00Z", "Merged into main"));
         assert_eq!(
@@ -10949,7 +10949,8 @@ mod tests {
                 .iter()
                 .map(|held| held.text.as_str())
                 .collect::<Vec<_>>(),
-            ["Blocked on the API", "Merged into main"]
+            ["Merged into main", "Blocked on the API"],
+            "the newest comment reads first"
         );
     }
 

@@ -5234,7 +5234,7 @@ mod tests {
     }
 
     #[test]
-    fn a_comment_just_posted_shows_at_the_foot_of_the_discussion() {
+    fn a_comment_just_posted_shows_at_the_head_of_the_discussion() {
         let item = ticket();
         let mut app = App::new(vec![item.clone()]);
         app.narrow_details = true;
@@ -5264,8 +5264,8 @@ mod tests {
             .find("Merged into main")
             .expect("the comment just posted");
         assert!(
-            earlier < posted,
-            "the new comment reads last, under Comments: {text}"
+            posted < earlier,
+            "the new comment reads first, under Comments: {text}"
         );
         assert!(text.contains("Jacob Ragsdale"), "{text}");
     }
