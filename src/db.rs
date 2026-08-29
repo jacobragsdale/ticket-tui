@@ -26,6 +26,22 @@ pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
 /// DevOps's own timestamps do not.
 pub const WATERMARK_KEY: &str = "watermark_changed_at";
 
+/// `sync_meta` key holding the Azure DevOps organization the stored work items
+/// were pulled from, written by every successful pull. A run resolving another
+/// organization refuses to sync into the database rather than replacing rows it
+/// did not fetch.
+pub const ORGANIZATION_KEY: &str = "organization";
+
+/// `sync_meta` key holding the Azure DevOps project the stored work items were
+/// pulled from, the other half of [`ORGANIZATION_KEY`].
+pub const PROJECT_KEY: &str = "project";
+
+/// `sync_meta` key holding the extra WIQL condition the last pull narrowed the
+/// project with, empty for a database holding the whole project. A pull whose
+/// scope no longer matches this runs in full, because widening it has to bring
+/// work items in and narrowing it has to drop the ones now outside.
+pub const SYNC_SCOPE_KEY: &str = "sync_scope";
+
 /// `sync_meta` key holding when the project's classification nodes were last
 /// read. The iteration and area pickers open from the cached trees and only ask
 /// Azure DevOps again once this is an hour old, so a run that follows another

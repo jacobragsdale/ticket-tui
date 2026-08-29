@@ -53,6 +53,10 @@ Press `r` at any time to pull immediately.
 cargo run --release -- --refresh 300
 ```
 
+`TICKET_TUI_REFRESH` sets the same interval, and `--query` narrows what a pull
+asks Azure DevOps for; both are under
+[Organization and project](#organization-and-project).
+
 Without a configured organization the TUI runs offline: it browses the database,
 never contacts the network, and `r` reports the missing organization. An empty
 database then opens to the status line `Database is empty and offline; run with
@@ -103,6 +107,56 @@ Both values are resolved in this order:
 values the TUI browses the database offline and never syncs; with `--sync` an
 unresolved value fails with the missing flag, variable, and command spelled out.
 
+### The database remembers which project it holds
+
+Every successful pull records the organization and project it ran under in the
+`sync_meta` table. A run that resolves a different pair will not sync into a
+database that already holds work items: the sync worker never starts, the TUI
+opens offline over the rows that are there, and the notification — and the `i`
+overlay's sync line — says
+
+```text
+Database holds other-org/borealis; pass --database for another project or --sync to replace it
+```
+
+so a typo in `--project`, or a `TICKET_TUI_ORG` left over from yesterday, cannot
+quietly replace a database. `--sync` is how the replacement is asked for: it
+pulls the new project in full and re-stamps the database with it. A database
+with nothing in it, or one written before this was recorded, adopts whatever the
+next pull brings.
+
+### `TICKET_TUI_REFRESH`
+
+`TICKET_TUI_REFRESH` mirrors `--refresh`, so a shell profile can set the pull
+interval once. The flag wins when both are given, and a value that is not a
+number of seconds is a startup error naming the variable rather than a silent
+fall back to the default.
+
+### `--query`: how much of the project to sync
+
+A project too large to hold whole is narrowed with `--query`, or
+`TICKET_TUI_QUERY`, which takes one extra WIQL condition:
+
+```console
+cargo run --release -- --query "[System.ChangedDate] > @today-180"
+cargo run --release -- --query "[System.WorkItemType] <> 'Test Case'"
+```
+
+The condition is ANDed into both the full and the incremental query, in
+parentheses so its own `OR` cannot swallow the clauses around it, and is passed
+to Azure DevOps verbatim: WIQL is its dialect to parse, so a mistake comes back
+as the usual sync failure notification rather than as a local guess about what
+is legal.
+
+The scope is stored in `sync_meta` as `sync_scope`. Changing it — or dropping it
+— makes the next pull a full one, because a watermark says what changed, not
+what the old condition kept out: only a full pull can bring in what a widened
+scope now admits and drop what a narrowed one now excludes.
+
+The `i` overlay's sync line names all of it: the organization and project, the
+refresh interval or `on request` when the timer is off, the scope when one is
+configured, and how the last pull went.
+
 ## Sync
 
 A sync worker pulls in the background on a timer, every 60 seconds by default,
@@ -143,6 +197,16 @@ SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project ORDER BY
 Deleting a work item is not an edit — it stops being listed — so this is what
 catches one moved to the recycle bin, and the rows it no longer names are
 removed along with their links, comments, and history.
+
+A configured [sync scope](#--query-how-much-of-the-project-to-sync) is ANDed
+into both queries in parentheses, so the same reconciliation drops a work item
+an edit has moved outside the scope:
+
+```sql
+SELECT [System.Id] FROM WorkItems
+WHERE [System.TeamProject] = @project AND ([System.WorkItemType] <> 'Test Case')
+ORDER BY [System.Id]
+```
 
 Whatever the changed-since query names is read in batches of 200 from
 `/_apis/wit/workitems` with `$expand=relations` and written in one transaction,
@@ -285,6 +349,13 @@ pull reads. If a pull finishes while an edit is still in flight, the edit stays
 on screen over the rows the pull brought. There is no offline queue: without a
 configured organization an edit is refused before anything changes, and an edit
 that cannot be sent is reverted rather than saved for later.
+
+Every editor is reachable two ways. Clicking a field's value in the details
+pane opens that field's editor where the value is, as a dropdown anchored under
+it — one click, not two — and `Enter` does the same for the value under the
+pointer while the details pane is focused, with the link line still opening the
+work item. The keyboard opens the same editors centred, and both paths run the
+same command and write the same edit; only the placement differs.
 
 `e` opens the Edit menu, which lists the fields that can be changed; `S`
 (capital, because `s` is the sort menu) skips it and opens the state picker
@@ -486,7 +557,7 @@ against the server.
 | `[` / `]` | Jump to the previous or next recently viewed ticket |
 | `Tab` | Toggle focus between tickets and details |
 | `d` | Toggle the details screen when the terminal is under 70 columns |
-| `Enter` | Select the family cursor ticket, or open from the details pane |
+| `Enter` | Select the family cursor ticket; with details focused, edit the field under the pointer, or open the work item |
 | `o` | Open the selected ticket in the system browser |
 | `r` | Sync from Azure DevOps now, without waiting for the timer |
 | `i` | Show database path, row counts, and sync freshness |
@@ -503,8 +574,16 @@ table, details pane, help, or overlay by three rows or lines and does not
 change keyboard focus or the selected ticket. Left-click activates the
 visible control under the pointer on release: search, filter pills, sort
 headers, ticket rows, checkboxes, bookmark markers,
-underlined IDs and URLs, tabs, overlay rows, and close/action buttons. Dragging over visible text
-selects it and copies the plain text on release. Bracketed paste inserts at
+underlined IDs and URLs, details-pane field values, tabs, overlay rows, and
+close/action buttons. A field value in the details pane — the title, the state,
+the assignee, the priority, the tags, the iteration, or the area — opens its
+editor as a dropdown hung under the value that was clicked, left edge on it and
+width fitted to the longest entry. A field with too little room below opens its
+dropdown above itself, and one with room neither way falls back to the middle of
+the screen. Clicking anywhere outside an open dropdown closes it without a
+change, and that click reaches nothing underneath. Assignee and priority share a
+line and are two separate targets on it. Dragging over visible text
+selects it and copies the plain text on release, a field value included. Bracketed paste inserts at
 the caret in search, the command palette, the named-view editor, and the title,
 tags, and comment prompts.
 Scrollbar tracks page by a viewport-minus-one step; thumbs can be
@@ -514,7 +593,8 @@ and details at least 30 side by side, and each keeps six rows when stacked.
 `Reset pane split` in the command palette restores the built-in layout.
 Right-click, double-click, and horizontal wheel gestures are not
 used. Terminals supporting OSC 22 show a browser-style pointer over external
-URL targets.
+URL targets and over the details-pane values that can be edited, which underline
+under the pointer whether or not the terminal has colours.
 
 Search accepts a compact grammar such as `state:active type:bug
 assignee:"Avery Chen" priority:1 tag:rust`, plus `project:`, `area:`, and
@@ -581,12 +661,22 @@ every pull, and comments and revision history for every work item whose
 `details_rev` says they have been read. A work item the project stops listing
 takes all three with it. The `sync_meta`
 key/value table describes the sync itself rather than the work items, so a full
-pull clears the other tables but leaves it alone. Two keys live there:
-`me_display_name`, the signed-in display name that marks your own work items,
-and `watermark_changed_at`, the greatest `System.ChangedDate` the last
-successful pull saw, as an RFC 3339 UTC timestamp. That watermark is where the
-next incremental pull starts asking; a database without one is pulled in full
-and left with one.
+pull clears the other tables but leaves it alone. These keys live there, beside
+the `classification_nodes_fetched_at` below:
+
+| Key | Meaning |
+|---|---|
+| `me_display_name` | The signed-in display name that marks your own work items |
+| `watermark_changed_at` | The greatest `System.ChangedDate` the last successful pull saw, as an RFC 3339 UTC timestamp |
+| `organization`, `project` | Where the stored work items were pulled from |
+| `sync_scope` | The extra WIQL condition that pull narrowed the project with, empty for a project pulled whole |
+
+The watermark is where the next incremental pull starts asking; a database
+without one is pulled in full and left with one. The organization and project
+are what a run resolving a different pair refuses to sync over, and the scope is
+what a pull compares its own against: a scope that has moved forces one full
+pull. Those three are written by every successful pull and only when they
+change, so an idle project's pull still leaves the file untouched.
 
 The `identities` table holds what the assignee picker offers beyond the people
 the rows already name: `display_name`, the primary key, and `unique_name`, the

@@ -66,13 +66,21 @@ pub struct AzureConfig {
     /// Organization slug, e.g. `jacobragsdale` for `https://dev.azure.com/jacobragsdale`.
     pub organization: String,
     pub project: String,
+    /// An extra WIQL condition ANDed into both pulls, narrowing a project too
+    /// large to hold whole — `[System.ChangedDate] > @today-180`, say. `None`
+    /// pulls the project entire.
+    pub scope: Option<String>,
 }
 
 impl AzureConfig {
-    /// Resolve organization and project from explicit values, then the
-    /// `TICKET_TUI_ORG` / `TICKET_TUI_PROJECT` environment, then the
-    /// `az devops configure` defaults file.
-    pub fn resolve(organization: Option<String>, project: Option<String>) -> Result<Self> {
+    /// Resolve organization, project, and sync scope from explicit values, then
+    /// the `TICKET_TUI_ORG` / `TICKET_TUI_PROJECT` / `TICKET_TUI_QUERY`
+    /// environment, then the `az devops configure` defaults file.
+    pub fn resolve(
+        organization: Option<String>,
+        project: Option<String>,
+        scope: Option<String>,
+    ) -> Result<Self> {
         let defaults = az_devops_defaults();
         let organization = organization
             .or_else(|| std::env::var("TICKET_TUI_ORG").ok())
@@ -89,6 +97,7 @@ impl AzureConfig {
         Ok(Self {
             organization: organization_slug(&organization),
             project,
+            scope: sync_scope(scope.or_else(|| std::env::var("TICKET_TUI_QUERY").ok())),
         })
     }
 
@@ -101,6 +110,40 @@ impl AzureConfig {
     pub fn work_item_url(&self, id: i64) -> String {
         format!("{}/{}/_workitems/edit/{id}", self.base_url(), self.project)
     }
+}
+
+/// A sync scope is whatever the user wrote, trimmed; a blank one is no scope at
+/// all. The condition itself is never inspected here: WIQL is Azure DevOps's
+/// dialect to parse, and a mistake in it comes back as a failed sync rather
+/// than as a local guess about what is legal.
+fn sync_scope(raw: Option<String>) -> Option<String> {
+    raw.map(|scope| scope.trim().to_owned())
+        .filter(|scope| !scope.is_empty())
+}
+
+/// Every work item in the project the configured scope still lets through. The
+/// condition goes through in parentheses so its own `OR` cannot swallow the
+/// clauses around it.
+fn scoped_project_wiql(scope: Option<&str>) -> String {
+    scope.map_or_else(
+        || PROJECT_IDS_WIQL.to_owned(),
+        |scope| format!("{PROJECT_IDS_WIQL} AND ({scope})"),
+    )
+}
+
+/// The query behind a full pull: every work item the scope allows.
+fn all_ids_wiql(scope: Option<&str>) -> String {
+    format!("{} ORDER BY [System.Id]", scoped_project_wiql(scope))
+}
+
+/// The query behind an incremental pull: what the scope allows and the
+/// watermark says has moved.
+fn changed_ids_wiql(scope: Option<&str>, watermark: Timestamp) -> String {
+    format!(
+        "{} AND [System.ChangedDate] >= '{}' ORDER BY [System.Id]",
+        scoped_project_wiql(scope),
+        watermark.to_iso8601_utc()
+    )
 }
 
 /// Accept `https://dev.azure.com/slug`, `https://slug.visualstudio.com`, or a bare slug.
@@ -192,18 +235,16 @@ impl AzureClient {
     /// more; that costs one row and is what keeps two edits made in the same
     /// second from hiding behind each other.
     pub fn fetch_changed_work_items(&self, watermark: Timestamp) -> Result<SyncBatch> {
-        let wiql = format!(
-            "{PROJECT_IDS_WIQL} AND [System.ChangedDate] >= '{}' ORDER BY [System.Id]",
-            watermark.to_iso8601_utc()
-        );
+        let wiql = changed_ids_wiql(self.config.scope.as_deref(), watermark);
         self.fetch_work_items(&self.query_work_item_ids(&wiql)?)
     }
 
-    /// Every work item id the project still has. A pull compares this against
-    /// the ids it already holds, because a deleted work item is not reported as
-    /// changed — it simply stops being listed.
+    /// Every work item id the project still has within the configured scope. A
+    /// pull compares this against the ids it already holds, because a deleted
+    /// work item is not reported as changed — it simply stops being listed, and
+    /// so does one an edit has moved outside the scope.
     pub fn query_ids(&self) -> Result<Vec<i64>> {
-        self.query_work_item_ids(&format!("{PROJECT_IDS_WIQL} ORDER BY [System.Id]"))
+        self.query_work_item_ids(&all_ids_wiql(self.config.scope.as_deref()))
     }
 
     /// Read the named work items, relations and all, in batches the endpoint
@@ -1067,7 +1108,47 @@ mod tests {
         AzureConfig {
             organization: "demo".into(),
             project: "development".into(),
+            scope: None,
         }
+    }
+
+    #[test]
+    fn a_sync_scope_narrows_both_pulls_and_travels_verbatim_in_parentheses() {
+        assert_eq!(
+            all_ids_wiql(None),
+            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project \
+             ORDER BY [System.Id]"
+        );
+        assert_eq!(
+            changed_ids_wiql(None, crate::timestamp::ts("2026-08-28T20:15:03Z")),
+            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project \
+             AND [System.ChangedDate] >= '2026-08-28T20:15:03Z' ORDER BY [System.Id]"
+        );
+
+        let scope = Some("[System.WorkItemType] <> 'Test Case' OR [System.Id] = 7");
+        assert_eq!(
+            all_ids_wiql(scope),
+            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project \
+             AND ([System.WorkItemType] <> 'Test Case' OR [System.Id] = 7) ORDER BY [System.Id]",
+            "the condition is parenthesised so its own OR cannot swallow the project clause"
+        );
+        assert_eq!(
+            changed_ids_wiql(scope, crate::timestamp::ts("2026-08-28T20:15:03Z")),
+            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project \
+             AND ([System.WorkItemType] <> 'Test Case' OR [System.Id] = 7) \
+             AND [System.ChangedDate] >= '2026-08-28T20:15:03Z' ORDER BY [System.Id]"
+        );
+
+        assert_eq!(
+            sync_scope(Some("  [System.ChangedDate] > @today-180 ".into())).as_deref(),
+            Some("[System.ChangedDate] > @today-180")
+        );
+        assert_eq!(
+            sync_scope(Some("   ".into())),
+            None,
+            "a blank scope is none"
+        );
+        assert_eq!(sync_scope(None), None);
     }
 
     #[test]
@@ -1331,6 +1412,7 @@ mod tests {
         let client_config = AzureConfig {
             organization: "demo".into(),
             project: "my project".into(),
+            scope: None,
         };
         let client = AzureClient {
             agent: ureq::Agent::new_with_defaults(),
