@@ -19,7 +19,7 @@ pub struct SearchResult {
     pub matches: Vec<SearchMatch>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SearchDocument {
     ticket_index: usize,
     text: Utf32String,
@@ -95,6 +95,19 @@ impl SearchEngine {
 
     pub fn replace_documents(&mut self, documents: SearchDocuments) {
         self.documents = documents.documents;
+    }
+
+    /// Re-indexes one work item an edit changed, leaving the rest of the
+    /// documents as they are: a write-through edit touches one row, and
+    /// rebuilding every document to follow it would be wasted work.
+    pub fn update_document(&mut self, ticket_index: usize, ticket: &Ticket) {
+        let documents = Arc::make_mut(&mut self.documents);
+        if let Some(document) = documents
+            .iter_mut()
+            .find(|document| document.ticket_index == ticket_index)
+        {
+            document.text = ticket.searchable_text().into();
+        }
     }
 
     pub fn submit(&mut self, query: &str) -> u64 {

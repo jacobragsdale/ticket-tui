@@ -19,6 +19,7 @@ use ticket_tui::app::{
 };
 use ticket_tui::azure::{AzureClient, AzureConfig};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
+use ticket_tui::edit::{EditRejection, EditRequest};
 use ticket_tui::model::TicketGraph;
 use ticket_tui::session;
 use ticket_tui::sync::{
@@ -199,6 +200,7 @@ fn run() -> Result<()> {
         repository.path().to_path_buf(),
         db::data_signature(repository.path()),
     );
+    app.set_offline_reason(offline_reason.clone());
     let session_path = session::path_for(repository.path());
     match session::load(&session_path) {
         Ok(loaded) => app.restore_session(loaded),
@@ -402,6 +404,7 @@ fn handle_action(
     match action {
         AppAction::None => {}
         AppAction::Sync => start_sync(app, runtime),
+        AppAction::Edit(request) => start_edit(app, runtime, request),
         AppAction::OpenUrl(raw_url) => match open_https_url(&raw_url, opener) {
             Ok(()) => app.set_status(format!("Opened {raw_url}")),
             Err(error) => app.set_error(format!("Could not open ticket: {error:#}")),
@@ -468,6 +471,31 @@ fn start_sync(app: &mut App, runtime: &mut SyncRuntime) {
     send_pull(app, runtime, PullOrigin::User);
 }
 
+/// Hands one edit to the sync worker. The row already shows the change, so a
+/// worker that is gone puts it back here rather than leaving a lie on screen.
+fn start_edit(app: &mut App, runtime: &mut SyncRuntime, request: EditRequest) {
+    let key = request.key.clone();
+    let label = request.edit.label().to_owned();
+    let sent = runtime
+        .worker
+        .as_ref()
+        .map(|worker| worker.send(SyncRequest::Edit(request)));
+    let error = match sent {
+        Some(Ok(())) => return,
+        Some(Err(error)) => format!("{error:#}"),
+        None => runtime
+            .offline_reason
+            .clone()
+            .unwrap_or_else(|| "Azure DevOps is not configured".to_owned()),
+    };
+    app.reject_edit(&EditRejection {
+        key,
+        label,
+        conflict: false,
+        message: error,
+    });
+}
+
 fn send_pull(app: &mut App, runtime: &mut SyncRuntime, origin: PullOrigin) {
     let sent = runtime
         .worker
@@ -519,6 +547,25 @@ fn poll_sync(
                     }
                 }
             }
+            SyncEvent::Edited(result) => match *result {
+                Ok(applied) => {
+                    app.apply_edit(applied);
+                    // The worker wrote that row itself, so the watcher below is
+                    // told about it rather than reloading behind us.
+                    app.configure_database(
+                        repository.path().to_path_buf(),
+                        db::data_signature(repository.path()),
+                    );
+                }
+                Err(rejection) => {
+                    // A stale copy is worth a pull: the refused field is about
+                    // to arrive with whatever else moved.
+                    if rejection.conflict {
+                        start_sync(app, runtime);
+                    }
+                    app.reject_edit(&rejection);
+                }
+            },
             SyncEvent::Stopped => {
                 runtime.stop(app, "the Azure DevOps sync worker stopped");
             }
@@ -535,7 +582,11 @@ fn poll_watch(
     reloader: &mut ReloadEngine,
 ) -> bool {
     let signature = db::data_signature(repository.path());
-    if signature == app.data_signature || app.reload_pending || app.sync_pending {
+    if signature == app.data_signature
+        || app.reload_pending
+        || app.sync_pending
+        || app.edits_pending()
+    {
         return false;
     }
     app.mark_stale();
@@ -724,21 +775,25 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use serde_json::Value;
     use tempfile::tempdir;
     use ticket_tui::app::NotificationLevel;
-    use ticket_tui::azure::SyncBatch;
-    use ticket_tui::model::{Ticket, TicketGraph, TicketKey};
+    use ticket_tui::azure::{RequestRejected, SyncBatch};
+    use ticket_tui::edit::FieldEdit;
+    use ticket_tui::model::{RelationRecord, Ticket, TicketGraph, TicketKey};
     use ticket_tui::sync::{SourceConnector, WorkItemSource};
     use ticket_tui::timestamp::Timestamp;
 
     struct FailingOpener;
 
     /// Azure DevOps stood in for: every pull returns the same tickets, or the
-    /// same failure.
+    /// same failure, and a write answers with a stored copy or a refusal.
     #[derive(Clone)]
     struct FakeAzure {
         tickets: Vec<Ticket>,
         failure: Option<String>,
+        stored: Option<Ticket>,
+        refusal: Option<(u16, String)>,
     }
 
     impl FakeAzure {
@@ -746,13 +801,31 @@ mod tests {
             Self {
                 tickets,
                 failure: None,
+                stored: None,
+                refusal: None,
             }
         }
 
         fn failing(message: &str) -> Self {
             Self {
-                tickets: Vec::new(),
                 failure: Some(message.to_owned()),
+                ..Self::returning(Vec::new())
+            }
+        }
+
+        /// Accepts the next write and answers with `stored`.
+        fn storing(stored: Ticket) -> Self {
+            Self {
+                stored: Some(stored),
+                ..Self::returning(Vec::new())
+            }
+        }
+
+        /// Refuses the next write, then answers pulls with `tickets`.
+        fn refusing(status: u16, message: &str, tickets: Vec<Ticket>) -> Self {
+            Self {
+                refusal: Some((status, message.to_owned())),
+                ..Self::returning(tickets)
             }
         }
     }
@@ -770,6 +843,24 @@ mod tests {
 
         fn display_name(&self) -> Result<Option<String>> {
             Ok(None)
+        }
+
+        fn patch_work_item(
+            &self,
+            id: i64,
+            _patch: &[Value],
+        ) -> Result<(Ticket, Vec<RelationRecord>)> {
+            if let Some((status, message)) = &self.refusal {
+                return Err(anyhow::Error::new(RequestRejected::new(
+                    *status,
+                    format!("https://dev.azure.com/example-org/_apis/wit/workitems/{id}"),
+                    message.clone(),
+                )));
+            }
+            match self.stored.clone() {
+                Some(ticket) => Ok((ticket, Vec::new())),
+                None => bail!("the fake source was not given a stored copy"),
+            }
         }
     }
 
@@ -805,6 +896,20 @@ mod tests {
     ) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while app.sync_pending {
+            poll_sync(app, repository, runtime);
+            assert!(Instant::now() < deadline, "the sync worker timed out");
+            thread::yield_now();
+        }
+    }
+
+    /// Pumps the event loop's sync polling until the edit in flight answers.
+    fn await_edit(
+        app: &mut App,
+        repository: &mut SqliteTicketRepository,
+        runtime: &mut SyncRuntime,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while app.edits_pending() {
             poll_sync(app, repository, runtime);
             assert!(Instant::now() < deadline, "the sync worker timed out");
             thread::yield_now();
@@ -1049,6 +1154,116 @@ mod tests {
         assert_eq!(app.activity_label(), None);
         assert!(offline_status(true).contains("--sync"));
         assert!(offline_status(false).contains("offline"));
+    }
+
+    #[test]
+    fn an_accepted_edit_updates_the_row_and_the_database_without_a_reload() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let mut stored = ticket(3);
+        stored.state = "Done".into();
+        stored.revision = 9;
+        let (mut app, mut repository, mut runtime) =
+            synced_app(&path, FakeAzure::storing(stored.clone()));
+        let selected = app.selected_ticket().unwrap().key.clone();
+        assert_eq!(selected.id, 3, "the newest work item starts selected");
+
+        let action = app.edit_selected(FieldEdit::state("Done"));
+        assert!(matches!(action, AppAction::Edit(_)));
+        assert_eq!(
+            app.selected_ticket().unwrap().state,
+            "Done",
+            "the row changes before the worker is even asked"
+        );
+        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        await_edit(&mut app, &mut repository, &mut runtime);
+
+        assert_eq!(app.ticket_by_key(&selected), Some(&stored));
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Updated #3 · State → Done")
+        );
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.key.id),
+            Some(3),
+            "an edit landing leaves the selection where it was"
+        );
+        assert_eq!(
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .load_all()
+                .unwrap()
+                .iter()
+                .find(|ticket| ticket.key.id == 3)
+                .map(|ticket| ticket.state.clone()),
+            Some("Done".to_owned()),
+            "the worker wrote the row it was told to write"
+        );
+        assert!(
+            !poll_watch(&mut app, &repository, &mut ReloadEngine::default()),
+            "the watcher does not chase the row our own worker just wrote"
+        );
+        assert!(!runtime.scheduler.in_flight(), "nothing else was asked for");
+    }
+
+    #[test]
+    fn a_conflicting_edit_puts_the_row_back_and_pulls_the_latest_copy() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let (mut app, mut repository, mut runtime) = synced_app(
+            &path,
+            FakeAzure::refusing(409, "the work item has been changed", vec![ticket(3)]),
+        );
+        let selected = app.selected_ticket().unwrap().key.clone();
+
+        let action = app.edit_selected(FieldEdit::state("Done"));
+        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        await_edit(&mut app, &mut repository, &mut runtime);
+
+        assert_eq!(
+            app.ticket_by_key(&selected)
+                .map(|ticket| ticket.state.clone()),
+            Some("Active".to_owned()),
+            "the row goes back to what Azure DevOps still holds"
+        );
+        let (message, level) = app.notification().expect("a conflict is always reported");
+        assert!(message.contains("#3 changed in Azure DevOps"), "{message}");
+        assert!(message.contains("State not saved"), "{message}");
+        assert_eq!(level, NotificationLevel::Error);
+        assert!(
+            app.sync_pending && runtime.scheduler.in_flight(),
+            "a conflict asks for the latest copy straight away"
+        );
+
+        await_sync(&mut app, &mut repository, &mut runtime);
+        assert_eq!(
+            app.tickets().len(),
+            1,
+            "the pull the conflict asked for ran"
+        );
+    }
+
+    #[test]
+    fn an_edit_with_no_worker_left_reverts_the_row_and_says_why() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let (mut app, _repository, mut runtime) =
+            synced_app(&path, FakeAzure::returning(vec![ticket(3)]));
+        let action = app.edit_selected(FieldEdit::state("Done"));
+        runtime.worker = None;
+        runtime.offline_reason = Some("no Azure DevOps organization; pass --org".into());
+
+        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.state.clone()),
+            Some("Active".to_owned()),
+            "an edit that never left is not left showing"
+        );
+        assert!(!app.edits_pending());
+        let (message, level) = app.notification().unwrap();
+        assert!(message.contains("--org"), "{message}");
+        assert_eq!(level, NotificationLevel::Error);
     }
 
     #[test]

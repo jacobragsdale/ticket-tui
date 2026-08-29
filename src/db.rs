@@ -290,6 +290,36 @@ impl SqliteTicketRepository {
         Ok(tickets.len())
     }
 
+    /// Writes one work item and the links leading out of it, leaving every
+    /// other row alone. An edit that Azure DevOps accepted lands this way: it
+    /// changed one record, so replacing the whole database would throw away
+    /// everything else the last pull brought.
+    pub fn upsert(&mut self, ticket: &Ticket, relations: &[RelationRecord]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        insert_ticket(&transaction, ticket)?;
+        transaction
+            .execute(
+                "DELETE FROM work_item_relations WHERE organization = ?1 AND from_id = ?2",
+                params![ticket.key.organization, ticket.key.id],
+            )
+            .context("failed to clear the work item's relations")?;
+        for relation in relations {
+            transaction.execute(
+                "INSERT OR REPLACE INTO work_item_relations (organization, from_id, to_id, kind)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    relation.from.organization,
+                    relation.from.id,
+                    relation.to.id,
+                    relation.kind.as_str()
+                ],
+            )?;
+        }
+        transaction
+            .commit()
+            .with_context(|| format!("failed to store work item {}", ticket.key.id))
+    }
+
     fn load_relations(&self) -> Result<Vec<RelationRecord>> {
         let mut statement = self
             .connection
@@ -621,6 +651,70 @@ mod tests {
                 .as_deref(),
             Some("Avery Chen"),
             "the signed-in name outlives a reopen"
+        );
+    }
+
+    #[test]
+    fn upsert_writes_one_work_item_and_its_links_without_disturbing_the_rest() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+        let relation = |from: &Ticket, to: &Ticket, kind| RelationRecord {
+            from: from.key.clone(),
+            to: to.key.clone(),
+            kind,
+        };
+        let graph = TicketGraph {
+            relations: vec![
+                relation(&ticket(1), &ticket(2), RelationKind::Parent),
+                relation(&ticket(2), &ticket(1), RelationKind::Child),
+            ],
+            ..TicketGraph::default()
+        };
+        repository
+            .replace_all(&[ticket(1), ticket(2)], &graph)
+            .unwrap();
+        let before = data_signature(&path);
+
+        let mut edited = ticket(1);
+        edited.state = "Done".into();
+        edited.revision = 4;
+        repository
+            .upsert(
+                &edited,
+                &[relation(&ticket(1), &ticket(3), RelationKind::Related)],
+            )
+            .unwrap();
+
+        let mut stored = repository.load_all().unwrap();
+        stored.sort_by_key(|ticket| ticket.key.id);
+        assert_eq!(stored, vec![edited.clone(), ticket(2)]);
+        let relations = repository.load_graph().unwrap().relations;
+        assert_eq!(
+            relations.len(),
+            2,
+            "the work item's own links are replaced and nobody else's are"
+        );
+        assert!(relations.contains(&relation(&ticket(2), &ticket(1), RelationKind::Child)));
+        assert!(relations.contains(&relation(&ticket(1), &ticket(3), RelationKind::Related)));
+        assert_ne!(
+            data_signature(&path),
+            before,
+            "the watcher can tell the file was written"
+        );
+
+        let mut fresh = ticket(9);
+        fresh.title = "Written by an edit".into();
+        repository.upsert(&fresh, &[]).unwrap();
+        assert_eq!(repository.load_all().unwrap().len(), 3);
+        assert_eq!(
+            repository
+                .load_all()
+                .unwrap()
+                .iter()
+                .find(|ticket| ticket.key.id == 9)
+                .map(|ticket| ticket.title.clone()),
+            Some("Written by an edit".to_owned())
         );
     }
 

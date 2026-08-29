@@ -269,6 +269,13 @@ impl TicketGraph {
             .collect()
     }
 
+    /// Swaps one work item's outgoing links for the set a write brought back,
+    /// leaving links from every other work item alone.
+    pub fn replace_relations_from(&mut self, key: &TicketKey, relations: Vec<RelationRecord>) {
+        self.relations.retain(|relation| relation.from != *key);
+        self.relations.extend(relations);
+    }
+
     #[must_use]
     pub fn family(&self, key: &TicketKey) -> FamilySnapshot {
         FamilySnapshot::from_graph(self, key)

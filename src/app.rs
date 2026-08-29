@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -13,6 +13,8 @@ use crate::agent_context::{
 };
 use crate::columns::TableLayout;
 use crate::command::{Command, CommandId, command_for_key, matching_commands};
+pub use crate::edit::FieldEdit;
+use crate::edit::{EditApplied, EditRejection, EditRequest};
 use crate::export;
 pub use crate::filter::FacetTarget;
 use crate::filter::{
@@ -84,10 +86,12 @@ impl Focus {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum AppAction {
     None,
     Sync,
+    /// Write one field of one work item back to Azure DevOps.
+    Edit(EditRequest),
     OpenUrl(String),
     Copy {
         text: String,
@@ -202,6 +206,24 @@ pub struct ViewsOverlay {
     pub scroll: ScrollState,
 }
 
+/// An edit waiting on Azure DevOps. `original` is the row as it was before the
+/// change, restored if the write is refused; applying `edit` to it gives back
+/// the optimistic copy the table is showing, which is how a pull that lands
+/// first is topped up again.
+#[derive(Clone, Debug)]
+struct PendingEdit {
+    original: Ticket,
+    edit: FieldEdit,
+}
+
+impl PendingEdit {
+    fn optimistic(&self) -> Ticket {
+        let mut ticket = self.original.clone();
+        self.edit.apply(&mut ticket);
+        ticket
+    }
+}
+
 #[derive(Debug)]
 pub struct PreparedTickets {
     tickets: Vec<Ticket>,
@@ -285,6 +307,11 @@ pub struct App {
     pub data_signature: u128,
     /// Whether a pull from Azure DevOps is in flight.
     pub sync_pending: bool,
+    /// Edits sent to Azure DevOps and not answered yet, keyed by work item.
+    pending_edits: HashMap<TicketKey, PendingEdit>,
+    /// Why there is nothing to write to, reported when an edit is attempted
+    /// without a configured Azure DevOps project.
+    offline_reason: Option<String>,
     /// Whether Azure DevOps is configured at all: an offline run browses the
     /// database and reports no sync state.
     sync_enabled: bool,
@@ -372,6 +399,8 @@ impl App {
             stale: false,
             data_signature: 0,
             sync_pending: false,
+            pending_edits: HashMap::new(),
+            offline_reason: None,
             sync_enabled: false,
             synced_at: None,
             sync_error: None,
@@ -744,6 +773,7 @@ impl App {
         self.tickets = Arc::new(prepared.tickets);
         self.graph = prepared.graph;
         self.search.replace_documents(prepared.search_documents);
+        self.reapply_pending_edits();
         self.loaded_at = Instant::now();
         self.stale = false;
         if self.fuzzy_query().is_empty() {
@@ -753,6 +783,137 @@ impl App {
             self.visible.clear();
             self.table_state.select(None);
             self.submit_search();
+        }
+    }
+
+    /// Asks for one field of the selected work item to be written back to
+    /// Azure DevOps. The row carries the change at once, so the table never
+    /// waits for the network; the action this returns is what actually sends
+    /// it, and a refusal puts the row back. Every edit feature goes this way.
+    pub fn edit_selected(&mut self, edit: FieldEdit) -> AppAction {
+        let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
+            self.set_error("No work item is selected");
+            return AppAction::None;
+        };
+        self.edit_ticket(&key, edit)
+    }
+
+    /// [`Self::edit_selected`] for a work item that is not the selected row.
+    pub fn edit_ticket(&mut self, key: &TicketKey, edit: FieldEdit) -> AppAction {
+        let refusal = |reason: &str| format!("#{} {} not saved: {reason}", key.id, edit.label());
+        if !self.sync_enabled {
+            // Nothing to write to, so the row is left exactly as it is.
+            let reason = self
+                .offline_reason
+                .clone()
+                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned());
+            let message = refusal(&reason);
+            self.set_error(message);
+            return AppAction::None;
+        }
+        if self.pending_edits.contains_key(key) {
+            // The revision a second edit would test with is already stale, so
+            // it could only earn a conflict.
+            let message = refusal("an earlier edit is still in flight");
+            self.set_error(message);
+            return AppAction::None;
+        }
+        let Some(index) = self.index_of(key) else {
+            let message = refusal("it is not in this database");
+            self.set_error(message);
+            return AppAction::None;
+        };
+        let pending = PendingEdit {
+            original: self.tickets[index].clone(),
+            edit: edit.clone(),
+        };
+        let request = EditRequest {
+            key: key.clone(),
+            expected_revision: pending.original.revision,
+            edit,
+        };
+        self.set_ticket(index, pending.optimistic());
+        self.pending_edits.insert(key.clone(), pending);
+        AppAction::Edit(request)
+    }
+
+    /// Whether an edit is waiting on Azure DevOps. The database watcher stands
+    /// down while one is, because the sync worker is writing that row itself.
+    #[must_use]
+    pub fn edits_pending(&self) -> bool {
+        !self.pending_edits.is_empty()
+    }
+
+    /// Swaps in the copy Azure DevOps stored, so the row shows the revision and
+    /// changed date the server settled on rather than the optimistic guess.
+    pub fn apply_edit(&mut self, applied: EditApplied) {
+        let key = applied.ticket.key.clone();
+        self.pending_edits.remove(&key);
+        self.graph.replace_relations_from(&key, applied.relations);
+        if let Some(index) = self.index_of(&key) {
+            self.set_ticket(index, applied.ticket);
+            self.resettle_rows();
+        }
+        self.set_status(format!("Updated #{} · {}", key.id, applied.edit.summary()));
+    }
+
+    /// Puts a refused edit back the way it was and says which field did not
+    /// save, so a change is never dropped quietly.
+    pub fn reject_edit(&mut self, rejection: &EditRejection) {
+        if let Some(pending) = self.pending_edits.remove(&rejection.key)
+            && let Some(index) = self.index_of(&rejection.key)
+        {
+            self.set_ticket(index, pending.original);
+        }
+        self.set_error(rejection.notification());
+    }
+
+    /// Why the TUI cannot write anything, told to whoever tries to.
+    pub fn set_offline_reason(&mut self, reason: Option<String>) {
+        self.offline_reason = reason;
+    }
+
+    fn index_of(&self, key: &TicketKey) -> Option<usize> {
+        self.tickets.iter().position(|ticket| ticket.key == *key)
+    }
+
+    /// Replaces one work item in place, keeping its search document in step so
+    /// the next query sees the new value.
+    fn set_ticket(&mut self, index: usize, ticket: Ticket) {
+        Arc::make_mut(&mut self.tickets)[index] = ticket;
+        self.search.update_document(index, &self.tickets[index]);
+    }
+
+    /// Re-applies the filters and the sort to the rows already on screen, for
+    /// when one of them changed under the current ordering. The selection
+    /// follows its work item rather than its row number.
+    fn resettle_rows(&mut self) {
+        let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
+        self.apply_filters();
+        self.sort_visible();
+        self.restore_selection(selected.as_ref());
+    }
+
+    /// Puts the optimistic copies back on top of a pull that finished while an
+    /// edit was still in flight, so an edited row does not flicker back to the
+    /// value the pull brought. That pulled row becomes what a refusal restores,
+    /// because it is the freshest copy the edit did not make.
+    fn reapply_pending_edits(&mut self) {
+        if self.pending_edits.is_empty() {
+            return;
+        }
+        let keys: Vec<TicketKey> = self.pending_edits.keys().cloned().collect();
+        for key in keys {
+            let Some(index) = self.index_of(&key) else {
+                continue;
+            };
+            let pulled = self.tickets[index].clone();
+            let Some(pending) = self.pending_edits.get_mut(&key) else {
+                continue;
+            };
+            pending.original = pulled;
+            let optimistic = pending.optimistic();
+            self.set_ticket(index, optimistic);
         }
     }
 
@@ -3211,5 +3372,213 @@ mod tests {
         assert_eq!(restored.pane_split_wide, DEFAULT_PANE_SPLIT_WIDE);
         assert_eq!(restored.pane_split_stacked, DEFAULT_PANE_SPLIT_STACKED);
         assert!(restored.session_dirty);
+    }
+
+    /// Three work items over a configured Azure DevOps project, which is what
+    /// an edit needs to go anywhere.
+    fn editing_app() -> App {
+        let mut app = App::new(vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+            ticket(3, "Gamma", "2026-03-01T00:00:00Z"),
+        ]);
+        app.enable_sync();
+        app.set_table_viewport(3);
+        app
+    }
+
+    fn edit_request(app: &mut App, edit: FieldEdit) -> EditRequest {
+        match app.edit_selected(edit) {
+            AppAction::Edit(request) => request,
+            other => panic!("expected an edit to be dispatched, got {other:?}"),
+        }
+    }
+
+    /// The work item as Azure DevOps hands it back: the field written, and the
+    /// revision and changed date it decided on.
+    fn stored_copy(app: &App, key: &TicketKey, state: &str) -> Ticket {
+        let mut ticket = app.ticket_by_key(key).expect("the row is loaded").clone();
+        ticket.state = state.to_owned();
+        ticket.revision += 1;
+        ticket.changed_at = crate::timestamp::ts("2026-04-01T00:00:00Z");
+        ticket
+    }
+
+    #[test]
+    fn an_edit_shows_at_once_and_the_stored_copy_replaces_it() {
+        let mut app = editing_app();
+        let request = edit_request(&mut app, FieldEdit::state("Doing"));
+        let key = request.key.clone();
+
+        assert_eq!(request.expected_revision, 1, "the row's revision is tested");
+        assert_eq!(request.edit.summary(), "State → Doing");
+        assert!(app.edits_pending());
+        assert_eq!(
+            app.ticket_by_key(&key).unwrap().state,
+            "Doing",
+            "the row does not wait for the network"
+        );
+
+        app.set_query("Doing".into());
+        await_search(&mut app);
+        assert_eq!(
+            app.visible_count(),
+            1,
+            "the search index follows the optimistic value"
+        );
+        app.set_query(String::new());
+        await_search(&mut app);
+
+        let stored = stored_copy(&app, &key, "Doing");
+        app.apply_edit(EditApplied {
+            ticket: stored.clone(),
+            relations: Vec::new(),
+            edit: FieldEdit::state("Doing"),
+        });
+
+        assert!(!app.edits_pending());
+        assert_eq!(app.ticket_by_key(&key), Some(&stored), "the server wins");
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Updated #3 · State → Doing")
+        );
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.key.id),
+            Some(key.id),
+            "the selection stays on the work item it was on"
+        );
+    }
+
+    #[test]
+    fn a_refused_edit_puts_the_row_back_and_names_the_field() {
+        let mut app = editing_app();
+        let request = edit_request(&mut app, FieldEdit::state("Doing"));
+        let before = app.tickets().to_vec();
+
+        app.reject_edit(&EditRejection {
+            key: request.key.clone(),
+            label: "State".into(),
+            conflict: true,
+            message: "the test operation on /rev failed".into(),
+        });
+
+        assert!(!app.edits_pending());
+        assert_eq!(
+            app.ticket_by_key(&request.key).unwrap().state,
+            "Active",
+            "a refused write leaves nothing of itself behind"
+        );
+        assert_ne!(before, app.tickets());
+        let (message, level) = app.notification().expect("a refusal is always reported");
+        assert!(message.contains("#3 changed in Azure DevOps"), "{message}");
+        assert!(message.contains("State not saved"), "{message}");
+        assert_eq!(level, NotificationLevel::Error);
+    }
+
+    #[test]
+    fn a_pull_that_lands_during_an_edit_keeps_the_optimistic_value() {
+        let mut app = editing_app();
+        let request = edit_request(&mut app, FieldEdit::state("Doing"));
+        let key = request.key.clone();
+
+        // A pull that was already in flight when the edit went out: it cannot
+        // know about the edit, but it must not undo it on screen either.
+        let mut pulled = ticket(3, "Gamma renamed", "2026-03-02T00:00:00Z");
+        pulled.revision = 4;
+        app.replace_prepared_tickets(PreparedTickets::new(vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+            pulled.clone(),
+        ]));
+
+        let row = app.ticket_by_key(&key).expect("the row survived the pull");
+        assert_eq!(row.state, "Doing", "the edit is still showing");
+        assert_eq!(row.title, "Gamma renamed", "everything else is the pull's");
+        assert!(app.edits_pending());
+
+        app.reject_edit(&EditRejection {
+            key: key.clone(),
+            label: "State".into(),
+            conflict: false,
+            message: "field is read only".into(),
+        });
+        assert_eq!(
+            app.ticket_by_key(&key),
+            Some(&pulled),
+            "a refusal restores the freshest copy the edit did not make"
+        );
+    }
+
+    #[test]
+    fn an_edit_leaves_the_filtered_view_only_once_it_lands() {
+        let mut app = editing_app();
+        app.set_query("state:Active".into());
+        assert_eq!(app.visible_count(), 3);
+
+        let request = edit_request(&mut app, FieldEdit::state("Done"));
+        assert_eq!(
+            app.visible_count(),
+            3,
+            "the row stays where it is while the write is in flight"
+        );
+
+        let stored = stored_copy(&app, &request.key, "Done");
+        app.apply_edit(EditApplied {
+            ticket: stored,
+            relations: Vec::new(),
+            edit: request.edit.clone(),
+        });
+
+        assert_eq!(
+            app.visible_count(),
+            2,
+            "the filter drops the row when the change lands"
+        );
+        assert_eq!(app.query(), "state:Active", "the query is left alone");
+    }
+
+    #[test]
+    fn an_offline_app_refuses_an_edit_and_changes_nothing() {
+        let mut app = App::new(vec![ticket(1, "Alpha", "2026-01-01T00:00:00Z")]);
+        app.set_offline_reason(Some("no Azure DevOps organization; pass --org".into()));
+
+        assert_eq!(
+            app.edit_selected(FieldEdit::state("Doing")),
+            AppAction::None
+        );
+
+        assert_eq!(app.tickets()[0].state, "Active");
+        assert!(!app.edits_pending());
+        let (message, level) = app.notification().expect("the refusal is reported");
+        assert!(message.contains("State not saved"), "{message}");
+        assert!(message.contains("--org"), "{message}");
+        assert_eq!(level, NotificationLevel::Error);
+    }
+
+    #[test]
+    fn a_second_edit_of_the_same_row_waits_for_the_first_to_answer() {
+        let mut app = editing_app();
+        let request = edit_request(&mut app, FieldEdit::state("Doing"));
+
+        assert_eq!(app.edit_selected(FieldEdit::state("Done")), AppAction::None);
+        assert_eq!(app.ticket_by_key(&request.key).unwrap().state, "Doing");
+        let (message, _) = app.notification().unwrap();
+        assert!(
+            message.contains("an earlier edit is still in flight"),
+            "{message}"
+        );
+
+        app.apply_edit(EditApplied {
+            ticket: stored_copy(&app, &request.key, "Doing"),
+            relations: Vec::new(),
+            edit: request.edit,
+        });
+        assert!(
+            matches!(
+                app.edit_selected(FieldEdit::state("Done")),
+                AppAction::Edit(_)
+            ),
+            "the next edit goes out once the first has answered"
+        );
     }
 }

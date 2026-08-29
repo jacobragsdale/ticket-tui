@@ -173,6 +173,25 @@ impl AzureClient {
         Ok(batch)
     }
 
+    /// Write one work item's fields with a JSON Patch document, returning Azure
+    /// DevOps's own copy of what it stored. The document decides whether the
+    /// write is safe: [`crate::edit::EditRequest`] leads with a revision test,
+    /// so a work item that moved on is refused rather than overwritten.
+    pub fn update_work_item(
+        &self,
+        id: i64,
+        patch: &[Value],
+    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        // Without `$expand=relations` the answer carries no links at all, and
+        // the row's relations would be replaced with nothing.
+        let url = format!(
+            "{}/_apis/wit/workitems/{id}?$expand=relations&api-version={API_VERSION}",
+            self.config.base_url()
+        );
+        let item = self.send(&url, Request::Patch(patch))?;
+        parse_work_item(&item, &self.config)
+    }
+
     /// Display name of the signed-in user, used to mark their own work items.
     /// The profile host is separate from the work-item host and may be blocked
     /// or unavailable, so a failure yields `None` rather than sinking the sync.
@@ -208,23 +227,23 @@ impl AzureClient {
     }
 
     fn get(&self, url: &str) -> Result<Value> {
-        self.send(url, None)
+        self.send(url, Request::Get)
     }
 
     fn post(&self, url: &str, body: &Value) -> Result<Value> {
-        self.send(url, Some(body))
+        self.send(url, Request::Post(body))
     }
 
     /// One request, retried once with a freshly minted token when Azure DevOps
     /// rejects the current one, because an access token expires long before a
     /// running TUI does. A failed refresh reports the original rejection, which
     /// carries the advice to sign in again.
-    fn send(&self, url: &str, body: Option<&Value>) -> Result<Value> {
-        match self.attempt(url, body) {
+    fn send(&self, url: &str, request: Request<'_>) -> Result<Value> {
+        match self.attempt(url, request) {
             Err(error) if rejected_credentials(&error) => match authorization_header() {
                 Ok(refreshed) => {
                     *self.authorization.borrow_mut() = refreshed;
-                    self.attempt(url, body)
+                    self.attempt(url, request)
                 }
                 Err(_) => Err(error),
             },
@@ -232,28 +251,44 @@ impl AzureClient {
         }
     }
 
-    fn attempt(&self, url: &str, body: Option<&Value>) -> Result<Value> {
+    fn attempt(&self, url: &str, request: Request<'_>) -> Result<Value> {
         let authorization = self.authorization.borrow().clone();
-        let response = match body {
-            Some(body) => self
-                .agent
-                .post(url)
-                .header("Authorization", &authorization)
-                .header("X-VSS-ForceMsaPassThrough", "true")
-                .header("Accept", "application/json")
-                .send_json(body)
-                .with_context(|| format!("POST {url} failed"))?,
-            None => self
-                .agent
-                .get(url)
-                .header("Authorization", &authorization)
-                .header("X-VSS-ForceMsaPassThrough", "true")
-                .header("Accept", "application/json")
+        let response = match request {
+            Request::Get => authorized(self.agent.get(url), &authorization)
                 .call()
                 .with_context(|| format!("GET {url} failed"))?,
+            Request::Post(body) => authorized(self.agent.post(url), &authorization)
+                .send_json(body)
+                .with_context(|| format!("POST {url} failed"))?,
+            Request::Patch(patch) => authorized(self.agent.patch(url), &authorization)
+                // Azure DevOps refuses a patch document sent as plain JSON.
+                .header("Content-Type", "application/json-patch+json")
+                .send_json(patch)
+                .with_context(|| format!("PATCH {url} failed"))?,
         };
         read_json(response, url)
     }
+}
+
+/// One request the client makes, and the body that goes with it.
+#[derive(Clone, Copy)]
+enum Request<'a> {
+    Get,
+    Post(&'a Value),
+    /// A JSON Patch document, which Azure DevOps takes only under its own
+    /// media type.
+    Patch(&'a [Value]),
+}
+
+/// The headers every Azure DevOps request carries, whatever its method.
+fn authorized<Body>(
+    builder: ureq::RequestBuilder<Body>,
+    authorization: &str,
+) -> ureq::RequestBuilder<Body> {
+    builder
+        .header("Authorization", authorization)
+        .header("X-VSS-ForceMsaPassThrough", "true")
+        .header("Accept", "application/json")
 }
 
 /// Azure DevOps refused the credentials. Carried as its own error type so a
@@ -271,6 +306,87 @@ impl std::error::Error for RejectedCredentials {}
 
 fn rejected_credentials(error: &anyhow::Error) -> bool {
     error.downcast_ref::<RejectedCredentials>().is_some()
+}
+
+/// Azure DevOps refused a request and said why. Carried as its own error type
+/// so a write can tell a work item that moved on apart from every other
+/// failure; the display text is the same either way.
+#[derive(Debug)]
+pub struct RequestRejected {
+    status: u16,
+    url: String,
+    message: String,
+}
+
+impl RequestRejected {
+    #[must_use]
+    pub fn new(status: u16, url: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            url: url.into(),
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn status(&self) -> u16 {
+        self.status
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Whether the refusal means the work item changed after it was read: an
+    /// explicit conflict status, or the `test` operation on `/rev` failing,
+    /// which Azure DevOps reports as an ordinary 4xx that talks about the
+    /// revision or the test.
+    #[must_use]
+    pub fn is_conflict(&self) -> bool {
+        if matches!(self.status, 409 | 412) {
+            return true;
+        }
+        if !(400..500).contains(&self.status) {
+            return false;
+        }
+        let message = self.message.to_ascii_lowercase();
+        [
+            "/rev",
+            "revision",
+            "test operation",
+            "test op",
+            "'test'",
+            "\"test\"",
+            "concurren",
+            "changed by another",
+            "modified by another",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle))
+    }
+}
+
+impl fmt::Display for RequestRejected {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Azure DevOps returned HTTP {} for {}: {}",
+            self.status, self.url, self.message
+        )
+    }
+}
+
+impl std::error::Error for RequestRejected {}
+
+/// Whether a failed write means the work item moved on under us, which a fresh
+/// pull fixes. Anything Azure DevOps did not refuse outright — a dead network,
+/// an unreadable body — is not a conflict.
+#[must_use]
+pub fn is_write_conflict(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RequestRejected>()
+        .is_some_and(RequestRejected::is_conflict)
 }
 
 /// Pull `displayName` out of a `/_apis/profile/profiles/me` document.
@@ -306,7 +422,9 @@ fn read_json(mut response: ureq::http::Response<ureq::Body>, url: &str) -> Resul
                 "Azure DevOps rejected the credentials ({status}); run `az login` and retry: {message}"
             ))));
         }
-        bail!("Azure DevOps returned HTTP {status} for {url}: {message}");
+        return Err(anyhow::Error::new(RequestRejected::new(
+            status, url, message,
+        )));
     }
     serde_json::from_str(&text)
         .with_context(|| format!("Azure DevOps returned invalid JSON from {url}"))
@@ -646,6 +764,53 @@ mod tests {
         assert_eq!(
             read_json(response(200, r#"{"count":1}"#), url).unwrap(),
             json!({"count": 1})
+        );
+    }
+
+    #[test]
+    fn a_refused_write_is_a_conflict_only_when_the_work_item_moved_on() {
+        let url = "https://dev.azure.com/demo/_apis/wit/workitems/613";
+        let conflict = |status: u16, body: &str| {
+            let error = read_json(response(status, body), url).unwrap_err();
+            is_write_conflict(&error)
+        };
+
+        assert!(conflict(409, r#"{"message":"conflict"}"#));
+        assert!(conflict(412, r#"{"message":"precondition failed"}"#));
+        assert!(
+            conflict(
+                400,
+                r#"{"message":"The \"test\" operation for path \"/rev\" failed."}"#
+            ),
+            "Azure DevOps reports a failed revision test as a plain 400"
+        );
+        assert!(conflict(
+            400,
+            r#"{"message":"Work item 613 has been changed by another client."}"#
+        ));
+        assert!(conflict(
+            400,
+            r#"{"message":"The revision 4 does not match the current revision 6."}"#
+        ));
+
+        assert!(
+            !conflict(
+                400,
+                r#"{"message":"TF401320: Rule Error for field State. Value 'Testing' is not allowed."}"#
+            ),
+            "a rule error is the user's problem, not a stale copy"
+        );
+        assert!(!conflict(403, r#"{"message":"read only field"}"#));
+        assert!(
+            !conflict(500, r#"{"message":"/rev"}"#),
+            "a fault is a fault"
+        );
+
+        let error = read_json(response(404, r#"{"message":"does not exist"}"#), url).unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            format!("Azure DevOps returned HTTP 404 for {url}: does not exist"),
+            "typing the refusal keeps the message it always had"
         );
     }
 

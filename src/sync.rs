@@ -9,11 +9,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 
 use crate::app::PreparedTickets;
-use crate::azure::{AzureClient, AzureConfig, SyncBatch};
+use crate::azure::{self, AzureClient, AzureConfig, SyncBatch};
 use crate::db::SqliteTicketRepository;
-use crate::model::TicketGraph;
+use crate::edit::{EditApplied, EditRejection, EditRequest};
+use crate::model::{RelationRecord, Ticket, TicketGraph};
 
 /// What asked for a pull. A timer pull is silent unless it fails; a keypress
 /// reports itself either way.
@@ -23,12 +25,14 @@ pub enum PullOrigin {
     User,
 }
 
-/// Work for the sync thread. Pulling is the only kind today; editing a work
-/// item becomes another variant.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Work for the sync thread, done in the order it arrives: an edit queued
+/// before a pull is written before that pull reads.
+#[derive(Clone, Debug)]
 pub enum SyncRequest {
     /// Replace every local work item with a fresh copy from Azure DevOps.
     Pull(PullOrigin),
+    /// Write one field of one work item back to Azure DevOps.
+    Edit(EditRequest),
 }
 
 /// What the sync thread sends back.
@@ -41,6 +45,8 @@ pub enum SyncEvent {
         origin: PullOrigin,
         outcome: SyncOutcome,
     },
+    /// One edit landed, or was refused and changes nothing.
+    Edited(Box<Result<EditApplied, EditRejection>>),
     /// The worker thread is gone and no further events will arrive.
     Stopped,
 }
@@ -63,6 +69,9 @@ pub trait WorkItemSource {
     fn pull(&self) -> Result<SyncBatch>;
     /// Display name of the signed-in user, used to mark their own work items.
     fn display_name(&self) -> Result<Option<String>>;
+    /// Write one work item with a JSON Patch document, answering with the copy
+    /// the server stored.
+    fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<(Ticket, Vec<RelationRecord>)>;
 }
 
 impl WorkItemSource for AzureClient {
@@ -72,6 +81,10 @@ impl WorkItemSource for AzureClient {
 
     fn display_name(&self) -> Result<Option<String>> {
         self.current_user_display_name()
+    }
+
+    fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<(Ticket, Vec<RelationRecord>)> {
+        self.update_work_item(id, patch)
     }
 }
 
@@ -162,6 +175,9 @@ fn work(
                 origin,
                 outcome: worker.pull(events),
             },
+            SyncRequest::Edit(request) => {
+                SyncEvent::Edited(Box::new(worker.edit(&request, events)))
+            }
         };
         if events.send(event).is_err() {
             break;
@@ -184,6 +200,39 @@ impl Worker {
             Ok((prepared, count)) => SyncOutcome::Pulled { prepared, count },
             Err(error) => SyncOutcome::Failed(format!("{error:#}")),
         }
+    }
+
+    /// Writes one field back to Azure DevOps. A refusal is reported as itself
+    /// rather than as a failed sync, because the row it belongs to has to be
+    /// put back on the main thread.
+    fn edit(
+        &mut self,
+        request: &EditRequest,
+        events: &Sender<SyncEvent>,
+    ) -> Result<EditApplied, EditRejection> {
+        self.try_edit(request, events)
+            .map_err(|error| EditRejection {
+                key: request.key.clone(),
+                label: request.edit.label().to_owned(),
+                conflict: azure::is_write_conflict(&error),
+                message: format!("{error:#}"),
+            })
+    }
+
+    fn try_edit(
+        &mut self,
+        request: &EditRequest,
+        events: &Sender<SyncEvent>,
+    ) -> Result<EditApplied> {
+        let (ticket, relations) = self
+            .source(events)?
+            .patch_work_item(request.key.id, &request.document())?;
+        self.repository()?.upsert(&ticket, &relations)?;
+        Ok(EditApplied {
+            ticket,
+            relations,
+            edit: request.edit.clone(),
+        })
     }
 
     fn try_pull(&mut self, events: &Sender<SyncEvent>) -> Result<(PreparedTickets, usize)> {
@@ -313,8 +362,11 @@ impl SyncScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::azure::RequestRejected;
+    use crate::edit::FieldEdit;
     use crate::model::{RelationKind, RelationRecord, Ticket, TicketKey};
     use crate::timestamp::ts;
+    use serde_json::json;
     use std::sync::{Arc, Mutex};
     use tempfile::{TempDir, tempdir};
 
@@ -342,10 +394,20 @@ mod tests {
         }
     }
 
-    /// A scripted stand-in for Azure DevOps: each pull takes the next result.
+    /// One write the worker made: the work item id, and the document it sent.
+    type SentPatch = (i64, Vec<Value>);
+
+    /// A scripted stand-in for Azure DevOps: each pull takes the next result, and
+    /// a write answers with the stored copy or with the refusal it was given.
     #[derive(Clone, Default)]
     struct FakeSource {
         results: Arc<Mutex<Vec<Result<SyncBatch, String>>>>,
+        /// The copy a write answers with, and the links that come with it.
+        stored: Option<(Ticket, Vec<RelationRecord>)>,
+        /// The status and message a write is refused with instead.
+        refusal: Option<(u16, String)>,
+        /// Every patch document the worker sent.
+        patches: Arc<Mutex<Vec<SentPatch>>>,
         display_name: Option<String>,
     }
 
@@ -354,6 +416,21 @@ mod tests {
             Self {
                 results: Arc::new(Mutex::new(results)),
                 display_name: Some("Jacob Ragsdale".into()),
+                ..Self::default()
+            }
+        }
+
+        fn storing(ticket: Ticket, relations: Vec<RelationRecord>) -> Self {
+            Self {
+                stored: Some((ticket, relations)),
+                ..Self::with(vec![Ok(SyncBatch::default())])
+            }
+        }
+
+        fn refusing(status: u16, message: &str) -> Self {
+            Self {
+                refusal: Some((status, message.to_owned())),
+                ..Self::with(vec![Ok(SyncBatch::default())])
             }
         }
     }
@@ -370,6 +447,24 @@ mod tests {
         fn display_name(&self) -> Result<Option<String>> {
             Ok(self.display_name.clone())
         }
+
+        fn patch_work_item(
+            &self,
+            id: i64,
+            patch: &[Value],
+        ) -> Result<(Ticket, Vec<RelationRecord>)> {
+            self.patches.lock().unwrap().push((id, patch.to_vec()));
+            if let Some((status, message)) = &self.refusal {
+                return Err(anyhow::Error::new(RequestRejected::new(
+                    *status,
+                    format!("https://dev.azure.com/demo/_apis/wit/workitems/{id}"),
+                    message.clone(),
+                )));
+            }
+            self.stored
+                .clone()
+                .context("the fake source was not given a stored copy")
+        }
     }
 
     impl SourceConnector for FakeSource {
@@ -380,12 +475,37 @@ mod tests {
 
     /// A database holding one ticket, plus the worker reading and writing it.
     fn seeded_database(directory: &TempDir) -> PathBuf {
+        seeded_database_of(directory, &[ticket(1, "Existing")])
+    }
+
+    fn seeded_database_of(directory: &TempDir, tickets: &[Ticket]) -> PathBuf {
         let path = directory.path().join("tickets.sqlite3");
         let mut repository = SqliteTicketRepository::open(&path).unwrap();
         repository
-            .replace_all(&[ticket(1, "Existing")], &TicketGraph::default())
+            .replace_all(tickets, &TicketGraph::default())
             .unwrap();
         path
+    }
+
+    fn edited(handle: &SyncHandle) -> Result<EditApplied, EditRejection> {
+        loop {
+            match next_event(handle) {
+                SyncEvent::Edited(result) => return *result,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected an edit to finish, got {other:?}"),
+            }
+        }
+    }
+
+    fn edit_request(id: i64, state: &str, expected_revision: i64) -> EditRequest {
+        EditRequest {
+            key: TicketKey {
+                organization: "demo".into(),
+                id,
+            },
+            expected_revision,
+            edit: FieldEdit::state(state),
+        }
     }
 
     fn next_event(handle: &SyncHandle) -> SyncEvent {
@@ -472,7 +592,7 @@ mod tests {
             match next_event(&handle) {
                 SyncEvent::Finished { outcome, .. } => break outcome,
                 SyncEvent::DisplayName(_) => continue,
-                SyncEvent::Stopped => panic!("the worker stopped early"),
+                other => panic!("expected a finished pull, got {other:?}"),
             }
         };
         let SyncOutcome::Failed(error) = outcome else {
@@ -482,6 +602,119 @@ mod tests {
 
         let stored = SqliteTicketRepository::open_existing(&path).unwrap();
         assert_eq!(stored.load_all().unwrap()[0].title, "Existing");
+    }
+
+    #[test]
+    fn an_edit_writes_one_row_and_hands_back_the_copy_azure_devops_stored() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database_of(&directory, &[ticket(1, "Existing"), ticket(2, "Untouched")]);
+        let mut stored = ticket(1, "Existing");
+        stored.state = "Done".into();
+        stored.revision = 7;
+        let relation = RelationRecord {
+            from: stored.key.clone(),
+            to: ticket(2, "Untouched").key,
+            kind: RelationKind::Parent,
+        };
+        let source = FakeSource::storing(stored.clone(), vec![relation.clone()]);
+        let patches = Arc::clone(&source.patches);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle
+            .send(SyncRequest::Edit(edit_request(1, "Done", 1)))
+            .unwrap();
+        let applied = edited(&handle).expect("the write was accepted");
+
+        assert_eq!(applied.ticket, stored);
+        assert_eq!(applied.relations, vec![relation.clone()]);
+        assert_eq!(applied.edit.summary(), "State → Done");
+        assert_eq!(
+            *patches.lock().unwrap(),
+            vec![(
+                1,
+                vec![
+                    json!({"op": "test", "path": "/rev", "value": 1}),
+                    json!({"op": "add", "path": "/fields/System.State", "value": "Done"}),
+                ]
+            )],
+            "the revision test leads the document"
+        );
+
+        let database = SqliteTicketRepository::open_existing(&path).unwrap();
+        let mut rows = database.load_all().unwrap();
+        rows.sort_by_key(|ticket| ticket.key.id);
+        assert_eq!(
+            rows,
+            vec![stored, ticket(2, "Untouched")],
+            "an edit writes its own row and leaves the others alone"
+        );
+        assert_eq!(database.load_graph().unwrap().relations, vec![relation]);
+    }
+
+    #[test]
+    fn a_refused_edit_reports_a_conflict_only_when_the_work_item_moved_on() {
+        let directory = tempdir().unwrap();
+        let conflict = |status, message: &str| {
+            let path = seeded_database(&directory);
+            let handle = SyncHandle::spawn(
+                path.clone(),
+                Box::new(FakeSource::refusing(status, message)),
+            )
+            .unwrap();
+            handle
+                .send(SyncRequest::Edit(edit_request(1, "Done", 1)))
+                .unwrap();
+            let rejection = edited(&handle).expect_err("the write was refused");
+            assert_eq!(rejection.key.id, 1);
+            assert_eq!(rejection.label, "State");
+            assert!(rejection.message.contains(message), "{}", rejection.message);
+            assert_eq!(
+                SqliteTicketRepository::open_existing(&path)
+                    .unwrap()
+                    .load_all()
+                    .unwrap()[0]
+                    .state,
+                "Active",
+                "a refused write never reaches the database"
+            );
+            rejection.conflict
+        };
+
+        assert!(conflict(409, "the work item has been changed"));
+        assert!(conflict(
+            400,
+            r#"The "test" operation for path "/rev" failed"#
+        ));
+        assert!(!conflict(403, "field is read only"));
+    }
+
+    #[test]
+    fn an_edit_queued_before_a_pull_is_written_before_that_pull_reads() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let mut stored = ticket(1, "Existing");
+        stored.state = "Done".into();
+        let handle =
+            SyncHandle::spawn(path, Box::new(FakeSource::storing(stored, vec![]))).unwrap();
+
+        handle
+            .send(SyncRequest::Edit(edit_request(1, "Done", 1)))
+            .unwrap();
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+
+        let mut seen = Vec::new();
+        while seen.len() < 2 {
+            match next_event(&handle) {
+                SyncEvent::Edited(result) => {
+                    result.expect("the write was accepted");
+                    seen.push("edit");
+                }
+                SyncEvent::Finished { .. } => seen.push("pull"),
+                SyncEvent::DisplayName(_) => continue,
+                SyncEvent::Stopped => panic!("the worker stopped early"),
+            }
+        }
+        assert_eq!(seen, ["edit", "pull"], "requests are answered in order");
     }
 
     #[test]
