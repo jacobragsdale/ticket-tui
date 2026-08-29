@@ -13,7 +13,9 @@ use time::OffsetDateTime;
 
 use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder};
 use crate::filter::{FacetTarget, FilterField};
-use crate::model::{FamilySnapshot, FamilyTreeEntry, SortDirection, SortField, Ticket, TicketKey};
+use crate::model::{
+    FamilySnapshot, FamilyTreeEntry, SortDirection, SortField, StateCategory, Ticket, TicketKey,
+};
 use crate::pointer::{
     PointerLayer, PointerTarget, ScrollMetrics, ScrollSurface, SelectableSnapshot,
     SelectableSurface, region,
@@ -35,10 +37,11 @@ struct Theme {
     error: Color,
     scrollbar: Color,
     search_match: Color,
-    state_new: Color,
-    state_active: Color,
+    state_proposed: Color,
+    state_in_progress: Color,
     state_resolved: Color,
-    state_closed: Color,
+    state_completed: Color,
+    state_removed: Color,
     priority_critical: Color,
     priority_high: Color,
     priority_normal: Color,
@@ -58,10 +61,11 @@ impl Theme {
                 error: Color::Reset,
                 scrollbar: Color::Reset,
                 search_match: Color::Reset,
-                state_new: Color::Reset,
-                state_active: Color::Reset,
+                state_proposed: Color::Reset,
+                state_in_progress: Color::Reset,
                 state_resolved: Color::Reset,
-                state_closed: Color::Reset,
+                state_completed: Color::Reset,
+                state_removed: Color::Reset,
                 priority_critical: Color::Reset,
                 priority_high: Color::Reset,
                 priority_normal: Color::Reset,
@@ -78,10 +82,11 @@ impl Theme {
                 error: Color::Red,
                 scrollbar: Color::DarkGray,
                 search_match: Color::Yellow,
-                state_new: Color::Blue,
-                state_active: Color::Yellow,
+                state_proposed: Color::Blue,
+                state_in_progress: Color::Yellow,
                 state_resolved: Color::Magenta,
-                state_closed: Color::Green,
+                state_completed: Color::Green,
+                state_removed: Color::DarkGray,
                 priority_critical: Color::Red,
                 priority_high: Color::Yellow,
                 priority_normal: Color::Blue,
@@ -1723,11 +1728,18 @@ fn family_closed_summary(app: &App, family: &FamilySnapshot) -> Option<(usize, u
 }
 
 fn family_section_line(summary: Option<(usize, usize)>, focused: bool) -> Line<'static> {
-    let title = match summary {
-        Some((done, total)) => format!("Family · {done}/{total} closed"),
-        None => "Family".into(),
+    let heading = family_heading_style(focused);
+    let Some((done, total)) = summary else {
+        return Line::styled("Family", heading);
     };
-    Line::styled(title, family_heading_style(focused))
+    let mut count = Style::default().fg(state_color(StateCategory::Completed));
+    if focused {
+        count = with_cursor_style(count);
+    }
+    Line::from(vec![
+        Span::styled("Family · ", heading),
+        Span::styled(format!("{done}/{total} closed"), count),
+    ])
 }
 
 fn family_heading_style(focused: bool) -> Style {
@@ -1900,7 +1912,7 @@ fn family_breadcrumb_line(app: &App, family: &FamilySnapshot) -> Line<'static> {
             .count();
         spans.push(Span::styled(
             format!(" · {done}/{} closed", family.children.len()),
-            Style::default().fg(theme().muted),
+            Style::default().fg(state_color(StateCategory::Completed)),
         ));
     }
     Line::from(spans)
@@ -1972,8 +1984,8 @@ fn visible_row_y(area: Rect, logical: u16, scroll: u16) -> Option<u16> {
 
 fn state_is_done(state: &str) -> bool {
     matches!(
-        state.to_ascii_lowercase().as_str(),
-        "closed" | "resolved" | "done"
+        StateCategory::of(state),
+        StateCategory::Completed | StateCategory::Removed
     )
 }
 
@@ -2149,9 +2161,9 @@ fn type_style(work_item_type: &str) -> Style {
     let color = match work_item_type.to_ascii_lowercase().as_str() {
         "bug" => theme().priority_critical,
         "task" => theme().accent,
-        "user story" | "story" => theme().state_new,
+        "user story" | "story" => theme().state_proposed,
         "feature" => theme().state_resolved,
-        "epic" => theme().state_active,
+        "epic" => theme().state_in_progress,
         _ => theme().muted,
     };
     Style::default().fg(color)
@@ -2192,15 +2204,22 @@ fn badge_spans(
     spans
 }
 
+fn state_color(category: StateCategory) -> Color {
+    match category {
+        StateCategory::Proposed => theme().state_proposed,
+        StateCategory::InProgress => theme().state_in_progress,
+        StateCategory::Resolved => theme().state_resolved,
+        StateCategory::Completed => theme().state_completed,
+        StateCategory::Removed => theme().state_removed,
+        // Custom states stay readable rather than fading into the background.
+        StateCategory::Unknown => theme().text,
+    }
+}
+
 fn state_style(state: &str) -> Style {
-    let color = match state.to_ascii_lowercase().as_str() {
-        "new" => theme().state_new,
-        "active" => theme().state_active,
-        "resolved" => theme().state_resolved,
-        "closed" => theme().state_closed,
-        _ => theme().muted,
-    };
-    Style::default().fg(color).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(state_color(StateCategory::of(state)))
+        .add_modifier(Modifier::BOLD)
 }
 
 fn priority_style(priority: Option<i64>) -> Style {
@@ -2874,10 +2893,56 @@ mod tests {
         let monochrome = Theme::new(true);
 
         assert_eq!(monochrome.accent, Color::Reset);
-        assert_eq!(monochrome.state_active, Color::Reset);
+        assert_eq!(monochrome.state_in_progress, Color::Reset);
         assert_eq!(monochrome.priority_critical, Color::Reset);
         assert_eq!(monochrome.search_match, Color::Reset);
         assert_eq!(monochrome.error, Color::Reset);
+    }
+
+    /// Foreground colours of one table column, top row first.
+    fn column_cell_colors(app: &mut App, field: SortField, rows: usize) -> Vec<Color> {
+        let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let header = app
+            .hit_regions
+            .headers
+            .iter()
+            .find(|(_, id)| *id == field)
+            .expect("column should be visible")
+            .0;
+        let body = app.hit_regions.table_body.expect("table body should exist");
+        let buffer = terminal.backend().buffer();
+        (0..rows)
+            .map(|row| buffer[(header.x, body.y + u16::try_from(row).unwrap())].fg)
+            .collect()
+    }
+
+    fn assert_distinct_and_legible(colors: &[Color]) {
+        for (index, color) in colors.iter().enumerate() {
+            assert_ne!(*color, theme().muted, "column {index} rendered as muted");
+            for other in &colors[index + 1..] {
+                assert_ne!(
+                    color, other,
+                    "column colours should be distinct: {colors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn basic_process_states_get_distinct_colors() {
+        if theme() == &Theme::new(true) {
+            return; // NO_COLOR: every colour is intentionally Reset.
+        }
+        let mut app = App::new(vec![
+            ticket_at(10_001, "Alpha", "Issue", "To Do", "2026-03-03T00:00:00Z"),
+            ticket_at(10_002, "Beta", "Issue", "Doing", "2026-03-02T00:00:00Z"),
+            ticket_at(10_003, "Gamma", "Issue", "Done", "2026-03-01T00:00:00Z"),
+        ]);
+
+        let colors = column_cell_colors(&mut app, SortField::State, 3);
+
+        assert_distinct_and_legible(&colors);
     }
 
     fn await_search(app: &mut App) {
