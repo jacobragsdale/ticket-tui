@@ -665,6 +665,10 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// The details pane is one scrolling document: the heading, the family tree,
+/// Planning, Description, History, and Comments are lines of a single
+/// paragraph, so the title scrolls away with everything under it and the
+/// scrollbar measures the whole pane.
 fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let mut block = focused_block(" Details ", app.focus.is_details_pane());
     if area.width >= 24 {
@@ -706,238 +710,276 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
         return;
     };
+    if inner.width == 0 || inner.height == 0 {
+        // Nothing scrollable this frame; keep the measured height.
+        let viewport = app.details.viewport;
+        app.details.set_viewport(viewport, 0);
+        return;
+    }
 
     let family = app.family_of(&ticket.key);
+    let has_family = family.has_family();
+    let width = inner.width;
+    let cursor = app.family_cursor.clone();
+    let family_focused = app.focus == Focus::Family;
     let mut highlighter = QueryHighlighter::new(app.query());
     let title_style = Style::default()
         .fg(theme().text)
         .add_modifier(Modifier::BOLD);
-    let mut metadata_lines = vec![
-        highlight_line(
-            ticket.title.clone(),
-            &highlighter.indices(&ticket.title),
-            title_style,
-            search_match_style(title_style),
-        ),
-        ticket_identity_line(&ticket, &mut highlighter),
-    ];
-    if family.has_family() {
-        metadata_lines.push(family_breadcrumb_line(app, &family));
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut family_hits: Vec<FamilyHit> = Vec::new();
+    let mut line_links: Vec<(u16, TicketKey)> = Vec::new();
+    // Every click target is a line of the one paragraph, so each is recorded
+    // against its logical line and placed once the scroll offset is known.
+    let mut field_hits: Vec<(u16, EditableField, u16, u16)> = Vec::new();
+    let mut tree_start: Option<u16> = None;
+
+    lines.push(highlight_line(
+        ticket.title.clone(),
+        &highlighter.indices(&ticket.title),
+        title_style,
+        search_match_style(title_style),
+    ));
+    lines.push(ticket_identity_line(&ticket, &mut highlighter));
+    if has_family {
+        lines.push(family_breadcrumb_line(app, &family));
     }
-    metadata_lines.push(ticket_assignment_line(
+    lines.push(ticket_assignment_line(
         &ticket,
         app.is_mine(&ticket),
         &mut highlighter,
     ));
-    metadata_lines.push(tags_field_line(&ticket.tags, &mut highlighter));
-    metadata_lines.push(field_line(
+    lines.push(tags_field_line(&ticket.tags, &mut highlighter));
+    lines.push(field_line(
         "Project / Revision",
         format!(
             "{} / {} · r{}",
             ticket.key.organization, ticket.project, ticket.revision
         ),
     ));
-    let metadata_height = inner
-        .height
-        .saturating_sub(2)
-        .min(u16::try_from(metadata_lines.len()).unwrap_or(6));
-    let chunks = Layout::vertical([
-        Constraint::Length(metadata_height),
-        Constraint::Length((inner.height > metadata_height).into()),
-        Constraint::Fill(1),
-    ])
-    .split(inner);
-    frame.render_widget(Paragraph::new(Text::from(metadata_lines)), chunks[0]);
-    register_metadata_fields(app, chunks[0], &ticket, family.has_family());
+    for span in metadata_field_spans(&ticket, has_family) {
+        field_hits.push((span.line, span.field, span.x, span.width));
+    }
+    let url_line = u16::try_from(lines.len()).ok();
+    lines.push(link_line(ticket.web_url.clone()));
+    lines.push(Line::default());
 
-    if chunks[1].height > 0 {
-        frame.render_widget(Paragraph::new(link_line(ticket.web_url.clone())), chunks[1]);
+    if has_family {
+        lines.push(family_section_line(
+            family_closed_summary(app, &family),
+            family_focused,
+        ));
+        for entry in app.visible_family_tree() {
+            let related = app.ticket_by_key(&entry.key);
+            let is_cursor = family_focused && cursor.as_ref() == Some(&entry.key);
+            let line = family_tree_line(&entry, related, is_cursor, width);
+            if let Ok(index) = u16::try_from(lines.len()) {
+                tree_start.get_or_insert(index);
+                family_hits.push(FamilyHit {
+                    line: index,
+                    key: entry.key.clone(),
+                    jumpable: related.is_some(),
+                });
+            }
+            lines.push(line);
+        }
+        for parent in &family.extra_parents {
+            let related = app.ticket_by_key(parent);
+            let is_cursor = family_focused && cursor.as_ref() == Some(parent);
+            if let Ok(index) = u16::try_from(lines.len())
+                && related.is_some()
+            {
+                line_links.push((index, parent.clone()));
+            }
+            lines.push(family_member_line(
+                "  also ", parent, related, false, is_cursor, width,
+            ));
+        }
+        lines.push(Line::default());
+    }
+
+    lines.push(section_line("Planning"));
+    if let Ok(line) = u16::try_from(lines.len()) {
+        field_hits.push((
+            line,
+            EditableField::Area,
+            columns("Area: "),
+            columns(&ticket.area_path),
+        ));
+    }
+    lines.push(highlighted_field_line(
+        "Area",
+        &ticket.area_path,
+        &mut highlighter,
+    ));
+    if let Ok(line) = u16::try_from(lines.len()) {
+        field_hits.push((
+            line,
+            EditableField::Iteration,
+            columns("Iteration: "),
+            columns(&ticket.iteration_path),
+        ));
+    }
+    lines.push(highlighted_field_line(
+        "Iteration",
+        &ticket.iteration_path,
+        &mut highlighter,
+    ));
+    lines.push(field_line("Created", ticket.created_at.exact_utc()));
+    lines.push(field_line("Changed", ticket.changed_at.exact_utc()));
+
+    lines.push(Line::default());
+    lines.push(section_line("Description"));
+    if let Some(reason) = ticket.reason.as_deref() {
+        lines.push(field_line("Reason", reason));
+        lines.push(Line::default());
+    }
+    if ticket.description.is_empty() {
+        lines.push(Line::styled(
+            "No description",
+            Style::default().fg(theme().muted),
+        ));
+    } else {
+        lines.extend(
+            ticket
+                .description
+                .lines()
+                .map(|line| Line::from(line.to_owned())),
+        );
+    }
+
+    let history = app.history_for(&ticket.key);
+    let loading_details = app.details_pending.as_ref() == Some(&ticket.key);
+    if loading_details || !history.is_empty() {
+        let now = OffsetDateTime::now_utc();
+        lines.push(Line::default());
+        lines.push(section_line("History"));
+        if loading_details {
+            lines.push(Line::styled(
+                "  Loading comments and history…",
+                Style::default().fg(theme().muted),
+            ));
+        }
+        lines.extend(history.into_iter().map(|entry| history_line(entry, now)));
+    }
+    let comments = app.comments_for(&ticket.key);
+    if !comments.is_empty() {
+        lines.push(Line::default());
+        lines.push(section_line("Comments"));
+        for comment in comments {
+            let who = comment.author.as_deref().unwrap_or("unknown");
+            lines.push(Line::from(format!(
+                "  {who} · {}",
+                comment.created_at.exact_utc()
+            )));
+            lines.extend(comment.text.lines().map(|line| {
+                Line::styled(format!("    {line}"), Style::default().fg(theme().body))
+            }));
+        }
+    }
+
+    // Wrapping moves every line under a long one down, so the click targets
+    // are placed on the rows the paragraph actually draws them on.
+    let last_hit = field_hits
+        .iter()
+        .map(|(line, ..)| *line)
+        .chain(family_hits.iter().map(|hit| hit.line))
+        .chain(line_links.iter().map(|(line, _)| *line))
+        .chain(url_line)
+        .max();
+    let rows = last_hit.map_or_else(Vec::new, |last| {
+        wrapped_row_starts(&lines, width, usize::from(last).saturating_add(1))
+    });
+    app.details_family_row = tree_start
+        .and_then(|line| rows.get(usize::from(line)).copied())
+        .map_or(0, usize::from);
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(theme().body));
+    let line_count = paragraph.line_count(width);
+    let viewport = usize::from(inner.height);
+    app.details.set_viewport(viewport, line_count);
+    let scroll = app.details.offset;
+    let scroll_rows = u16::try_from(scroll).unwrap_or(u16::MAX);
+    frame.render_widget(paragraph.scroll((scroll_rows, 0)), inner);
+
+    let row_of = |logical: u16| -> Option<u16> {
+        let row = rows.get(usize::from(logical)).copied()?;
+        visible_row_y(inner, row, scroll_rows)
+    };
+    if let Some(y) = url_line.and_then(row_of) {
         app.hit_regions.push(region(
-            chunks[1],
+            Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
             PointerTarget::OpenSelectedUrl,
             PointerLayer::Base,
             Some(SelectableSurface::Details),
             Some(ScrollSurface::Details),
         ));
     }
-    if chunks[2].height > 0 {
-        let width = chunks[2].width;
-        let cursor = app.family_cursor.clone();
-        let family_focused = app.focus == Focus::Family;
-        let mut detail_lines = Vec::new();
-        let mut family_hits: Vec<FamilyHit> = Vec::new();
-        let mut line_links: Vec<(u16, TicketKey)> = Vec::new();
-        // The Planning rows scroll with the rest of the body, so their editable
-        // values are registered once their line is known to be on screen.
-        let mut field_hits: Vec<(u16, EditableField, u16, u16)> = Vec::new();
-
-        if family.has_family() {
-            detail_lines.push(family_section_line(
-                family_closed_summary(app, &family),
-                family_focused,
-            ));
-            for entry in app.visible_family_tree() {
-                let related = app.ticket_by_key(&entry.key);
-                let is_cursor = family_focused && cursor.as_ref() == Some(&entry.key);
-                let line = family_tree_line(&entry, related, is_cursor, width);
-                if let Ok(index) = u16::try_from(detail_lines.len()) {
-                    family_hits.push(FamilyHit {
-                        line: index,
-                        key: entry.key.clone(),
-                        jumpable: related.is_some(),
-                    });
-                }
-                detail_lines.push(line);
-            }
-            for parent in &family.extra_parents {
-                let related = app.ticket_by_key(parent);
-                let is_cursor = family_focused && cursor.as_ref() == Some(parent);
-                if let Ok(index) = u16::try_from(detail_lines.len())
-                    && related.is_some()
-                {
-                    line_links.push((index, parent.clone()));
-                }
-                detail_lines.push(family_member_line(
-                    "  also ", parent, related, false, is_cursor, width,
-                ));
-            }
-            detail_lines.push(Line::default());
+    for hit in family_hits {
+        if !hit.jumpable {
+            continue;
         }
-        detail_lines.push(section_line("Planning"));
-        if let Ok(line) = u16::try_from(detail_lines.len()) {
-            field_hits.push((
-                line,
-                EditableField::Area,
-                columns("Area: "),
-                columns(&ticket.area_path),
+        if let Some(y) = row_of(hit.line) {
+            app.hit_regions.push(region(
+                Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
+                PointerTarget::JumpToTicket(hit.key.clone()),
+                PointerLayer::Base,
+                Some(SelectableSurface::Details),
+                Some(ScrollSurface::Details),
             ));
         }
-        detail_lines.push(highlighted_field_line(
-            "Area",
-            &ticket.area_path,
-            &mut highlighter,
-        ));
-        if let Ok(line) = u16::try_from(detail_lines.len()) {
-            field_hits.push((
-                line,
-                EditableField::Iteration,
-                columns("Iteration: "),
-                columns(&ticket.iteration_path),
-            ));
-        }
-        detail_lines.push(highlighted_field_line(
-            "Iteration",
-            &ticket.iteration_path,
-            &mut highlighter,
-        ));
-        detail_lines.push(field_line("Created", ticket.created_at.exact_utc()));
-        detail_lines.push(field_line("Changed", ticket.changed_at.exact_utc()));
-        let history = app.history_for(&ticket.key);
-        let loading_details = app.details_pending.as_ref() == Some(&ticket.key);
-        if loading_details || !history.is_empty() {
-            let now = OffsetDateTime::now_utc();
-            detail_lines.push(Line::default());
-            detail_lines.push(section_line("History"));
-            if loading_details {
-                detail_lines.push(Line::styled(
-                    "  Loading comments and history…",
-                    Style::default().fg(theme().muted),
-                ));
-            }
-            detail_lines.extend(history.into_iter().map(|entry| history_line(entry, now)));
-        }
-        let comments = app.comments_for(&ticket.key);
-        if !comments.is_empty() {
-            detail_lines.push(Line::default());
-            detail_lines.push(section_line("Comments"));
-            for comment in comments {
-                let who = comment.author.as_deref().unwrap_or("unknown");
-                detail_lines.push(Line::from(format!(
-                    "  {who} · {}",
-                    comment.created_at.exact_utc()
-                )));
-                detail_lines.extend(comment.text.lines().map(|line| {
-                    Line::styled(format!("    {line}"), Style::default().fg(theme().body))
-                }));
-            }
-        }
-        detail_lines.push(Line::default());
-        detail_lines.push(section_line("Description"));
-        if let Some(reason) = ticket.reason.as_deref() {
-            detail_lines.push(field_line("Reason", reason));
-            detail_lines.push(Line::default());
-        }
-        if ticket.description.is_empty() {
-            detail_lines.push(Line::styled(
-                "No description",
-                Style::default().fg(theme().muted),
-            ));
-        } else {
-            detail_lines.extend(
-                ticket
-                    .description
-                    .lines()
-                    .map(|line| Line::from(line.to_owned())),
-            );
-        }
-        let paragraph = Paragraph::new(Text::from(detail_lines))
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(theme().body));
-        let line_count = paragraph.line_count(chunks[2].width);
-        let viewport = usize::from(chunks[2].height);
-        app.details.set_viewport(viewport, line_count);
-        let scroll = app.details.offset;
-        let scroll_rows = u16::try_from(scroll).unwrap_or(u16::MAX);
-        frame.render_widget(paragraph.scroll((scroll_rows, 0)), chunks[2]);
-        for hit in family_hits {
-            let Some(y) = visible_row_y(chunks[2], hit.line, scroll_rows) else {
-                continue;
-            };
-            if hit.jumpable {
-                app.hit_regions.push(region(
-                    Rect::new(chunks[2].x, y, chunks[2].width.saturating_sub(1), 1),
-                    PointerTarget::JumpToTicket(hit.key.clone()),
-                    PointerLayer::Base,
-                    Some(SelectableSurface::Details),
-                    Some(ScrollSurface::Details),
-                ));
-            }
-        }
-        for (logical, key) in line_links {
-            if let Some(y) = visible_row_y(chunks[2], logical, scroll_rows) {
-                app.hit_regions.push(region(
-                    Rect::new(chunks[2].x, y, chunks[2].width.saturating_sub(1), 1),
-                    PointerTarget::JumpToTicket(key),
-                    PointerLayer::Base,
-                    Some(SelectableSurface::Details),
-                    Some(ScrollSurface::Details),
-                ));
-            }
-        }
-        for (logical, field, x, width) in field_hits {
-            if let Some(y) = visible_row_y(chunks[2], logical, scroll_rows) {
-                register_edit_field(app, chunks[2], field, y, x, width);
-            }
-        }
-        let overflow = line_count > viewport;
-        if overflow {
-            render_scrollbar(
-                frame,
-                app,
-                chunks[2],
-                ScrollSurface::Details,
-                line_count,
-                scroll,
-                viewport,
-            );
-        }
-        capture_selectable(frame, app, SelectableSurface::Details, inner, overflow);
-    } else {
-        // Nothing scrollable this frame; keep the measured height.
-        let viewport = app.details.viewport;
-        app.details.set_viewport(viewport, 0);
-        capture_selectable(frame, app, SelectableSurface::Details, inner, false);
     }
+    for (logical, key) in line_links {
+        if let Some(y) = row_of(logical) {
+            app.hit_regions.push(region(
+                Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
+                PointerTarget::JumpToTicket(key),
+                PointerLayer::Base,
+                Some(SelectableSurface::Details),
+                Some(ScrollSurface::Details),
+            ));
+        }
+    }
+    for (logical, field, x, span_width) in field_hits {
+        if let Some(y) = row_of(logical) {
+            register_edit_field(app, inner, field, y, x, span_width);
+        }
+    }
+    let overflow = line_count > viewport;
+    if overflow {
+        render_scrollbar(
+            frame,
+            app,
+            inner,
+            ScrollSurface::Details,
+            line_count,
+            scroll,
+            viewport,
+        );
+    }
+    capture_selectable(frame, app, SelectableSurface::Details, inner, overflow);
+}
+
+/// The first row each of the leading `upto` lines is drawn on once the details
+/// paragraph wraps them at `width`. Click targets are placed by this rather
+/// than by their line number, so a title that takes two rows carries the
+/// fields under it down with it.
+fn wrapped_row_starts(lines: &[Line<'_>], width: u16, upto: usize) -> Vec<u16> {
+    let width = width.max(1);
+    let mut starts = Vec::with_capacity(upto.min(lines.len()));
+    let mut row = 0u16;
+    for line in lines.iter().take(upto) {
+        starts.push(row);
+        let height = Paragraph::new(line.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            .max(1);
+        row = row.saturating_add(u16::try_from(height).unwrap_or(u16::MAX));
+    }
+    starts
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -2963,9 +3005,9 @@ fn tags_field_line(tags: &[String], highlighter: &mut QueryHighlighter) -> Line<
     Line::from(spans)
 }
 
-/// One editable value on the details pane's metadata block: which line of the
-/// block it sits on, the column its value starts at, and how wide that value
-/// is drawn.
+/// One editable value on the details pane's heading: which of the pane's
+/// leading lines it sits on, the column its value starts at, and how wide that
+/// value is drawn.
 struct FieldSpan {
     field: EditableField,
     line: u16,
@@ -2978,11 +3020,12 @@ fn columns(text: &str) -> u16 {
     u16::try_from(Span::raw(text).width()).unwrap_or(u16::MAX)
 }
 
-/// Where each editable value sits on the metadata block, measured from the same
+/// Where each editable value sits on the pane's heading, measured from the same
 /// text [`ticket_identity_line`], [`ticket_assignment_line`], and
 /// [`tags_field_line`] build their lines out of, so a click lands on the value
-/// rather than anywhere on its line. Assignee and Priority share a line and are
-/// two separate spans on it.
+/// rather than anywhere on its line. The heading opens the pane's one scrolling
+/// paragraph, so these are the content's first lines. Assignee and Priority
+/// share a line and are two separate spans on it.
 fn metadata_field_spans(ticket: &Ticket, has_family: bool) -> Vec<FieldSpan> {
     let separator = columns(" \u{b7} ");
     let state_x = columns("ID / Type / State: ")
@@ -3046,24 +3089,6 @@ fn tags_run_width(tags: &[String]) -> u16 {
         let gap = u16::from(total > 0);
         total.saturating_add(badge).saturating_add(gap)
     })
-}
-
-/// Registers a hit region on every editable value of the metadata block. A
-/// value on a line the block is too short to show gets none.
-fn register_metadata_fields(app: &mut App, area: Rect, ticket: &Ticket, has_family: bool) {
-    for span in metadata_field_spans(ticket, has_family) {
-        if span.line >= area.height {
-            continue;
-        }
-        register_edit_field(
-            app,
-            area,
-            span.field,
-            area.y.saturating_add(span.line),
-            span.x,
-            span.width,
-        );
-    }
 }
 
 /// One editable value's hit region on a row already on screen, clipped to the
@@ -3987,6 +4012,12 @@ mod tests {
             .expect("an overflowing details pane registers its scrollbar");
         assert_eq!(metrics.offset, metrics.max_offset(), "scrolled to the end");
         let track = metrics.track;
+        let pane = app.hit_regions.details.expect("details area");
+        assert_eq!(
+            (track.y, track.height),
+            (pane.y + 1, pane.height - 2),
+            "the track spans the whole pane, heading included"
+        );
         let thumb = metrics.thumb().expect("the description overflows the pane");
         assert_eq!(
             painted_thumb(&terminal, track),
@@ -4422,7 +4453,7 @@ mod tests {
             }],
         });
 
-        let text = render_text(60, 36, &mut app);
+        let text = render_text(60, 44, &mut app);
         assert!(text.contains("Family"));
         assert!(text.contains("99"));
         assert!(text.contains("missing ticket"));
@@ -4430,6 +4461,24 @@ mod tests {
         assert!(text.contains("Comments"));
         assert!(text.contains("Looks good"));
         assert!(!text.contains("Relationships"));
+
+        let section = |title: &str| text.find(title).unwrap_or_else(|| panic!("{title}"));
+        assert!(
+            section("Family") < section("Planning"),
+            "the family tree opens the sections"
+        );
+        assert!(
+            section("Planning") < section("Description"),
+            "Planning comes before Description"
+        );
+        assert!(
+            section("Description") < section("History"),
+            "Description comes before History"
+        );
+        assert!(
+            section("History") < section("Comments"),
+            "History comes before Comments"
+        );
     }
 
     #[test]
@@ -5519,6 +5568,124 @@ mod tests {
         assert!(
             app.hit_regions.edit_field(EditableField::Area).is_none(),
             "a value scrolled off the pane is not clickable"
+        );
+    }
+
+    #[test]
+    fn the_heading_scrolls_away_and_its_fields_travel_with_it() {
+        let mut app = auth_family_app_with_long_details();
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let before = edit_field_rect(&app, EditableField::Assignee);
+        assert_eq!(text_at(&terminal, before), "Avery Chen");
+
+        app.details.scroll_to(2);
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let after = edit_field_rect(&app, EditableField::Assignee);
+        assert_eq!(
+            after.y + 2,
+            before.y,
+            "the heading scrolls with everything under it"
+        );
+        assert_eq!(text_at(&terminal, after), "Avery Chen");
+        click(&mut app, after.x, after.y);
+        assert_eq!(
+            app.mode,
+            AppMode::AssigneePicker,
+            "a scrolled value still opens its editor"
+        );
+        assert_eq!(app.overlay_anchor, OverlayAnchor::Below(after));
+
+        let mut app = auth_family_app_with_long_details();
+        render_text(60, 24, &mut app);
+        app.details.scroll_to(app.details.max_offset());
+        render_text(60, 24, &mut app);
+        assert!(
+            app.hit_regions.edit_field(EditableField::Title).is_none(),
+            "a heading value scrolled off the pane is not clickable"
+        );
+        assert!(
+            app.hit_regions
+                .edit_field(EditableField::Assignee)
+                .is_none(),
+            "and neither is the assignee beside it"
+        );
+        assert!(
+            app.hit_regions.detail_url.is_none(),
+            "the link line scrolls off with the rest of the heading"
+        );
+    }
+
+    #[test]
+    fn the_family_cursor_scrolls_itself_back_into_view_below_the_heading() {
+        let mut app = auth_family_app_with_long_details();
+        app.focus = Focus::Family;
+        render_text(60, 14, &mut app);
+        let pane = app.hit_regions.details.expect("details area");
+        let fold = usize::from(pane.height.saturating_sub(2));
+        assert_eq!(app.details.offset, 0, "a fresh selection starts at the top");
+        assert!(
+            app.details_family_row >= fold,
+            "the heading fills this pane, so the tree starts below the fold: \
+             {} rows down, {fold} visible",
+            app.details_family_row
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        render_text(60, 14, &mut app);
+        assert!(
+            app.details.offset > 0,
+            "the pane scrolled down to the family cursor"
+        );
+        assert_cursor_row_visible(&app);
+
+        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        render_text(60, 14, &mut app);
+        assert_cursor_row_visible(&app);
+    }
+
+    fn assert_cursor_row_visible(app: &App) {
+        let cursor = app.family_cursor.clone().expect("a family cursor");
+        assert!(
+            app.hit_regions
+                .detail_links
+                .iter()
+                .any(|(_, key)| *key == cursor),
+            "the cursor row should be on screen, offset {}",
+            app.details.offset
+        );
+    }
+
+    #[test]
+    fn end_scrolls_past_the_description_to_the_last_comment() {
+        let item = ticket();
+        let mut long = item.clone();
+        long.description = "line\n".repeat(60);
+        let mut app = App::new(vec![long]);
+        app.set_workspace_graph(TicketGraph {
+            relations: Vec::new(),
+            comments: vec![CommentRecord {
+                ticket: item.key,
+                comment_id: 1,
+                created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
+                author: Some("Avery Chen".into()),
+                text: "The very last word".into(),
+            }],
+            history: Vec::new(),
+        });
+        app.narrow_details = true;
+        app.focus = Focus::Details;
+
+        let text = render_text(60, 20, &mut app);
+        assert!(
+            !text.contains("The very last word"),
+            "the discussion starts below the fold"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        let text = render_text(60, 20, &mut app);
+        assert!(
+            text.contains("The very last word"),
+            "End reaches the last comment"
         );
     }
 

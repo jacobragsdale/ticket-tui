@@ -570,6 +570,16 @@ The help overlay's Actions section and the palette's key labels are generated
 from the same command table these keys are bound in, so a binding reads the same
 way everywhere.
 
+The details pane is one scrolling document rather than a pinned heading over a
+scrolling body. Its heading — title, ID / Type / State, the family breadcrumb,
+assignee and priority, tags, project and revision, and the work-item URL —
+scrolls away with everything under it, in this order: the family tree,
+Planning, Description, History, and Comments. The scrollbar therefore measures
+the whole pane and its thumb reaches the bottom, `End` lands on the last
+comment, and a field value stays clickable wherever the scroll has carried it.
+Moving the family cursor scrolls the tree back into view when the heading has
+pushed it below the fold.
+
 Mouse input stays captured so the TUI can provide its own pointer controls
 without restoring terminal drag-select. Wheel scrolling moves the hovered
 table, details pane, help, or overlay by three rows or lines and does not
