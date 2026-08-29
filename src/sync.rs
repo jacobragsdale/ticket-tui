@@ -19,8 +19,8 @@ use crate::classification::ClassificationNode;
 use crate::db::{self, SqliteTicketRepository};
 use crate::edit::{EditApplied, EditRejection, EditRequest};
 use crate::model::{
-    CommentRecord, DetailsUpdate, Identity, RelationRecord, StateOption, Ticket, TicketGraph,
-    TicketKey, WorkItemDetails,
+    CommentRecord, DetailsUpdate, Identity, RelationKind, RelationRecord, StateOption, Ticket,
+    TicketGraph, TicketKey, WorkItemDetails,
 };
 use crate::timestamp::Timestamp;
 
@@ -83,6 +83,14 @@ pub enum SyncRequest {
         patch: Vec<Value>,
         parent: Option<i64>,
     },
+    /// Move one work item under a different parent, or out from under the one
+    /// it has when `new_parent` is `None`. The relation index a removal needs
+    /// is only knowable from a copy read now, so the worker reads the work item
+    /// itself rather than being told where the link sits.
+    Reparent {
+        key: TicketKey,
+        new_parent: Option<i64>,
+    },
 }
 
 /// What the sync thread sends back.
@@ -123,8 +131,38 @@ pub enum SyncEvent {
     /// One work item was created and is already written to SQLite, or was
     /// refused and nothing was written at all.
     Created(Box<Result<CreatedWorkItem, CreateRejection>>),
+    /// One work item was moved under a different parent and is already written
+    /// to SQLite, or was refused and the graph has to go back the way it was.
+    Reparented(Box<Result<ReparentApplied, ReparentRejection>>),
     /// The worker thread is gone and no further events will arrive.
     Stopped,
+}
+
+/// A work item Azure DevOps moved, as the answer to a reparent came back: the
+/// row, the links it now carries, and the parent those links name — all three
+/// already written to SQLite.
+#[derive(Clone, Debug)]
+pub struct ReparentApplied {
+    pub ticket: Ticket,
+    pub relations: Vec<RelationRecord>,
+    /// The parent the stored copy hangs under, or `None` for one that now
+    /// hangs under nothing. Read from `relations` rather than from the request,
+    /// so the graph settles on what the server did and not on what was asked.
+    pub parent: Option<TicketKey>,
+}
+
+/// A move that did not land, so the graph goes back the way it was.
+#[derive(Clone, Debug)]
+pub struct ReparentRejection {
+    pub key: TicketKey,
+    /// Whether the work item changed under us between the read and the write,
+    /// which a fresh pull fixes. A cycle Azure DevOps refused is not one of
+    /// these — the revision test passed and the rule did not — so it is
+    /// reported in Azure DevOps's own words and the move is simply put back.
+    /// The picker cannot offer a descendant, so this only ever happens to a
+    /// graph the project has already moved on from.
+    pub conflict: bool,
+    pub message: String,
 }
 
 /// A work item Azure DevOps stored, as the answer to a create came back: the
@@ -232,6 +270,18 @@ pub trait WorkItemSource {
     ) -> Result<(Ticket, Vec<RelationRecord>)> {
         Err(anyhow!("this source cannot create work items"))
     }
+    /// Move one work item under `new_parent`, or out from under the parent it
+    /// has when that is `None`, answering with the copy the server stored. The
+    /// source reads the work item's current links itself: a parent is removed
+    /// by the index it sits at, and only a copy read now knows that index. A
+    /// source that cannot move one says so rather than pretending to have.
+    fn reparent_work_item(
+        &self,
+        _id: i64,
+        _new_parent: Option<i64>,
+    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        Err(anyhow!("this source cannot reparent work items"))
+    }
     /// The states one work item type allows, which is what the state picker
     /// offers once a pull has cached them.
     fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>>;
@@ -294,6 +344,14 @@ impl WorkItemSource for AzureClient {
 
     fn patch_work_item(&self, id: i64, patch: &[Value]) -> Result<(Ticket, Vec<RelationRecord>)> {
         self.update_work_item(id, patch)
+    }
+
+    fn reparent_work_item(
+        &self,
+        id: i64,
+        new_parent: Option<i64>,
+    ) -> Result<(Ticket, Vec<RelationRecord>)> {
+        AzureClient::reparent_work_item(self, id, new_parent)
     }
 
     fn create_work_item(
@@ -512,6 +570,9 @@ fn work(
                 parent,
                 events,
             ))),
+            SyncRequest::Reparent { key, new_parent } => {
+                SyncEvent::Reparented(Box::new(worker.reparent(key, new_parent, events)))
+            }
         };
         if events.send(event).is_err() {
             break;
@@ -710,6 +771,49 @@ impl Worker {
             ticket,
             relations,
             edit: request.edit.clone(),
+        })
+    }
+
+    /// Moves one work item between parents. Like an edit, a refusal is reported
+    /// as itself rather than as a failed sync: the graph took the move the
+    /// moment it was asked for, and only the main thread can put it back.
+    fn reparent(
+        &mut self,
+        key: TicketKey,
+        new_parent: Option<i64>,
+        events: &Sender<SyncEvent>,
+    ) -> Result<ReparentApplied, ReparentRejection> {
+        self.awaiting_throttle(|worker| worker.try_reparent(&key, new_parent, events))
+            .map_err(|error| ReparentRejection {
+                key: key.clone(),
+                conflict: azure::is_write_conflict(&error),
+                message: format!("{error:#}"),
+            })
+    }
+
+    /// Azure DevOps answers a move with the work item that moved and nothing
+    /// else, so the parent it left is never mentioned — and the child link that
+    /// parent holds would go on naming it. Both sides are cleared and rewritten
+    /// together, which is what keeps a family tree read back out of SQLite
+    /// agreeing with the one on screen.
+    fn try_reparent(
+        &mut self,
+        key: &TicketKey,
+        new_parent: Option<i64>,
+        events: &Sender<SyncEvent>,
+    ) -> Result<ReparentApplied> {
+        let (ticket, relations) = self
+            .source(events)?
+            .reparent_work_item(key.id, new_parent)?;
+        self.repository()?.reparent(&ticket, &relations)?;
+        let parent = relations
+            .iter()
+            .find(|relation| relation.kind == RelationKind::Parent)
+            .map(|relation| relation.to.clone());
+        Ok(ReparentApplied {
+            ticket,
+            relations,
+            parent,
         })
     }
 
@@ -1244,6 +1348,9 @@ mod tests {
     /// fields, and the parent it was filed under.
     type Creation = (String, Vec<Value>, Option<i64>);
 
+    /// One move the worker made: the work item, and the parent it was given.
+    type Move = (i64, Option<i64>);
+
     /// A scripted stand-in for Azure DevOps: each pull takes the next result, and
     /// a write answers with the stored copy or with the refusal it was given.
     #[derive(Clone, Default)]
@@ -1298,6 +1405,8 @@ mod tests {
         /// Every create the worker sent: the type, the field operations, and
         /// the parent it named.
         created: Arc<Mutex<Vec<Creation>>>,
+        /// Every move the worker sent: the work item, and the parent it named.
+        reparented: Arc<Mutex<Vec<Move>>>,
         /// What this source pulls, for the tests about recording it. `None`
         /// stands in for a source that does not know, which is what leaves
         /// every other test's database free of sync scope rows.
@@ -1514,6 +1623,24 @@ mod tests {
                 return Err(anyhow::Error::new(RequestRejected::new(
                     *status,
                     "https://dev.azure.com/demo/atlas/_apis/wit/workitems/$Issue".to_owned(),
+                    message.clone(),
+                )));
+            }
+            self.stored
+                .clone()
+                .context("the fake source was not given a stored copy")
+        }
+
+        fn reparent_work_item(
+            &self,
+            id: i64,
+            new_parent: Option<i64>,
+        ) -> Result<(Ticket, Vec<RelationRecord>)> {
+            self.reparented.lock().unwrap().push((id, new_parent));
+            if let Some((status, message)) = &self.refusal {
+                return Err(anyhow::Error::new(RequestRejected::new(
+                    *status,
+                    format!("https://dev.azure.com/demo/_apis/wit/workitems/{id}"),
                     message.clone(),
                 )));
             }
@@ -2515,6 +2642,7 @@ mod tests {
                 | SyncEvent::ClassificationNodes(_)
                 | SyncEvent::WorkItemTypes(_)
                 | SyncEvent::Created(_)
+                | SyncEvent::Reparented(_)
                 | SyncEvent::Commented(_) => continue,
                 SyncEvent::Stopped => panic!("the worker stopped early"),
             }
@@ -2532,6 +2660,166 @@ mod tests {
                 other => panic!("expected a create to finish, got {other:?}"),
             }
         }
+    }
+
+    /// The answer to the next move, past the display name the first connect
+    /// reports.
+    fn reparented(handle: &SyncHandle) -> Result<ReparentApplied, ReparentRejection> {
+        loop {
+            match next_event(handle) {
+                SyncEvent::Reparented(result) => return *result,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected a move to finish, got {other:?}"),
+            }
+        }
+    }
+
+    /// One hierarchy link, as a pull writes it: the child names its parent.
+    fn parent_link(child: i64, parent: i64) -> RelationRecord {
+        RelationRecord {
+            from: TicketKey {
+                organization: "demo".into(),
+                id: child,
+            },
+            to: TicketKey {
+                organization: "demo".into(),
+                id: parent,
+            },
+            kind: RelationKind::Parent,
+        }
+    }
+
+    /// The other half of the same link, as the parent's own copy reports it.
+    fn child_link(parent: i64, child: i64) -> RelationRecord {
+        RelationRecord {
+            from: TicketKey {
+                organization: "demo".into(),
+                id: parent,
+            },
+            to: TicketKey {
+                organization: "demo".into(),
+                id: child,
+            },
+            kind: RelationKind::Child,
+        }
+    }
+
+    #[test]
+    fn a_moved_work_item_is_stored_under_its_new_parent_and_taken_off_the_old_one() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let tickets = [
+            ticket(1, "Old epic"),
+            ticket(2, "New epic"),
+            ticket(3, "Issue"),
+        ];
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+        repository
+            .replace_all(
+                &tickets,
+                &TicketGraph {
+                    relations: vec![parent_link(3, 1), child_link(1, 3)],
+                    ..TicketGraph::default()
+                },
+            )
+            .unwrap();
+        drop(repository);
+
+        let source = FakeSource::storing(ticket(3, "Issue"), vec![parent_link(3, 2)]);
+        let sent = Arc::clone(&source.reparented);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle
+            .send(SyncRequest::Reparent {
+                key: tickets[2].key.clone(),
+                new_parent: Some(2),
+            })
+            .unwrap();
+        let applied = reparented(&handle).expect("the move was accepted");
+
+        assert_eq!(
+            sent.lock().unwrap().clone(),
+            vec![(3, Some(2))],
+            "the work item and the parent it was given both travel as they were"
+        );
+        assert_eq!(
+            applied.parent,
+            Some(tickets[1].key.clone()),
+            "the parent is read back out of the links the server sent, not out of the request"
+        );
+
+        let graph = SqliteTicketRepository::open_existing(&path)
+            .unwrap()
+            .load_graph()
+            .unwrap();
+        assert_eq!(
+            graph.parents_of(&tickets[2].key),
+            vec![tickets[1].key.clone()],
+            "the work item is stored under the epic it moved to"
+        );
+        assert!(
+            graph.children_of(&tickets[0].key).is_empty(),
+            "and the child link the epic it left still held is gone with it"
+        );
+        assert_eq!(
+            graph.children_of(&tickets[1].key),
+            vec![tickets[2].key.clone()],
+            "the new epic reads the work item as its child"
+        );
+    }
+
+    #[test]
+    fn a_refused_move_writes_nothing_and_reports_a_conflict_as_one() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let tickets = [ticket(1, "Old epic"), ticket(3, "Issue")];
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+        repository
+            .replace_all(
+                &tickets,
+                &TicketGraph {
+                    relations: vec![parent_link(3, 1), child_link(1, 3)],
+                    ..TicketGraph::default()
+                },
+            )
+            .unwrap();
+        drop(repository);
+        let handle = SyncHandle::spawn(
+            path.clone(),
+            Box::new(FakeSource::refusing(
+                412,
+                "the work item was changed by another client",
+            )),
+        )
+        .unwrap();
+
+        handle
+            .send(SyncRequest::Reparent {
+                key: tickets[1].key.clone(),
+                new_parent: None,
+            })
+            .unwrap();
+        let rejection = reparented(&handle).expect_err("the move was refused");
+
+        assert!(rejection.conflict, "a failed revision test is a conflict");
+        assert!(
+            rejection.message.contains("changed by another client"),
+            "the refusal travels as it came: {}",
+            rejection.message
+        );
+        let graph = SqliteTicketRepository::open_existing(&path)
+            .unwrap()
+            .load_graph()
+            .unwrap();
+        assert_eq!(
+            graph.parents_of(&tickets[1].key),
+            vec![tickets[0].key.clone()],
+            "the stored family is exactly as it was"
+        );
+        assert_eq!(
+            graph.children_of(&tickets[0].key),
+            vec![tickets[1].key.clone()]
+        );
     }
 
     /// The types the next work item types request answers with.

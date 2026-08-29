@@ -15,7 +15,7 @@ use crate::app::{
     NotificationLevel, PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PromptField, RowDensity, SearchOrder,
     UNASSIGNED_LABEL,
 };
-use crate::command::{COMMANDS, EDIT_MENU, key_label_for};
+use crate::command::{COMMANDS, key_label_for};
 use crate::filter::{FacetTarget, FilterField};
 use crate::model::{
     FamilySnapshot, FamilyTreeEntry, HistoryRecord, SortDirection, SortField, StateCategory,
@@ -217,6 +217,7 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::PriorityPicker => render_priority_picker(frame, app),
         AppMode::Prompt => render_prompt(frame, app),
         AppMode::AssigneePicker => render_assignee_picker(frame, app),
+        AppMode::ParentPicker => render_parent_picker(frame, app),
         AppMode::NodePicker => render_node_picker(frame, app),
         AppMode::Form => render_form(frame, app),
         AppMode::TypePicker => render_type_picker(frame, app),
@@ -1042,6 +1043,9 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             AppMode::NodePicker => {
                 "Type to filter  \u{2191}\u{2193} select  Enter move  Esc cancel"
             }
+            AppMode::ParentPicker => {
+                "Type to filter  \u{2191}\u{2193} select  Enter file under  Esc cancel"
+            }
             AppMode::TypePicker => "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel",
             AppMode::Form => "\u{2191}\u{2193}/Tab fields  Enter picker  Ctrl-S create  Esc cancel",
             AppMode::Browse if app.focus == Focus::Family => "↑↓ move  Enter select  Tab details",
@@ -1745,12 +1749,13 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
 /// The Edit menu: one row per field editor, each labelled with the field it
 /// changes and the key that opens it directly.
 fn render_edit_menu(frame: &mut Frame<'_>, app: &mut App) {
-    let height = u16::try_from(EDIT_MENU.len().saturating_add(2)).unwrap_or(u16::MAX);
+    let entries = app.edit_menu_entries();
+    let height = u16::try_from(entries.len().saturating_add(2)).unwrap_or(u16::MAX);
     let area = centered_rect(frame.area(), 40, height.max(3));
     frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, app, area, " Edit ");
     let selected = app.edit_menu.index;
-    let rows: Vec<Line> = EDIT_MENU
+    let rows: Vec<Line> = entries
         .iter()
         .enumerate()
         .map(|(index, entry)| {
@@ -1958,6 +1963,93 @@ fn render_assignee_picker(frame: &mut Frame<'_>, app: &mut App) {
             rows,
             row_hit_width: None,
             target: &|index| PointerTarget::AssigneeOption { index },
+            decorate: None,
+        },
+    );
+}
+
+/// The parent picker: a filter field over every work item the selected one
+/// could be filed under, each row naming its id, its type, and its title, with
+/// the parent it hangs under already marked and under the cursor. Neither the
+/// work item itself nor anything below it is in the list, so no row here can
+/// make a cycle.
+fn render_parent_picker(frame: &mut Frame<'_>, app: &mut App) {
+    let candidates = app.parent_matches();
+    let current = app.parent_picker.current.clone();
+    let height = u16::try_from(candidates.len().saturating_add(3))
+        .unwrap_or(u16::MAX)
+        .clamp(5, 18);
+    let selected = app.parent_picker.index;
+    let rows: Vec<Line> = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            let marker = if index == selected { "\u{203a}" } else { " " };
+            let here = if current.as_ref() == Some(&candidate.key) {
+                "\u{2022}"
+            } else {
+                " "
+            };
+            Line::from(vec![
+                Span::raw(format!("{marker}{here} ")),
+                Span::styled(
+                    format!("#{}", candidate.key.id),
+                    Style::default().fg(theme().accent),
+                ),
+                Span::styled(
+                    format!(" {} ", candidate.work_item_type),
+                    Style::default().fg(theme().muted),
+                ),
+                Span::styled(candidate.title.clone(), Style::default().fg(theme().text)),
+            ])
+        })
+        .collect();
+    let width = overlay_width(app.overlay_anchor, &rows, 64, frame.area());
+    let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
+    frame.render_widget(Clear, area);
+    let title = format!(" Parent of #{} ", app.parent_picker.child.id);
+    let inner = render_modal_frame(frame, app, area, &title);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
+    let query_area = chunks[0];
+    let query = if app.parent_picker.query.is_empty() {
+        Line::styled(
+            "Filter by id or title\u{2026}",
+            Style::default().fg(theme().muted),
+        )
+    } else {
+        Line::from(app.parent_picker.query.text().to_owned())
+    };
+    frame.render_widget(
+        Paragraph::new(query).style(Style::default().fg(theme().text)),
+        query_area,
+    );
+    app.hit_regions.push(region(
+        query_area,
+        PointerTarget::ParentQuery,
+        PointerLayer::Modal,
+        Some(SelectableSurface::Overlay),
+        None,
+    ));
+    capture_selectable(frame, app, SelectableSurface::Overlay, query_area, false);
+    let cursor_x = query_area.x.saturating_add(
+        u16::try_from(app.parent_picker.query.cursor())
+            .unwrap_or(u16::MAX)
+            .min(query_area.width.saturating_sub(1)),
+    );
+    frame.set_cursor_position((cursor_x, query_area.y));
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: chunks[1],
+            surface: ScrollSurface::ParentPicker,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: false,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::ParentOption { index },
             decorate: None,
         },
     );
@@ -5835,6 +5927,65 @@ mod tests {
         };
         assert_eq!(app.mode, AppMode::Browse);
         assert_eq!(requests[0].edit.value_text(), "Priya Nair");
+    }
+
+    #[test]
+    fn the_parent_picker_renders_the_work_items_that_could_hold_this_one() {
+        let mut app = App::new(vec![
+            ticket_at(
+                10_001,
+                "Auth rewrite",
+                "Epic",
+                "To Do",
+                "2026-03-05T00:00:00Z",
+            ),
+            ticket_at(
+                10_002,
+                "Login form",
+                "Issue",
+                "To Do",
+                "2026-03-04T00:00:00Z",
+            ),
+            ticket_at(10_003, "Payments", "Epic", "To Do", "2026-03-03T00:00:00Z"),
+            ticket_at(
+                10_004,
+                "Validate email",
+                "Task",
+                "To Do",
+                "2026-03-02T00:00:00Z",
+            ),
+        ]);
+        app.set_workspace_graph(parent_child_graph());
+        app.enable_sync();
+        app.set_table_viewport(4);
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.selected_ticket().map(|item| item.key.id), Some(10_002));
+
+        // The Edit menu's Set parent row, which is the eighth, with Remove
+        // parent under it because this work item has a parent.
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let menu = render_text(90, 24, &mut app);
+        assert!(menu.contains("Set parent"), "{menu}");
+        assert!(menu.contains("Remove parent"), "{menu}");
+        for _ in 0..7 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::ParentPicker);
+
+        let picker = render_text(90, 24, &mut app);
+        assert!(picker.contains("Parent of #10002"), "{picker}");
+        assert!(picker.contains("Filter by id or title"), "{picker}");
+        assert!(picker.contains("#10001 Epic Auth rewrite"), "{picker}");
+        assert!(picker.contains("#10003 Epic Payments"), "{picker}");
+        assert!(
+            !picker.contains("#10004"),
+            "the task hanging under this work item would make a cycle: {picker}"
+        );
+        assert!(
+            picker.contains("Enter file under"),
+            "the footer explains the picker: {picker}"
+        );
     }
 
     #[test]

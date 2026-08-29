@@ -15,7 +15,10 @@ use crate::agent_context::{
 };
 use crate::classification::{self, ClassificationNode, NodeKind};
 use crate::columns::TableLayout;
-use crate::command::{Command, CommandId, EDIT_MENU, command_for_key, matching_commands};
+use crate::command::{
+    Command, CommandId, EDIT_MENU, EditMenuEntry, REMOVE_PARENT_ROW, command_for_key,
+    matching_commands,
+};
 pub use crate::edit::FieldEdit;
 use crate::edit::{EditApplied, EditRejection, EditRequest, normalize_tags};
 use crate::export;
@@ -37,6 +40,7 @@ use crate::pointer::{
 pub use crate::pointer::{EditableField, HitRegions, OverlayAnchor, PointerTarget};
 use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
 use crate::session::{self, NamedView, Session};
+use crate::sync::{ReparentApplied, ReparentRejection};
 use crate::text_input::TextInput;
 use crate::timestamp::Timestamp;
 
@@ -70,6 +74,8 @@ pub enum AppMode {
     Form,
     /// The work item types a form's Type field can name.
     TypePicker,
+    /// The work items the selected one can be filed under, filtered by typing.
+    ParentPicker,
 }
 
 /// How long a work item may sit untouched before the Changed column flags it,
@@ -152,6 +158,13 @@ pub enum AppAction {
         work_item_type: String,
         patch: Vec<Value>,
         parent: Option<i64>,
+    },
+    /// Move one work item under a different parent, or out from under the one
+    /// it has when `new_parent` is `None`. The graph already carries the move,
+    /// so a refusal puts both halves of the old link back.
+    Reparent {
+        key: TicketKey,
+        new_parent: Option<i64>,
     },
     /// Leave one comment on one work item. Nothing appears on the work item
     /// until Azure DevOps has stored it, so this is the one write the table
@@ -440,6 +453,55 @@ pub struct AssigneePicker {
     pub current: Option<String>,
     /// What the picker was opened over, shown in its title.
     pub scope: EditScope,
+}
+
+/// One work item the parent picker offers: enough of it to read the row and to
+/// match what has been typed, which is its id and its title.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParentCandidate {
+    pub key: TicketKey,
+    pub work_item_type: String,
+    pub title: String,
+}
+
+/// The parent picker: every work item the selected one could be filed under,
+/// filtered by whatever has been typed. Built when it opens from the rows
+/// already loaded, so it never waits for the network.
+///
+/// A work item cannot be its own ancestor, so neither the work item itself nor
+/// anything below it is ever a candidate. That is what makes a cycle
+/// unaskable-for rather than merely refused.
+#[derive(Clone, Debug)]
+pub struct ParentPicker {
+    /// Every work item that could be the parent, in table order.
+    pub candidates: Vec<ParentCandidate>,
+    pub query: TextInput,
+    /// The cursor, counted over the candidates the query left showing.
+    pub index: usize,
+    pub scroll: ScrollState,
+    /// The work item being moved, which is what the picker's title names.
+    pub child: TicketKey,
+    /// The parent it hangs under now, which `Enter` treats as a no-op.
+    pub current: Option<TicketKey>,
+}
+
+impl Default for ParentPicker {
+    /// A picker nobody has opened yet, over no work item: id `0`, the same
+    /// stand-in [`EditScope::default`] uses for a scope nothing has been
+    /// chosen for. [`App::open_parent_picker`] fills it in before it is read.
+    fn default() -> Self {
+        Self {
+            candidates: Vec::new(),
+            query: TextInput::default(),
+            index: 0,
+            scroll: ScrollState::default(),
+            child: TicketKey {
+                organization: String::new(),
+                id: 0,
+            },
+            current: None,
+        }
+    }
 }
 
 /// How long a cached copy of the classification trees is trusted before either
@@ -1415,6 +1477,7 @@ pub struct App {
     pub state_picker: StatePicker,
     pub priority_picker: PriorityPicker,
     pub assignee_picker: AssigneePicker,
+    pub parent_picker: ParentPicker,
     pub node_picker: NodePicker,
     pub type_picker: TypePicker,
     /// The open multi-field form, if there is one.
@@ -1461,6 +1524,9 @@ pub struct App {
     pub details_pending: Option<TicketKey>,
     /// Edits sent to Azure DevOps and not answered yet, keyed by work item.
     pending_edits: HashMap<TicketKey, PendingEdit>,
+    /// The moves waiting on Azure DevOps, each remembering the parent the work
+    /// item hung under before it was made. A refusal puts that parent back.
+    pending_reparents: HashMap<TicketKey, Option<TicketKey>>,
     /// Bulk changes with answers still to come, newest last. There is normally
     /// at most one, but a second started before the first has finished is
     /// counted on its own rather than taking the first one's place.
@@ -1629,6 +1695,7 @@ impl App {
             state_picker: StatePicker::default(),
             priority_picker: PriorityPicker::default(),
             assignee_picker: AssigneePicker::default(),
+            parent_picker: ParentPicker::default(),
             node_picker: NodePicker::default(),
             prompt: None,
             overlay_anchor: OverlayAnchor::Centered,
@@ -1648,6 +1715,7 @@ impl App {
             sync_pending: false,
             details_pending: None,
             pending_edits: HashMap::new(),
+            pending_reparents: HashMap::new(),
             bulk_edits: Vec::new(),
             undo_stack: Vec::new(),
             undo_groups: 0,
@@ -2961,6 +3029,7 @@ impl App {
                 }
             }
             Some(TextEditor::Assignee) => self.assignee_picker.query.paste(pasted, false),
+            Some(TextEditor::Parent) => self.parent_picker.query.paste(pasted, false),
             Some(TextEditor::Node) => self.node_picker.query.paste(pasted, false),
             None => {}
         }
@@ -3016,6 +3085,7 @@ impl App {
             AppMode::Views if self.views_overlay.naming.is_some() => Some(TextEditor::ViewName),
             AppMode::Prompt => Some(TextEditor::Prompt),
             AppMode::AssigneePicker => Some(TextEditor::Assignee),
+            AppMode::ParentPicker => Some(TextEditor::Parent),
             AppMode::NodePicker => Some(TextEditor::Node),
             AppMode::Form => Some(TextEditor::Form),
             _ => None,
@@ -3047,6 +3117,7 @@ impl App {
             ScrollSurface::StatePicker => self.state_picker.scroll,
             ScrollSurface::PriorityPicker => self.priority_picker.scroll,
             ScrollSurface::AssigneePicker => self.assignee_picker.scroll,
+            ScrollSurface::ParentPicker => self.parent_picker.scroll,
             ScrollSurface::NodePicker => self.node_picker.scroll,
             ScrollSurface::TypePicker => self.type_picker.scroll,
             ScrollSurface::Form => self.form_scroll,
@@ -3071,6 +3142,7 @@ impl App {
             ScrollSurface::StatePicker => &mut self.state_picker.scroll,
             ScrollSurface::PriorityPicker => &mut self.priority_picker.scroll,
             ScrollSurface::AssigneePicker => &mut self.assignee_picker.scroll,
+            ScrollSurface::ParentPicker => &mut self.parent_picker.scroll,
             ScrollSurface::NodePicker => &mut self.node_picker.scroll,
             ScrollSurface::TypePicker => &mut self.type_picker.scroll,
             ScrollSurface::Form => &mut self.form_scroll,
@@ -3177,6 +3249,7 @@ impl App {
             AppMode::PriorityPicker => self.handle_priority_picker_key(key),
             AppMode::Prompt => self.handle_prompt_key(key),
             AppMode::AssigneePicker => self.handle_assignee_picker_key(key),
+            AppMode::ParentPicker => self.handle_parent_picker_key(key),
             AppMode::NodePicker => self.handle_node_picker_key(key),
             AppMode::Form => self.handle_form_key(key),
             AppMode::TypePicker => self.handle_type_picker_key(key),
@@ -3639,6 +3712,13 @@ impl App {
             PointerTarget::AssigneeQuery => {
                 self.place_caret(TextEditor::Assignee, column, row);
             }
+            PointerTarget::ParentOption { index } => {
+                self.parent_picker.index = index;
+                return self.choose_parent(index);
+            }
+            PointerTarget::ParentQuery => {
+                self.place_caret(TextEditor::Parent, column, row);
+            }
             PointerTarget::NodeOption { index } => {
                 self.node_picker.index = index;
                 return self.choose_node(index);
@@ -3767,6 +3847,7 @@ impl App {
                 | TextEditor::Prompt
                 | TextEditor::Assignee
                 | TextEditor::Node
+                | TextEditor::Parent
                 | TextEditor::Form => SelectableSurface::Overlay,
             })
             .and_then(|snapshot| snapshot.pos_at(column, row))
@@ -3794,6 +3875,7 @@ impl App {
                 }
             }
             TextEditor::Assignee => self.assignee_picker.query.set_cursor(index),
+            TextEditor::Parent => self.parent_picker.query.set_cursor(index),
             TextEditor::Node => self.node_picker.query.set_cursor(index),
             TextEditor::Form => {
                 if let Some(field) = self.focused_form_field_mut() {
@@ -4353,7 +4435,7 @@ impl App {
     }
 
     fn handle_edit_menu_key(&mut self, key: KeyEvent) -> AppAction {
-        let last = EDIT_MENU.len().saturating_sub(1);
+        let last = self.edit_menu_entries().len().saturating_sub(1);
         match key.code {
             KeyCode::Esc | KeyCode::Char('e') => self.mode = AppMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -4378,7 +4460,7 @@ impl App {
     /// Runs one Edit menu entry, which is the command it names. Each editor
     /// opens itself, so nothing here knows what a state or a title is.
     fn run_edit_menu_entry(&mut self, index: usize) -> AppAction {
-        let Some(entry) = EDIT_MENU.get(index) else {
+        let Some(entry) = self.edit_menu_entries().get(index).copied() else {
             self.mode = AppMode::Browse;
             return AppAction::None;
         };
@@ -4732,6 +4814,252 @@ impl App {
             &candidate.display,
             candidate.unique.as_deref(),
         ))
+    }
+
+    /// The parent one work item hangs under now, as the graph holds it. Azure
+    /// DevOps allows a work item only one, so the first is the one.
+    #[must_use]
+    pub fn parent_of(&self, key: &TicketKey) -> Option<TicketKey> {
+        self.graph.parents_of(key).into_iter().next()
+    }
+
+    /// Whether the work item under the cursor has a parent to take off, which
+    /// is what puts `Remove parent` in the Edit menu.
+    #[must_use]
+    pub fn selected_has_parent(&self) -> bool {
+        self.selected_ticket()
+            .is_some_and(|ticket| self.parent_of(&ticket.key).is_some())
+    }
+
+    /// The Edit menu as it stands for the row under the cursor: [`EDIT_MENU`],
+    /// plus `Remove parent` under `Set parent…` when there is a parent to
+    /// remove. Every reader of the menu goes through here, so the cursor, the
+    /// mouse, and the drawing all count the same rows.
+    #[must_use]
+    pub fn edit_menu_entries(&self) -> Vec<EditMenuEntry> {
+        let mut entries = EDIT_MENU.to_vec();
+        if !self.selected_has_parent() {
+            return entries;
+        }
+        let after = entries
+            .iter()
+            .position(|entry| entry.command == CommandId::SetParent)
+            .map_or(entries.len(), |index| index + 1);
+        entries.insert(after, REMOVE_PARENT_ROW);
+        entries
+    }
+
+    /// Every work item the selected one could be filed under: all of them, less
+    /// itself and everything already below it.
+    ///
+    /// Leaving the descendants out is what makes a cycle impossible to ask for.
+    /// It is not the only guard — the graph on screen can be behind the
+    /// project, and Azure DevOps refuses a cycle it can see whatever the picker
+    /// offered — but it is the one that keeps the refusal from ever being
+    /// earned by an honest choice.
+    #[must_use]
+    pub fn parent_candidates(&self, child: &TicketKey) -> Vec<ParentCandidate> {
+        let below: HashSet<TicketKey> = self.graph.descendants_of(child).into_iter().collect();
+        self.tickets
+            .iter()
+            .filter(|ticket| ticket.key != *child && !below.contains(&ticket.key))
+            .map(|ticket| ParentCandidate {
+                key: ticket.key.clone(),
+                work_item_type: ticket.work_item_type.clone(),
+                title: ticket.title.clone(),
+            })
+            .collect()
+    }
+
+    /// The candidates whatever has been typed leaves showing, which is what the
+    /// picker draws and what its cursor counts over. Both the id and the title
+    /// match, so `613` and `dispatcher` each find the same work item.
+    #[must_use]
+    pub fn parent_matches(&self) -> Vec<ParentCandidate> {
+        let query = self.parent_picker.query.text().trim().to_owned();
+        self.parent_picker
+            .candidates
+            .iter()
+            .filter(|candidate| {
+                query.is_empty()
+                    || fuzzy_contains(&candidate.title, &query)
+                    || fuzzy_contains(&candidate.key.id.to_string(), &query)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The Edit menu's `Set parent…` row: every work item this one could hang
+    /// under, with the one it hangs under now under the cursor. The list is
+    /// built from the rows already loaded, so the picker opens at once.
+    fn open_parent_picker(&mut self) {
+        let Some(child) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
+            self.set_error("No work item is selected");
+            return;
+        };
+        let candidates = self.parent_candidates(&child);
+        if candidates.is_empty() {
+            self.set_error("No other work item is loaded to file this one under");
+            return;
+        }
+        let current = self.parent_of(&child);
+        let index = current
+            .as_ref()
+            .and_then(|parent| {
+                candidates
+                    .iter()
+                    .position(|candidate| candidate.key == *parent)
+            })
+            .unwrap_or_default();
+        self.parent_picker = ParentPicker {
+            candidates,
+            query: TextInput::default(),
+            index,
+            scroll: ScrollState::default(),
+            child,
+            current,
+        };
+        self.parent_picker.scroll.ensure_visible(index);
+        self.mode = AppMode::ParentPicker;
+    }
+
+    fn handle_parent_picker_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => self.mode = AppMode::Browse,
+            KeyCode::Up => self.move_parent_selection(-1),
+            KeyCode::Down => self.move_parent_selection(1),
+            KeyCode::PageUp => self.move_parent_selection(-5),
+            KeyCode::PageDown => self.move_parent_selection(5),
+            KeyCode::Enter => return self.choose_parent(self.parent_picker.index),
+            // Everything else is typing, the way it is in the assignee picker.
+            _ => {
+                let before = self.parent_picker.query.text().to_owned();
+                self.parent_picker.query.handle_key(key);
+                if self.parent_picker.query.text() != before {
+                    self.parent_picker.index = 0;
+                    self.parent_picker.scroll.scroll_to(0);
+                }
+            }
+        }
+        AppAction::None
+    }
+
+    fn move_parent_selection(&mut self, delta: isize) {
+        let last = self.parent_matches().len().saturating_sub(1);
+        let index = self
+            .parent_picker
+            .index
+            .saturating_add_signed(delta)
+            .min(last);
+        self.parent_picker.index = index;
+        self.parent_picker.scroll.ensure_visible(index);
+    }
+
+    /// `Enter` in the parent picker: the work item moves under whatever the
+    /// cursor is on. Choosing the parent it already has writes nothing.
+    fn choose_parent(&mut self, index: usize) -> AppAction {
+        let Some(candidate) = self.parent_matches().get(index).cloned() else {
+            self.mode = AppMode::Browse;
+            return AppAction::None;
+        };
+        self.mode = AppMode::Browse;
+        if self.parent_picker.current.as_ref() == Some(&candidate.key) {
+            return AppAction::None;
+        }
+        let child = self.parent_picker.child.clone();
+        self.begin_reparent(&child, Some(candidate.key))
+    }
+
+    /// The Edit menu's `Remove parent` row: the work item comes out of its
+    /// family and hangs under nothing.
+    fn remove_parent(&mut self) -> AppAction {
+        let Some(child) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
+            self.set_error("No work item is selected");
+            return AppAction::None;
+        };
+        if self.parent_of(&child).is_none() {
+            self.set_error(format!("#{} has no parent to remove", child.id));
+            return AppAction::None;
+        }
+        self.begin_reparent(&child, None)
+    }
+
+    /// Starts one move: the graph takes it at once in both directions, the
+    /// parent it had is kept for a refusal, and the action that sends it comes
+    /// back. The child progress of the parent it left and the parent it joined
+    /// are both rebuilt here, so neither ratio is stale for a frame.
+    fn begin_reparent(&mut self, child: &TicketKey, new_parent: Option<TicketKey>) -> AppAction {
+        if !self.sync_enabled {
+            let reason = self
+                .offline_reason
+                .clone()
+                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned());
+            self.set_error(format!("#{} not moved: {reason}", child.id));
+            return AppAction::None;
+        }
+        if self.pending_reparents.contains_key(child) {
+            self.set_error(format!("#{}: an earlier move is still in flight", child.id));
+            return AppAction::None;
+        }
+        let previous = self.parent_of(child);
+        self.graph.reparent(child, new_parent.as_ref());
+        self.refresh_child_progress();
+        self.pending_reparents.insert(child.clone(), previous);
+        self.set_status(match new_parent.as_ref() {
+            Some(parent) => format!("Moving #{} under #{}\u{2026}", child.id, parent.id),
+            None => format!("Detaching #{}\u{2026}", child.id),
+        });
+        AppAction::Reparent {
+            key: child.clone(),
+            new_parent: new_parent.map(|parent| parent.id),
+        }
+    }
+
+    /// Whether a move is waiting on Azure DevOps. The database watcher stands
+    /// down while one is, for the same reason it does for an edit: the sync
+    /// worker is writing those rows itself.
+    #[must_use]
+    pub fn reparents_pending(&self) -> bool {
+        !self.pending_reparents.is_empty()
+    }
+
+    /// Settles a move Azure DevOps accepted. The links the server sent back
+    /// replace the ones held for the work item, and the other half of the
+    /// hierarchy link is rewritten from them, so the family the old parent
+    /// still thought it had is gone whatever the optimistic guess did.
+    pub fn apply_reparent(&mut self, applied: ReparentApplied) {
+        let key = applied.ticket.key.clone();
+        self.pending_reparents.remove(&key);
+        let parent = applied.parent.clone();
+        self.graph.replace_relations_from(&key, applied.relations);
+        self.graph.reparent(&key, parent.as_ref());
+        if let Some(index) = self.index_of(&key) {
+            self.set_ticket(index, applied.ticket);
+            self.resettle_rows();
+        }
+        self.refresh_child_progress();
+        self.set_status(match parent {
+            Some(parent) => format!("Moved #{} under #{}", key.id, parent.id),
+            None => format!("Detached #{}", key.id),
+        });
+    }
+
+    /// A move that did not land, so the graph goes back the way it was — both
+    /// halves of the link, and the child progress of both parents with them.
+    pub fn reject_reparent(&mut self, rejection: &ReparentRejection) {
+        if let Some(previous) = self.pending_reparents.remove(&rejection.key) {
+            self.graph.reparent(&rejection.key, previous.as_ref());
+            self.refresh_child_progress();
+        }
+        let tail = if rejection.conflict {
+            " \u{b7} it changed in Azure DevOps; syncing"
+        } else {
+            ""
+        };
+        self.set_error(format!(
+            "#{} not moved: {}{tail}",
+            rejection.key.id, rejection.message
+        ));
     }
 
     /// The project's iteration and area trees as the database holds them.
@@ -5914,6 +6242,11 @@ impl App {
             CommandId::EditAssignee => self.open_assignee_picker(),
             CommandId::EditIteration => self.open_node_picker(NodeKind::Iteration),
             CommandId::EditArea => self.open_node_picker(NodeKind::Area),
+            CommandId::SetParent => {
+                self.open_parent_picker();
+                AppAction::None
+            }
+            CommandId::RemoveParent => self.remove_parent(),
             CommandId::EditDescription => self.edit_description(),
             CommandId::UndoEdit => self.undo_last_edit(),
             CommandId::AddComment => {
@@ -6366,6 +6699,7 @@ const fn mode_name(mode: AppMode) -> &'static str {
         AppMode::NodePicker => "node-picker",
         AppMode::Form => "form",
         AppMode::TypePicker => "type-picker",
+        AppMode::ParentPicker => "parent-picker",
     }
 }
 
@@ -8119,6 +8453,347 @@ mod tests {
         }
     }
 
+    /// Two epics, two issues under the first of them, and a task under one of
+    /// those issues: enough family to move a work item out of one epic and into
+    /// another, and enough depth to have a descendant the picker must hide.
+    fn reparent_app() -> App {
+        let mut epic = ticket(1, "Auth rewrite", "2026-01-05T00:00:00Z");
+        epic.work_item_type = "Epic".into();
+        let mut other = ticket(2, "Payments", "2026-01-04T00:00:00Z");
+        other.work_item_type = "Epic".into();
+        let mut issue = ticket(3, "Login form", "2026-01-03T00:00:00Z");
+        issue.work_item_type = "Issue".into();
+        let mut closed = ticket(4, "Logout", "2026-01-02T00:00:00Z");
+        closed.work_item_type = "Issue".into();
+        closed.state = "Closed".into();
+        let task = ticket(5, "Validate email", "2026-01-01T00:00:00Z");
+        let mut app = App::new(vec![epic, other, issue, closed, task]);
+        app.set_workspace_graph(TicketGraph {
+            relations: vec![
+                child_of(3, 1),
+                child_of(4, 1),
+                child_of(5, 3),
+                RelationRecord {
+                    from: family_key(1),
+                    to: family_key(3),
+                    kind: RelationKind::Child,
+                },
+            ],
+            ..TicketGraph::default()
+        });
+        app.enable_sync();
+        app.set_table_viewport(5);
+        app.jump_to_ticket(&family_key(3));
+        app
+    }
+
+    fn candidate_ids(candidates: &[ParentCandidate]) -> Vec<i64> {
+        candidates
+            .iter()
+            .map(|candidate| candidate.key.id)
+            .collect()
+    }
+
+    fn menu_labels(app: &App) -> Vec<&'static str> {
+        app.edit_menu_entries()
+            .into_iter()
+            .map(|entry| entry.label)
+            .collect()
+    }
+
+    fn progress_of(app: &App, id: i64) -> Option<(usize, usize)> {
+        app.child_progress(&family_key(id))
+            .map(|progress| (progress.done, progress.total))
+    }
+
+    #[test]
+    fn the_parent_picker_leaves_out_the_work_item_itself_and_everything_below_it() {
+        let mut app = reparent_app();
+
+        app.run_command(CommandId::SetParent);
+
+        assert_eq!(app.mode, AppMode::ParentPicker);
+        assert_eq!(
+            candidate_ids(&app.parent_picker.candidates),
+            [1, 2, 4],
+            "#3 cannot be its own parent and #5 is already under it, so neither is offered"
+        );
+        assert_eq!(
+            app.parent_picker.current,
+            Some(family_key(1)),
+            "the epic it hangs under now opens under the cursor"
+        );
+        assert_eq!(app.parent_picker.index, 0);
+    }
+
+    #[test]
+    fn the_parent_picker_filters_on_the_id_as_well_as_the_title() {
+        let mut app = reparent_app();
+        app.run_command(CommandId::SetParent);
+
+        for ch in "pay".chars() {
+            press(&mut app, KeyCode::Char(ch));
+        }
+        assert_eq!(
+            candidate_ids(&app.parent_matches()),
+            [2],
+            "the title matches"
+        );
+
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Backspace);
+        }
+        press(&mut app, KeyCode::Char('4'));
+        assert_eq!(
+            candidate_ids(&app.parent_matches()),
+            [4],
+            "and so does the id"
+        );
+    }
+
+    #[test]
+    fn remove_parent_is_offered_only_when_the_work_item_has_one_to_remove() {
+        let mut app = reparent_app();
+
+        assert!(
+            menu_labels(&app).contains(&"Remove parent"),
+            "#3 hangs under an epic, so it can be detached: {:?}",
+            menu_labels(&app)
+        );
+        assert_eq!(
+            app.edit_menu_entries()[7].command,
+            CommandId::SetParent,
+            "the removal follows the row that sets a parent"
+        );
+        assert_eq!(app.edit_menu_entries()[8].command, CommandId::RemoveParent);
+
+        app.jump_to_ticket(&family_key(2));
+        assert!(
+            !menu_labels(&app).contains(&"Remove parent"),
+            "#2 hangs under nothing, so there is nothing to take off: {:?}",
+            menu_labels(&app)
+        );
+        assert_eq!(
+            app.run_command(CommandId::RemoveParent),
+            AppAction::None,
+            "and asking for it anyway writes nothing"
+        );
+    }
+
+    #[test]
+    fn choosing_a_new_parent_moves_the_work_item_in_the_graph_and_in_both_ratios() {
+        let mut app = reparent_app();
+        assert_eq!(progress_of(&app, 1), Some((1, 2)));
+        assert_eq!(progress_of(&app, 2), None);
+        app.run_command(CommandId::SetParent);
+
+        let index = app
+            .parent_matches()
+            .iter()
+            .position(|candidate| candidate.key == family_key(2))
+            .expect("the other epic is on offer");
+        let action = app.choose_parent(index);
+
+        assert_eq!(
+            action,
+            AppAction::Reparent {
+                key: family_key(3),
+                new_parent: Some(2),
+            }
+        );
+        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(
+            app.parent_of(&family_key(3)),
+            Some(family_key(2)),
+            "the work item names its new epic at once"
+        );
+        assert_eq!(
+            app.family_of(&family_key(1)).children,
+            vec![family_key(4)],
+            "and the epic it left no longer names it, which is the other half of the link"
+        );
+        assert_eq!(app.family_of(&family_key(2)).children, vec![family_key(3)]);
+        assert_eq!(
+            progress_of(&app, 1),
+            Some((1, 1)),
+            "the epic it left has one issue fewer to finish"
+        );
+        assert_eq!(
+            progress_of(&app, 2),
+            Some((0, 1)),
+            "and the epic it joined has one more"
+        );
+        assert_eq!(
+            app.visible_family_tree().first().map(|entry| entry.key.id),
+            Some(2),
+            "the family tree redraws from the graph, so the new epic is the root"
+        );
+    }
+
+    #[test]
+    fn removing_a_parent_detaches_the_work_item_in_both_directions() {
+        let mut app = reparent_app();
+
+        let action = app.run_command(CommandId::RemoveParent);
+
+        assert_eq!(
+            action,
+            AppAction::Reparent {
+                key: family_key(3),
+                new_parent: None,
+            }
+        );
+        assert_eq!(app.parent_of(&family_key(3)), None);
+        assert_eq!(
+            app.family_of(&family_key(1)).children,
+            vec![family_key(4)],
+            "the epic keeps the issue it still has and loses the one that left"
+        );
+        assert_eq!(progress_of(&app, 1), Some((1, 1)));
+        assert_eq!(
+            app.family_of(&family_key(3)).children,
+            vec![family_key(5)],
+            "what hangs under the detached work item comes with it"
+        );
+    }
+
+    #[test]
+    fn a_refused_move_puts_both_halves_of_the_link_and_both_ratios_back() {
+        let mut app = reparent_app();
+        app.run_command(CommandId::SetParent);
+        let index = app
+            .parent_matches()
+            .iter()
+            .position(|candidate| candidate.key == family_key(2))
+            .expect("the other epic is on offer");
+        app.choose_parent(index);
+        assert_eq!(app.parent_of(&family_key(3)), Some(family_key(2)));
+
+        app.reject_reparent(&ReparentRejection {
+            key: family_key(3),
+            conflict: true,
+            message: "it changed in Azure DevOps".into(),
+        });
+
+        assert_eq!(
+            app.parent_of(&family_key(3)),
+            Some(family_key(1)),
+            "the work item is back under the epic it was under"
+        );
+        assert_eq!(
+            app.family_of(&family_key(1)).children,
+            vec![family_key(3), family_key(4)],
+            "and that epic names it again"
+        );
+        assert_eq!(
+            app.family_of(&family_key(2)).children,
+            Vec::new(),
+            "the epic it never joined is empty again"
+        );
+        assert_eq!(progress_of(&app, 1), Some((1, 2)));
+        assert_eq!(progress_of(&app, 2), None);
+        let (message, level) = app.notification().expect("a refused move is never silent");
+        assert_eq!(level, NotificationLevel::Error);
+        assert!(
+            message.contains("#3 not moved") && message.contains("syncing"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_cycle_the_stale_graph_could_not_see_is_refused_and_put_back_in_its_own_words() {
+        // The picker cannot offer a descendant, so a cycle only ever comes from
+        // a graph the project has already moved on from: #2 became a child of
+        // #3 in Azure DevOps, and nothing here has read that yet.
+        let mut app = reparent_app();
+        app.run_command(CommandId::SetParent);
+        let index = app
+            .parent_matches()
+            .iter()
+            .position(|candidate| candidate.key == family_key(2))
+            .expect("the other epic still looks like a candidate");
+        app.choose_parent(index);
+
+        app.reject_reparent(&ReparentRejection {
+            key: family_key(3),
+            conflict: false,
+            message: "TF201036: adding this link would create a circular relationship".into(),
+        });
+
+        assert_eq!(
+            app.parent_of(&family_key(3)),
+            Some(family_key(1)),
+            "the move is undone whole, not left half applied"
+        );
+        assert_eq!(
+            app.family_of(&family_key(1)).children,
+            vec![family_key(3), family_key(4)]
+        );
+        assert_eq!(app.family_of(&family_key(2)).children, Vec::new());
+        assert_eq!(progress_of(&app, 1), Some((1, 2)));
+        assert!(!app.reparents_pending());
+        let (message, _) = app.notification().expect("a refused move is never silent");
+        assert!(
+            message.contains("circular relationship") && !message.contains("syncing"),
+            "Azure DevOps's own reason is reported, and a rule refusal is not a conflict: {message}"
+        );
+    }
+
+    #[test]
+    fn an_accepted_move_settles_on_the_links_azure_devops_sent_back() {
+        let mut app = reparent_app();
+        app.run_command(CommandId::RemoveParent);
+        let mut stored = app.ticket_by_key(&family_key(3)).unwrap().clone();
+        stored.revision += 1;
+
+        // The server filed it under the other epic after all, which is what the
+        // graph has to settle on rather than the detachment that was asked for.
+        app.apply_reparent(ReparentApplied {
+            ticket: stored,
+            relations: vec![child_of(3, 2)],
+            parent: Some(family_key(2)),
+        });
+
+        assert!(!app.reparents_pending());
+        assert_eq!(app.parent_of(&family_key(3)), Some(family_key(2)));
+        assert_eq!(app.family_of(&family_key(2)).children, vec![family_key(3)]);
+        assert_eq!(app.family_of(&family_key(1)).children, vec![family_key(4)]);
+        assert_eq!(progress_of(&app, 2), Some((0, 1)));
+        assert_eq!(
+            app.ticket_by_key(&family_key(3)).unwrap().revision,
+            2,
+            "the row takes the revision the server settled on"
+        );
+    }
+
+    #[test]
+    fn a_second_move_is_refused_while_the_first_is_still_in_flight() {
+        let mut app = reparent_app();
+        assert!(matches!(
+            app.run_command(CommandId::RemoveParent),
+            AppAction::Reparent { .. }
+        ));
+        assert!(app.reparents_pending());
+
+        app.run_command(CommandId::SetParent);
+        let index = app
+            .parent_matches()
+            .iter()
+            .position(|candidate| candidate.key == family_key(2))
+            .expect("the other epic is on offer");
+
+        assert_eq!(
+            app.choose_parent(index),
+            AppAction::None,
+            "the second move would be tested against a revision that is already stale"
+        );
+        assert_eq!(
+            app.parent_of(&family_key(3)),
+            None,
+            "and the graph still shows only the move that is in flight"
+        );
+    }
+
     #[test]
     fn child_progress_counts_direct_children_and_closes_on_completed_or_removed() {
         let mut app = App::new(epic_tickets());
@@ -9268,6 +9943,7 @@ mod tests {
                 "Assignee",
                 "Iteration",
                 "Area",
+                "Set parent\u{2026}",
                 "Description",
                 "Add comment",
                 "New child"
