@@ -973,7 +973,24 @@ one that has not started. `Tab` moves the focus to the tree, `j`/`k` and a
 click move between nodes, and while the run on screen is going the watcher
 reads its timeline every five seconds; a finished run's is read once and kept.
 
-The log tail that follows the selected node is #684.
+Under the timeline is the log of the node the tree cursor is on — or, with
+nobody chosen, of the deepest task still running, which moves on as tasks
+finish. `l` gives the log the whole pane and gives it back. The title reads
+`Log · Build and test · 1,204 lines · following`. The ISO timestamp every line
+carries is dimmed rather than dropped, because a slow step is easiest to spot
+by its clock, and the `##[…]` markers are painted rather than printed:
+`##[section]` bold in the accent colour, `##[group]` and `##[endgroup]` bold
+with a `▸`, `##[warning]` yellow, `##[error]` red, `##[debug]` muted,
+`##[command]` accent.
+
+While the node is being written the watcher reads the log every two seconds,
+sending the number of lines already held so each poll fetches only what is new;
+two empty polls in a row and it drops to five seconds until there is something
+to read again. A finished node's log is read once, whole. Follow mode keeps the
+tail in view; scrolling up with `k`, `PgUp`, the wheel or the scrollbar thumb
+leaves it and the title says `scrolled`, and `End` follows again. The pane is a
+selectable surface, so dragging across it copies lines. Twenty thousand lines
+are kept per log, with a line at the top saying how many earlier ones went.
 
 ## Controls
 

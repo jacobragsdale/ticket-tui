@@ -69,7 +69,7 @@ fn the_runs_level_draws_the_runs_of_the_pipeline_that_was_opened() {
 #[test]
 fn the_details_pane_heads_a_run_with_what_it_was_and_where_it_came_from() {
     let mut app = pipelines_app();
-    let text = pipelines_text(140, 30, &mut app);
+    let text = pipelines_text(140, 44, &mut app);
 
     assert!(text.contains("20260829.14"), "{text}");
     assert!(text.contains("Branch"), "{text}");
@@ -284,14 +284,14 @@ fn timeline_fixture() -> Vec<TimelineRecord> {
 fn the_details_pane_draws_the_timeline_as_a_tree_with_a_glyph_and_a_duration_each() {
     let mut app = pipelines_app();
     app.select_tab(TabId::Pipelines);
-    render_text(140, 34, &mut app);
+    render_text(140, 48, &mut app);
     let run = app
         .pipelines
         .focused_run()
         .expect("the details pane settles on a run");
     app.pipelines.set_timeline(run, timeline_fixture());
 
-    let text = render_text(140, 34, &mut app);
+    let text = render_text(140, 48, &mut app);
     assert!(text.contains("Timeline"), "{text}");
     assert!(
         text.contains("\u{2713} Build"),
@@ -327,10 +327,10 @@ fn the_details_pane_draws_the_timeline_as_a_tree_with_a_glyph_and_a_duration_eac
 fn the_timeline_cursor_moves_with_the_keyboard_and_a_click() {
     let mut app = pipelines_app();
     app.select_tab(TabId::Pipelines);
-    render_text(140, 34, &mut app);
+    render_text(140, 48, &mut app);
     let run = app.pipelines.focused_run().expect("a run");
     app.pipelines.set_timeline(run, timeline_fixture());
-    render_text(140, 34, &mut app);
+    render_text(140, 48, &mut app);
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.shell.focus, Focus::Details);
@@ -349,4 +349,113 @@ fn the_timeline_cursor_moves_with_the_keyboard_and_a_click() {
         .rect;
     click(&mut app, node.x + 2, node.y);
     assert_eq!(app.pipelines.timeline_cursor(), 3);
+}
+
+/// A run on screen with a timeline whose second node has a log.
+fn logging_app() -> App {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    render_text(140, 48, &mut app);
+    let run = app.pipelines.focused_run().expect("a run");
+    app.pipelines.set_timeline(run, timeline_fixture());
+    app
+}
+
+#[test]
+fn the_log_pane_paints_every_marker_and_says_what_it_is_following() {
+    let mut app = logging_app();
+    let run = app.pipelines.focused_run().expect("a run");
+    app.pipelines.append_log(
+        run,
+        7,
+        0,
+        vec![
+            "2026-08-29T10:00:06.1234567Z ##[section]Starting: cargo test".to_owned(),
+            "2026-08-29T10:00:07.1234567Z ##[group]Environment".to_owned(),
+            "2026-08-29T10:00:08.1234567Z ##[command]cargo test --all-targets".to_owned(),
+            "2026-08-29T10:00:09.1234567Z ##[warning]unused variable".to_owned(),
+            "2026-08-29T10:00:10.1234567Z ##[error]test failed".to_owned(),
+            "2026-08-29T10:00:11.1234567Z ##[debug]inner detail".to_owned(),
+            "2026-08-29T10:00:12.1234567Z plain output".to_owned(),
+        ],
+        false,
+    );
+    // The tree cursor is on the job, whose log this is.
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+    let text = render_text(140, 48, &mut app);
+    assert!(
+        text.contains("Log \u{00b7} cargo test \u{00b7} 7 lines \u{00b7} following"),
+        "the title names the node, the size and the state: {text}"
+    );
+    assert!(text.contains("Starting: cargo test"), "{text}");
+    assert!(
+        text.contains("\u{25b8} Environment"),
+        "a group carries its marker: {text}"
+    );
+    assert!(text.contains("test failed"), "{text}");
+    assert!(text.contains("plain output"), "{text}");
+    assert!(
+        text.contains("10:00:06"),
+        "the timestamp is kept, dimmed: {text}"
+    );
+    assert!(
+        !text.contains("##["),
+        "and the markers themselves are painted, not printed: {text}"
+    );
+}
+
+#[test]
+fn scrolling_the_log_leaves_follow_mode_and_end_goes_back_to_it() {
+    let mut app = logging_app();
+    let run = app.pipelines.focused_run().expect("a run");
+    let lines: Vec<String> = (1..=200).map(|line| format!("line {line}")).collect();
+    app.pipelines.append_log(run, 7, 0, lines, false);
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+
+    let text = render_text(140, 30, &mut app);
+    assert!(
+        text.contains("line 200"),
+        "following shows the tail: {text}"
+    );
+    assert!(text.contains("following"), "{text}");
+
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    let text = render_text(140, 30, &mut app);
+    assert!(
+        text.contains("scrolled"),
+        "scrolling up by hand leaves follow mode: {text}"
+    );
+    assert!(!text.contains("line 200"), "{text}");
+
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    let text = render_text(140, 30, &mut app);
+    assert!(
+        text.contains("following") && text.contains("line 200"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_log_past_the_cap_keeps_the_tail_and_says_how_much_it_dropped() {
+    let mut app = logging_app();
+    let run = app.pipelines.focused_run().expect("a run");
+    let lines: Vec<String> = (1..=20_010).map(|line| format!("line {line}")).collect();
+    app.pipelines.append_log(run, 7, 0, lines, true);
+
+    let held = app.pipelines.log(run, 7);
+    assert_eq!(held.len(), 20_000, "the cap holds");
+    assert!(
+        held[0].contains("earlier lines skipped"),
+        "and says what went: {}",
+        held[0]
+    );
+    assert_eq!(
+        held.last().unwrap(),
+        "line 20010",
+        "the tail is what is kept"
+    );
 }

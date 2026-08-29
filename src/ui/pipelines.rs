@@ -264,6 +264,24 @@ fn render_details(
     shell: &mut Shell,
     area: Rect,
 ) {
+    // `l` gives the log the whole pane; otherwise the run and its timeline
+    // take the top half and the log the bottom.
+    if screen.log_full_pane() {
+        render_log(frame, screen, shell, area);
+        return;
+    }
+    let halves =
+        Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(area);
+    render_run_details(frame, screen, shell, halves[0]);
+    render_log(frame, screen, shell, halves[1]);
+}
+
+fn render_run_details(
+    frame: &mut Frame<'_>,
+    screen: &mut PipelinesScreen,
+    shell: &mut Shell,
+    area: Rect,
+) {
     let now = Timestamp::now();
     let block = focused_block(" Run ", shell.focus == Focus::Details);
     let inner = block.inner(area);
@@ -443,6 +461,145 @@ fn node_style(record: &TimelineRecord) -> Style {
         return Style::default().fg(theme().state_in_progress);
     }
     run_style(record.state, record.result)
+}
+
+/// The log of the node the tree cursor is on, or of the deepest task still
+/// running when nobody has chosen one. Following keeps the tail in view;
+/// scrolling up by any means leaves it, and `End` goes back.
+fn render_log(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut Shell, area: Rect) {
+    let node = screen.log_node_name();
+    let lines: Vec<String> = screen
+        .log_target()
+        .map(|target| {
+            screen
+                .focused_run()
+                .map(|run| screen.log(run, target.log_id).to_vec())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    let title = format!(
+        " Log \u{00b7} {} \u{00b7} {} lines \u{00b7} {} ",
+        node.unwrap_or_else(|| "nothing chosen".to_owned()),
+        lines.len(),
+        if screen.log_following() {
+            "following"
+        } else {
+            "scrolled"
+        }
+    );
+    let block = focused_block(title, shell.focus == Focus::Details);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if lines.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No log yet").style(Style::default().fg(theme().muted)),
+            inner,
+        );
+        return;
+    }
+    let viewport = usize::from(inner.height).max(1);
+    screen.log_scroll.set_viewport(viewport, lines.len());
+    if screen.log_following() {
+        let tail = lines.len().saturating_sub(viewport);
+        screen.log_scroll.scroll_to(tail);
+    }
+    let offset = screen.log_scroll.offset;
+    let painted: Vec<Line<'static>> = lines
+        .iter()
+        .skip(offset)
+        .take(viewport)
+        .map(|line| log_line(line))
+        .collect();
+    frame.render_widget(Paragraph::new(painted), inner);
+    if lines.len() > viewport {
+        render_scrollbar(
+            frame,
+            PointerLayer::Base,
+            shell,
+            inner,
+            ScrollSurface::Details,
+            ScrollState {
+                offset,
+                content: lines.len(),
+                viewport,
+            },
+        );
+    }
+    capture_selectable(frame, shell, SelectableSurface::Details, inner, true);
+}
+
+/// One log line, with the timestamp dimmed and the `##[marker]` prefixes
+/// painted the way the conventions ask.
+fn log_line(raw: &str) -> Line<'static> {
+    let (stamp, rest) = split_timestamp(raw);
+    let mut spans = Vec::new();
+    if let Some(stamp) = stamp {
+        spans.push(Span::styled(stamp, Style::default().fg(theme().muted)));
+    }
+    let (marker, body) = split_marker(rest);
+    match marker {
+        Some("section") => spans.push(Span::styled(
+            body.to_owned(),
+            Style::default()
+                .fg(theme().accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Some("group") => spans.push(Span::styled(
+            format!("\u{25b8} {body}"),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Some("endgroup") => spans.push(Span::styled(
+            format!("\u{25b8} {body}"),
+            Style::default()
+                .fg(theme().muted)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Some("warning") => spans.push(Span::styled(
+            body.to_owned(),
+            Style::default().fg(theme().warning),
+        )),
+        Some("error") => spans.push(Span::styled(
+            body.to_owned(),
+            Style::default().fg(theme().error),
+        )),
+        Some("debug") => spans.push(Span::styled(
+            body.to_owned(),
+            Style::default().fg(theme().muted),
+        )),
+        Some("command") => spans.push(Span::styled(
+            body.to_owned(),
+            Style::default().fg(theme().accent),
+        )),
+        _ => spans.push(Span::raw(body.to_owned())),
+    }
+    Line::from(spans)
+}
+
+/// Azure DevOps prefixes every line with an ISO instant. It is dimmed rather
+/// than dropped: a slow step is easiest to spot by its clock.
+fn split_timestamp(raw: &str) -> (Option<String>, &str) {
+    let Some((stamp, rest)) = raw.split_once(' ') else {
+        return (None, raw);
+    };
+    let looks_like_a_stamp = stamp.len() >= 20
+        && stamp.starts_with(|character: char| character.is_ascii_digit())
+        && stamp.contains('T');
+    if looks_like_a_stamp {
+        (Some(format!("{} ", &stamp[..19])), rest)
+    } else {
+        (None, raw)
+    }
+}
+
+/// `##[error]something went wrong` is `("error", "something went wrong")`.
+fn split_marker(line: &str) -> (Option<&str>, &str) {
+    let Some(rest) = line.strip_prefix("##[") else {
+        return (None, line);
+    };
+    let Some((marker, body)) = rest.split_once(']') else {
+        return (None, line);
+    };
+    (Some(marker), body)
 }
 
 fn result_word(row: &RunRow) -> String {

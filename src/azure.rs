@@ -666,6 +666,38 @@ impl AzureClient {
         Ok(parse_timeline(&self.get(url.as_str())?))
     }
 
+    /// One log, from `start_line` on. The watcher sends the number of lines it
+    /// already holds, so a poll of a growing log fetches only what is new.
+    pub fn fetch_log_lines(
+        &self,
+        run_id: i64,
+        log_id: i64,
+        start_line: usize,
+    ) -> Result<Vec<String>> {
+        let (run, log) = (run_id.to_string(), log_id.to_string());
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "build",
+            "builds",
+            run.as_str(),
+            "logs",
+            log.as_str(),
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&format!(
+            "startLine={start_line}&api-version={API_VERSION}"
+        )));
+        let response = self.get(url.as_str())?;
+        Ok(response["value"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|line| line.as_str().map(str::to_owned))
+            .collect())
+    }
+
     /// The teams hang off `_apis/projects` rather than off the project. `tail`
     /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {

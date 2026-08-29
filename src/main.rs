@@ -34,7 +34,7 @@ use ticket_tui::sync::{
 };
 use ticket_tui::timestamp::Timestamp;
 use ticket_tui::watch::{
-    AzureWatchConnector, LIVE_RUNS_CADENCE, WatchEvent, WatchHandle, WatchRequest,
+    AzureWatchConnector, LIVE_RUNS_CADENCE, LogTarget, WatchEvent, WatchHandle, WatchRequest,
 };
 use url::Url;
 
@@ -53,8 +53,9 @@ struct SyncRuntime {
     /// Whether the watcher has been told the Pipelines tab is showing, so the
     /// message is sent when it changes rather than every turn.
     watching_tab: bool,
-    /// The run the watcher was last told about, for the same reason.
-    watching_run: Option<i64>,
+    /// The run and log node the watcher was last told about, for the same
+    /// reason.
+    watching_run: (Option<i64>, Option<LogTarget>),
     scheduler: SyncScheduler,
     config: Option<AzureConfig>,
     /// Why Azure DevOps could not be resolved, reported when the user asks for
@@ -361,7 +362,7 @@ fn run() -> Result<()> {
         details: DetailsEngine::default(),
         pipelines: None,
         watching_tab: false,
-        watching_run: None,
+        watching_run: (None, None),
     };
     if let Some(config) = config.filter(|_| wrong_project.is_none()) {
         runtime.worker = Some(SyncHandle::spawn(
@@ -965,9 +966,15 @@ fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     // reading, so the watcher is told whenever the cursor settles somewhere
     // else.
     let focus = showing.then(|| app.pipelines.focused_run()).flatten();
-    if focus != runtime.watching_run {
-        runtime.watching_run = focus;
-        let _ = watcher.send(focus.map_or(WatchRequest::Blur, WatchRequest::Focus));
+    let node = focus.and_then(|_| app.pipelines.log_target());
+    if (focus, node) != runtime.watching_run {
+        runtime.watching_run = (focus, node);
+        let _ = watcher.send(
+            focus.map_or(WatchRequest::Blur, |run_id| WatchRequest::Focus {
+                run_id,
+                node,
+            }),
+        );
     }
     if showing != runtime.watching_tab {
         runtime.watching_tab = showing;
@@ -989,6 +996,15 @@ fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
             WatchEvent::Timeline { run_id, records } => {
                 app.pipelines.set_timeline(run_id, records);
             }
+            WatchEvent::LogLines {
+                run_id,
+                log_id,
+                from_line,
+                lines,
+                finished,
+            } => app
+                .pipelines
+                .append_log(run_id, log_id, from_line, lines, finished),
             WatchEvent::Throttled(wait) => app.shell.set_watch_state(Some(format!(
                 "holding off {}s — Azure DevOps asked",
                 wait.as_secs()
@@ -1672,7 +1688,7 @@ mod tests {
             details: DetailsEngine::default(),
             pipelines: None,
             watching_tab: false,
-            watching_run: None,
+            watching_run: (None, None),
         };
         (app, repository, runtime)
     }
@@ -1958,7 +1974,7 @@ mod tests {
             details: DetailsEngine::default(),
             pipelines: None,
             watching_tab: false,
-            watching_run: None,
+            watching_run: (None, None),
         };
 
         handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
@@ -2218,7 +2234,7 @@ mod tests {
             details: DetailsEngine::default(),
             pipelines: None,
             watching_tab: false,
-            watching_run: None,
+            watching_run: (None, None),
         };
 
         handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
@@ -2924,7 +2940,7 @@ mod tests {
             details: DetailsEngine::default(),
             pipelines: None,
             watching_tab: false,
-            watching_run: None,
+            watching_run: (None, None),
         }
     }
 

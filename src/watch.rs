@@ -27,6 +27,26 @@ pub const LIVE_RUNS_CADENCE: Duration = Duration::from_secs(15);
 /// finished run's timeline is read once and kept for the session.
 pub const TIMELINE_CADENCE: Duration = Duration::from_secs(5);
 
+/// How often the log of the node on screen is read while it is being written.
+pub const LOG_CADENCE: Duration = Duration::from_secs(2);
+
+/// What the log cadence falls back to once a log has stopped producing lines:
+/// a task that is running but quiet is not worth two requests a second.
+pub const QUIET_LOG_CADENCE: Duration = Duration::from_secs(5);
+
+/// How many empty polls in a row mean a log has gone quiet.
+const QUIET_AFTER: u32 = 2;
+
+/// The node whose log is on screen, and how much of it is already held.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LogTarget {
+    pub log_id: i64,
+    /// How many lines the screen holds, which is where the next fetch starts.
+    pub from_line: usize,
+    /// Whether the node is still writing. A finished one is read once, whole.
+    pub live: bool,
+}
+
 /// The longest any cadence stretches to when the budget is thin. Past this,
 /// waiting longer stops being politeness and starts being uselessness.
 pub const MAX_CADENCE: Duration = Duration::from_secs(60);
@@ -39,9 +59,13 @@ pub enum WatchRequest {
     /// Whether the Pipelines tab is the one showing. A hidden tab with nothing
     /// watched is the watcher's cue to go quiet.
     TabShowing(bool),
-    /// The run the details pane is showing, whose timeline is worth reading
-    /// every few seconds while it is going. #684 adds the log node to this.
-    Focus(i64),
+    /// The run the details pane is showing, and the node whose log is under
+    /// it: the timeline is read while the run is going, the log while the node
+    /// is being written.
+    Focus {
+        run_id: i64,
+        node: Option<LogTarget>,
+    },
     /// Nothing is on screen worth reading a timeline for.
     Blur,
     /// Keep following one run wherever the user goes. #685 puts this behind a
@@ -57,6 +81,15 @@ pub enum WatchRequest {
 pub enum WatchEvent {
     /// Every run in the project that is queued, going, or being cancelled.
     LiveRuns(Vec<Run>),
+    /// New lines of one node's log, from the line the watcher was asked to
+    /// start at. `finished` says the log will not grow again.
+    LogLines {
+        run_id: i64,
+        log_id: i64,
+        from_line: usize,
+        lines: Vec<String>,
+        finished: bool,
+    },
     /// One run's stages, jobs and tasks, as they stand.
     Timeline {
         run_id: i64,
@@ -80,6 +113,11 @@ pub trait PipelineSource: Send {
 
     /// One run's timeline: its stages, jobs and tasks.
     fn timeline(&self, _run_id: i64) -> Result<Vec<TimelineRecord>> {
+        Ok(Vec::new())
+    }
+
+    /// One node's log, from `start_line` on.
+    fn log_lines(&self, _run_id: i64, _log_id: i64, _start_line: usize) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
 
@@ -170,6 +208,14 @@ pub struct Watcher {
     watched: Vec<i64>,
     /// The run whose timeline is worth reading, if one is on screen.
     focus: Option<i64>,
+    /// The node whose log is on screen, and where its next fetch starts.
+    node: Option<LogTarget>,
+    log: Cadence,
+    /// Polls in a row that brought back nothing, which is what turns the log
+    /// cadence down to the quiet one.
+    quiet_polls: u32,
+    /// Logs read whole because their node had finished: never read again.
+    settled_logs: Vec<(i64, i64)>,
     /// Runs whose timeline has finished moving. One of these is read once and
     /// never again: nothing about a finished run changes.
     settled: Vec<i64>,
@@ -187,6 +233,10 @@ impl Watcher {
             tab_showing: false,
             watched: Vec::new(),
             focus: None,
+            node: None,
+            log: Cadence::new(LOG_CADENCE),
+            quiet_polls: 0,
+            settled_logs: Vec::new(),
             settled: Vec::new(),
             failing: false,
         }
@@ -199,6 +249,13 @@ impl Watcher {
         self.tab_showing || !self.watched.is_empty()
     }
 
+    /// The log cadence as it stands: two seconds while lines are coming, five
+    /// once the node has gone quiet.
+    #[must_use]
+    pub const fn log_cadence(&self) -> Duration {
+        self.log.interval()
+    }
+
     /// The live-runs cadence as it stands, which the database overlay reports.
     #[must_use]
     pub const fn live_cadence(&self) -> Duration {
@@ -209,15 +266,26 @@ impl Watcher {
     pub fn handle(&mut self, request: &WatchRequest) -> bool {
         match request {
             WatchRequest::TabShowing(showing) => self.tab_showing = *showing,
-            WatchRequest::Focus(run) => {
-                if self.focus != Some(*run) {
-                    self.focus = Some(*run);
+            WatchRequest::Focus { run_id, node } => {
+                if self.focus != Some(*run_id) {
+                    self.focus = Some(*run_id);
                     // A run just moved onto the screen is read at once rather
                     // than at the next tick of somebody else's cadence.
                     self.timeline = Cadence::new(TIMELINE_CADENCE);
                 }
+                // A different node is a different log, read at once; the same
+                // node with more lines held is the same poll going on.
+                let moved = self.node.map(|held| held.log_id) != node.map(|node| node.log_id);
+                if moved {
+                    self.log = Cadence::new(LOG_CADENCE);
+                    self.quiet_polls = 0;
+                }
+                self.node = *node;
             }
-            WatchRequest::Blur => self.focus = None,
+            WatchRequest::Blur => {
+                self.focus = None;
+                self.node = None;
+            }
             WatchRequest::Watch(run) => {
                 if !self.watched.contains(run) {
                     self.watched.push(*run);
@@ -279,11 +347,52 @@ impl Watcher {
             }
             self.timeline.polled(now);
         }
+        if let Some(target) = self.node.filter(|target| {
+            !self
+                .settled_logs
+                .contains(&(self.focus.unwrap_or_default(), target.log_id))
+        }) && let Some(run) = self.focus
+            && self.log.is_due(now)
+        {
+            match self.source.log_lines(run, target.log_id, target.from_line) {
+                Ok(lines) => {
+                    if lines.is_empty() {
+                        self.quiet_polls = self.quiet_polls.saturating_add(1);
+                        if self.quiet_polls >= QUIET_AFTER {
+                            self.log = Cadence::new(QUIET_LOG_CADENCE);
+                        }
+                    } else {
+                        self.quiet_polls = 0;
+                        self.log = Cadence::new(LOG_CADENCE);
+                    }
+                    if !target.live {
+                        self.settled_logs.push((run, target.log_id));
+                    }
+                    events.push(WatchEvent::LogLines {
+                        run_id: run,
+                        log_id: target.log_id,
+                        from_line: target.from_line,
+                        lines,
+                        finished: !target.live,
+                    });
+                }
+                Err(error) => {
+                    self.log.stretch();
+                    if !self.failing {
+                        self.failing = true;
+                        events.push(WatchEvent::Failed(format!("{error:#}")));
+                    }
+                }
+            }
+            self.log.polled(now);
+        }
         if let Some(wait) = self.source.throttled_for() {
             self.live.stretch();
             self.timeline.stretch();
+            self.log.stretch();
             self.live.hold_off(now, wait);
             self.timeline.hold_off(now, wait);
+            self.log.hold_off(now, wait);
             events.push(WatchEvent::Throttled(wait));
         }
         events
@@ -301,7 +410,8 @@ impl Watcher {
             .focus
             .filter(|run| !self.settled.contains(run))
             .map_or(live, |_| self.timeline.until_due(now));
-        Some(live.min(timeline))
+        let log = self.node.map_or(live, |_| self.log.until_due(now));
+        Some(live.min(timeline).min(log))
     }
 }
 
@@ -312,6 +422,10 @@ impl PipelineSource for crate::azure::AzureClient {
 
     fn timeline(&self, run_id: i64) -> Result<Vec<TimelineRecord>> {
         self.fetch_timeline(run_id)
+    }
+
+    fn log_lines(&self, run_id: i64, log_id: i64, start_line: usize) -> Result<Vec<String>> {
+        self.fetch_log_lines(run_id, log_id, start_line)
     }
 
     fn throttled_for(&self) -> Option<Duration> {
@@ -431,6 +545,10 @@ mod tests {
         /// How many timelines were read, and whether the run has finished.
         timelines: Arc<Mutex<usize>>,
         finished: Arc<Mutex<bool>>,
+        /// The lines the next log read answers with, and the start line each
+        /// read asked for.
+        log: Arc<Mutex<Vec<String>>>,
+        log_reads: Arc<Mutex<Vec<usize>>>,
         /// The errors the next reads answer with, oldest first.
         failures: Arc<Mutex<Vec<String>>>,
         /// The waits the source reports having been asked for.
@@ -470,6 +588,11 @@ mod tests {
             }])
         }
 
+        fn log_lines(&self, _run_id: i64, _log_id: i64, start_line: usize) -> Result<Vec<String>> {
+            self.log_reads.lock().unwrap().push(start_line);
+            Ok(self.log.lock().unwrap().clone())
+        }
+
         fn throttled_for(&self) -> Option<Duration> {
             self.throttles.lock().unwrap().pop()
         }
@@ -502,6 +625,8 @@ mod tests {
         failures: Arc<Mutex<Vec<String>>>,
         timelines: Arc<Mutex<usize>>,
         finished: Arc<Mutex<bool>>,
+        log: Arc<Mutex<Vec<String>>>,
+        log_reads: Arc<Mutex<Vec<usize>>>,
     }
 
     fn watcher() -> Harness {
@@ -510,6 +635,8 @@ mod tests {
         let failures = Arc::new(Mutex::new(Vec::new()));
         let timelines = Arc::new(Mutex::new(0));
         let finished = Arc::new(Mutex::new(false));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let log_reads = Arc::new(Mutex::new(Vec::new()));
         let source = FakeRuns {
             runs: Arc::new(Mutex::new(vec![run(14)])),
             failures: Arc::clone(&failures),
@@ -517,6 +644,8 @@ mod tests {
             reads: Arc::clone(&reads),
             timelines: Arc::clone(&timelines),
             finished: Arc::clone(&finished),
+            log: Arc::clone(&log),
+            log_reads: Arc::clone(&log_reads),
         };
         Harness {
             watcher: Watcher::new(Box::new(source)),
@@ -525,6 +654,8 @@ mod tests {
             failures,
             timelines,
             finished,
+            log,
+            log_reads,
         }
     }
 
@@ -657,7 +788,10 @@ mod tests {
             ..
         } = watcher();
         watcher.handle(&WatchRequest::TabShowing(true));
-        watcher.handle(&WatchRequest::Focus(14));
+        watcher.handle(&WatchRequest::Focus {
+            run_id: 14,
+            node: None,
+        });
         let start = Instant::now();
 
         let events = watcher.poll(start);
@@ -692,6 +826,122 @@ mod tests {
             *timelines.lock().unwrap(),
             reads,
             "a finished run's timeline is read once and kept"
+        );
+    }
+
+    #[test]
+    fn a_growing_log_is_read_from_where_the_screen_left_off_and_slows_when_it_goes_quiet() {
+        let Harness {
+            mut watcher,
+            log_reads,
+            log,
+            ..
+        } = watcher();
+        watcher.handle(&WatchRequest::TabShowing(true));
+        *log.lock().unwrap() = vec!["one".to_owned(), "two".to_owned()];
+        watcher.handle(&WatchRequest::Focus {
+            run_id: 14,
+            node: Some(LogTarget {
+                log_id: 7,
+                from_line: 0,
+                live: true,
+            }),
+        });
+        let start = Instant::now();
+
+        let events = watcher.poll(start);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                WatchEvent::LogLines { log_id: 7, from_line: 0, lines, finished: false, .. }
+                    if lines.len() == 2
+            )),
+            "the first poll brings back what is there"
+        );
+        assert_eq!(*log_reads.lock().unwrap(), [0], "starting at the top");
+
+        // The screen now holds two lines, so the next poll asks for the third.
+        watcher.handle(&WatchRequest::Focus {
+            run_id: 14,
+            node: Some(LogTarget {
+                log_id: 7,
+                from_line: 2,
+                live: true,
+            }),
+        });
+        *log.lock().unwrap() = vec!["three".to_owned()];
+        let events = watcher.poll(start + LOG_CADENCE);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                WatchEvent::LogLines { from_line: 2, lines, .. } if lines == &["three".to_owned()]
+            )),
+            "and only what is new"
+        );
+        assert_eq!(
+            *log_reads.lock().unwrap(),
+            [0, 2],
+            "each poll starts where the screen left off"
+        );
+        assert_eq!(watcher.log_cadence(), LOG_CADENCE);
+
+        // Two empty polls in a row and the node is quiet.
+        log.lock().unwrap().clear();
+        watcher.poll(start + Duration::from_secs(4));
+        assert_eq!(
+            watcher.log_cadence(),
+            LOG_CADENCE,
+            "one quiet poll is nothing"
+        );
+        watcher.poll(start + Duration::from_secs(6));
+        assert_eq!(
+            watcher.log_cadence(),
+            QUIET_LOG_CADENCE,
+            "two in a row and it stops asking twice a second"
+        );
+
+        *log.lock().unwrap() = vec!["four".to_owned()];
+        watcher.poll(start + Duration::from_secs(12));
+        assert_eq!(
+            watcher.log_cadence(),
+            LOG_CADENCE,
+            "and picks up again the moment there is something to read"
+        );
+    }
+
+    #[test]
+    fn a_finished_nodes_log_is_read_once_and_never_again() {
+        let Harness {
+            mut watcher,
+            log_reads,
+            log,
+            ..
+        } = watcher();
+        watcher.handle(&WatchRequest::TabShowing(true));
+        *log.lock().unwrap() = vec!["all of it".to_owned()];
+        watcher.handle(&WatchRequest::Focus {
+            run_id: 14,
+            node: Some(LogTarget {
+                log_id: 7,
+                from_line: 0,
+                live: false,
+            }),
+        });
+        let start = Instant::now();
+
+        let events = watcher.poll(start);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, WatchEvent::LogLines { finished: true, .. })),
+            "the whole log, and it says it will not grow"
+        );
+
+        watcher.poll(start + Duration::from_secs(30));
+        assert_eq!(
+            log_reads.lock().unwrap().len(),
+            1,
+            "a finished node's log is never asked for twice"
         );
     }
 

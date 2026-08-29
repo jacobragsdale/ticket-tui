@@ -17,6 +17,11 @@ use crate::filter::{MatchContext, ParsedQuery, parse_query};
 use crate::model::{Jump, Pipeline, Run, TimelineRecord};
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 use crate::session::TabSession;
+use crate::watch::LogTarget;
+
+/// The most lines one log is worth keeping in memory. Past this the oldest go
+/// and a line at the top says how many.
+const LOG_LINE_CAP: usize = 20_000;
 use crate::text_input::TextInput;
 
 mod columns;
@@ -70,6 +75,15 @@ pub struct PipelinesScreen {
     timelines: Vec<(i64, Vec<TimelineRecord>)>,
     /// The run the details pane is showing and where its tree cursor is.
     focused: Option<(i64, usize)>,
+    /// The lines held per (run, log), newest last.
+    logs: Vec<(i64, i64, Vec<String>)>,
+    pub log_scroll: ScrollState,
+    /// Whether the log pane is keeping the tail in view.
+    log_follow: bool,
+    /// Whether the log has the whole details pane.
+    log_full: bool,
+    /// Whether the log on screen has stopped growing.
+    log_finished: bool,
 }
 
 impl Default for PipelinesScreen {
@@ -92,6 +106,11 @@ impl Default for PipelinesScreen {
             details: ScrollState::default(),
             timelines: Vec::new(),
             focused: None,
+            logs: Vec::new(),
+            log_scroll: ScrollState::default(),
+            log_follow: true,
+            log_full: false,
+            log_finished: false,
         }
     }
 }
@@ -198,6 +217,129 @@ impl PipelinesScreen {
         };
         let count = self.timeline(run).len();
         self.focused = Some((run, index.min(count.saturating_sub(1))));
+    }
+
+    /// The node whose log is on screen: the one the tree cursor is on, or the
+    /// deepest task still running when nobody has chosen one. This is what the
+    /// watcher is asked to follow, and it moves on as tasks finish.
+    #[must_use]
+    pub fn log_target(&self) -> Option<LogTarget> {
+        let (run, cursor) = self.focused?;
+        let records = self.timeline(run);
+        let chosen = records
+            .get(cursor)
+            .filter(|record| record.log_id.is_some())
+            .or_else(|| {
+                records
+                    .iter()
+                    .rfind(|record| record.log_id.is_some() && record.state.is_live())
+            })?;
+        let log_id = chosen.log_id?;
+        Some(LogTarget {
+            log_id,
+            from_line: self.log(run, log_id).len(),
+            live: chosen.state.is_live(),
+        })
+    }
+
+    /// What the node whose log is showing is called, for the log's title.
+    #[must_use]
+    pub fn log_node_name(&self) -> Option<String> {
+        let (run, cursor) = self.focused?;
+        let records = self.timeline(run);
+        records
+            .get(cursor)
+            .filter(|record| record.log_id.is_some())
+            .or_else(|| {
+                records
+                    .iter()
+                    .rfind(|record| record.log_id.is_some() && record.state.is_live())
+            })
+            .map(|record| record.name.clone())
+    }
+
+    /// The lines held for one log.
+    #[must_use]
+    pub fn log(&self, run_id: i64, log_id: i64) -> &[String] {
+        self.logs
+            .iter()
+            .find(|(held_run, held_log, _)| *held_run == run_id && *held_log == log_id)
+            .map_or(&[], |(_, _, lines)| lines.as_slice())
+    }
+
+    /// Folds new lines onto the end of a log. A poll that answers from a line
+    /// the screen has already passed is dropped rather than duplicated, which
+    /// is what makes a retried fetch harmless.
+    pub fn append_log(
+        &mut self,
+        run_id: i64,
+        log_id: i64,
+        from_line: usize,
+        lines: Vec<String>,
+        finished: bool,
+    ) {
+        if lines.is_empty() {
+            if finished {
+                self.log_finished = true;
+            }
+            return;
+        }
+        let held = self
+            .logs
+            .iter_mut()
+            .find(|(held_run, held_log, _)| *held_run == run_id && *held_log == log_id);
+        let held = match held {
+            Some((_, _, held)) => held,
+            None => {
+                self.logs.push((run_id, log_id, Vec::new()));
+                // Only the log on screen and the one before it are worth
+                // keeping; the rest are a fetch away.
+                if self.logs.len() > 4 {
+                    self.logs.remove(0);
+                }
+                &mut self.logs.last_mut().expect("just pushed").2
+            }
+        };
+        if from_line > held.len() {
+            return;
+        }
+        held.truncate(from_line);
+        held.extend(lines);
+        if held.len() > LOG_LINE_CAP {
+            // One more than the overflow, because the line saying what went
+            // takes a place of its own.
+            let skipped = held.len() - LOG_LINE_CAP + 1;
+            held.drain(..skipped);
+            held.insert(0, format!("\u{2026} {skipped} earlier lines skipped"));
+        }
+        self.log_finished = finished;
+        if self.log_follow {
+            let viewport = self.log_scroll.viewport.max(1);
+            self.log_scroll.content = held.len();
+            self.log_scroll
+                .scroll_to(held.len().saturating_sub(viewport));
+        }
+    }
+
+    /// Whether the log pane is following the tail, which is what `End` puts it
+    /// back to and scrolling up takes it out of.
+    #[must_use]
+    pub const fn log_following(&self) -> bool {
+        self.log_follow
+    }
+
+    pub const fn follow_log(&mut self, follow: bool) {
+        self.log_follow = follow;
+    }
+
+    /// Whether the log has the whole pane, which `l` toggles.
+    #[must_use]
+    pub const fn log_full_pane(&self) -> bool {
+        self.log_full
+    }
+
+    pub const fn toggle_log_pane(&mut self) {
+        self.log_full = !self.log_full;
     }
 
     /// The runs still going, which is what the watcher is asked to follow.
@@ -447,6 +589,33 @@ impl Screen for PipelinesScreen {
         }
         if shell.focus == Focus::Details {
             match key.code {
+                KeyCode::Char('l') => {
+                    self.toggle_log_pane();
+                    return AppAction::None;
+                }
+                KeyCode::End => {
+                    self.follow_log(true);
+                    return AppAction::None;
+                }
+                KeyCode::Down | KeyCode::Char('j') if self.log_full => {
+                    self.log_scroll.scroll_by(1);
+                    self.follow_log(false);
+                    return AppAction::None;
+                }
+                KeyCode::Up | KeyCode::Char('k') if self.log_full => {
+                    self.log_scroll.scroll_by(-1);
+                    self.follow_log(false);
+                    return AppAction::None;
+                }
+                KeyCode::PageUp if self.log_full => {
+                    self.log_scroll.scroll_by(-10);
+                    self.follow_log(false);
+                    return AppAction::None;
+                }
+                KeyCode::PageDown if self.log_full => {
+                    self.log_scroll.scroll_by(10);
+                    return AppAction::None;
+                }
                 KeyCode::Down | KeyCode::Char('j') => {
                     self.move_timeline_cursor(1);
                     return AppAction::None;
@@ -573,14 +742,19 @@ impl Screen for PipelinesScreen {
 
     fn scroll_state(&self, surface: ScrollSurface) -> ScrollState {
         match surface {
-            ScrollSurface::Details => self.details,
+            ScrollSurface::Details => self.log_scroll,
             _ => self.cursor().scroll,
         }
     }
 
+    /// Scrolling the log by hand is what takes it out of follow mode, wherever
+    /// the scroll came from — a key, the wheel, or the scrollbar thumb.
     fn scroll_state_mut(&mut self, surface: ScrollSurface) -> &mut ScrollState {
         match surface {
-            ScrollSurface::Details => &mut self.details,
+            ScrollSurface::Details => {
+                self.log_follow = false;
+                &mut self.log_scroll
+            }
             _ => &mut self.cursor_mut().scroll,
         }
     }
