@@ -19,6 +19,7 @@ pub const TAGS_FIELD: &str = "System.Tags";
 pub const PRIORITY_FIELD: &str = "Microsoft.VSTS.Common.Priority";
 pub const ITERATION_PATH_FIELD: &str = "System.IterationPath";
 pub const AREA_PATH_FIELD: &str = "System.AreaPath";
+pub const DESCRIPTION_FIELD: &str = "System.Description";
 
 /// One JSON Patch operation setting a work-item field. Azure DevOps takes `add`
 /// for a field that is already present as well as for one that is not.
@@ -182,6 +183,22 @@ impl FieldEdit {
         Self::new(AREA_PATH_FIELD, "Area", path)
     }
 
+    /// Rewrite the description, which is the one field written as HTML rather
+    /// than as a value. A notification cannot say a whole document out loud, so
+    /// it says the field changed and leaves the reading of it to the details
+    /// pane; an empty document clears the field.
+    #[must_use]
+    pub fn description(html: &str) -> Self {
+        Self {
+            shown: Some(if html.trim().is_empty() {
+                String::new()
+            } else {
+                "updated".to_owned()
+            }),
+            ..Self::new(DESCRIPTION_FIELD, "Description", html)
+        }
+    }
+
     /// Take a work item off whoever holds it. `System.AssignedTo` goes back to
     /// nobody by being removed, not by being set to an empty identity.
     #[must_use]
@@ -261,6 +278,15 @@ impl FieldEdit {
                 ticket.iteration_path = self.value_string();
             }
             AREA_PATH_FIELD if !self.value.is_clear() => ticket.area_path = self.value_string(),
+            // The description is held twice: as Azure DevOps stores it, and as
+            // the details pane draws it. An edit writes the markup and renders
+            // the reading of it, so the pane changes with the row rather than
+            // waiting for the copy the server sends back.
+            DESCRIPTION_FIELD => {
+                let html = self.value_string();
+                ticket.description = crate::html::html_to_text(&html);
+                ticket.description_html = html;
+            }
             TAGS_FIELD => {
                 ticket.tags = text
                     .unwrap_or_default()
@@ -450,14 +476,51 @@ mod tests {
         FieldEdit::new(PRIORITY_FIELD, "Priority", "3").apply(&mut edited);
         assert_eq!(edited.priority, Some(3), "Azure DevOps quotes some numbers");
 
-        let unknown = FieldEdit::new("System.Description", "Description", "Later");
+        let unknown = FieldEdit::new("System.History", "History", "Later");
         let before = edited.clone();
         unknown.apply(&mut edited);
         assert_eq!(
             edited, before,
             "a field the row does not model waits for the server copy"
         );
-        assert_eq!(unknown.summary(), "Description → Later");
+        assert_eq!(unknown.summary(), "History → Later");
+    }
+
+    #[test]
+    fn a_description_writes_the_markup_and_shows_the_reading_of_it() {
+        let edit = FieldEdit::description("<p>Hand it to <code>$EDITOR</code>.</p>");
+        assert_eq!(
+            edit.patch(),
+            vec![json!({
+                "op": "add",
+                "path": "/fields/System.Description",
+                "value": "<p>Hand it to <code>$EDITOR</code>.</p>",
+            })],
+            "Azure DevOps is handed the document it stores"
+        );
+        assert_eq!(
+            edit.summary(),
+            "Description → updated",
+            "a notification cannot say a whole document out loud"
+        );
+
+        let mut described = ticket();
+        edit.apply(&mut described);
+        assert_eq!(
+            described.description_html,
+            "<p>Hand it to <code>$EDITOR</code>.</p>"
+        );
+        assert_eq!(
+            described.description, "Hand it to `$EDITOR`.",
+            "the details pane reads the new description at once"
+        );
+        assert_eq!(described.title, ticket().title, "only the field it names");
+
+        let cleared = FieldEdit::description("");
+        assert_eq!(cleared.summary(), "Description → (none)");
+        cleared.apply(&mut described);
+        assert!(described.description.is_empty());
+        assert!(described.description_html.is_empty());
     }
 
     #[test]

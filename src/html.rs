@@ -66,29 +66,46 @@ const NAMED_ENTITIES: &[(&str, char)] = &[
 #[must_use]
 pub fn html_to_text(html: &str) -> String {
     let mut renderer = Renderer::new(html.len());
+    walk(html, &mut renderer);
+    renderer.finish()
+}
+
+/// What a walk of some markup hands each piece of it to. The plain text the
+/// details pane draws and the Markdown a description is edited as are two
+/// readings of the same documents, so the tokenizer below is written once and
+/// each renderer only says what a text node and a tag mean to it.
+pub(crate) trait Visitor {
+    fn text(&mut self, raw: &str);
+    fn tag(&mut self, tag: &Tag<'_>);
+}
+
+/// Walks `html` once, handing every text node and every tag to `visitor` in
+/// the order they were written. Markup that does not parse as a tag is handed
+/// over as the text it looks like, so nothing is dropped on the way.
+pub(crate) fn walk(html: &str, visitor: &mut impl Visitor) {
     let mut rest = html;
     while let Some(start) = rest.find('<') {
-        renderer.text(&rest[..start]);
+        visitor.text(&rest[..start]);
         let after = &rest[start + 1..];
         // A comment runs to `-->` however much markup it swallows on the way.
         if let Some(body) = after.strip_prefix("!--") {
             let Some(end) = body.find("-->") else {
-                return renderer.finish();
+                return;
             };
             rest = &body[end + 3..];
             continue;
         }
         let Some(end) = after.find('>') else {
             // A `<` with nothing closing it is text someone typed.
-            renderer.text(&rest[start..]);
-            return renderer.finish();
+            visitor.text(&rest[start..]);
+            return;
         };
         let raw = &after[..end];
         // A `<` inside what looked like a tag means the outer one was never a
         // tag at all: `a < b <br>` opens no element. Keep it as text and start
         // again from the inner `<`.
         if let Some(inner) = raw.find('<') {
-            renderer.text(&rest[start..start + 1 + inner]);
+            visitor.text(&rest[start..start + 1 + inner]);
             rest = &after[inner..];
             continue;
         }
@@ -99,12 +116,11 @@ pub fn html_to_text(html: &str) -> String {
             continue;
         }
         match Tag::parse(raw) {
-            Some(tag) => renderer.tag(&tag),
-            None => renderer.text(literal),
+            Some(tag) => visitor.tag(&tag),
+            None => visitor.text(literal),
         }
     }
-    renderer.text(rest);
-    renderer.finish()
+    visitor.text(rest);
 }
 
 #[derive(Default)]
@@ -374,10 +390,20 @@ impl Renderer {
     }
 }
 
-/// One tag, reduced to the parts the renderer reads.
-struct Tag<'a> {
-    name: String,
-    closing: bool,
+impl Visitor for Renderer {
+    fn text(&mut self, raw: &str) {
+        Self::text(self, raw);
+    }
+
+    fn tag(&mut self, tag: &Tag<'_>) {
+        Self::tag(self, tag);
+    }
+}
+
+/// One tag, reduced to the parts a renderer reads.
+pub(crate) struct Tag<'a> {
+    pub(crate) name: String,
+    pub(crate) closing: bool,
     attributes: &'a str,
 }
 
@@ -404,10 +430,16 @@ impl<'a> Tag<'a> {
         })
     }
 
+    /// Everything written between the tag name and the `>`, as it stands.
+    /// Enough to tell a bare `<span>` from one carrying a colour.
+    pub(crate) fn attributes(&self) -> &str {
+        self.attributes
+    }
+
     /// The value of one attribute, with its entities decoded. Quoted and bare
     /// values both parse, and a name that only appears inside another value is
     /// not mistaken for the attribute itself.
-    fn attribute(&self, wanted: &str) -> Option<String> {
+    pub(crate) fn attribute(&self, wanted: &str) -> Option<String> {
         let lowered = self.attributes.to_ascii_lowercase();
         let mut from = 0;
         while let Some(offset) = lowered[from..].find(wanted) {
@@ -443,7 +475,7 @@ fn attribute_value(raw: &str) -> String {
 /// code point, the names in [`NAMED_ENTITIES`] by table. Anything else — a
 /// bare `&`, an unknown name — is left exactly as it was written, and each
 /// entity is decoded once, so `&amp;lt;` is the text `&lt;`.
-fn decode_entities(raw: &str) -> String {
+pub(crate) fn decode_entities(raw: &str) -> String {
     if !raw.contains('&') {
         return raw.to_owned();
     }
