@@ -53,6 +53,10 @@ Press `r` at any time to pull immediately.
 cargo run --release -- --refresh 300
 ```
 
+`TICKET_TUI_REFRESH` sets the same interval, and `--query` narrows what a pull
+asks Azure DevOps for; both are under
+[Organization and project](#organization-and-project).
+
 Without a configured organization the TUI runs offline: it browses the database,
 never contacts the network, and `r` reports the missing organization. An empty
 database then opens to the status line `Database is empty and offline; run with
@@ -103,6 +107,56 @@ Both values are resolved in this order:
 values the TUI browses the database offline and never syncs; with `--sync` an
 unresolved value fails with the missing flag, variable, and command spelled out.
 
+### The database remembers which project it holds
+
+Every successful pull records the organization and project it ran under in the
+`sync_meta` table. A run that resolves a different pair will not sync into a
+database that already holds work items: the sync worker never starts, the TUI
+opens offline over the rows that are there, and the notification — and the `i`
+overlay's sync line — says
+
+```text
+Database holds other-org/borealis; pass --database for another project or --sync to replace it
+```
+
+so a typo in `--project`, or a `TICKET_TUI_ORG` left over from yesterday, cannot
+quietly replace a database. `--sync` is how the replacement is asked for: it
+pulls the new project in full and re-stamps the database with it. A database
+with nothing in it, or one written before this was recorded, adopts whatever the
+next pull brings.
+
+### `TICKET_TUI_REFRESH`
+
+`TICKET_TUI_REFRESH` mirrors `--refresh`, so a shell profile can set the pull
+interval once. The flag wins when both are given, and a value that is not a
+number of seconds is a startup error naming the variable rather than a silent
+fall back to the default.
+
+### `--query`: how much of the project to sync
+
+A project too large to hold whole is narrowed with `--query`, or
+`TICKET_TUI_QUERY`, which takes one extra WIQL condition:
+
+```console
+cargo run --release -- --query "[System.ChangedDate] > @today-180"
+cargo run --release -- --query "[System.WorkItemType] <> 'Test Case'"
+```
+
+The condition is ANDed into both the full and the incremental query, in
+parentheses so its own `OR` cannot swallow the clauses around it, and is passed
+to Azure DevOps verbatim: WIQL is its dialect to parse, so a mistake comes back
+as the usual sync failure notification rather than as a local guess about what
+is legal.
+
+The scope is stored in `sync_meta` as `sync_scope`. Changing it — or dropping it
+— makes the next pull a full one, because a watermark says what changed, not
+what the old condition kept out: only a full pull can bring in what a widened
+scope now admits and drop what a narrowed one now excludes.
+
+The `i` overlay's sync line names all of it: the organization and project, the
+refresh interval or `on request` when the timer is off, the scope when one is
+configured, and how the last pull went.
+
 ## Sync
 
 A sync worker pulls in the background on a timer, every 60 seconds by default,
@@ -143,6 +197,16 @@ SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project ORDER BY
 Deleting a work item is not an edit — it stops being listed — so this is what
 catches one moved to the recycle bin, and the rows it no longer names are
 removed along with their links, comments, and history.
+
+A configured [sync scope](#--query-how-much-of-the-project-to-sync) is ANDed
+into both queries in parentheses, so the same reconciliation drops a work item
+an edit has moved outside the scope:
+
+```sql
+SELECT [System.Id] FROM WorkItems
+WHERE [System.TeamProject] = @project AND ([System.WorkItemType] <> 'Test Case')
+ORDER BY [System.Id]
+```
 
 Whatever the changed-since query names is read in batches of 200 from
 `/_apis/wit/workitems` with `$expand=relations` and written in one transaction,
@@ -542,12 +606,22 @@ every pull, and comments and revision history for every work item whose
 `details_rev` says they have been read. A work item the project stops listing
 takes all three with it. The `sync_meta`
 key/value table describes the sync itself rather than the work items, so a full
-pull clears the other tables but leaves it alone. Two keys live there:
-`me_display_name`, the signed-in display name that marks your own work items,
-and `watermark_changed_at`, the greatest `System.ChangedDate` the last
-successful pull saw, as an RFC 3339 UTC timestamp. That watermark is where the
-next incremental pull starts asking; a database without one is pulled in full
-and left with one.
+pull clears the other tables but leaves it alone. These keys live there, beside
+the `classification_nodes_fetched_at` below:
+
+| Key | Meaning |
+|---|---|
+| `me_display_name` | The signed-in display name that marks your own work items |
+| `watermark_changed_at` | The greatest `System.ChangedDate` the last successful pull saw, as an RFC 3339 UTC timestamp |
+| `organization`, `project` | Where the stored work items were pulled from |
+| `sync_scope` | The extra WIQL condition that pull narrowed the project with, empty for a project pulled whole |
+
+The watermark is where the next incremental pull starts asking; a database
+without one is pulled in full and left with one. The organization and project
+are what a run resolving a different pair refuses to sync over, and the scope is
+what a pull compares its own against: a scope that has moved forces one full
+pull. Those three are written by every successful pull and only when they
+change, so an idle project's pull still leaves the file untouched.
 
 The `identities` table holds what the assignee picker offers beyond the people
 the rows already name: `display_name`, the primary key, and `unique_name`, the

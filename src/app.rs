@@ -624,6 +624,10 @@ pub struct App {
     /// Whether Azure DevOps is configured at all: an offline run browses the
     /// database and reports no sync state.
     sync_enabled: bool,
+    /// Where the rows come from — the organization and project, how often they
+    /// are pulled, and the scope narrowing them — as the database overlay
+    /// reports it. `None` until the run resolves a project.
+    sync_source: Option<String>,
     /// When the last successful pull finished, which is not `loaded_at`: a
     /// SQLite reload moves that too.
     synced_at: Option<Instant>,
@@ -737,6 +741,7 @@ impl App {
             pending_comments: HashSet::new(),
             offline_reason: None,
             sync_enabled: false,
+            sync_source: None,
             synced_at: None,
             sync_error: None,
             me: None,
@@ -1126,12 +1131,33 @@ impl App {
             .map(|at| format!("Synced {}", relative_age(at.elapsed())))
     }
 
-    /// The database overlay's one-line account of the last sync.
+    /// Where the rows are pulled from, as the database overlay reports it.
+    pub fn set_sync_source(&mut self, source: Option<String>) {
+        self.sync_source = source;
+    }
+
+    /// The database overlay's one-line account of the sync: where the rows come
+    /// from, and how the last pull went. An offline run says why it is offline
+    /// there instead — a missing organization, or a database another project
+    /// filled.
     #[must_use]
     pub fn sync_summary(&self) -> String {
-        if !self.sync_enabled {
-            return "offline; no Azure DevOps organization configured".into();
+        let state = if self.sync_enabled {
+            self.sync_state()
+        } else {
+            self.offline_reason.as_ref().map_or_else(
+                || "offline; no Azure DevOps organization configured".to_owned(),
+                |reason| format!("offline; {reason}"),
+            )
+        };
+        match &self.sync_source {
+            Some(source) => format!("{source} · {state}"),
+            None => state,
         }
+    }
+
+    /// How the last pull went, for a run that can pull at all.
+    fn sync_state(&self) -> String {
         let last = self
             .synced_at
             .map_or_else(|| "not yet".to_owned(), |at| relative_age(at.elapsed()));

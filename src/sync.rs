@@ -229,10 +229,39 @@ impl WorkItemSource for AzureClient {
     }
 }
 
+/// Which slice of Azure DevOps a connector's sources read: the project the work
+/// items come from, and the extra WIQL condition narrowing it. A pull records
+/// this beside the rows, so a later run can tell which project a database holds
+/// and a changed condition can force a full pull.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyncScope {
+    pub organization: String,
+    pub project: String,
+    /// The extra WIQL condition ANDed into both pulls, or `None` for a project
+    /// pulled entire.
+    pub condition: Option<String>,
+}
+
+impl From<&AzureConfig> for SyncScope {
+    fn from(config: &AzureConfig) -> Self {
+        Self {
+            organization: config.organization.clone(),
+            project: config.project.clone(),
+            condition: config.scope.clone(),
+        }
+    }
+}
+
 /// Opens a source the first time one is needed, so the TUI never waits for an
 /// access token before it draws.
 pub trait SourceConnector: Send {
     fn connect(&mut self) -> Result<Box<dyn WorkItemSource>>;
+    /// What this connector's sources pull. A source standing in for Azure
+    /// DevOps answers with nothing, and the pull records nothing about where
+    /// its work items came from.
+    fn scope(&self) -> Option<SyncScope> {
+        None
+    }
 }
 
 /// Connects to the configured Azure DevOps project.
@@ -251,6 +280,10 @@ impl AzureConnector {
 impl SourceConnector for AzureConnector {
     fn connect(&mut self) -> Result<Box<dyn WorkItemSource>> {
         Ok(Box::new(AzureClient::connect(self.config.clone())?))
+    }
+
+    fn scope(&self) -> Option<SyncScope> {
+        Some(SyncScope::from(&self.config))
     }
 }
 
@@ -535,12 +568,23 @@ impl Worker {
     /// A pull starts from the watermark the last one left behind. Without one —
     /// a fresh file, a schema the current build rebuilt, or a value written by
     /// something that can no longer be read — there is no safe starting point,
-    /// so everything comes down once and leaves a watermark for next time.
+    /// so everything comes down once and leaves a watermark for next time. A
+    /// scope that no longer matches the one the rows were pulled under is the
+    /// other way to lose that starting point.
     fn try_pull(&mut self, events: &Sender<SyncEvent>) -> Result<SyncOutcome> {
-        match self.watermark()? {
-            Some(watermark) => self.pull_changed(watermark, events),
-            None => self.pull_everything(events),
-        }
+        let outcome = match self.watermark()? {
+            // A scope that has moved makes the stored rows the wrong slice of
+            // the project: the condition may have widened, and only a full pull
+            // brings in what it now admits, or narrowed, and only a full pull
+            // drops what it now excludes.
+            Some(watermark) if !self.rescoped()? => self.pull_changed(watermark, events)?,
+            _ => self.pull_everything(events)?,
+        };
+        // Which project these rows came from, recorded after the pull that
+        // brought them rather than before it: a pull that failed says nothing
+        // about what the database holds.
+        self.record_scope()?;
+        Ok(outcome)
     }
 
     fn watermark(&mut self) -> Result<Option<Timestamp>> {
@@ -548,6 +592,47 @@ impl Worker {
             return Ok(None);
         };
         Ok(Timestamp::parse(&stored).ok())
+    }
+
+    /// Whether the configured scope differs from the one the stored rows were
+    /// pulled under. A connector that does not know its own scope — every fake
+    /// — never rescopes anything.
+    fn rescoped(&mut self) -> Result<bool> {
+        let Some(scope) = self.connector.scope() else {
+            return Ok(false);
+        };
+        Ok(self.stored_condition()? != scope.condition)
+    }
+
+    /// The WIQL condition the stored rows were pulled under. It is written as
+    /// the empty string when there is none, so a database that has never
+    /// recorded one and a database pulled whole read the same.
+    fn stored_condition(&mut self) -> Result<Option<String>> {
+        Ok(self
+            .repository()?
+            .meta(db::SYNC_SCOPE_KEY)?
+            .filter(|condition| !condition.is_empty()))
+    }
+
+    /// Records the project and condition this pull ran under, and only when one
+    /// of them moved: an idle project's pull still leaves the file untouched,
+    /// which is what keeps every other reader from reloading for nothing.
+    fn record_scope(&mut self) -> Result<()> {
+        let Some(scope) = self.connector.scope() else {
+            return Ok(());
+        };
+        let condition = scope.condition.clone().unwrap_or_default();
+        let repository = self.repository()?;
+        for (key, value) in [
+            (db::ORGANIZATION_KEY, scope.organization.as_str()),
+            (db::PROJECT_KEY, scope.project.as_str()),
+            (db::SYNC_SCOPE_KEY, condition.as_str()),
+        ] {
+            if repository.meta(key)?.as_deref() != Some(value) {
+                repository.set_meta(key, value)?;
+            }
+        }
+        Ok(())
     }
 
     /// Replaces every stored work item with a fresh copy of the project.
@@ -871,6 +956,10 @@ mod tests {
         comment: Option<CommentRecord>,
         /// Every comment body posted, with the work item it was posted on.
         posted: Arc<Mutex<Vec<(i64, String)>>>,
+        /// What this source pulls, for the tests about recording it. `None`
+        /// stands in for a source that does not know, which is what leaves
+        /// every other test's database free of sync scope rows.
+        scope: Option<SyncScope>,
     }
 
     impl FakeSource {
@@ -928,6 +1017,18 @@ mod tests {
         fn with_nodes(self, nodes: Vec<ClassificationNode>) -> Self {
             Self {
                 classification_nodes: Some(nodes),
+                ..self
+            }
+        }
+
+        /// Which project this source pulls, and how much of it.
+        fn scoped(self, condition: Option<&str>) -> Self {
+            Self {
+                scope: Some(SyncScope {
+                    organization: "demo".into(),
+                    project: "atlas".into(),
+                    condition: condition.map(ToOwned::to_owned),
+                }),
                 ..self
             }
         }
@@ -1051,6 +1152,10 @@ mod tests {
         fn connect(&mut self) -> Result<Box<dyn WorkItemSource>> {
             Ok(Box::new(self.clone()))
         }
+
+        fn scope(&self) -> Option<SyncScope> {
+            self.scope.clone()
+        }
     }
 
     /// A database holding one ticket, plus the worker reading and writing it.
@@ -1082,11 +1187,15 @@ mod tests {
         path
     }
 
-    fn stored_watermark(path: &PathBuf) -> Option<String> {
+    fn stored_meta(path: &PathBuf, key: &str) -> Option<String> {
         SqliteTicketRepository::open_existing(path)
             .unwrap()
-            .meta(db::WATERMARK_KEY)
+            .meta(key)
             .unwrap()
+    }
+
+    fn stored_watermark(path: &PathBuf) -> Option<String> {
+        stored_meta(path, db::WATERMARK_KEY)
     }
 
     fn edited(handle: &SyncHandle) -> Result<EditApplied, EditRejection> {
@@ -1207,6 +1316,94 @@ mod tests {
             SyncEvent::Finished { origin, outcome } => (origin, outcome),
             other => panic!("expected a finished pull, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_pull_records_the_project_and_condition_it_ran_under() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource::with(vec![Ok(SyncBatch {
+            tickets: vec![ticket(7, "Pulled")],
+            relations: Vec::new(),
+        })])
+        .scoped(Some("[System.WorkItemType] <> 'Test Case'"));
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        assert!(matches!(pulled(&handle), SyncOutcome::Pulled { .. }));
+
+        assert_eq!(
+            stored_meta(&path, db::ORGANIZATION_KEY).as_deref(),
+            Some("demo"),
+            "the database records which project filled it"
+        );
+        assert_eq!(
+            stored_meta(&path, db::PROJECT_KEY).as_deref(),
+            Some("atlas")
+        );
+        assert_eq!(
+            stored_meta(&path, db::SYNC_SCOPE_KEY).as_deref(),
+            Some("[System.WorkItemType] <> 'Test Case'"),
+            "and how much of it was asked for"
+        );
+    }
+
+    #[test]
+    fn a_changed_scope_pulls_the_project_again_and_stores_the_new_condition() {
+        let directory = tempdir().unwrap();
+        let path = watermarked_database(
+            &directory,
+            &[ticket(1, "Existing")],
+            &TicketGraph::default(),
+            "2026-02-01T00:00:00Z",
+        );
+        let mut repository = SqliteTicketRepository::open_existing(&path).unwrap();
+        repository
+            .set_meta(db::SYNC_SCOPE_KEY, "[System.WorkItemType] <> 'Test Case'")
+            .unwrap();
+        drop(repository);
+        let source = FakeSource::with(vec![
+            Ok(SyncBatch {
+                tickets: vec![ticket(7, "In the new scope")],
+                relations: Vec::new(),
+            }),
+            Ok(SyncBatch {
+                tickets: vec![ticket(8, "Changed since")],
+                relations: Vec::new(),
+            }),
+        ])
+        .scoped(Some("[System.ChangedDate] > @today-180"));
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        let SyncOutcome::Pulled { mode, .. } = pulled(&handle) else {
+            panic!("expected a successful pull");
+        };
+        assert_eq!(
+            mode,
+            SyncMode::Full,
+            "a watermark says what changed, not what the old condition kept out"
+        );
+        assert_eq!(
+            stored_meta(&path, db::SYNC_SCOPE_KEY).as_deref(),
+            Some("[System.ChangedDate] > @today-180")
+        );
+        let stored = SqliteTicketRepository::open_existing(&path).unwrap();
+        assert_eq!(
+            stored.load_all().unwrap().len(),
+            1,
+            "the work items the old condition let through are gone"
+        );
+
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        let SyncOutcome::Pulled { mode, .. } = pulled(&handle) else {
+            panic!("expected a successful pull");
+        };
+        assert_eq!(
+            mode,
+            SyncMode::Incremental,
+            "the condition matches what the rows were pulled under, so the watermark is trusted"
+        );
     }
 
     #[test]
