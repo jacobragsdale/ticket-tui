@@ -9,12 +9,12 @@ use directories::ProjectDirs;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::model::{
-    CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateCatalog, StateCategory,
-    StateOption, Ticket, TicketGraph, TicketKey,
+    CommentRecord, DetailsUpdate, HistoryRecord, RelationKind, RelationRecord, StateCatalog,
+    StateCategory, StateOption, Ticket, TicketGraph, TicketKey,
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -52,6 +52,7 @@ CREATE TABLE work_items (
     created_at     TEXT NOT NULL,
     changed_at     TEXT NOT NULL,
     web_url        TEXT NOT NULL,
+    details_rev    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (organization, work_item_id)
 );
 CREATE INDEX work_items_changed_idx ON work_items(changed_at);
@@ -179,7 +180,8 @@ impl SqliteTicketRepository {
         let mut statement = self.connection.prepare(
             "SELECT organization, project, work_item_id, revision, work_item_type,
                     title, state, reason, assigned_to, priority, area_path,
-                    iteration_path, tags, description, created_at, changed_at, web_url
+                    iteration_path, tags, description, created_at, changed_at, web_url,
+                    details_rev
              FROM work_items",
         )?;
         let rows = statement.query_map([], |row| {
@@ -213,6 +215,7 @@ impl SqliteTicketRepository {
                 created_at: parse_row_timestamp(created_raw, "created_at", &organization, id)?,
                 changed_at: parse_row_timestamp(changed_raw, "changed_at", &organization, id)?,
                 web_url: row.get(16)?,
+                details_rev: row.get(17)?,
             })
         })?;
 
@@ -331,37 +334,10 @@ impl SqliteTicketRepository {
             )?;
         }
         for comment in &graph.comments {
-            transaction.execute(
-                "INSERT OR REPLACE INTO work_item_comments
-                    (organization, work_item_id, comment_id, created_at, author, body)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    comment.ticket.organization,
-                    comment.ticket.id,
-                    comment.comment_id,
-                    comment.created_at.to_rfc3339(),
-                    comment.author,
-                    comment.text
-                ],
-            )?;
+            insert_comment(&transaction, comment)?;
         }
         for entry in &graph.history {
-            transaction.execute(
-                "INSERT OR REPLACE INTO work_item_history
-                    (organization, work_item_id, revision, changed_at, changed_by,
-                     field_name, old_value, new_value)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    entry.ticket.organization,
-                    entry.ticket.id,
-                    entry.revision,
-                    entry.changed_at.to_rfc3339(),
-                    entry.changed_by,
-                    entry.field_name,
-                    entry.old_value,
-                    entry.new_value
-                ],
-            )?;
+            insert_history(&transaction, entry)?;
         }
         transaction.commit()?;
         Ok(tickets.len())
@@ -372,17 +348,52 @@ impl SqliteTicketRepository {
     /// changed one record, so replacing the whole database would throw away
     /// everything else the last pull brought.
     pub fn upsert(&mut self, ticket: &Ticket, relations: &[RelationRecord]) -> Result<()> {
-        self.write_upserts(slice::from_ref(ticket), relations)
+        self.write_upserts(slice::from_ref(ticket), relations, &[])
             .with_context(|| format!("failed to store work item {}", ticket.key.id))
     }
 
-    /// Writes a batch of work items and the links leading out of them in one
-    /// transaction, leaving every other row alone. This is how an incremental
-    /// pull lands: only what changed is rewritten, so the rows nobody touched
-    /// keep the bytes they already had.
-    pub fn upsert_all(&mut self, tickets: &[Ticket], relations: &[RelationRecord]) -> Result<()> {
-        self.write_upserts(tickets, relations)
+    /// Writes a batch of work items, the links leading out of them, and the
+    /// comments and history read for them, in one transaction, leaving every
+    /// other row alone. This is how an incremental pull lands: only what
+    /// changed is rewritten, so the rows nobody touched keep the bytes they
+    /// already had, and a work item's rows and its discussion never disagree
+    /// about which revision they came from.
+    pub fn upsert_all(
+        &mut self,
+        tickets: &[Ticket],
+        relations: &[RelationRecord],
+        details: &[DetailsUpdate],
+    ) -> Result<()> {
+        self.write_upserts(tickets, relations, details)
             .with_context(|| format!("failed to store {} changed work items", tickets.len()))
+    }
+
+    /// Replaces the comments and revision history of work items whose rows are
+    /// already stored, which is how a details fetch the selection asked for
+    /// lands. Nothing at all is written for an empty batch.
+    pub fn replace_details(&mut self, details: &[DetailsUpdate]) -> Result<()> {
+        if details.is_empty() {
+            return Ok(());
+        }
+        let transaction = self.connection.transaction()?;
+        write_details(&transaction, details)?;
+        transaction
+            .commit()
+            .context("failed to store work item comments and history")
+    }
+
+    /// The stored revision of one work item, which is the revision a details
+    /// fetch records against it. `None` when the row is gone, which is what a
+    /// fetch racing a deletion sees.
+    pub fn revision_of(&self, key: &TicketKey) -> Result<Option<i64>> {
+        self.connection
+            .query_row(
+                "SELECT revision FROM work_items WHERE organization = ?1 AND work_item_id = ?2",
+                params![key.organization, key.id],
+                |row| row.get(0),
+            )
+            .optional()
+            .with_context(|| format!("failed to read the revision of work item {}", key.id))
     }
 
     /// Every work item type the database already knows the states of, so a pull
@@ -449,10 +460,15 @@ impl SqliteTicketRepository {
         Ok(missing.len())
     }
 
-    /// One transaction holding every work item in `tickets` and the links
-    /// leading out of each of them, replacing whatever those work items linked
-    /// to before.
-    fn write_upserts(&mut self, tickets: &[Ticket], relations: &[RelationRecord]) -> Result<()> {
+    /// One transaction holding every work item in `tickets`, the links leading
+    /// out of each of them, and the details read for any of them, replacing
+    /// whatever those work items linked to and said before.
+    fn write_upserts(
+        &mut self,
+        tickets: &[Ticket],
+        relations: &[RelationRecord],
+        details: &[DetailsUpdate],
+    ) -> Result<()> {
         let transaction = self.connection.transaction()?;
         for ticket in tickets {
             insert_ticket(&transaction, ticket)?;
@@ -475,6 +491,9 @@ impl SqliteTicketRepository {
                 ],
             )?;
         }
+        // After the work items: a fresh row carries `details_rev = 0`, and it
+        // is this that lifts it to the revision the details were read at.
+        write_details(&transaction, details)?;
         transaction.commit()?;
         Ok(())
     }
@@ -656,8 +675,10 @@ fn insert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
         "INSERT OR REPLACE INTO work_items (
             organization, project, work_item_id, revision, work_item_type,
             title, state, reason, assigned_to, priority, area_path,
-            iteration_path, tags, description, created_at, changed_at, web_url
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            iteration_path, tags, description, created_at, changed_at, web_url,
+            details_rev
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                   ?18)",
         params![
             ticket.key.organization,
             ticket.project,
@@ -676,8 +697,75 @@ fn insert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
             ticket.created_at.to_rfc3339(),
             ticket.changed_at.to_rfc3339(),
             ticket.web_url,
+            ticket.details_rev,
         ],
     )?;
+    Ok(())
+}
+
+fn insert_comment(transaction: &Transaction<'_>, comment: &CommentRecord) -> Result<()> {
+    transaction.execute(
+        "INSERT OR REPLACE INTO work_item_comments
+            (organization, work_item_id, comment_id, created_at, author, body)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            comment.ticket.organization,
+            comment.ticket.id,
+            comment.comment_id,
+            comment.created_at.to_rfc3339(),
+            comment.author,
+            comment.text
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_history(transaction: &Transaction<'_>, entry: &HistoryRecord) -> Result<()> {
+    transaction.execute(
+        "INSERT OR REPLACE INTO work_item_history
+            (organization, work_item_id, revision, changed_at, changed_by,
+             field_name, old_value, new_value)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            entry.ticket.organization,
+            entry.ticket.id,
+            entry.revision,
+            entry.changed_at.to_rfc3339(),
+            entry.changed_by,
+            entry.field_name,
+            entry.old_value,
+            entry.new_value
+        ],
+    )?;
+    Ok(())
+}
+
+/// Replaces the comments and revision history of every work item in `updates`
+/// and records the revision they were read at. A work item with neither is
+/// still written: its `details_rev` moves, which is what stops it being asked
+/// about again.
+fn write_details(transaction: &Transaction<'_>, updates: &[DetailsUpdate]) -> Result<()> {
+    for update in updates {
+        transaction.execute(
+            "DELETE FROM work_item_comments WHERE organization = ?1 AND work_item_id = ?2",
+            params![update.key.organization, update.key.id],
+        )?;
+        transaction.execute(
+            "DELETE FROM work_item_history WHERE organization = ?1 AND work_item_id = ?2",
+            params![update.key.organization, update.key.id],
+        )?;
+        for comment in &update.details.comments {
+            insert_comment(transaction, comment)?;
+        }
+        for entry in &update.details.history {
+            insert_history(transaction, entry)?;
+        }
+        transaction.execute(
+            "UPDATE work_items SET details_rev = ?3
+             WHERE organization = ?1 AND work_item_id = ?2",
+            params![update.key.organization, update.key.id, update.revision],
+        )?;
+    }
     Ok(())
 }
 
@@ -708,6 +796,7 @@ mod tests {
             created_at: ts("2026-01-01T00:00:00Z"),
             changed_at: ts("2026-02-01T00:00:00Z"),
             web_url: format!("https://dev.azure.com/example-org/atlas/_workitems/edit/{id}"),
+            details_rev: 0,
         }
     }
 

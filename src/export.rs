@@ -133,6 +133,7 @@ mod tests {
             created_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
             changed_at: crate::timestamp::ts("2026-01-02T00:00:00Z"),
             web_url: "https://dev.azure.com/demo/atlas/_workitems/edit/42".into(),
+            details_rev: 0,
         }
     }
 

@@ -18,8 +18,8 @@ use crate::app::{
 use crate::command::{COMMANDS, EDIT_MENU, key_label_for};
 use crate::filter::{FacetTarget, FilterField};
 use crate::model::{
-    FamilySnapshot, FamilyTreeEntry, SortDirection, SortField, StateCategory, Ticket, TicketKey,
-    path_leaf,
+    FamilySnapshot, FamilyTreeEntry, HistoryRecord, SortDirection, SortField, StateCategory,
+    Ticket, TicketKey, path_leaf,
 };
 use crate::pointer::{
     PointerLayer, PointerTarget, ScrollMetrics, ScrollSurface, SelectableSnapshot,
@@ -795,23 +795,18 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         detail_lines.push(field_line("Created", ticket.created_at.exact_utc()));
         detail_lines.push(field_line("Changed", ticket.changed_at.exact_utc()));
         let history = app.history_for(&ticket.key);
-        if !history.is_empty() {
+        let loading_details = app.details_pending.as_ref() == Some(&ticket.key);
+        if loading_details || !history.is_empty() {
+            let now = OffsetDateTime::now_utc();
             detail_lines.push(Line::default());
             detail_lines.push(section_line("History"));
-            for entry in history {
-                let who = entry.changed_by.as_deref().unwrap_or("unknown");
-                let old = entry.old_value.as_deref().unwrap_or("—");
-                let new = entry.new_value.as_deref().unwrap_or("—");
-                detail_lines.push(Line::from(format!(
-                    "  r{} · {} · {who}",
-                    entry.revision,
-                    entry.changed_at.exact_utc()
-                )));
+            if loading_details {
                 detail_lines.push(Line::styled(
-                    format!("    {}: {old} → {new}", entry.field_name),
-                    Style::default().fg(theme().body),
+                    "  Loading comments and history…",
+                    Style::default().fg(theme().muted),
                 ));
             }
+            detail_lines.extend(history.into_iter().map(|entry| history_line(entry, now)));
         }
         let comments = app.comments_for(&ticket.key);
         if !comments.is_empty() {
@@ -2745,6 +2740,29 @@ fn field_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
     ])
 }
 
+/// One change on one revision: how long ago it landed, who made it, and what
+/// moved. The relative age is the wording the Changed column uses, with the
+/// exact instant beside it in muted text for anyone who needs one.
+fn history_line(entry: &HistoryRecord, now: OffsetDateTime) -> Line<'static> {
+    let who = entry.changed_by.as_deref().unwrap_or("unknown");
+    let old = entry.old_value.as_deref().unwrap_or("—");
+    let new = entry.new_value.as_deref().unwrap_or("—");
+    Line::from(vec![
+        Span::styled(
+            format!(
+                "  {} · {who} · {}: {old} → {new}",
+                entry.changed_at.relative_to(now),
+                entry.field_name
+            ),
+            Style::default().fg(theme().body),
+        ),
+        Span::styled(
+            format!("  {}", entry.changed_at.exact_utc()),
+            Style::default().fg(theme().muted),
+        ),
+    ])
+}
+
 fn section_line(title: &'static str) -> Line<'static> {
     Line::styled(
         title,
@@ -3131,6 +3149,7 @@ mod tests {
             created_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
             changed_at: crate::timestamp::ts("2026-01-02T00:00:00Z"),
             web_url: "https://dev.azure.com/demo/atlas/_workitems/edit/10001".into(),
+            details_rev: 0,
         }
     }
 

@@ -12,14 +12,45 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::model::{RelationKind, RelationRecord, StateCategory, StateOption, Ticket, TicketKey};
+use crate::model::{
+    CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateCategory, StateOption, Ticket,
+    TicketKey, WorkItemDetails,
+};
 use crate::timestamp::Timestamp;
 
 /// Azure DevOps resource id accepted by `az account get-access-token`.
 const ADO_RESOURCE: &str = "499b84ac-1321-427f-aa17-267ca6975798";
 const API_VERSION: &str = "7.1";
+/// Comments are still behind a preview flag on every 7.x API version.
+const COMMENTS_API_VERSION: &str = "7.1-preview.4";
 /// Largest id batch the work items endpoint accepts.
 const BATCH_SIZE: usize = 200;
+/// Revisions read per updates request, and the page size that endpoint takes.
+const UPDATES_PAGE: usize = 200;
+/// How many pages of one work item's comments or updates are read before the
+/// client stops asking. A work item with more revisions than this is a bot's,
+/// and the details pane is no place to render forty thousand rows.
+const MAX_DETAIL_PAGES: usize = 50;
+/// Azure DevOps stamps the newest revision's `revisedDate` with a date in this
+/// year — `9999-01-01T00:00:00Z` — because nothing has revised that revision
+/// yet. It is a sentinel, not an instant, and never reaches the database.
+const UNREVISED_YEAR: &str = "9999-";
+
+/// The work item fields whose changes are worth showing, in the order the
+/// details pane renders them when one revision touched several. Everything
+/// else Azure DevOps reports on an update — the revision number, the changed
+/// date, the comment count, the watermark — is bookkeeping about the change
+/// rather than the change itself.
+const TRACKED_FIELDS: [(&str, &str); 8] = [
+    ("System.State", "State"),
+    ("System.AssignedTo", "Assigned to"),
+    ("System.Title", "Title"),
+    ("System.IterationPath", "Iteration"),
+    ("System.AreaPath", "Area"),
+    ("Microsoft.VSTS.Common.Priority", "Priority"),
+    ("System.Tags", "Tags"),
+    ("System.Reason", "Reason"),
+];
 const BODY_LIMIT: u64 = 64 * 1024 * 1024;
 /// Profiles live on the identity host, not on `dev.azure.com/{org}`.
 const PROFILE_URL: &str =
@@ -245,6 +276,102 @@ impl AzureClient {
                 Some(StateOption::new(name, category))
             })
             .collect())
+    }
+
+    /// One work item's discussion and the revisions behind it, which is what
+    /// the details pane shows under its planning fields. Two requests for a
+    /// work item of ordinary length, more when either list pages.
+    pub fn fetch_work_item_details(&self, id: i64) -> Result<WorkItemDetails> {
+        let key = TicketKey {
+            organization: self.config.organization.clone(),
+            id,
+        };
+        Ok(WorkItemDetails {
+            comments: self.fetch_comments(&key)?,
+            history: self.fetch_updates(&key)?,
+        })
+    }
+
+    /// Every comment on one work item, following the continuation token the
+    /// endpoint answers with while there is another page.
+    fn fetch_comments(&self, key: &TicketKey) -> Result<Vec<CommentRecord>> {
+        let mut comments = Vec::new();
+        let mut continuation: Option<String> = None;
+        for _ in 0..MAX_DETAIL_PAGES {
+            let page = self.get(&self.comments_url(key.id, continuation.as_deref())?)?;
+            comments.extend(parse_comments(&page, key));
+            continuation = page
+                .get("continuationToken")
+                .and_then(Value::as_str)
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned);
+            if continuation.is_none() {
+                break;
+            }
+        }
+        Ok(comments)
+    }
+
+    /// Every revision of one work item, read a page at a time and mapped onto
+    /// history records in one pass: the newest revision's date is resolved
+    /// against the revision before it, which can sit on the previous page.
+    fn fetch_updates(&self, key: &TicketKey) -> Result<Vec<HistoryRecord>> {
+        let mut updates: Vec<Value> = Vec::new();
+        for page in 0..MAX_DETAIL_PAGES {
+            let response = self.get(&self.updates_url(key.id, page * UPDATES_PAGE)?)?;
+            let Some(items) = response.get("value").and_then(Value::as_array) else {
+                break;
+            };
+            let read = items.len();
+            updates.extend(items.iter().cloned());
+            if read < UPDATES_PAGE {
+                break;
+            }
+        }
+        Ok(parse_updates(&updates, key))
+    }
+
+    /// Comments hang off the project, and a continuation token is opaque, so
+    /// both are escaped rather than pasted into a format string.
+    fn comments_url(&self, id: i64, continuation: Option<&str>) -> Result<String> {
+        let mut url = self.api_url(&[
+            self.config.project.as_str(),
+            "_apis",
+            "wit",
+            "workItems",
+            &id.to_string(),
+            "comments",
+        ])?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("api-version", COMMENTS_API_VERSION);
+            if let Some(continuation) = continuation {
+                query.append_pair("continuationToken", continuation);
+            }
+        }
+        Ok(url.into())
+    }
+
+    /// Updates hang off the organization rather than the project, and page by
+    /// `$top`/`$skip` rather than by token.
+    fn updates_url(&self, id: i64, skip: usize) -> Result<String> {
+        let mut url = self.api_url(&["_apis", "wit", "workItems", &id.to_string(), "updates"])?;
+        url.query_pairs_mut()
+            .append_pair("api-version", API_VERSION)
+            .append_pair("$top", &UPDATES_PAGE.to_string())
+            .append_pair("$skip", &skip.to_string());
+        Ok(url.into())
+    }
+
+    /// A URL under the organization with every path segment escaped, because a
+    /// project name can carry spaces.
+    fn api_url(&self, segments: &[&str]) -> Result<Url> {
+        let mut url = Url::parse(&self.config.base_url())
+            .with_context(|| format!("invalid Azure DevOps URL {}", self.config.base_url()))?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?
+            .extend(segments);
+        Ok(url)
     }
 
     /// A work item type is a path segment and its name has spaces in it — `User
@@ -620,6 +747,11 @@ pub fn parse_work_item(
         created_at: timestamp("System.CreatedDate")?,
         changed_at: timestamp("System.ChangedDate")?,
         web_url: config.work_item_url(id),
+        // A work item read from the list endpoint carries no comments or
+        // history: those are two more requests, made only when this revision
+        // is the one being looked at. An edit lands the same way, which is
+        // what makes the details pane read a work item again after a write.
+        details_rev: 0,
     };
     let relations = item
         .get("relations")
@@ -644,6 +776,131 @@ pub fn parse_work_item(
         })
         .unwrap_or_default();
     Ok((ticket, relations))
+}
+
+/// Map one `/_apis/wit/workItems/{id}/comments` page onto comment records.
+/// A comment whose body flattens to nothing is dropped: an author line with
+/// no text under it says less than the space it takes.
+#[must_use]
+pub fn parse_comments(page: &Value, key: &TicketKey) -> Vec<CommentRecord> {
+    page.get("comments")
+        .or_else(|| page.get("value"))
+        .and_then(Value::as_array)
+        .map(|comments| {
+            comments
+                .iter()
+                .filter_map(|comment| parse_comment(comment, key))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_comment(comment: &Value, key: &TicketKey) -> Option<CommentRecord> {
+    let text = html_to_text(
+        comment
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+    );
+    if text.is_empty() {
+        return None;
+    }
+    Some(CommentRecord {
+        ticket: key.clone(),
+        comment_id: comment.get("id").and_then(Value::as_i64)?,
+        created_at: comment
+            .get("createdDate")
+            .and_then(Value::as_str)
+            .and_then(|raw| Timestamp::parse(raw).ok())?,
+        author: comment.get("createdBy").and_then(identity_name),
+        text,
+    })
+}
+
+/// Map `/_apis/wit/workItems/{id}/updates` entries onto history records,
+/// oldest revision first.
+///
+/// Only [`TRACKED_FIELDS`] survive: a revision that moved nothing else — a
+/// description reworded, a comment counted, a watermark advanced — is not a
+/// change anyone reads a history for, and is dropped whole. The newest
+/// revision's `revisedDate` is Azure DevOps's [`UNREVISED_YEAR`] sentinel
+/// rather than an instant, so its own `System.ChangedDate` stands in, and
+/// failing that the revision before it does.
+#[must_use]
+pub fn parse_updates(updates: &[Value], key: &TicketKey) -> Vec<HistoryRecord> {
+    let mut records = Vec::new();
+    let mut previous: Option<Timestamp> = None;
+    for update in updates {
+        let fields = update.get("fields").and_then(Value::as_object);
+        let Some(changed_at) = update_timestamp(update, fields, previous) else {
+            continue;
+        };
+        previous = Some(changed_at);
+        let (Some(revision), Some(fields)) = (update.get("rev").and_then(Value::as_i64), fields)
+        else {
+            continue;
+        };
+        let changed_by = update.get("revisedBy").and_then(identity_name);
+        for (name, label) in TRACKED_FIELDS {
+            let Some(change) = fields.get(name) else {
+                continue;
+            };
+            let old_value = field_value(change.get("oldValue"));
+            let new_value = field_value(change.get("newValue"));
+            if old_value == new_value {
+                continue;
+            }
+            records.push(HistoryRecord {
+                ticket: key.clone(),
+                revision,
+                changed_at,
+                changed_by: changed_by.clone(),
+                field_name: (*label).to_owned(),
+                old_value,
+                new_value,
+            });
+        }
+    }
+    records
+}
+
+/// When one revision landed. The sentinel the newest revision carries is not a
+/// date, so what the revision said about `System.ChangedDate` is used instead,
+/// and failing that the date of the revision before it.
+fn update_timestamp(
+    update: &Value,
+    fields: Option<&serde_json::Map<String, Value>>,
+    previous: Option<Timestamp>,
+) -> Option<Timestamp> {
+    let revised = update
+        .get("revisedDate")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !revised.is_empty() && !revised.starts_with(UNREVISED_YEAR) {
+        return Timestamp::parse(revised).ok();
+    }
+    fields
+        .and_then(|fields| fields.get("System.ChangedDate"))
+        .and_then(|change| change.get("newValue"))
+        .and_then(Value::as_str)
+        .and_then(|raw| Timestamp::parse(raw).ok())
+        .or(previous)
+}
+
+/// One side of a field change as text: an identity keeps its display name, a
+/// number or a flag its literal, and a blank string is no value at all — which
+/// is how a field being set for the first time reads.
+fn field_value(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::Null => None,
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        }
+        object @ Value::Object(_) => identity_name(object),
+        other => Some(other.to_string()),
+    }
 }
 
 fn identity_name(value: &Value) -> Option<String> {
@@ -788,6 +1045,211 @@ mod tests {
         assert_eq!(relations[0].kind, RelationKind::Parent);
         assert_eq!(relations[0].to.id, 11);
         assert_eq!(relations[1].kind, RelationKind::Related);
+    }
+
+    fn key(id: i64) -> TicketKey {
+        TicketKey {
+            organization: "demo".into(),
+            id,
+        }
+    }
+
+    #[test]
+    fn updates_keep_the_fields_a_person_reads_a_history_for_and_drop_the_bookkeeping() {
+        let updates = [
+            json!({
+                "id": 1, "rev": 1,
+                "revisedBy": {"displayName": "Jacob Ragsdale"},
+                "revisedDate": "2026-08-20T10:00:00Z",
+                "fields": {
+                    "System.Id": {"newValue": 613},
+                    "System.Rev": {"newValue": 1},
+                    "System.Watermark": {"newValue": 4},
+                    "System.State": {"newValue": "To Do"},
+                    "System.ChangedDate": {"newValue": "2026-08-20T10:00:00Z"}
+                }
+            }),
+            json!({
+                "id": 2, "rev": 2,
+                "revisedBy": {"displayName": "Avery Chen"},
+                "revisedDate": "2026-08-21T09:30:00Z",
+                "fields": {
+                    "System.Rev": {"oldValue": 1, "newValue": 2},
+                    "System.Watermark": {"oldValue": 4, "newValue": 5},
+                    "System.CommentCount": {"oldValue": 0, "newValue": 1},
+                    "System.ChangedDate": {
+                        "oldValue": "2026-08-20T10:00:00Z",
+                        "newValue": "2026-08-21T09:30:00Z"
+                    }
+                }
+            }),
+            json!({
+                "id": 3, "rev": 3,
+                "revisedBy": {"displayName": "Jacob Ragsdale"},
+                // The newest revision has not been revised, so Azure DevOps
+                // stamps it with a sentinel rather than a date.
+                "revisedDate": "9999-01-01T00:00:00Z",
+                "fields": {
+                    "System.Rev": {"oldValue": 2, "newValue": 3},
+                    "System.State": {"oldValue": "To Do", "newValue": "Doing"},
+                    "System.AssignedTo": {
+                        "oldValue": {"displayName": "Avery Chen", "uniqueName": "avery@example.com"},
+                        "newValue": {"displayName": "Jacob Ragsdale", "uniqueName": "jacob@example.com"}
+                    },
+                    "Microsoft.VSTS.Common.Priority": {"oldValue": 2, "newValue": 1},
+                    "System.ChangedDate": {
+                        "oldValue": "2026-08-21T09:30:00Z",
+                        "newValue": "2026-08-22T16:45:00Z"
+                    }
+                }
+            }),
+        ];
+
+        let history = parse_updates(&updates, &key(613));
+        let rendered: Vec<String> = history
+            .iter()
+            .map(|entry| {
+                format!(
+                    "r{} {} {}: {} → {}",
+                    entry.revision,
+                    entry.changed_at.exact_utc(),
+                    entry.field_name,
+                    entry.old_value.as_deref().unwrap_or("—"),
+                    entry.new_value.as_deref().unwrap_or("—"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rendered,
+            [
+                "r1 2026-08-20 10:00:00 UTC State: — → To Do",
+                "r3 2026-08-22 16:45:00 UTC State: To Do → Doing",
+                "r3 2026-08-22 16:45:00 UTC Assigned to: Avery Chen → Jacob Ragsdale",
+                "r3 2026-08-22 16:45:00 UTC Priority: 2 → 1",
+            ],
+            "revision 2 moved only bookkeeping, so it is not a change at all"
+        );
+        assert!(
+            history
+                .iter()
+                .all(|entry| entry.ticket == key(613)
+                    && !entry.changed_at.to_rfc3339().contains("9999")),
+            "the sentinel never reaches the database"
+        );
+        assert_eq!(
+            history[1].changed_by.as_deref(),
+            Some("Jacob Ragsdale"),
+            "an identity is stored as the name it displays under"
+        );
+    }
+
+    #[test]
+    fn a_sentinel_date_with_nothing_to_replace_it_falls_back_to_the_revision_before() {
+        let updates = [
+            json!({
+                "rev": 1,
+                "revisedDate": "2026-08-20T10:00:00Z",
+                "fields": {"System.State": {"newValue": "To Do"}}
+            }),
+            json!({
+                "rev": 2,
+                "revisedDate": "9999-01-01T00:00:00Z",
+                "fields": {"System.State": {"oldValue": "To Do", "newValue": "Done"}}
+            }),
+        ];
+
+        let history = parse_updates(&updates, &key(613));
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history[1].changed_at, history[0].changed_at,
+            "with no changed date of its own, the newest revision is dated by the one before it"
+        );
+
+        assert!(
+            parse_updates(&[json!({"rev": 1, "fields": {}})], &key(613)).is_empty(),
+            "the very first revision, undatable and touching nothing, is no history at all"
+        );
+    }
+
+    #[test]
+    fn comments_are_flattened_to_text_and_the_empty_ones_dropped() {
+        let page = json!({
+            "totalCount": 3,
+            "count": 3,
+            "comments": [
+                {
+                    "id": 5,
+                    "text": "<div>Looks&nbsp;good</div><div>Shipping it</div>",
+                    "createdBy": {"displayName": "Avery Chen", "uniqueName": "avery@example.com"},
+                    "createdDate": "2026-08-21T09:30:00Z"
+                },
+                {
+                    "id": 6,
+                    "text": "<div>   </div>",
+                    "createdBy": {"displayName": "A Bot"},
+                    "createdDate": "2026-08-21T09:31:00Z"
+                },
+                {
+                    "id": 7,
+                    "text": "No author here",
+                    "createdDate": "2026-08-21T09:32:00Z"
+                }
+            ],
+            "continuationToken": "next"
+        });
+
+        let comments = parse_comments(&page, &key(613));
+        assert_eq!(
+            comments
+                .iter()
+                .map(|comment| (
+                    comment.comment_id,
+                    comment.author.as_deref(),
+                    comment.text.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (5, Some("Avery Chen"), "Looks good\nShipping it"),
+                (7, None, "No author here"),
+            ],
+            "a comment that flattens to nothing is not worth a line"
+        );
+        assert_eq!(comments[0].ticket, key(613));
+        assert_eq!(
+            comments[0].created_at,
+            crate::timestamp::ts("2026-08-21T09:30:00Z")
+        );
+        assert!(parse_comments(&json!({"count": 0}), &key(613)).is_empty());
+    }
+
+    #[test]
+    fn detail_urls_escape_the_project_and_the_continuation_token() {
+        let client_config = AzureConfig {
+            organization: "demo".into(),
+            project: "my project".into(),
+        };
+        let client = AzureClient {
+            agent: ureq::Agent::new_with_defaults(),
+            config: client_config,
+            authorization: RefCell::new("Bearer test".into()),
+        };
+
+        assert_eq!(
+            client.comments_url(613, None).unwrap(),
+            "https://dev.azure.com/demo/my%20project/_apis/wit/workItems/613/comments\
+             ?api-version=7.1-preview.4"
+        );
+        assert_eq!(
+            client.comments_url(613, Some("a b/c")).unwrap(),
+            "https://dev.azure.com/demo/my%20project/_apis/wit/workItems/613/comments\
+             ?api-version=7.1-preview.4&continuationToken=a+b%2Fc"
+        );
+        assert_eq!(
+            client.updates_url(613, 200).unwrap(),
+            "https://dev.azure.com/demo/_apis/wit/workItems/613/updates\
+             ?api-version=7.1&%24top=200&%24skip=200",
+            "updates hang off the organization, not the project"
+        );
     }
 
     #[test]
