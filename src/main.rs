@@ -1183,6 +1183,7 @@ mod tests {
             iteration_path: "Atlas\\Sprint 1".into(),
             tags: Vec::new(),
             description: String::new(),
+            description_html: String::new(),
             created_at: Timestamp::parse("2026-01-01T00:00:00Z").unwrap(),
             changed_at: Timestamp::parse(&format!("2026-0{id}-01T00:00:00Z")).unwrap(),
             web_url: format!("https://dev.azure.com/example-org/atlas/_workitems/edit/{id}"),

@@ -26,7 +26,13 @@ pub struct Ticket {
     pub area_path: String,
     pub iteration_path: String,
     pub tags: Vec<String>,
+    /// `System.Description` rendered as plain text: what the details pane
+    /// draws and what an export carries.
     pub description: String,
+    /// The same field as Azure DevOps stores it. The description is written in
+    /// a rich-text editor, so an edit has to hand back HTML rather than the
+    /// flattened reading of it.
+    pub description_html: String,
     pub created_at: Timestamp,
     pub changed_at: Timestamp,
     pub web_url: String,
@@ -974,6 +980,7 @@ mod tests {
             iteration_path: "demo\\Sprint 1".into(),
             tags: vec!["rust".into()],
             description: "not searchable sentinel".into(),
+            description_html: String::new(),
             created_at: ts("2026-01-01T00:00:00Z"),
             changed_at: Timestamp::from_offset_date_time(
                 time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(id),
