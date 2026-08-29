@@ -15,6 +15,7 @@ use crate::app::{App, AppMode, Focus, HitRegions, NotificationLevel, RowDensity,
 use crate::filter::{FacetTarget, FilterField};
 use crate::model::{
     FamilySnapshot, FamilyTreeEntry, SortDirection, SortField, StateCategory, Ticket, TicketKey,
+    path_leaf,
 };
 use crate::pointer::{
     PointerLayer, PointerTarget, ScrollMetrics, ScrollSurface, SelectableSnapshot,
@@ -51,6 +52,9 @@ struct Theme {
     priority_critical: Color,
     priority_high: Color,
     priority_normal: Color,
+    /// Restrained badge colours a tag is hashed into, so one tag always reads
+    /// the same wherever it appears.
+    tag_palette: [Color; 6],
 }
 
 impl Theme {
@@ -81,6 +85,7 @@ impl Theme {
                 priority_critical: Color::Reset,
                 priority_high: Color::Reset,
                 priority_normal: Color::Reset,
+                tag_palette: [Color::Reset; 6],
             }
         } else {
             Self {
@@ -108,6 +113,14 @@ impl Theme {
                 priority_critical: Color::Red,
                 priority_high: Color::Yellow,
                 priority_normal: Color::Blue,
+                tag_palette: [
+                    Color::Cyan,
+                    Color::Blue,
+                    Color::Magenta,
+                    Color::Green,
+                    Color::Yellow,
+                    Color::White,
+                ],
             }
         }
     }
@@ -398,10 +411,11 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let bookmarked = app.is_bookmarked(&ticket.key);
         let checked = app.is_row_selected(&ticket.key);
         let mut cells = vec![Cell::from(row_marker_line(checked, bookmarked))];
+        let tone = RowTone::of(&ticket.state);
         cells.extend(
             columns
                 .iter()
-                .map(|column| table_cell(ticket, column.id, now, density, &mut highlighter)),
+                .map(|column| table_cell(ticket, column.id, now, density, tone, &mut highlighter)),
         );
         Row::new(cells).height(row_height)
     });
@@ -1738,6 +1752,30 @@ fn family_connector(prefix: &str) -> String {
     }
 }
 
+/// A one-character state marker for the family tree, where there is no room to
+/// spell the state out.
+const fn state_glyph(category: StateCategory) -> &'static str {
+    match category {
+        StateCategory::Proposed => "\u{25cb}",
+        StateCategory::InProgress => "\u{25d0}",
+        StateCategory::Resolved => "\u{25cf}",
+        StateCategory::Completed => "\u{2713}",
+        StateCategory::Removed => "\u{2717}",
+        StateCategory::Unknown => "",
+    }
+}
+
+/// Colour the glyph like the table's State cell; monochrome leans on weight.
+fn state_glyph_style(base: Style, category: StateCategory) -> Style {
+    let color = state_color(category);
+    let style = base.fg(color).remove_modifier(Modifier::UNDERLINED);
+    if color == Color::Reset {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
 fn family_tree_line(
     entry: &FamilyTreeEntry,
     ticket: Option<&Ticket>,
@@ -1748,11 +1786,13 @@ fn family_tree_line(
     let id = entry.key.id.to_string();
     let type_label = ticket.map_or("?", |ticket| ticket.work_item_type.as_str());
     let title = ticket.map_or("missing ticket", |ticket| ticket.title.as_str());
+    let category = ticket.map(|ticket| StateCategory::of(&ticket.state));
     let current_label = if entry.is_current { " current" } else { "" };
     let packed = pack_family_row(
         usize::from(width),
         &format!("{connector}{id}"),
         type_label,
+        category.map_or("", state_glyph),
         title,
         current_label,
     );
@@ -1762,86 +1802,126 @@ fn family_tree_line(
     } else {
         base.fg(theme().link).add_modifier(Modifier::UNDERLINED)
     };
-    let rest_style = if entry.is_current {
-        base
+    // The row you are reading keeps its weight; finished relatives fade.
+    let tone = if entry.is_current {
+        RowTone::Normal
     } else {
-        base.fg(theme().body)
+        ticket.map_or(RowTone::Normal, |ticket| RowTone::of(&ticket.state))
     };
+    let rest_style = tone
+        .apply(if entry.is_current {
+            base
+        } else {
+            base.fg(theme().body)
+        })
+        .remove_modifier(Modifier::UNDERLINED);
     let head_len = connector.chars().count() + id.chars().count();
-    let rest: String = packed.chars().skip(head_len).collect();
-    Line::from(vec![
-        Span::styled(connector, base),
-        Span::styled(id, id_style),
-        Span::styled(rest, rest_style.remove_modifier(Modifier::UNDERLINED)),
-    ])
+    let mut spans = vec![Span::styled(connector, base), Span::styled(id, id_style)];
+    if let Some(at) = packed.glyph_at {
+        let lead: String = packed
+            .text
+            .chars()
+            .skip(head_len)
+            .take(at.saturating_sub(head_len))
+            .collect();
+        let glyph: String = packed.text.chars().skip(at).take(1).collect();
+        let tail: String = packed.text.chars().skip(at + 1).collect();
+        spans.push(Span::styled(lead, rest_style));
+        spans.push(Span::styled(
+            glyph,
+            state_glyph_style(base, category.unwrap_or(StateCategory::Unknown)),
+        ));
+        spans.push(Span::styled(tail, rest_style));
+    } else {
+        let rest: String = packed.text.chars().skip(head_len).collect();
+        spans.push(Span::styled(rest, rest_style));
+    }
+    Line::from(spans)
+}
+
+/// A family row packed to its width, with the char offset of the state glyph
+/// when one survived the fit.
+struct PackedFamilyRow {
+    text: String,
+    glyph_at: Option<usize>,
+}
+
+impl PackedFamilyRow {
+    fn plain(text: String) -> Self {
+        Self {
+            text,
+            glyph_at: None,
+        }
+    }
 }
 
 fn pack_family_row(
     width: usize,
     head: &str,
     type_label: &str,
+    glyph: &str,
     title: &str,
     current_label: &str,
-) -> String {
-    let assemble = |include_type: bool, include_current: bool, title: &str| {
+) -> PackedFamilyRow {
+    let assemble = |include_type: bool, include_glyph: bool, include_current: bool, title: &str| {
         let mut text = head.to_owned();
         if include_type {
             text.push_str("  ");
             text.push_str(type_label);
         }
-        if !title.is_empty() {
+        let mut glyph_at = None;
+        if include_glyph && !glyph.is_empty() {
             text.push_str("  ");
+            glyph_at = Some(text.chars().count());
+            text.push_str(glyph);
+        }
+        if !title.is_empty() {
+            text.push_str(if glyph_at.is_some() { " " } else { "  " });
             text.push_str(title);
         }
         if include_current {
             text.push_str(current_label);
         }
-        text
+        PackedFamilyRow { text, glyph_at }
     };
     let include_current = !current_label.is_empty();
-    let fit = |text: String| (text.chars().count() <= width).then_some(text);
-    if let Some(text) = fit(assemble(true, include_current, title)) {
-        return text;
-    }
-    let truncated = take_chars(
-        title,
+    let fit = |row: PackedFamilyRow| (row.text.chars().count() <= width).then_some(row);
+    let budget = |include_type: bool, include_current: bool| {
         width.saturating_sub(
-            assemble(true, include_current, "")
+            assemble(include_type, false, include_current, "")
+                .text
                 .chars()
                 .count()
                 .saturating_add(2),
-        ),
-    );
-    if let Some(text) = fit(assemble(true, include_current, &truncated)) {
-        return text;
+        )
+    };
+    if let Some(row) = fit(assemble(true, true, include_current, title)) {
+        return row;
     }
-    let truncated = take_chars(
-        title,
-        width.saturating_sub(
-            assemble(false, include_current, "")
-                .chars()
-                .count()
-                .saturating_add(2),
-        ),
-    );
-    if let Some(text) = fit(assemble(false, include_current, &truncated)) {
-        return text;
+    // Shed one thing at a time so the connector and id always survive: the
+    // glyph goes before the title is truncated, then the type, then the
+    // current marker.
+    if let Some(row) = fit(assemble(true, false, include_current, title)) {
+        return row;
     }
-    let truncated = take_chars(
-        title,
-        width.saturating_sub(assemble(false, false, "").chars().count().saturating_add(2)),
-    );
-    if let Some(text) = fit(assemble(false, false, &truncated)) {
-        return text;
+    for (with_type, with_current) in [
+        (true, include_current),
+        (false, include_current),
+        (false, false),
+    ] {
+        let truncated = take_chars(title, budget(with_type, with_current));
+        if let Some(row) = fit(assemble(with_type, false, with_current, &truncated)) {
+            return row;
+        }
     }
-    let without_title = assemble(false, false, "");
-    if without_title.chars().count() <= width {
+    let without_title = assemble(false, false, false, "");
+    if without_title.text.chars().count() <= width {
         return without_title;
     }
     if head.chars().count() <= width {
-        return head.to_owned();
+        return PackedFamilyRow::plain(head.to_owned());
     }
-    take_chars(head, width)
+    PackedFamilyRow::plain(take_chars(head, width))
 }
 
 fn family_breadcrumb_line(app: &App, family: &FamilySnapshot) -> Line<'static> {
@@ -1947,6 +2027,38 @@ fn state_is_done(state: &str) -> bool {
     )
 }
 
+/// How strongly a row is painted: finished work fades so open work stands out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowTone {
+    Normal,
+    Muted,
+}
+
+impl RowTone {
+    fn of(state: &str) -> Self {
+        if state_is_done(state) {
+            Self::Muted
+        } else {
+            Self::Normal
+        }
+    }
+
+    /// Fade a style. Colour themes drop to the muted foreground; the monochrome
+    /// theme has no muted colour, so it dims instead. Bold goes either way, so
+    /// weight alone still separates open work from finished work.
+    fn apply(self, style: Style) -> Style {
+        if self == Self::Normal {
+            return style;
+        }
+        let style = style.remove_modifier(Modifier::BOLD);
+        if theme().muted == Color::Reset {
+            style.add_modifier(Modifier::DIM)
+        } else {
+            style.fg(theme().muted)
+        }
+    }
+}
+
 fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
     let area = centered_rect(frame.area(), 62, 10);
     frame.render_widget(Clear, area);
@@ -1997,21 +2109,26 @@ fn table_cell(
     field: SortField,
     now: OffsetDateTime,
     density: RowDensity,
+    tone: RowTone,
     highlighter: &mut QueryHighlighter,
 ) -> Cell<'static> {
+    let plain = tone.apply(Style::default());
     let line = match field {
-        SortField::Type => Line::from(type_badge_spans(&ticket.work_item_type, highlighter)),
-        SortField::Title => highlight_searchable(&ticket.title, Style::default(), highlighter),
+        SortField::Type => Line::from(type_badge_spans(&ticket.work_item_type, tone, highlighter)),
+        SortField::Title => highlight_searchable(&ticket.title, plain, highlighter),
         SortField::Id => {
-            let style = Style::default()
-                .fg(theme().link)
-                .add_modifier(Modifier::UNDERLINED);
+            let style = tone.apply(
+                Style::default()
+                    .fg(theme().link)
+                    .add_modifier(Modifier::UNDERLINED),
+            );
             terminate_underline(highlight_searchable(
                 &ticket.key.id.to_string(),
                 style,
                 highlighter,
             ))
         }
+        // The state cell keeps its own colour: it is what marks the row done.
         SortField::State => {
             highlight_searchable(&ticket.state, state_style(&ticket.state), highlighter)
         }
@@ -2021,9 +2138,9 @@ fn table_cell(
                 |name| (name.to_owned(), true),
             );
             if searchable {
-                highlight_searchable(&text, Style::default(), highlighter)
+                highlight_searchable(&text, plain, highlighter)
             } else {
-                Line::styled(text, Style::default().fg(theme().muted))
+                Line::styled(text, tone.apply(Style::default().fg(theme().muted)))
             }
         }
         SortField::Priority => Line::from(
@@ -2032,24 +2149,29 @@ fn table_cell(
                 .map_or_else(|| "—".into(), |priority| priority.to_string()),
         )
         .right_aligned()
-        .style(priority_style(ticket.priority)),
-        SortField::Changed => Line::from(ticket.changed_at.relative_to(now)).right_aligned(),
-        SortField::Created => Line::from(ticket.created_at.relative_to(now)).right_aligned(),
+        .style(tone.apply(priority_style(ticket.priority))),
+        SortField::Changed => Line::from(ticket.changed_at.relative_to(now))
+            .right_aligned()
+            .style(plain),
+        SortField::Created => Line::from(ticket.created_at.relative_to(now))
+            .right_aligned()
+            .style(plain),
         SortField::Organization => {
-            highlight_searchable(&ticket.key.organization, Style::default(), highlighter)
+            highlight_searchable(&ticket.key.organization, plain, highlighter)
         }
-        SortField::Project => highlight_searchable(&ticket.project, Style::default(), highlighter),
-        SortField::Area => highlight_searchable(&ticket.area_path, Style::default(), highlighter),
+        SortField::Project => highlight_searchable(&ticket.project, plain, highlighter),
+        // Only the leaf fits a table column; the details pane keeps the full path.
+        SortField::Area => highlight_searchable(path_leaf(&ticket.area_path), plain, highlighter),
         SortField::Iteration => {
-            highlight_searchable(&ticket.iteration_path, Style::default(), highlighter)
+            highlight_searchable(path_leaf(&ticket.iteration_path), plain, highlighter)
         }
-        SortField::Tags => Line::from(tag_badge_spans(&ticket.tags, highlighter)),
+        SortField::Tags => Line::from(tag_badge_spans(&ticket.tags, tone, highlighter)),
     };
 
     if density == RowDensity::Comfortable && field == SortField::Title {
         Cell::from(Text::from(vec![
             line,
-            Line::from(tag_badge_spans(&ticket.tags, highlighter)),
+            Line::from(tag_badge_spans(&ticket.tags, tone, highlighter)),
         ]))
     } else {
         Cell::from(line)
@@ -2080,7 +2202,9 @@ fn search_match_style(base: Style) -> Style {
 
 fn highlight_line(text: String, indices: &[u32], base: Style, matched: Style) -> Line<'static> {
     if indices.is_empty() {
-        return Line::styled(text, base);
+        // The style rides on the span so callers that harvest `spans` — the
+        // badges, the details pane — keep the colour.
+        return Line::from(Span::styled(text, base));
     }
 
     let mut spans = Vec::new();
@@ -2129,12 +2253,22 @@ fn type_style(work_item_type: &str) -> Style {
 
 fn type_badge_spans(
     work_item_type: &str,
+    tone: RowTone,
     highlighter: &mut QueryHighlighter,
 ) -> Vec<Span<'static>> {
-    badge_spans(work_item_type, type_style(work_item_type), highlighter)
+    badge_spans(
+        work_item_type,
+        type_style(work_item_type),
+        tone,
+        highlighter,
+    )
 }
 
-fn tag_badge_spans(tags: &[String], highlighter: &mut QueryHighlighter) -> Vec<Span<'static>> {
+fn tag_badge_spans(
+    tags: &[String],
+    tone: RowTone,
+    highlighter: &mut QueryHighlighter,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for (index, tag) in tags.iter().enumerate() {
         if index > 0 {
@@ -2142,23 +2276,44 @@ fn tag_badge_spans(tags: &[String], highlighter: &mut QueryHighlighter) -> Vec<S
         }
         spans.extend(badge_spans(
             tag,
-            Style::default().fg(theme().muted),
+            Style::default().fg(tag_color(tag)),
+            tone,
             highlighter,
         ));
     }
     spans
 }
 
+/// Hash a tag onto a stable palette entry, ignoring case.
+///
+/// FNV-1a over the lowercased bytes keeps the mapping deterministic between
+/// runs and between panes without reaching for a hasher dependency.
+fn tag_color(tag: &str) -> Color {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in tag.bytes() {
+        hash ^= u32::from(byte.to_ascii_lowercase());
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    let palette = theme().tag_palette;
+    palette[usize::try_from(hash).unwrap_or_default() % palette.len()]
+}
+
 fn badge_spans(
     label: &str,
     style: Style,
+    tone: RowTone,
     highlighter: &mut QueryHighlighter,
 ) -> Vec<Span<'static>> {
-    let inner = highlight_searchable(label, style.add_modifier(Modifier::BOLD), highlighter);
+    let bracket = tone.apply(style);
+    let inner = highlight_searchable(
+        label,
+        tone.apply(style.add_modifier(Modifier::BOLD)),
+        highlighter,
+    );
     let mut spans = Vec::with_capacity(inner.spans.len() + 2);
-    spans.push(Span::styled("[", style));
+    spans.push(Span::styled("[", bracket));
     spans.extend(inner.spans);
-    spans.push(Span::styled("]", style));
+    spans.push(Span::styled("]", bracket));
     spans
 }
 
@@ -2199,7 +2354,11 @@ fn ticket_identity_line(ticket: &Ticket, highlighter: &mut QueryHighlighter) -> 
     )];
     spans.extend(highlight_searchable(&id, Style::default(), highlighter).spans);
     spans.push(Span::raw(" · "));
-    spans.extend(type_badge_spans(&ticket.work_item_type, highlighter));
+    spans.extend(type_badge_spans(
+        &ticket.work_item_type,
+        RowTone::Normal,
+        highlighter,
+    ));
     spans.push(Span::raw(" · "));
     spans.extend(highlight_searchable(&ticket.state, state, highlighter).spans);
     Line::from(spans)
@@ -2249,7 +2408,7 @@ fn tags_field_line(tags: &[String], highlighter: &mut QueryHighlighter) -> Line<
     if tags.is_empty() {
         spans.push(Span::styled("—", Style::default().fg(theme().muted)));
     } else {
-        spans.extend(tag_badge_spans(tags, highlighter));
+        spans.extend(tag_badge_spans(tags, RowTone::Normal, highlighter));
     }
     Line::from(spans)
 }
@@ -2857,6 +3016,12 @@ mod tests {
         assert_eq!(monochrome.priority_critical, Color::Reset);
         assert_eq!(monochrome.search_match, Color::Reset);
         assert_eq!(monochrome.error, Color::Reset);
+        assert!(
+            monochrome
+                .tag_palette
+                .iter()
+                .all(|color| *color == Color::Reset)
+        );
     }
 
     /// Foreground colours of one table column, top row first.
@@ -2919,6 +3084,160 @@ mod tests {
         let colors = column_cell_colors(&mut app, SortField::Type, 3);
 
         assert_distinct_and_legible(&colors);
+    }
+
+    /// Foreground, background, and modifiers of one rendered buffer cell.
+    fn painted_cell(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> (Color, Color, Modifier) {
+        let cell = &terminal.backend().buffer()[(x, y)];
+        (cell.fg, cell.bg, cell.modifier)
+    }
+
+    /// Left edge of one table column, shared by the header and the body rows.
+    fn column_x(app: &App, field: SortField) -> u16 {
+        app.hit_regions
+            .headers
+            .iter()
+            .find(|(_, id)| *id == field)
+            .expect("column should be visible")
+            .0
+            .x
+    }
+
+    #[test]
+    fn completed_rows_fade_while_open_rows_stay_bright() {
+        let mut app = App::new(vec![
+            ticket_at(10_001, "Alpha", "Issue", "To Do", "2026-03-03T00:00:00Z"),
+            ticket_at(10_002, "Beta", "Issue", "Doing", "2026-03-02T00:00:00Z"),
+            ticket_at(10_003, "Gamma", "Issue", "Done", "2026-03-01T00:00:00Z"),
+        ]);
+        let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let title_x = column_x(&app, SortField::Title);
+        let state_x = column_x(&app, SortField::State);
+        let body = app.hit_regions.table_body.expect("table body");
+        let (open_fg, _, open_modifier) = painted_cell(&terminal, title_x, body.y);
+        let (done_fg, _, done_modifier) = painted_cell(&terminal, title_x, body.y + 2);
+        let (state_fg, _, state_modifier) = painted_cell(&terminal, state_x, body.y + 2);
+
+        if theme().muted == Color::Reset {
+            assert!(
+                done_modifier.contains(Modifier::DIM),
+                "the done row should dim when there is no muted colour"
+            );
+            assert!(
+                !open_modifier.contains(Modifier::DIM),
+                "open rows must stay undimmed"
+            );
+            assert!(
+                !state_modifier.contains(Modifier::DIM),
+                "the state cell keeps its own weight"
+            );
+        } else {
+            assert_eq!(done_fg, theme().muted, "the done title should be muted");
+            assert_ne!(open_fg, theme().muted, "the open title should stay bright");
+            assert_eq!(
+                state_fg,
+                state_color(StateCategory::Completed),
+                "the state cell keeps its own colour"
+            );
+        }
+
+        // The row highlight is painted over the faded cells, so a selected done
+        // row stays readable.
+        click(&mut app, title_x, body.y + 2);
+        assert_eq!(app.selected_row(), Some(2));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let (selected_fg, selected_bg, selected_modifier) =
+            painted_cell(&terminal, title_x, body.y + 2);
+        assert!(
+            selected_modifier.contains(Modifier::BOLD),
+            "the selected row highlight should still bolden the done row"
+        );
+        if theme().muted == Color::Reset {
+            assert!(selected_modifier.contains(Modifier::DIM));
+        } else {
+            assert_eq!(selected_fg, theme().muted);
+            assert_eq!(selected_bg, theme().selected_background);
+        }
+    }
+
+    #[test]
+    fn table_columns_show_only_the_leaf_of_a_path() {
+        let mut app = App::new(vec![ticket()]);
+        for field in [SortField::Area, SortField::Iteration] {
+            let index = app
+                .layout
+                .columns
+                .iter()
+                .position(|column| column.id == field)
+                .expect("path column");
+            app.layout.toggle_visible(index);
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(150, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let body = app.hit_regions.table_body.expect("table body");
+        let details = app.hit_regions.details.expect("details pane");
+        let buffer = terminal.backend().buffer();
+
+        assert!(
+            find_buffer_text_in(buffer, body, "Sprint 1").is_some(),
+            "the table should show the iteration leaf"
+        );
+        assert!(
+            find_buffer_text_in(buffer, body, "Platform").is_some(),
+            "the table should show the area leaf"
+        );
+        assert!(
+            find_buffer_text_in(buffer, body, "Atlas\\").is_none(),
+            "the table should not repeat the parent path"
+        );
+        assert!(
+            find_buffer_text_in(buffer, details, "Atlas\\Sprint 1").is_some(),
+            "the details pane keeps the full path"
+        );
+    }
+
+    #[test]
+    fn tag_colors_are_stable_and_case_insensitive() {
+        assert_eq!(tag_color("tech-debt"), tag_color("TECH-DEBT"));
+        assert_eq!(tag_color("Rust"), tag_color("rust"));
+
+        if theme() == &Theme::new(true) {
+            return; // NO_COLOR: every colour is intentionally Reset.
+        }
+        let colors: Vec<Color> = ["docs", "flaky", "perf", "rust"]
+            .iter()
+            .map(|tag| tag_color(tag))
+            .collect();
+        assert_distinct_and_legible(&colors);
+    }
+
+    #[test]
+    fn a_tag_keeps_one_colour_across_the_table_and_details() {
+        let mut app = App::new(vec![ticket()]);
+        let tags = app
+            .layout
+            .columns
+            .iter()
+            .position(|column| column.id == SortField::Tags)
+            .expect("tags column");
+        app.layout.toggle_visible(tags);
+
+        let mut terminal = Terminal::new(TestBackend::new(150, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let body = app.hit_regions.table_body.expect("table body");
+        let details = app.hit_regions.details.expect("details pane");
+        let (table_x, table_y) = find_buffer_text_in(terminal.backend().buffer(), body, "[rust]")
+            .expect("tag badge in the table");
+        let (details_x, details_y) =
+            find_buffer_text_in(terminal.backend().buffer(), details, "[rust]")
+                .expect("tag badge in the details pane");
+
+        let (table_fg, _, _) = painted_cell(&terminal, table_x + 1, table_y);
+        let (details_fg, _, _) = painted_cell(&terminal, details_x + 1, details_y);
+        assert_eq!(table_fg, tag_color("rust"));
+        assert_eq!(table_fg, details_fg, "one tag, one colour");
     }
 
     fn await_search(app: &mut App) {
@@ -3310,6 +3629,91 @@ mod tests {
                 .modifier
                 .contains(Modifier::REVERSED)
         }));
+    }
+
+    #[test]
+    fn family_rows_show_a_state_glyph_and_fade_finished_work() {
+        let org = |id| TicketKey {
+            organization: "demo".into(),
+            id,
+        };
+        let mut app = App::new(vec![
+            ticket_at(
+                10_001,
+                "Auth epic",
+                "Epic",
+                "Active",
+                "2026-03-03T00:00:00Z",
+            ),
+            ticket_at(
+                10_002,
+                "Login form",
+                "User Story",
+                "Done",
+                "2026-02-01T00:00:00Z",
+            ),
+            ticket_at(
+                10_003,
+                "Logout",
+                "User Story",
+                "To Do",
+                "2026-01-15T00:00:00Z",
+            ),
+        ]);
+        app.set_workspace_graph(TicketGraph {
+            relations: vec![
+                RelationRecord {
+                    from: org(10_002),
+                    to: org(10_001),
+                    kind: RelationKind::Parent,
+                },
+                RelationRecord {
+                    from: org(10_003),
+                    to: org(10_001),
+                    kind: RelationKind::Parent,
+                },
+            ],
+            ..TicketGraph::default()
+        });
+        app.narrow_details = true;
+        assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_of = |needle: &str| {
+            find_buffer_text(buffer, 60, 30, needle)
+                .unwrap_or_else(|| panic!("{needle} should be on screen"))
+        };
+        let done_row = row_of("10002").1;
+        let open_row = row_of("10003").1;
+        let (check_x, check_row) = row_of("\u{2713}");
+        let (_, circle_row) = row_of("\u{25cb}");
+
+        assert_eq!(check_row, done_row, "the done child should show a check");
+        assert_eq!(circle_row, open_row, "the to-do child should show a circle");
+
+        let (glyph_fg, _, glyph_modifier) = painted_cell(&terminal, check_x, check_row);
+        let (title_fg, _, title_modifier) = {
+            let (x, y) = row_of("Login form");
+            painted_cell(&terminal, x, y)
+        };
+        let (open_title_fg, _, open_title_modifier) = {
+            let (x, y) = row_of("Logout");
+            painted_cell(&terminal, x, y)
+        };
+        if theme().muted == Color::Reset {
+            assert!(
+                glyph_modifier.contains(Modifier::BOLD),
+                "the glyph carries weight without colour"
+            );
+            assert!(title_modifier.contains(Modifier::DIM));
+            assert!(!open_title_modifier.contains(Modifier::DIM));
+        } else {
+            assert_eq!(glyph_fg, state_color(StateCategory::Completed));
+            assert_eq!(title_fg, theme().muted, "the done child should fade");
+            assert_ne!(open_title_fg, theme().muted);
+        }
     }
 
     fn auth_family_app_with_long_details() -> App {

@@ -315,10 +315,7 @@ fn field_matches(field: FilterField, ticket: &Ticket, needle: &str) -> bool {
 }
 
 fn path_segment_matches(value: &str, needle: &str) -> bool {
-    value
-        .rsplit(['\\', '/'])
-        .next()
-        .is_some_and(|segment| segment.eq_ignore_ascii_case(needle))
+    crate::model::path_leaf(value).eq_ignore_ascii_case(needle)
 }
 
 fn field_values(field: FilterField, ticket: &Ticket) -> Vec<String> {
