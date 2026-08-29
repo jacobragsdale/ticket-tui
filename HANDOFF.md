@@ -66,24 +66,34 @@ the six copies of the offline check, `SyncRuntime::send` the five copies of
 `ui::render_query_field` the four picker filter fields, and
 `sync::pull_summary` the wording the TUI and the CLI both had.
 
-## Next: make `App` tab-ready before the first new tab
+## The four-tab roadmap (Epics 656–660, created 2026-08-29)
 
-`App` (src/app.rs, 12.5k lines) is the app shell and the work-items screen in
-one struct, and `AppMode`, `ScrollSurface`, `PointerTarget`, `TextEditor`, the
-footer hints, `mode_name`, and `ui::render_pass` each enumerate every overlay.
-A Repos tab added as-is would grow all of them. The proposed slice, to discuss
-before starting: extract the work-items screen (tickets, search, filters,
-sort, pickers, forms, edits, family cursor) into its own module with its own
-mode enum, leaving `App` as the shell (tab, focus, pointer, notifications,
-session, sync flags) that dispatches keys, mouse, and rendering to the active
-tab. Split `app.rs` into a directory module at the same time. The six
-near-identical picker cursors (`focus_*`/`move_*_selection`) would collapse
-into one list-cursor type on the way through.
+ticket-tui grows into a terminal front-end for the whole project: Work items ·
+Repos · Pull requests · Pipelines, keys `1`–`4`, with the browser (`o`) for
+anything complicated. The design lives in the epics; every issue carries
+Problem / Approach / Done-when, and **Epic 656's description is the working
+agreement** for all of them (worker and watcher rules, the shared glyph
+language, keyboard–mouse parity, the test gates). Read it before any ticket.
+
+Build order: **656 Tab-ready shell** (661 split files → 662 extract the
+screen → 663 list scaffolding → 664 filter schema → 665 tab bar and key map →
+666 per-tab session → 667 jumps and `id:`), then **668** repos sync (pulled
+forward: pull requests and runs name repos), then **659 Pipelines** (680–689;
+the live log tail, 684, is the critical feature of the roadmap), **658 Pull
+requests** (674–679), the rest of **657 Repos** (669–673), and **660
+Cross-links and agents** (690–694).
+
+Decisions behind the tickets: no terminal hand-off and no Herdr integration
+(Repos is detect / clone / status / fetch / pull, not a git client); pull
+request actions in the TUI are vote, complete, abandon, auto-complete and a
+one-line comment, never the diff; pipelines get trigger, cancel, retry,
+approvals, and live status and logs through a second `PipelineWatcher` thread
+that never writes SQLite; agents are first-class through `ticket-tui`
+subcommands and context v3.
 
 ## What is left
 
-Nothing on the backlog. The tab-ready split above is the next slice, once its
-shape is agreed. Query round-tripping was the last
+The roadmap above; nothing is in Doing. Start at 661. Query round-tripping was the last
 loose end and is fixed: `quote_if_needed` now escapes `\` and `take_quoted`
 unescapes it, so `iteration:"development\Sprint 1"` survives
 `format_query`/`parse_query` (#654), and a backslash typed once inside a quoted
