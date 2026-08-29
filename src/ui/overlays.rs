@@ -558,24 +558,25 @@ pub(super) fn render_column_overlay(
 ) {
     let area = centered_rect(frame.area(), 56, 18);
     let inner = render_modal_frame(frame, screen, shell, area, " Columns ");
-    let content = screen.layout.columns.len();
+    let layout = Screen::columns(screen);
+    let content = layout.count();
     let selected = screen.column_overlay.cursor.index;
-    let rows: Vec<Line> = screen
-        .layout
-        .columns
-        .iter()
-        .enumerate()
-        .map(|(index, column)| {
+    let rows: Vec<Line> = (0..content)
+        .map(|index| {
             let marker = if index == selected { "›" } else { " " };
-            let check = if column.visible { "[x]" } else { "[ ]" };
-            let width = if column.id == SortField::Title {
+            let check = if layout.is_visible(index) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let width = if layout.flexible(index) {
                 "fill".into()
             } else {
-                column.width.to_string()
+                layout.width(index).to_string()
             };
             Line::from(format!(
                 "{marker} {check} {:<12} {width}",
-                column.id.label()
+                layout.label(index)
             ))
         })
         .collect();
@@ -613,11 +614,7 @@ pub(super) fn render_column_controls(
     logical: usize,
     y: u16,
 ) {
-    let resizable = screen
-        .layout
-        .columns
-        .get(logical)
-        .is_some_and(|column| column.id != SortField::Title);
+    let resizable = !Screen::columns(screen).flexible(logical);
     let controls = [
         (
             15,

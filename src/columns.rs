@@ -157,6 +157,9 @@ pub trait ColumnLayout {
     fn label(&self, index: usize) -> &'static str;
     fn is_visible(&self, index: usize) -> bool;
     fn width(&self, index: usize) -> u16;
+    /// Whether the column takes the width left over, which is what the overlay
+    /// shows as `fill` and refuses to resize.
+    fn flexible(&self, index: usize) -> bool;
     fn auto_hide(&self) -> bool;
     fn toggle_visible(&mut self, index: usize);
     /// Moves one column and answers where it landed.
@@ -181,6 +184,12 @@ impl<C: ColumnId> ColumnLayout for TableLayout<C> {
 
     fn width(&self, index: usize) -> u16 {
         self.columns.get(index).map_or(0, |column| column.width)
+    }
+
+    fn flexible(&self, index: usize) -> bool {
+        self.columns
+            .get(index)
+            .is_some_and(|column| column.id.flexible())
     }
 
     fn auto_hide(&self) -> bool {

@@ -930,6 +930,10 @@ impl Screen for WorkItemsScreen {
         Self::scroll_state_mut(self, surface)
     }
 
+    fn columns(&self) -> &dyn ColumnLayout {
+        &self.layout
+    }
+
     fn columns_mut(&mut self) -> &mut dyn ColumnLayout {
         &mut self.layout
     }

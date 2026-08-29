@@ -41,7 +41,10 @@ pub trait Screen {
     /// The same surface, to scroll it.
     fn scroll_state_mut(&mut self, surface: ScrollSurface) -> &mut ScrollState;
 
-    /// The columns the Columns overlay edits: whichever list this screen is
+    /// The columns the Columns overlay draws.
+    fn columns(&self) -> &dyn ColumnLayout;
+
+    /// The same, to edit: whichever list this screen is
     /// showing, without the overlay knowing what its columns are.
     fn columns_mut(&mut self) -> &mut dyn ColumnLayout;
 

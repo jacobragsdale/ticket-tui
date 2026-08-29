@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 
 use crate::app::{
     App, ChildProgress, DividerOrientation, Focus, FormOverlay, HitRegions, NotificationLevel,
-    PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PromptField, RowDensity, SearchOrder, Shell,
+    PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PromptField, RowDensity, Screen, SearchOrder, Shell,
     UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
 };
 use crate::command::{COMMANDS, key_label_for};
