@@ -1,14 +1,16 @@
 # ticket-tui
 
 `ticket-tui` is a fast terminal browser for Azure DevOps work items. It keeps a
-local SQLite cache of one Azure DevOps project and reads from that cache, so
-navigation, sorting, filtering, and fuzzy search stay instant. It provides mouse
+local SQLite database synced from one Azure DevOps project and reads from that
+database, so navigation, sorting, filtering, and fuzzy search stay instant. It provides mouse
 navigation, responsive ticket details, field sorting, live fuzzy search, and
 links that open in the system browser.
 
-The cache is disposable. `--sync` pulls the project's work items over the Azure
-DevOps REST API and replaces the cache contents; everything else the TUI does is
-local and never edits work items.
+Azure DevOps is the source of truth. `--sync` pulls the project's work items
+over the REST API and replaces the local rows; the database file itself is
+durable, lives in the platform data directory, and is the interface other tools
+and agent skills read. Everything else the TUI does is local and never edits
+work items.
 
 ## Run it
 
@@ -246,14 +248,14 @@ semicolon separation. The `work_item_relations`, `work_item_comments`, and
 key/value table describes the sync itself rather than the work items, so a pull
 clears the other tables but leaves it alone; `me_display_name` lives there.
 
-The cache carries `PRAGMA user_version = 6`. Because it is a cache rather than a
+The database carries `PRAGMA user_version = 6`. Because Azure DevOps is the
 record of truth, there are no migrations: a database at any other version has
 its tables dropped and recreated at startup, and the next `--sync` refills it.
-Deleting the file has the same effect. Background reloads instead open the cache
-without touching its schema and report the version mismatch, ending in
-`restart ticket-tui`, so a running instance can never empty a cache a newer
-build owns. After upgrading the binary, restart
-any running ticket-tui, and re-run `--sync` if the cache was rebuilt.
+Deleting the file has the same effect. Background reloads instead open the
+database without touching its schema and report the version mismatch, ending in
+`restart ticket-tui`, so a running instance can never empty a database a newer
+build owns. After upgrading the binary, restart any running ticket-tui, and
+re-run `--sync` if the schema was rebuilt.
 
 The TUI displays cached records but never edits them. Parent and child links
 render as an always-expanded family tree in the details pane. Click a family

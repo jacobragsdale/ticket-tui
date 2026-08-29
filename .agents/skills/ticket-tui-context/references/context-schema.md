@@ -20,7 +20,7 @@ wins.
 | `schema_version` | integer | Context contract version; currently `1` |
 | `process_id` | integer | PID of the ticket-tui process that wrote the file |
 | `updated_at` | string | UTC RFC 3339 time of the published state change |
-| `database_path` | string | SQLite cache backing the view |
+| `database_path` | string | SQLite database backing the view |
 | `me` | string or null | Signed-in display name recorded by the last `--sync`, overridden by `TICKET_TUI_ME`; null when neither is set |
 | `mode` | string | `browse`, `search`, or the active overlay name |
 | `focus` | string | `tickets`, `family`, or `details` |
@@ -62,8 +62,8 @@ fields behind that view. Join a ticket identity to `work_items` on
 `(organization, work_item_id)` when full fields are needed. Related records use
 `work_item_relations`, `work_item_comments`, and `work_item_history`.
 
-SQLite is a cache of an Azure DevOps project, not a record of truth. It is
-refilled by running ticket-tui with `--sync`, so it can lag the server and a
-work item changed in Azure DevOps since the last sync will still read as its
-cached values. Never write to it; ticket-tui replaces its contents wholesale on
-the next sync.
+The SQLite database is a durable local copy of one Azure DevOps project, synced
+by running ticket-tui with `--sync`; Azure DevOps remains the record of truth.
+It can lag the server, so a work item changed in Azure DevOps since the last
+sync still reads as its last synced values. Read it freely; never write to it,
+because ticket-tui replaces its rows wholesale on the next sync.
