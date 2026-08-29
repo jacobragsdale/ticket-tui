@@ -904,9 +904,11 @@ fn mouse_pointer_for_hover(
     divider: Option<DividerOrientation>,
 ) -> MousePointerShape {
     match target {
-        Some(PointerTarget::OpenTicket { .. } | PointerTarget::OpenSelectedUrl) => {
-            MousePointerShape::Link
-        }
+        Some(
+            PointerTarget::OpenTicket { .. }
+            | PointerTarget::OpenSelectedUrl
+            | PointerTarget::EditField { .. },
+        ) => MousePointerShape::Link,
         Some(PointerTarget::PaneDivider) => match divider {
             Some(DividerOrientation::Vertical) => MousePointerShape::ColResize,
             Some(DividerOrientation::Horizontal) => MousePointerShape::RowResize,
@@ -1318,6 +1320,16 @@ mod tests {
         assert_eq!(
             mouse_pointer_for_hover(Some(&PointerTarget::OpenTicket { index: 0 }), None),
             MousePointerShape::Link
+        );
+        assert_eq!(
+            mouse_pointer_for_hover(
+                Some(&PointerTarget::EditField {
+                    field: ticket_tui::pointer::EditableField::State
+                }),
+                None
+            ),
+            MousePointerShape::Link,
+            "an editable details field points the same way a link does"
         );
         assert_eq!(
             mouse_pointer_for_hover(Some(&PointerTarget::TableRow { index: 0 }), None),

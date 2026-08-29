@@ -286,6 +286,13 @@ on screen over the rows the pull brought. There is no offline queue: without a
 configured organization an edit is refused before anything changes, and an edit
 that cannot be sent is reverted rather than saved for later.
 
+Every editor is reachable two ways. Clicking a field's value in the details
+pane opens that field's editor where the value is, as a dropdown anchored under
+it — one click, not two — and `Enter` does the same for the value under the
+pointer while the details pane is focused, with the link line still opening the
+work item. The keyboard opens the same editors centred, and both paths run the
+same command and write the same edit; only the placement differs.
+
 `e` opens the Edit menu, which lists the fields that can be changed; `S`
 (capital, because `s` is the sort menu) skips it and opens the state picker
 directly. The picker lists the states the selected work item's type allows,
@@ -448,7 +455,7 @@ against the server.
 | `[` / `]` | Jump to the previous or next recently viewed ticket |
 | `Tab` | Toggle focus between tickets and details |
 | `d` | Toggle the details screen when the terminal is under 70 columns |
-| `Enter` | Select the family cursor ticket, or open from the details pane |
+| `Enter` | Select the family cursor ticket; with details focused, edit the field under the pointer, or open the work item |
 | `o` | Open the selected ticket in the system browser |
 | `r` | Sync from Azure DevOps now, without waiting for the timer |
 | `i` | Show database path, row counts, and sync freshness |
@@ -465,8 +472,16 @@ table, details pane, help, or overlay by three rows or lines and does not
 change keyboard focus or the selected ticket. Left-click activates the
 visible control under the pointer on release: search, filter pills, sort
 headers, ticket rows, checkboxes, bookmark markers,
-underlined IDs and URLs, tabs, overlay rows, and close/action buttons. Dragging over visible text
-selects it and copies the plain text on release. Bracketed paste inserts at
+underlined IDs and URLs, details-pane field values, tabs, overlay rows, and
+close/action buttons. A field value in the details pane — the title, the state,
+the assignee, the priority, the tags, the iteration, or the area — opens its
+editor as a dropdown hung under the value that was clicked, left edge on it and
+width fitted to the longest entry. A field with too little room below opens its
+dropdown above itself, and one with room neither way falls back to the middle of
+the screen. Clicking anywhere outside an open dropdown closes it without a
+change, and that click reaches nothing underneath. Assignee and priority share a
+line and are two separate targets on it. Dragging over visible text
+selects it and copies the plain text on release, a field value included. Bracketed paste inserts at
 the caret in search, the command palette, the named-view editor, and the title,
 tags, and comment prompts.
 Scrollbar tracks page by a viewport-minus-one step; thumbs can be
@@ -476,7 +491,8 @@ and details at least 30 side by side, and each keeps six rows when stacked.
 `Reset pane split` in the command palette restores the built-in layout.
 Right-click, double-click, and horizontal wheel gestures are not
 used. Terminals supporting OSC 22 show a browser-style pointer over external
-URL targets.
+URL targets and over the details-pane values that can be edited, which underline
+under the pointer whether or not the terminal has colours.
 
 Search accepts a compact grammar such as `state:active type:bug
 assignee:"Avery Chen" priority:1 tag:rust`, plus `project:`, `area:`, and

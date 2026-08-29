@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 
 use crate::app::{
     App, AppMode, DividerOrientation, Focus, HitRegions, NotificationLevel, PRIORITY_CHOICES,
-    PromptField, RowDensity, SearchOrder,
+    PromptField, RowDensity, SearchOrder, UNASSIGNED_LABEL,
 };
 use crate::command::{COMMANDS, EDIT_MENU, key_label_for};
 use crate::filter::{FacetTarget, FilterField};
@@ -21,13 +21,18 @@ use crate::model::{
     Ticket, TicketKey, path_leaf,
 };
 use crate::pointer::{
-    PointerLayer, PointerTarget, ScrollMetrics, ScrollSurface, SelectableSnapshot,
-    SelectableSurface, ThumbGeometry, region,
+    EditableField, OverlayAnchor, PointerLayer, PointerTarget, ScrollMetrics, ScrollSurface,
+    SelectableSnapshot, SelectableSurface, ThumbGeometry, region,
 };
 use crate::search::QueryHighlighter;
 
 const WIDE_BREAKPOINT: u16 = 110;
 const NARROW_BREAKPOINT: u16 = 70;
+
+/// The narrowest a dropdown gets, however short its entries are, and the
+/// fewest rows it is worth opening in: two for the frame and one for a row.
+const ANCHORED_MIN_WIDTH: u16 = 24;
+const ANCHORED_MIN_HEIGHT: u16 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Theme {
@@ -178,6 +183,18 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
     render_content(frame, app, sections[3]);
     render_footer(frame, app, sections[4]);
 
+    // A dropdown is dismissed by clicking away from it, so everything outside
+    // it becomes one target that closes it. The overlay's own regions are
+    // pushed after this one and on the same layer, so they still win.
+    if anchored_overlay(app) {
+        app.hit_regions.push(region(
+            area,
+            PointerTarget::DismissOverlay,
+            PointerLayer::Modal,
+            None,
+            None,
+        ));
+    }
     match app.mode {
         AppMode::Sort => render_sort_popup(frame, app),
         AppMode::Help => render_help_popup(frame, app),
@@ -731,6 +748,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     ])
     .split(inner);
     frame.render_widget(Paragraph::new(Text::from(metadata_lines)), chunks[0]);
+    register_metadata_fields(app, chunks[0], &ticket, family.has_family());
 
     if chunks[1].height > 0 {
         frame.render_widget(Paragraph::new(link_line(ticket.web_url.clone())), chunks[1]);
@@ -749,6 +767,9 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let mut detail_lines = Vec::new();
         let mut family_hits: Vec<FamilyHit> = Vec::new();
         let mut line_links: Vec<(u16, TicketKey)> = Vec::new();
+        // The Planning rows scroll with the rest of the body, so their editable
+        // values are registered once their line is known to be on screen.
+        let mut field_hits: Vec<(u16, EditableField, u16, u16)> = Vec::new();
 
         if family.has_family() {
             detail_lines.push(family_section_line(
@@ -783,11 +804,27 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             detail_lines.push(Line::default());
         }
         detail_lines.push(section_line("Planning"));
+        if let Ok(line) = u16::try_from(detail_lines.len()) {
+            field_hits.push((
+                line,
+                EditableField::Area,
+                columns("Area: "),
+                columns(&ticket.area_path),
+            ));
+        }
         detail_lines.push(highlighted_field_line(
             "Area",
             &ticket.area_path,
             &mut highlighter,
         ));
+        if let Ok(line) = u16::try_from(detail_lines.len()) {
+            field_hits.push((
+                line,
+                EditableField::Iteration,
+                columns("Iteration: "),
+                columns(&ticket.iteration_path),
+            ));
+        }
         detail_lines.push(highlighted_field_line(
             "Iteration",
             &ticket.iteration_path,
@@ -875,6 +912,11 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     Some(SelectableSurface::Details),
                     Some(ScrollSurface::Details),
                 ));
+            }
+        }
+        for (logical, field, x, width) in field_hits {
+            if let Some(y) = visible_row_y(chunks[2], logical, scroll_rows) {
+                register_edit_field(app, chunks[2], field, y, x, width);
             }
         }
         let overflow = line_count > viewport;
@@ -1674,10 +1716,6 @@ fn render_state_picker(frame: &mut Frame<'_>, app: &mut App) {
     let height = u16::try_from(options.len().saturating_add(2))
         .unwrap_or(u16::MAX)
         .clamp(3, 16);
-    let area = centered_rect(frame.area(), 40, height);
-    frame.render_widget(Clear, area);
-    let title = format!(" State \u{b7} #{} ", app.state_picker.id);
-    let inner = render_modal_frame(frame, app, area, &title);
     let selected = app.state_picker.index;
     let rows: Vec<Line> = options
         .iter()
@@ -1695,6 +1733,11 @@ fn render_state_picker(frame: &mut Frame<'_>, app: &mut App) {
             ])
         })
         .collect();
+    let width = overlay_width(app.overlay_anchor, &rows, 40, frame.area());
+    let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
+    frame.render_widget(Clear, area);
+    let title = format!(" State \u{b7} #{} ", app.state_picker.id);
+    let inner = render_modal_frame(frame, app, area, &title);
     render_list_overlay(
         frame,
         app,
@@ -1719,10 +1762,6 @@ fn render_state_picker(frame: &mut Frame<'_>, app: &mut App) {
 fn render_priority_picker(frame: &mut Frame<'_>, app: &mut App) {
     let current = app.priority_picker.current;
     let height = u16::try_from(PRIORITY_CHOICES.len().saturating_add(2)).unwrap_or(u16::MAX);
-    let area = centered_rect(frame.area(), 40, height);
-    frame.render_widget(Clear, area);
-    let title = format!(" Priority \u{b7} #{} ", app.priority_picker.id);
-    let inner = render_modal_frame(frame, app, area, &title);
     let selected = app.priority_picker.index;
     let rows: Vec<Line> = PRIORITY_CHOICES
         .iter()
@@ -1737,6 +1776,11 @@ fn render_priority_picker(frame: &mut Frame<'_>, app: &mut App) {
             ])
         })
         .collect();
+    let width = overlay_width(app.overlay_anchor, &rows, 40, frame.area());
+    let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
+    frame.render_widget(Clear, area);
+    let title = format!(" Priority \u{b7} #{} ", app.priority_picker.id);
+    let inner = render_modal_frame(frame, app, area, &title);
     render_list_overlay(
         frame,
         app,
@@ -1764,35 +1808,6 @@ fn render_assignee_picker(frame: &mut Frame<'_>, app: &mut App) {
     let height = u16::try_from(candidates.len().saturating_add(3))
         .unwrap_or(u16::MAX)
         .clamp(5, 18);
-    let area = centered_rect(frame.area(), 52, height);
-    frame.render_widget(Clear, area);
-    let title = format!(" Assignee \u{b7} #{} ", app.assignee_picker.id);
-    let inner = render_modal_frame(frame, app, area, &title);
-    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
-    let query_area = chunks[0];
-    let query = if app.assignee_picker.query.is_empty() {
-        Line::styled("Filter people\u{2026}", Style::default().fg(theme().muted))
-    } else {
-        Line::from(app.assignee_picker.query.text().to_owned())
-    };
-    frame.render_widget(
-        Paragraph::new(query).style(Style::default().fg(theme().text)),
-        query_area,
-    );
-    app.hit_regions.push(region(
-        query_area,
-        PointerTarget::AssigneeQuery,
-        PointerLayer::Modal,
-        Some(SelectableSurface::Overlay),
-        None,
-    ));
-    capture_selectable(frame, app, SelectableSurface::Overlay, query_area, false);
-    let cursor_x = query_area.x.saturating_add(
-        u16::try_from(app.assignee_picker.query.cursor())
-            .unwrap_or(u16::MAX)
-            .min(query_area.width.saturating_sub(1)),
-    );
-    frame.set_cursor_position((cursor_x, query_area.y));
     let selected = app.assignee_picker.index;
     let rows: Vec<Line> = candidates
         .iter()
@@ -1824,6 +1839,36 @@ fn render_assignee_picker(frame: &mut Frame<'_>, app: &mut App) {
             Line::from(spans)
         })
         .collect();
+    let width = overlay_width(app.overlay_anchor, &rows, 52, frame.area());
+    let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
+    frame.render_widget(Clear, area);
+    let title = format!(" Assignee \u{b7} #{} ", app.assignee_picker.id);
+    let inner = render_modal_frame(frame, app, area, &title);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
+    let query_area = chunks[0];
+    let query = if app.assignee_picker.query.is_empty() {
+        Line::styled("Filter people\u{2026}", Style::default().fg(theme().muted))
+    } else {
+        Line::from(app.assignee_picker.query.text().to_owned())
+    };
+    frame.render_widget(
+        Paragraph::new(query).style(Style::default().fg(theme().text)),
+        query_area,
+    );
+    app.hit_regions.push(region(
+        query_area,
+        PointerTarget::AssigneeQuery,
+        PointerLayer::Modal,
+        Some(SelectableSurface::Overlay),
+        None,
+    ));
+    capture_selectable(frame, app, SelectableSurface::Overlay, query_area, false);
+    let cursor_x = query_area.x.saturating_add(
+        u16::try_from(app.assignee_picker.query.cursor())
+            .unwrap_or(u16::MAX)
+            .min(query_area.width.saturating_sub(1)),
+    );
+    frame.set_cursor_position((cursor_x, query_area.y));
     render_list_overlay(
         frame,
         app,
@@ -1854,7 +1899,36 @@ fn render_node_picker(frame: &mut Frame<'_>, app: &mut App) {
     let height = u16::try_from(rows_data.len().saturating_add(3))
         .unwrap_or(u16::MAX)
         .clamp(5, 20);
-    let area = centered_rect(frame.area(), 56, height);
+    let selected = app.node_picker.index;
+    let rows: Vec<Line> = rows_data
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let marker = if index == selected { "\u{203a}" } else { " " };
+            let here = if row.path == current { "\u{2022}" } else { " " };
+            let mut spans = vec![
+                Span::raw(format!("{marker}{here} {}", row.indent())),
+                Span::styled(row.leaf().to_owned(), Style::default().fg(theme().text)),
+            ];
+            if let Some(dates) = row.dates.as_deref() {
+                spans.push(Span::styled(
+                    format!("  {dates}"),
+                    Style::default().fg(theme().muted),
+                ));
+            }
+            if row.current_period {
+                spans.push(Span::styled(
+                    " current",
+                    Style::default()
+                        .fg(theme().accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    let width = overlay_width(app.overlay_anchor, &rows, 56, frame.area());
+    let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
     frame.render_widget(Clear, area);
     let title = format!(" {} \u{b7} #{} ", kind.label(), app.node_picker.id);
     let inner = render_modal_frame(frame, app, area, &title);
@@ -1886,34 +1960,6 @@ fn render_node_picker(frame: &mut Frame<'_>, app: &mut App) {
             .min(query_area.width.saturating_sub(1)),
     );
     frame.set_cursor_position((cursor_x, query_area.y));
-    let selected = app.node_picker.index;
-    let rows: Vec<Line> = rows_data
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let marker = if index == selected { "\u{203a}" } else { " " };
-            let here = if row.path == current { "\u{2022}" } else { " " };
-            let mut spans = vec![
-                Span::raw(format!("{marker}{here} {}", row.indent())),
-                Span::styled(row.leaf().to_owned(), Style::default().fg(theme().text)),
-            ];
-            if let Some(dates) = row.dates.as_deref() {
-                spans.push(Span::styled(
-                    format!("  {dates}"),
-                    Style::default().fg(theme().muted),
-                ));
-            }
-            if row.current_period {
-                spans.push(Span::styled(
-                    " current",
-                    Style::default()
-                        .fg(theme().accent)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-            Line::from(spans)
-        })
-        .collect();
     render_list_overlay(
         frame,
         app,
@@ -1946,7 +1992,9 @@ fn render_prompt(frame: &mut Frame<'_>, app: &mut App) {
     }) else {
         return;
     };
-    let area = centered_rect(frame.area(), 64, 5);
+    let measured = [Line::from(format!("{}: {text}", field.label()))];
+    let width = overlay_width(app.overlay_anchor, &measured, 64, frame.area());
+    let area = overlay_area(frame.area(), app.overlay_anchor, width, 5);
     frame.render_widget(Clear, area);
     let title = format!(" {} ", field.title(id));
     let inner = render_modal_frame(frame, app, area, &title);
@@ -2915,6 +2963,137 @@ fn tags_field_line(tags: &[String], highlighter: &mut QueryHighlighter) -> Line<
     Line::from(spans)
 }
 
+/// One editable value on the details pane's metadata block: which line of the
+/// block it sits on, the column its value starts at, and how wide that value
+/// is drawn.
+struct FieldSpan {
+    field: EditableField,
+    line: u16,
+    x: u16,
+    width: u16,
+}
+
+/// How many columns a piece of text takes on the line that carries it.
+fn columns(text: &str) -> u16 {
+    u16::try_from(Span::raw(text).width()).unwrap_or(u16::MAX)
+}
+
+/// Where each editable value sits on the metadata block, measured from the same
+/// text [`ticket_identity_line`], [`ticket_assignment_line`], and
+/// [`tags_field_line`] build their lines out of, so a click lands on the value
+/// rather than anywhere on its line. Assignee and Priority share a line and are
+/// two separate spans on it.
+fn metadata_field_spans(ticket: &Ticket, has_family: bool) -> Vec<FieldSpan> {
+    let separator = columns(" \u{b7} ");
+    let state_x = columns("ID / Type / State: ")
+        .saturating_add(columns(&ticket.key.id.to_string()))
+        .saturating_add(separator)
+        .saturating_add(columns(&ticket.work_item_type))
+        .saturating_add(2)
+        .saturating_add(separator);
+    // The breadcrumb sits between the identity line and the assignment line
+    // whenever the work item has a family.
+    let assignment = 2u16.saturating_add(has_family.into());
+    let assignee = ticket.assigned_to.as_deref().unwrap_or(UNASSIGNED_LABEL);
+    let assignee_x = columns("Assignee / Priority: ");
+    let priority = ticket
+        .priority
+        .map_or_else(|| "\u{2014}".to_owned(), |priority| priority.to_string());
+    vec![
+        FieldSpan {
+            field: EditableField::Title,
+            line: 0,
+            x: 0,
+            width: columns(&ticket.title),
+        },
+        FieldSpan {
+            field: EditableField::State,
+            line: 1,
+            x: state_x,
+            width: columns(&ticket.state),
+        },
+        FieldSpan {
+            field: EditableField::Assignee,
+            line: assignment,
+            x: assignee_x,
+            width: columns(assignee),
+        },
+        FieldSpan {
+            field: EditableField::Priority,
+            line: assignment,
+            x: assignee_x
+                .saturating_add(columns(assignee))
+                .saturating_add(separator),
+            width: columns(&priority),
+        },
+        FieldSpan {
+            field: EditableField::Tags,
+            line: assignment.saturating_add(1),
+            x: columns("Tags: "),
+            width: tags_run_width(&ticket.tags),
+        },
+    ]
+}
+
+/// The columns the tag badges take together, brackets and the spaces between
+/// them included, or the width of the dash that stands in for an empty list.
+fn tags_run_width(tags: &[String]) -> u16 {
+    if tags.is_empty() {
+        return columns("\u{2014}");
+    }
+    tags.iter().fold(0u16, |total, tag| {
+        let badge = columns(tag).saturating_add(2);
+        let gap = u16::from(total > 0);
+        total.saturating_add(badge).saturating_add(gap)
+    })
+}
+
+/// Registers a hit region on every editable value of the metadata block. A
+/// value on a line the block is too short to show gets none.
+fn register_metadata_fields(app: &mut App, area: Rect, ticket: &Ticket, has_family: bool) {
+    for span in metadata_field_spans(ticket, has_family) {
+        if span.line >= area.height {
+            continue;
+        }
+        register_edit_field(
+            app,
+            area,
+            span.field,
+            area.y.saturating_add(span.line),
+            span.x,
+            span.width,
+        );
+    }
+}
+
+/// One editable value's hit region on a row already on screen, clipped to the
+/// pane and dropped when the value starts past its right edge. It stays part of
+/// the details text surface, so dragging across it still selects and copies.
+fn register_edit_field(
+    app: &mut App,
+    area: Rect,
+    field: EditableField,
+    y: u16,
+    x: u16,
+    width: u16,
+) {
+    if x >= area.width || width == 0 {
+        return;
+    }
+    app.hit_regions.push(region(
+        Rect::new(
+            area.x.saturating_add(x),
+            y,
+            width.min(area.width.saturating_sub(x)),
+            1,
+        ),
+        PointerTarget::EditField { field },
+        PointerLayer::Base,
+        Some(SelectableSurface::Details),
+        Some(ScrollSurface::Details),
+    ));
+}
+
 fn field_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
     Line::from(vec![
         Span::styled(
@@ -3220,10 +3399,25 @@ fn paint_hover(frame: &mut Frame<'_>, app: &App) {
             | PointerTarget::SearchField
             | PointerTarget::OverlayBody
             | PointerTarget::DismissFacet
+            | PointerTarget::DismissOverlay
             | PointerTarget::PaletteQuery
             | PointerTarget::ViewName
             | PointerTarget::PromptInput
     ) {
+        return;
+    }
+    // An editable value underlines rather than inverts, the way a link does,
+    // and a modifier says so under NO_COLOR too.
+    if matches!(target, PointerTarget::EditField { .. }) {
+        let rect = region.rect;
+        let buffer = frame.buffer_mut();
+        for y in rect.y..rect.y.saturating_add(rect.height) {
+            for x in rect.x..rect.x.saturating_add(rect.width) {
+                let cell = &mut buffer[(x, y)];
+                let style = cell.style().add_modifier(Modifier::UNDERLINED);
+                cell.set_style(style);
+            }
+        }
         return;
     }
     // Painted last, so on a hovered *and* selected row the tint covers the
@@ -3289,6 +3483,84 @@ fn focused_block<'a>(title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
         } else {
             theme().muted
         }))
+}
+
+/// Whether the overlay on screen is a dropdown hung off a details-pane field
+/// rather than a centred modal.
+fn anchored_overlay(app: &App) -> bool {
+    app.overlay_anchor.is_anchored()
+        && matches!(
+            app.mode,
+            AppMode::StatePicker
+                | AppMode::PriorityPicker
+                | AppMode::AssigneePicker
+                | AppMode::NodePicker
+                | AppMode::Prompt
+        )
+}
+
+/// Where an overlay of this size lands.
+///
+/// A centred one is placed the way it always was. A dropdown opens directly
+/// under the field that was clicked, left edge on the value, taking as many of
+/// the rows below as it needs; with too few rows under the field it opens above
+/// it instead, and with too few either way it falls back to the middle of the
+/// screen.
+fn overlay_area(area: Rect, anchor: OverlayAnchor, width: u16, height: u16) -> Rect {
+    let (field, prefer_above) = match anchor {
+        OverlayAnchor::Centered => return centered_rect(area, width, height),
+        OverlayAnchor::Below(field) => (field, false),
+        OverlayAnchor::Above(field) => (field, true),
+    };
+    let width = width.min(area.width).max(1);
+    let x = field
+        .x
+        .min(area.x.saturating_add(area.width).saturating_sub(width))
+        .max(area.x);
+    let top = field.y.saturating_add(field.height);
+    let below = area
+        .y
+        .saturating_add(area.height)
+        .saturating_sub(top.max(area.y));
+    let above = field.y.saturating_sub(area.y);
+    let drop_below = || Rect::new(x, top, width, height.min(below));
+    let drop_above = || {
+        let height = height.min(above);
+        Rect::new(x, field.y.saturating_sub(height), width, height)
+    };
+    let (first, second) = if prefer_above {
+        (above, below)
+    } else {
+        (below, above)
+    };
+    if first >= ANCHORED_MIN_HEIGHT {
+        if prefer_above {
+            drop_above()
+        } else {
+            drop_below()
+        }
+    } else if second >= ANCHORED_MIN_HEIGHT {
+        if prefer_above {
+            drop_below()
+        } else {
+            drop_above()
+        }
+    } else {
+        centered_rect(area, width, height)
+    }
+}
+
+/// How wide an overlay is drawn: the width it uses when centred, or, as a
+/// dropdown, whatever its longest row needs, never under
+/// [`ANCHORED_MIN_WIDTH`] and never wider than the screen.
+fn overlay_width(anchor: OverlayAnchor, rows: &[Line<'_>], centered: u16, area: Rect) -> u16 {
+    if !anchor.is_anchored() {
+        return centered;
+    }
+    let longest = rows.iter().map(Line::width).max().unwrap_or_default();
+    // Two columns of frame, one for the scrollbar, and one to breathe.
+    let fitted = u16::try_from(longest.saturating_add(4)).unwrap_or(u16::MAX);
+    fitted.clamp(ANCHORED_MIN_WIDTH.min(area.width), area.width)
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
@@ -5107,6 +5379,362 @@ mod tests {
         assert!(
             divider(&stacked).y > before.y,
             "the stacked divider moved down"
+        );
+    }
+
+    fn edit_field_rect(app: &App, field: EditableField) -> Rect {
+        app.hit_regions
+            .edit_field(field)
+            .unwrap_or_else(|| panic!("{field:?} should be clickable"))
+    }
+
+    fn text_at(terminal: &Terminal<TestBackend>, rect: Rect) -> String {
+        let buffer = terminal.backend().buffer();
+        (rect.x..rect.x.saturating_add(rect.width))
+            .map(|x| buffer[(x, rect.y)].symbol())
+            .collect()
+    }
+
+    fn issue_app() -> App {
+        let mut app = App::new(vec![ticket_at(
+            10_001,
+            "Fix ticket search",
+            "Issue",
+            "To Do",
+            "2026-03-03T00:00:00Z",
+        )]);
+        app.enable_sync();
+        let mut catalog = StateCatalog::default();
+        catalog.insert(
+            "Issue",
+            vec![
+                StateOption::new("To Do", StateCategory::Proposed),
+                StateOption::new("Doing", StateCategory::InProgress),
+                StateOption::new("Done", StateCategory::Completed),
+            ],
+        );
+        app.set_state_catalog(catalog);
+        app
+    }
+
+    #[test]
+    fn every_details_field_is_clickable_on_its_own_value() {
+        let mut app = App::new(vec![ticket()]);
+        let mut terminal = Terminal::new(TestBackend::new(130, 40)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        for (field, value) in [
+            (EditableField::Title, "Fix ticket search"),
+            (EditableField::State, "Active"),
+            (EditableField::Assignee, "Avery Chen"),
+            (EditableField::Priority, "1"),
+            (EditableField::Tags, "[rust] [search]"),
+            (EditableField::Area, "Atlas\\Platform"),
+            (EditableField::Iteration, "Atlas\\Sprint 1"),
+        ] {
+            let rect = edit_field_rect(&app, field);
+            assert_eq!(
+                text_at(&terminal, rect),
+                value,
+                "{field:?} should cover its own value"
+            );
+        }
+
+        let assignee = edit_field_rect(&app, EditableField::Assignee);
+        let priority = edit_field_rect(&app, EditableField::Priority);
+        app.handle_mouse(mouse(MouseEventKind::Moved, assignee.x, assignee.y));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let (_, _, modifier) = painted_cell(&terminal, assignee.x, assignee.y);
+        assert!(
+            modifier.contains(Modifier::UNDERLINED),
+            "hovering a value underlines it, colours or not"
+        );
+        let (_, _, elsewhere) = painted_cell(&terminal, priority.x, priority.y);
+        assert!(
+            !elsewhere.contains(Modifier::UNDERLINED),
+            "and only the value under the pointer"
+        );
+        assert_eq!(
+            assignee.y, priority.y,
+            "both sit on the Assignee / Priority line"
+        );
+        assert!(
+            assignee.x + assignee.width < priority.x,
+            "and each is its own target: {assignee:?} then {priority:?}"
+        );
+
+        let mut unassigned = App::new(vec![{
+            let mut ticket = ticket();
+            ticket.assigned_to = None;
+            ticket.priority = None;
+            ticket.tags.clear();
+            ticket
+        }]);
+        let mut terminal = Terminal::new(TestBackend::new(130, 40)).unwrap();
+        terminal
+            .draw(|frame| render(frame, &mut unassigned))
+            .unwrap();
+        assert_eq!(
+            text_at(
+                &terminal,
+                edit_field_rect(&unassigned, EditableField::Assignee)
+            ),
+            "Unassigned"
+        );
+        assert_eq!(
+            text_at(
+                &terminal,
+                edit_field_rect(&unassigned, EditableField::Priority)
+            ),
+            "\u{2014}"
+        );
+        assert_eq!(
+            text_at(&terminal, edit_field_rect(&unassigned, EditableField::Tags)),
+            "\u{2014}"
+        );
+    }
+
+    #[test]
+    fn planning_fields_follow_the_details_scroll_and_a_breadcrumb_shifts_the_rest() {
+        let mut app = auth_family_app_with_long_details();
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        // A work item with a family carries a breadcrumb line, so the
+        // assignment and tags lines sit one row lower than they otherwise do.
+        assert_eq!(
+            text_at(&terminal, edit_field_rect(&app, EditableField::Assignee)),
+            "Avery Chen"
+        );
+        let before = edit_field_rect(&app, EditableField::Area);
+        assert_eq!(text_at(&terminal, before), "Atlas\\Platform");
+
+        app.details.scroll_to(2);
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let after = edit_field_rect(&app, EditableField::Area);
+        assert_eq!(after.y + 2, before.y, "the value scrolled with the pane");
+        assert_eq!(text_at(&terminal, after), "Atlas\\Platform");
+
+        app.details.scroll_to(app.details.max_offset());
+        render_text(60, 24, &mut app);
+        assert!(
+            app.hit_regions.edit_field(EditableField::Area).is_none(),
+            "a value scrolled off the pane is not clickable"
+        );
+    }
+
+    #[test]
+    fn clicking_a_field_opens_its_editor_anchored_under_the_value() {
+        for (field, mode) in [
+            (EditableField::Title, AppMode::Prompt),
+            (EditableField::State, AppMode::StatePicker),
+            (EditableField::Assignee, AppMode::AssigneePicker),
+            (EditableField::Priority, AppMode::PriorityPicker),
+            (EditableField::Tags, AppMode::Prompt),
+            (EditableField::Area, AppMode::NodePicker),
+            (EditableField::Iteration, AppMode::NodePicker),
+        ] {
+            let mut app = issue_app();
+            render_text(130, 40, &mut app);
+            let rect = edit_field_rect(&app, field);
+            click(&mut app, rect.x, rect.y);
+            assert_eq!(app.mode, mode, "clicking {field:?}");
+            assert_eq!(
+                app.overlay_anchor,
+                OverlayAnchor::Below(rect),
+                "{field:?} anchors its editor to its own value"
+            );
+        }
+    }
+
+    #[test]
+    fn an_anchored_dropdown_is_drawn_under_the_field_and_dismissed_by_a_click_away() {
+        let mut app = issue_app();
+        render_text(130, 40, &mut app);
+        let field = edit_field_rect(&app, EditableField::Assignee);
+        assert!(matches!(
+            click(&mut app, field.x, field.y),
+            crate::app::AppAction::FetchIdentities | crate::app::AppAction::None
+        ));
+        assert_eq!(app.mode, AppMode::AssigneePicker);
+
+        let mut terminal = Terminal::new(TestBackend::new(130, 40)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer[(field.x, field.y + 1)].symbol(),
+            "\u{250c}",
+            "the dropdown's corner sits under the value"
+        );
+        let first = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::AssigneeOption { index: 0 }))
+            .expect("the first candidate should be clickable")
+            .rect;
+        assert!(
+            first.y > field.y && first.x >= field.x,
+            "the candidates hang below the field: {first:?} under {field:?}"
+        );
+
+        // A field near the right edge keeps its dropdown on screen.
+        app.mode = AppMode::Browse;
+        render_text(130, 40, &mut app);
+        let state = edit_field_rect(&app, EditableField::State);
+        click(&mut app, state.x, state.y);
+        let mut terminal = Terminal::new(TestBackend::new(130, 40)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let corner = find_buffer_text_in(
+            terminal.backend().buffer(),
+            Rect::new(0, state.y + 1, 130, 1),
+            "\u{250c}",
+        )
+        .expect("the state dropdown is drawn on the row under the value");
+        assert!(
+            corner.0 < state.x,
+            "and pulled left to stay on screen: {corner:?} for {state:?}"
+        );
+
+        // Everything outside the dropdown closes it and reaches nothing else.
+        let action = click(&mut app, 2, 1);
+        assert_eq!(action, crate::app::AppAction::None);
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.query().is_empty(), "the click never reached the search");
+        assert!(app.tickets()[0].state == "To Do", "and wrote nothing");
+    }
+
+    #[test]
+    fn a_drag_across_a_field_copies_its_text_and_opens_no_editor() {
+        let mut app = App::new(vec![ticket()]);
+        render_text(130, 40, &mut app);
+        let field = edit_field_rect(&app, EditableField::Assignee);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            field.x,
+            field.y,
+        ));
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            field.x + 4,
+            field.y,
+        ));
+        let action = app
+            .handle_mouse(mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                field.x + 4,
+                field.y,
+            ))
+            .action;
+        assert!(
+            matches!(action, crate::app::AppAction::Copy { .. }),
+            "a drag still selects text, got {action:?}"
+        );
+        assert_eq!(app.mode, AppMode::Browse, "and opens nothing");
+    }
+
+    #[test]
+    fn enter_opens_the_field_under_the_pointer_and_still_opens_the_link() {
+        let mut app = App::new(vec![ticket()]);
+        render_text(130, 40, &mut app);
+        let field = edit_field_rect(&app, EditableField::Priority);
+        app.focus = Focus::Details;
+        app.handle_mouse(mouse(MouseEventKind::Moved, field.x, field.y));
+        let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, crate::app::AppAction::None);
+        assert_eq!(app.mode, AppMode::PriorityPicker);
+        assert_eq!(app.overlay_anchor, OverlayAnchor::Below(field));
+
+        let mut app = App::new(vec![ticket()]);
+        render_text(130, 40, &mut app);
+        let url = app.hit_regions.detail_url.expect("detail url");
+        app.focus = Focus::Details;
+        app.handle_mouse(mouse(MouseEventKind::Moved, url.x, url.y));
+        assert!(matches!(
+            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            crate::app::AppAction::OpenUrl(_)
+        ));
+    }
+
+    #[test]
+    fn an_anchored_picker_writes_the_same_edit_as_the_keyboard_one() {
+        let mut keyboard = issue_app();
+        keyboard.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE));
+        assert_eq!(keyboard.overlay_anchor, OverlayAnchor::Centered);
+        keyboard.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let expected = keyboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(expected, crate::app::AppAction::Edit(_)),
+            "the keyboard path writes an edit, got {expected:?}"
+        );
+
+        let mut clicked = issue_app();
+        render_text(130, 40, &mut clicked);
+        let field = edit_field_rect(&clicked, EditableField::State);
+        click(&mut clicked, field.x, field.y);
+        render_text(130, 40, &mut clicked);
+        clicked.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let action = clicked.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(action, expected, "both paths produce the same edit");
+        assert_eq!(clicked.mode, AppMode::Browse);
+    }
+
+    #[test]
+    fn a_dropdown_opens_below_a_field_above_a_low_one_and_centred_when_neither_fits() {
+        let screen = Rect::new(0, 0, 80, 24);
+        let field = Rect::new(10, 4, 12, 1);
+        assert_eq!(
+            overlay_area(screen, OverlayAnchor::Below(field), 30, 8),
+            Rect::new(10, 5, 30, 8),
+            "a tall pane drops the list under the field"
+        );
+
+        let low = Rect::new(10, 22, 12, 1);
+        assert_eq!(
+            overlay_area(screen, OverlayAnchor::Below(low), 30, 8),
+            Rect::new(10, 14, 30, 8),
+            "a field near the bottom opens above itself"
+        );
+
+        let short = Rect::new(0, 0, 40, 5);
+        let middle = Rect::new(4, 2, 8, 1);
+        assert_eq!(
+            overlay_area(short, OverlayAnchor::Below(middle), 30, 8),
+            centered_rect(short, 30, 8),
+            "with room neither way the picker goes back to the middle"
+        );
+
+        let right = Rect::new(70, 4, 8, 1);
+        assert_eq!(
+            overlay_area(screen, OverlayAnchor::Below(right), 30, 8).x,
+            50,
+            "a dropdown is pulled back inside the screen"
+        );
+        assert_eq!(
+            overlay_area(screen, OverlayAnchor::Above(field), 30, 8),
+            Rect::new(10, 0, 30, 4),
+            "an upward anchor takes the rows it has"
+        );
+        assert_eq!(
+            overlay_area(screen, OverlayAnchor::Centered, 30, 8),
+            centered_rect(screen, 30, 8),
+            "a keyboard-opened picker stays centred"
+        );
+
+        let rows = [
+            Line::from("a short row"),
+            Line::from("the longest row here"),
+        ];
+        assert_eq!(
+            overlay_width(OverlayAnchor::Centered, &rows, 52, screen),
+            52
+        );
+        assert_eq!(
+            overlay_width(OverlayAnchor::Below(field), &rows, 52, screen),
+            24,
+            "a narrow list still opens at the minimum width"
+        );
+        let wide = [Line::from("x".repeat(40))];
+        assert_eq!(
+            overlay_width(OverlayAnchor::Below(field), &wide, 52, screen),
+            44
         );
     }
 }
