@@ -4503,6 +4503,26 @@ mod tests {
     }
 
     #[test]
+    fn date_filters_come_back_from_the_session_file_as_the_chips_they_were_typed_as() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tickets.session.json");
+        let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+        app.set_query("changed:<7d created:>2026-08-01 rust".into());
+        session::save(&path, &app.snapshot_session()).unwrap();
+
+        let mut restored = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+        restored.restore_session(session::load(&path).unwrap());
+
+        assert_eq!(restored.query(), "changed:<7d created:>2026-08-01 rust");
+        let labels: Vec<String> = restored
+            .filter_tokens()
+            .iter()
+            .map(FilterToken::chip_label)
+            .collect();
+        assert_eq!(labels, vec!["changed:<7d", "created:>2026-08-01"]);
+    }
+
+    #[test]
     fn bookmarks_multi_select_and_copy_use_selected_tickets() {
         let mut app = App::new(vec![
             ticket(1, "Alpha", "2026-01-01T00:00:00Z"),

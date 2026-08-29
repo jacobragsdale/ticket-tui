@@ -631,7 +631,16 @@ Search accepts a compact grammar such as `state:active type:bug
 assignee:"Avery Chen" priority:1 tag:rust`, plus `project:`, `area:`, and
 `iteration:`. Values in the same field are combined with OR; different fields
 are combined with AND. `is:bookmarked` limits the table to locally bookmarked
-tickets. Active filters appear as removable chips. The command palette copies
+tickets. `changed:` and `created:` take a comparison rather than a value, so
+`changed:<7d` is what moved in the last seven days and `changed:>14d` what has
+gone untouched for longer, over units of minutes, hours, days, and weeks
+(`m`, `h`, `d`, `w`), with `<=` and `>=` taking the edge and `updated:` reading
+as `changed:`. An ISO date compares against the instant instead, at UTC
+midnight, so `created:>2026-08-01` is everything raised since the start of
+August. Relative windows are measured as the filter runs, so a view saved as
+`changed:<7d` still means the last seven days tomorrow, and the `+` overlay
+offers 24h, 7d, 14d, and 30d presets for both fields, where a date has no list
+of values to check off. Active filters appear as removable chips. The command palette copies
 IDs, URLs, titles, Markdown links, or summaries, edits the title, priority,
 tags, iteration, area, or description, leaves a comment, and exports the
 selection as JSON or CSV. Press `i` for database path, row count, freshness, and the last
