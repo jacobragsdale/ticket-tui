@@ -431,6 +431,34 @@ impl SqliteTicketRepository {
         })
     }
 
+    /// Replace every cached row with a fresh pull from Azure DevOps.
+    pub fn replace_all(&mut self, tickets: &[Ticket], relations: &[RelationRecord]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute_batch(
+            "DELETE FROM work_items;
+             DELETE FROM work_item_relations;
+             DELETE FROM work_item_comments;
+             DELETE FROM work_item_history;",
+        )?;
+        for ticket in tickets {
+            upsert_ticket(&transaction, ticket)?;
+        }
+        for relation in relations {
+            transaction.execute(
+                "INSERT OR REPLACE INTO work_item_relations (organization, from_id, to_id, kind)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    relation.from.organization,
+                    relation.from.id,
+                    relation.to.id,
+                    relation.kind.as_str()
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn import_batch(&mut self, batch: &ImportBatch) -> Result<usize> {
         let transaction = self.connection.transaction()?;
         for ticket in &batch.tickets {

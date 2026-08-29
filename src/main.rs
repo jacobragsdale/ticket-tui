@@ -15,6 +15,7 @@ use crossterm::event::{
 use crossterm::execute;
 use ticket_tui::agent_context::{self, AgentContext};
 use ticket_tui::app::{App, AppAction, CopiedContent, PointerTarget, PreparedTickets};
+use ticket_tui::azure::{AzureClient, AzureConfig};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
 use ticket_tui::import::{self, ImportFormat};
 use ticket_tui::session;
@@ -32,6 +33,15 @@ struct Cli {
     /// Import a local JSON or CSV file before opening the TUI
     #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
     import: Option<PathBuf>,
+    /// Pull every work item from Azure DevOps into the database before opening the TUI
+    #[arg(long)]
+    sync: bool,
+    /// Azure DevOps organization (slug or URL); defaults to TICKET_TUI_ORG or `az devops configure`
+    #[arg(long, value_name = "ORG")]
+    org: Option<String>,
+    /// Azure DevOps project; defaults to TICKET_TUI_PROJECT or `az devops configure`
+    #[arg(long, value_name = "PROJECT")]
+    project: Option<String>,
 }
 
 #[derive(Default)]
@@ -117,8 +127,8 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let database_path = cli.database.unwrap_or_else(default_database_path);
-    if cli.read_only && cli.import.is_some() {
-        bail!("--import cannot be used with --read-only");
+    if cli.read_only && (cli.import.is_some() || cli.sync) {
+        bail!("--import and --sync cannot be used with --read-only");
     }
     let (mut repository, seeded_demo_data) = if cli.read_only {
         (
@@ -132,6 +142,24 @@ fn run() -> Result<()> {
     if let Some(import_path) = &cli.import {
         let report = import_file(&mut repository, import_path, import_format(import_path))?;
         eprintln!("imported {report}");
+    }
+    let mut sync_status = None;
+    if cli.sync {
+        let config = AzureConfig::resolve(cli.org.clone(), cli.project.clone())?;
+        eprintln!(
+            "syncing work items from {}/{}…",
+            config.base_url(),
+            config.project
+        );
+        let client = AzureClient::connect(config)?;
+        let batch = client.fetch_all_work_items()?;
+        repository.replace_all(&batch.tickets, &batch.relations)?;
+        sync_status = Some(format!(
+            "Synced {} work items from {}/{}",
+            batch.tickets.len(),
+            client.config().organization,
+            client.config().project
+        ));
     }
     let tickets = repository.load_all()?;
     let graph = repository.load_graph()?;
@@ -147,7 +175,9 @@ fn run() -> Result<()> {
         Ok(loaded) => app.restore_session(loaded),
         Err(error) => app.set_error(format!("Could not load session: {error:#}")),
     }
-    if seeded_demo_data {
+    if let Some(status) = sync_status {
+        app.set_status(status);
+    } else if seeded_demo_data {
         app.set_status(format!(
             "Created demo database with 500 tickets at {}",
             repository.path().display()
