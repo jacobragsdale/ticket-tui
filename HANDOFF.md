@@ -6,21 +6,24 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
 
 ## State of `main`
 
-- The four-tab roadmap is under way: Epic 656 (#661–#667), #668 (repos sync)
-  and Epic 659 (Pipelines, #680–#689) are all Done. Epic 658 (Pull requests,
-  #674–#679) is next, then the rest of Epic 657 (#669–#673), then Epic 660. `cargo fmt --check`, `cargo clippy --all-targets
-  --all-features -D warnings`, `cargo test --all-targets` (415 tests, and again
-  under `NO_COLOR=1`) and `cargo build --release` are clean.
-- Database schema is `PRAGMA user_version = 14`. The first launch of this build
-  rebuilds any older database and does one full pull automatically.
+- The four-tab roadmap is nearly done: Epic 656 (#661–#667), #668 (repos sync),
+  Epic 659 (Pipelines, #680–#689), Epic 658 (Pull requests, #674–#679) and Epic
+  657 (Repos, #669–#673) are all closed. **Epic 660 (#690–#694, cross-links and
+  agents) is what is left.** `cargo fmt --check`, `cargo clippy --all-targets
+  --all-features -D warnings`, `cargo test --all-targets` (486 lib + 28 bin
+  tests, and again under `NO_COLOR=1`) and `cargo build --release` are clean.
+- Database schema is `PRAGMA user_version = 16`. A schema bump drops and
+  rebuilds rather than migrating, so the first launch of a build that raises it
+  does one full pull automatically — and a running `ticket-tui` binary from
+  before the bump refuses to open the file until it is rebuilt.
 
 ## The module tree (#661, #662)
 
 `src/app.rs` and `src/ui.rs` are directory modules; every file is under 1,500
-lines. `App` is now only `{ shell, work_items }`: `Shell` is the state every
-screen shares and `WorkItemsScreen` is the first `Screen`. A screen method that
-needs the shell takes `shell: &mut Shell` (or `&Shell`) as its first argument
-after the receiver; nothing else reaches across.
+lines. `App` is `{ shell, tab, work_items, repos, pull_requests, pipelines }`:
+`Shell` is the state every screen shares and each tab is a `Screen`. A screen
+method that needs the shell takes `shell: &mut Shell` (or `&Shell`) as its
+first argument after the receiver; nothing else reaches across.
 
     src/app/mod.rs      App, AppAction, and the event entry points
         screen.rs       the Screen trait every tab implements
@@ -37,15 +40,21 @@ after the receiver; nothing else reaches across.
             query.rs    the search box, filters, facets, columns, commands
             views.rs    saved and built-in views, the sprint summary, staleness
             tests/      the same split, plus tests/deletes.rs
+        repos/          the Repos tab: the table, the workspace, the git keys
+        pull_requests/  the Pull requests tab: votes, complete, comment
         pipelines/      the Pipelines tab: two levels, the timeline, the log
     src/watch.rs        the pipeline watcher thread: live runs, timelines, logs,
                         approvals — cadences that stretch, and no SQLite at all
+    src/local.rs        the local-repos thread: the workspace scan and the three
+                        git commands the Repos tab runs — also no SQLite
     src/ui/mod.rs       render, render_screen, the layout, the theme, anchoring
         details.rs      the details pane and the family tree it draws
         overlays.rs     the list overlays, chips and facet bar
         pickers.rs      pickers, the prompt, the form, the delete confirmation
         table.rs        the table, its cells and their colours
         widgets.rs      the modal frame, query field, controls, scrollbar, paint
+        repos.rs        the Repos tab's own renderer
+        pull_requests.rs  the Pull requests tab's own renderer
         pipelines.rs    the Pipelines tab's own renderer
         tests/          the same split
 
@@ -95,6 +104,14 @@ Manager workflows (Epic 628, closed): built-in views with `@me` / `@none` /
 `@current` / `@open` sentinels (#629), sprint summary overlay (#630), stale
 highlighting sharing #649's predicate (#631), child progress (#648), `changed:`
 and `created:` date filters (#649), finished tickets hidden by default (#652).
+
+The four tabs (Epics 656–659, all closed): the shell split and its shared
+scaffolding (#661–#667), repos in the pull (#668), Pipelines with the live log
+tail and approvals (#680–#689), Pull requests with votes, complete, abandon,
+auto-complete and one-line comments (#674–#679), and Repos with the workspace
+scan, clone, fetch, pull and cross-tab jumps (#669–#673). Two background
+threads carry the live parts: `watch.rs` for pipelines and `local.rs` for git,
+and neither writes SQLite.
 
 Also: the CLI now resolves query sentinels through the same `MatchContext` the
 TUI uses, and refuses one it cannot resolve rather than returning an empty list.
@@ -146,19 +163,21 @@ subcommands and context v3.
 
 ## What is left
 
-The roadmap above. #661–#668 and Epic 659 (#680–#689) are Done; start at
-**Epic 658** (#674–#679, pull requests), then the rest of Epic 657 (#669–#673,
-repos), then Epic 660 (#690–#694, cross-links and agents).
+**Epic 660 (#690–#694, cross-links and agents)**, in order: #690 artifact links
+and the work-item Related section, #691 agent context v3, #692 CLI repos and
+pull requests, #693 CLI pipelines, runs, logs and approvals, #694 the rewritten
+`ticket-tui-context` skill. Then close the epic.
 
-Two things the Pipelines tab left behind, neither ticketed: its details pane
-does not scroll as a whole (the log has its own scroll; the header, the Related
-links and the timeline above it do not), and the facet bar and chip row are
-still written against the work items screen, so the new tabs filter through
-their search box but draw no pills. Both are noted on #689 and #681. then #668 before anything in Epic 659. Query round-tripping was an
-earlier loose end and is fixed: `quote_if_needed` now escapes `\` and `take_quoted`
-unescapes it, so `iteration:"development\Sprint 1"` survives
-`format_query`/`parse_query` (#654), and a backslash typed once inside a quoted
-filter value stays a single backslash (#655).
+Three things the finished tabs left behind, all noted on tickets:
+
+- The facet bar and chip row are still written against the work items screen,
+  so the other three tabs filter through their search box but draw no pills
+  (#681).
+- The Pipelines details pane does not scroll as a whole: the log has its own
+  scroll, the header, Related links and timeline above it do not (#689).
+- The Actions overlay and the command palette are work-items-only too, so the
+  Repos tab's git commands are reachable by key and by the details-pane buttons
+  but not from a menu (#671, #672).
 
 ## Known data issue, not a code bug
 
