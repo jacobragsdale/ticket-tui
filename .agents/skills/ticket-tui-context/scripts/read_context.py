@@ -257,7 +257,9 @@ def print_selected_details(database: Path, selected_value: object) -> None:
             print("\nSelected ticket details: ticket is absent from SQLite")
             return
         print("\nSelected ticket details:")
-        fields: list[str] = ticket.keys()
+        # description_html is the raw Azure DevOps markup kept for round-trip
+        # editing; the flattened description column is the readable one.
+        fields: list[str] = [name for name in ticket.keys() if name != "description_html"]
         for field in fields:
             print(f"  {field}: {ticket[field]}")
 
