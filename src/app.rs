@@ -31,7 +31,7 @@ use crate::pointer::{
     self, DragKind, PointerState, ScrollState, ScrollSurface, SelectableSurface, TextEditor,
     TextPos, TextSelection,
 };
-pub use crate::pointer::{HitRegions, PointerTarget};
+pub use crate::pointer::{EditableField, HitRegions, OverlayAnchor, PointerTarget};
 use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
 use crate::session::{self, NamedView, Session};
 use crate::text_input::TextInput;
@@ -593,6 +593,10 @@ pub struct App {
     pub node_picker: NodePicker,
     /// The open single-line field editor, if there is one.
     pub prompt: Option<TextPrompt>,
+    /// Where the open picker or prompt is drawn: centred, as every
+    /// keyboard-opened one is, or hung off the details-pane field that was
+    /// clicked to open it.
+    pub overlay_anchor: OverlayAnchor,
     bookmarks: HashSet<TicketKey>,
     selected_keys: HashSet<TicketKey>,
     recent: Vec<TicketKey>,
@@ -649,6 +653,21 @@ pub struct App {
     /// Whether the trees have been asked for this session, so opening either
     /// picker a second time costs nothing.
     classification_requested: bool,
+}
+
+/// Which editor a clicked details-pane field opens. Every one of them is a
+/// command already, so a click and the Edit menu reach the same code.
+#[must_use]
+const fn command_for_field(field: EditableField) -> CommandId {
+    match field {
+        EditableField::Title => CommandId::EditTitle,
+        EditableField::State => CommandId::ChangeState,
+        EditableField::Assignee => CommandId::EditAssignee,
+        EditableField::Priority => CommandId::EditPriority,
+        EditableField::Tags => CommandId::EditTags,
+        EditableField::Iteration => CommandId::EditIteration,
+        EditableField::Area => CommandId::EditArea,
+    }
 }
 
 /// Compact relative wording shared by the freshness and sync labels.
@@ -719,6 +738,7 @@ impl App {
             assignee_picker: AssigneePicker::default(),
             node_picker: NodePicker::default(),
             prompt: None,
+            overlay_anchor: OverlayAnchor::Centered,
             bookmarks: HashSet::new(),
             selected_keys: HashSet::new(),
             recent: Vec::new(),
@@ -1716,6 +1736,12 @@ impl App {
                     }
                 }
                 Focus::Details => {
+                    // A field the pointer is resting on opens its editor, the
+                    // way clicking it would; anywhere else still opens the
+                    // work item in the browser.
+                    if let Some(field) = self.pointed_edit_field() {
+                        return self.open_field_editor(field);
+                    }
                     self.record_history();
                     return self.open_selected();
                 }
@@ -1824,7 +1850,9 @@ impl App {
                 _ => None,
             };
             let selectable = match region.target {
-                PointerTarget::PaneDivider => None,
+                // Neither drags text: one resizes the panes, and the other is
+                // the empty space around a dropdown.
+                PointerTarget::PaneDivider | PointerTarget::DismissOverlay => None,
                 _ => selectable,
             };
             self.pointer.hover = Some(region.target.clone());
@@ -2110,6 +2138,8 @@ impl App {
             PointerTarget::NodeQuery => {
                 self.place_caret(TextEditor::Node, column, row);
             }
+            PointerTarget::EditField { field } => return self.open_field_editor(field),
+            PointerTarget::DismissOverlay => self.close_overlay(),
             PointerTarget::PromptInput => {
                 self.place_caret(TextEditor::Prompt, column, row);
             }
@@ -2150,6 +2180,30 @@ impl App {
             PointerTarget::PaneDivider => {}
         }
         AppAction::None
+    }
+
+    /// The details-pane field the pointer is resting on, which is what `Enter`
+    /// opens an editor for while that pane is focused.
+    #[must_use]
+    fn pointed_edit_field(&self) -> Option<EditableField> {
+        match self.hovered_region().map(|region| &region.target) {
+            Some(PointerTarget::EditField { field }) => Some(*field),
+            _ => None,
+        }
+    }
+
+    /// Opens the editor one details-pane field owns, as a dropdown hung under
+    /// the value on screen. It runs the same command the Edit menu and the
+    /// palette run, so both paths open the same picker and write the same
+    /// edit; only where the overlay lands differs.
+    fn open_field_editor(&mut self, field: EditableField) -> AppAction {
+        let anchor = self
+            .hit_regions
+            .edit_field(field)
+            .map_or(OverlayAnchor::Centered, OverlayAnchor::Below);
+        let action = self.run_command(command_for_field(field));
+        self.overlay_anchor = anchor;
+        action
     }
 
     fn close_overlay(&mut self) {
@@ -3605,6 +3659,9 @@ impl App {
     }
 
     fn run_command(&mut self, id: CommandId) -> AppAction {
+        // Every command opens its overlay centred; clicking a field sets its
+        // anchor afterwards, so a picker never inherits the last one's.
+        self.overlay_anchor = OverlayAnchor::Centered;
         match id {
             CommandId::Search => {
                 self.begin_search();

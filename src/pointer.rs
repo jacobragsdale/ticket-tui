@@ -51,6 +51,52 @@ pub enum TextEditor {
     Node,
 }
 
+/// One value on the details pane that can be edited by clicking it. Each names
+/// the editor it opens, which is the same one the Edit menu and the command
+/// palette reach.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum EditableField {
+    Title,
+    State,
+    Assignee,
+    Priority,
+    Tags,
+    Iteration,
+    Area,
+}
+
+/// Where an overlay is placed. Every keyboard-opened picker is `Centered`, the
+/// way it always was; a picker opened by clicking a field hangs off that
+/// field's value instead, and the rect it carries is where that value was
+/// drawn.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OverlayAnchor {
+    #[default]
+    Centered,
+    /// A dropdown directly under the field.
+    Below(Rect),
+    /// A dropdown directly over the field, for one with no room underneath.
+    Above(Rect),
+}
+
+impl OverlayAnchor {
+    /// Whether this overlay is a dropdown hung off a field rather than a
+    /// centred modal, which is also what puts a dismiss layer behind it.
+    #[must_use]
+    pub const fn is_anchored(self) -> bool {
+        !matches!(self, Self::Centered)
+    }
+
+    /// The field the dropdown hangs off, if it hangs off one.
+    #[must_use]
+    pub const fn field(self) -> Option<Rect> {
+        match self {
+            Self::Centered => None,
+            Self::Below(rect) | Self::Above(rect) => Some(rect),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PointerTarget {
     SearchField,
@@ -131,6 +177,14 @@ pub enum PointerTarget {
     },
     /// The filter field of the iteration or area picker.
     NodeQuery,
+    /// One editable value on the details pane, which opens its editor as a
+    /// dropdown anchored under it.
+    EditField {
+        field: EditableField,
+    },
+    /// Everything outside an anchored dropdown, which closes it without a
+    /// change rather than activating whatever sits underneath.
+    DismissOverlay,
     /// The text field of the title or tags prompt.
     PromptInput,
     SubmitPrompt,
@@ -248,6 +302,9 @@ pub struct HitRegions {
     pub detail_url: Option<Rect>,
     pub headers: Vec<(Rect, SortField)>,
     pub detail_links: Vec<(Rect, TicketKey)>,
+    /// Where each editable details-pane value was drawn this frame, which is
+    /// what an editor opened by clicking one is anchored to.
+    pub edit_fields: Vec<(Rect, EditableField)>,
     pub facet_pills: Vec<(Rect, FacetTarget)>,
 }
 
@@ -260,6 +317,7 @@ impl HitRegions {
             PointerTarget::OpenSelectedUrl => self.detail_url = Some(region.rect),
             PointerTarget::SortHeader(field) => self.headers.push((region.rect, *field)),
             PointerTarget::JumpToTicket(key) => self.detail_links.push((region.rect, key.clone())),
+            PointerTarget::EditField { field } => self.edit_fields.push((region.rect, *field)),
             PointerTarget::FacetPill(target) => self.facet_pills.push((region.rect, *target)),
             _ => {}
         }
@@ -308,6 +366,15 @@ impl HitRegions {
         self.selectable
             .iter()
             .find(|snapshot| snapshot.surface == surface)
+    }
+
+    /// Where one editable value was drawn, if it was drawn at all.
+    #[must_use]
+    pub fn edit_field(&self, field: EditableField) -> Option<Rect> {
+        self.edit_fields
+            .iter()
+            .find(|(_, entry)| *entry == field)
+            .map(|(rect, _)| *rect)
     }
 
     #[must_use]
