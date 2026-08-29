@@ -138,6 +138,10 @@ Interpreting what comes back:
   multi-select set used by bulk actions and can hold different work items.
 - **Visible rows** are only the rendered viewport — compare against the matching
   and total counts before saying "there are N".
+- **`tickets.finished_hidden`** means the table is leaving Done and Removed work
+  out, which it does by default. The matching count is then the open backlog
+  rather than everything the query matches, and the query itself does not say
+  so. Use `ticket-tui list` to read finished work; it has no such rule.
 - **A stale-process warning** means the file survived an unclean exit. It is the
   last observed view, not a live one.
 

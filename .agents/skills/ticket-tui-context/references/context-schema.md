@@ -22,7 +22,10 @@ rendered viewport and the current selection. For work item data use
 ## Top-level fields
 
 Current contract: **schema version 2**. A reader that finds another version
-should refuse rather than guess.
+should refuse rather than guess. A field may be added to a block within a
+version — `tickets.finished_hidden` was — so a reader should ignore fields it
+does not know rather than refuse them; only removing or reshaping a field
+already documented here bumps the version.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -39,7 +42,7 @@ should refuse rather than guess.
 | `active_view` | string or null | Loaded named view, if any |
 | `search` | object | Query, parsed filters, pending state, and ordering |
 | `sort` | object | Sort field, direction, and row density |
-| `tickets` | object | Result counts, viewport position, and rendered rows |
+| `tickets` | object | Result counts, whether finished work is hidden, viewport position, and rendered rows |
 | `selected_ticket` | ticket or null | Ticket driving the details pane |
 | `checked_tickets` | ticket array | Multi-select set used for bulk actions |
 | `family_cursor` | ticket reference or null | Keyboard cursor within the family tree |
@@ -128,6 +131,19 @@ is ordered by (`changed`, `priority`, `id`, `title`, `state`, `type`,
 `tickets.viewport_size` is the current row capacity. `tickets.visible_rows`
 contains only rows rendered in that viewport — never answer "there are N work
 items" from its length.
+
+`tickets.finished_hidden` is true when the TUI is leaving finished work — the
+Completed and Removed state categories — off the table. It is on by default and
+turned over in the TUI, and `search.query` does not say so: it is a rule the app
+applies beside the query, equivalent to an added `state:@open`. While it is
+true, `matching_count` and `visible_rows` are the open backlog rather than
+everything the query matches, so `total_count - matching_count` includes the
+finished rows as well as the filtered ones. A query naming a state of its own —
+`state:done`, `state:@open` — takes over from the rule and reports
+`finished_hidden: false`. The details pane and the family tree are unaffected,
+so `selected_ticket` and `family_cursor` can name a work item no visible row
+does. To read finished work while it is true, use the CLI: `ticket-tui list`
+has no such rule and reads the database directly.
 
 Ticket objects carry `organization`, `project`, `id`, `work_item_type`, `title`,
 `state`, `assigned_to`, `priority`, `tags`, `web_url`, `bookmarked`, and

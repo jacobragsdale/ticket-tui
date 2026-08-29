@@ -27,6 +27,7 @@ pub enum CommandId {
     ToggleDensity,
     ToggleDetails,
     ToggleSearchOrder,
+    ToggleFinished,
     ToggleBookmark,
     CopyId,
     CopyUrl,
@@ -250,6 +251,14 @@ pub const COMMANDS: &[Command] = &[
         help: "Relevance or fields",
     },
     Command {
+        id: CommandId::ToggleFinished,
+        // Reworded as it runs by `finished_title`, so the row always names the
+        // change it makes rather than the state it is in.
+        title: "Show finished tickets",
+        keys: &[],
+        help: "Done and Removed rows",
+    },
+    Command {
         id: CommandId::Open,
         title: "Open ticket in browser",
         keys: &[key('o')],
@@ -455,13 +464,40 @@ pub fn command_for_key(event: KeyEvent) -> Option<CommandId> {
         .map(|command| command.id)
 }
 
+/// How the finished-tickets toggle reads while finished work is hidden or
+/// listed. The row names the change it makes rather than the state it is in,
+/// which is how every other verb in the palette reads.
 #[must_use]
-pub fn matching_commands(query: &str) -> Vec<Command> {
+pub const fn finished_title(finished_hidden: bool) -> &'static str {
+    if finished_hidden {
+        "Show finished tickets"
+    } else {
+        "Hide finished tickets"
+    }
+}
+
+/// The command as the palette should list it right now. Only the finished
+/// toggle differs from its entry in [`COMMANDS`], and it is reworded before
+/// the query is matched so a command is found under the words it is showing.
+fn worded(command: Command, finished_hidden: bool) -> Command {
+    if command.id == CommandId::ToggleFinished {
+        Command {
+            title: finished_title(finished_hidden),
+            ..command
+        }
+    } else {
+        command
+    }
+}
+
+#[must_use]
+pub fn matching_commands(query: &str, finished_hidden: bool) -> Vec<Command> {
     let query = query.trim().to_ascii_lowercase();
     COMMANDS
         .iter()
         .copied()
         .filter(Command::in_palette)
+        .map(|command| worded(command, finished_hidden))
         .filter(|command| {
             query.is_empty()
                 || command.title.to_ascii_lowercase().contains(&query)
@@ -480,7 +516,7 @@ mod tests {
 
     #[test]
     fn palette_filters_commands_by_title() {
-        let matches = matching_commands("copy");
+        let matches = matching_commands("copy", true);
         assert!(
             matches
                 .iter()
@@ -488,10 +524,32 @@ mod tests {
         );
         assert!(!matches.iter().any(|command| command.id == CommandId::Sync));
         assert!(
-            !matching_commands("")
+            !matching_commands("", true)
                 .iter()
                 .any(|command| command.id == CommandId::Search),
             "commands that only work from browse mode stay out of the palette"
+        );
+    }
+
+    #[test]
+    fn the_finished_toggle_is_worded_as_the_change_it_would_make() {
+        let hidden = matching_commands("show finished", true);
+        assert_eq!(
+            hidden.first().map(|command| command.id),
+            Some(CommandId::ToggleFinished),
+            "while they are hidden the palette offers to show them"
+        );
+        assert_eq!(hidden[0].title, "Show finished tickets");
+
+        let shown = matching_commands("hide finished", false);
+        assert_eq!(
+            shown.first().map(|command| command.id),
+            Some(CommandId::ToggleFinished)
+        );
+        assert_eq!(shown[0].title, "Hide finished tickets");
+        assert!(
+            matching_commands("show finished", false).is_empty(),
+            "a command is only found under the words it is showing"
         );
     }
 

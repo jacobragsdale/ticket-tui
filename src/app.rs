@@ -21,8 +21,8 @@ use crate::edit::{EditApplied, EditRejection, EditRequest, normalize_tags};
 use crate::export;
 pub use crate::filter::FacetTarget;
 use crate::filter::{
-    FacetValue, FilterField, FilterToken, MatchContext, ParsedQuery, days_untouched, facet_values,
-    format_query, is_stale, parse_query, stale_query,
+    FacetValue, FilterField, FilterSet, FilterToken, MatchContext, ParsedQuery, Sentinel,
+    days_untouched, facet_values, format_query, is_stale, parse_query, stale_query,
 };
 use crate::model::{
     CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity,
@@ -1325,6 +1325,10 @@ pub struct App {
     search_history_index: Option<usize>,
     search_history_draft: String,
     pub search_order: SearchOrder,
+    /// Whether the table lists work the workflow has finished with. Off by
+    /// default, because the view a manager opens on is the open backlog; the
+    /// choice is kept in the session file.
+    show_finished: bool,
     pub row_density: RowDensity,
     pub sort_field: SortField,
     pub sort_direction: SortDirection,
@@ -1545,6 +1549,7 @@ impl App {
             search_history_index: None,
             search_history_draft: String::new(),
             search_order: SearchOrder::Relevance,
+            show_finished: false,
             row_density: RowDensity::Compact,
             sort_field: SortField::Changed,
             sort_direction: SortDirection::Descending,
@@ -1728,6 +1733,7 @@ impl App {
             tickets: TicketsContext {
                 total_count: self.tickets.len(),
                 matching_count: self.visible.len(),
+                finished_hidden: self.finished_hidden(),
                 viewport_start: self.table.offset,
                 viewport_size: self.table.viewport,
                 visible_rows,
@@ -1799,6 +1805,90 @@ impl App {
         parse_query(self.query.text())
     }
 
+    /// The filters the table actually applies: the query's own, and while
+    /// finished work is hidden an implicit `state:@open` alongside them.
+    ///
+    /// Writing the rule as the sentinel the grammar already has is what keeps
+    /// the toggle and an explicit `state:` from fighting. A value in one field
+    /// is ORed with the others in it, so a query naming a state of its own —
+    /// `state:done`, or the `state:@open` the Stale view is written with —
+    /// would be widened rather than narrowed by an implicit value beside it.
+    /// So the implicit one is left off entirely wherever the query names a
+    /// state, which is exactly the rule that makes `state:done` list finished
+    /// work while the toggle stays on, and makes `state:@open` mean what it
+    /// says rather than being applied twice.
+    #[must_use]
+    fn effective_filters(&self) -> FilterSet {
+        let mut filters = self.parsed_query().filters;
+        if self.hides_finished(&filters) {
+            filters.insert(FilterField::State, Sentinel::Open.as_value());
+        }
+        filters
+    }
+
+    /// Whether the table is leaving finished work out right now: the setting
+    /// says to, and the query names no state of its own that overrides it.
+    #[must_use]
+    pub fn finished_hidden(&self) -> bool {
+        self.hides_finished(&self.parsed_query().filters)
+    }
+
+    fn hides_finished(&self, filters: &FilterSet) -> bool {
+        !self.show_finished && filters.selected_count(FilterField::State) == 0
+    }
+
+    /// Whether the session is set to list finished work, whatever the query
+    /// in front of it currently asks for. This is what the palette command
+    /// turns over and what the session file carries.
+    #[must_use]
+    pub const fn show_finished(&self) -> bool {
+        self.show_finished
+    }
+
+    /// How many work items the finished rule is keeping off the table: the
+    /// ones the query's filters match and the rule does not.
+    ///
+    /// Counted when it is asked for rather than carried along, so it is right
+    /// however the visible set was last narrowed. It reads over the whole
+    /// database rather than over the fuzzy result, so under a typed search it
+    /// says how much finished work the filters hold rather than how much that
+    /// search would have found.
+    #[must_use]
+    pub fn hidden_finished(&self) -> usize {
+        if !self.finished_hidden() {
+            return 0;
+        }
+        let filters = self.parsed_query().filters;
+        let context = self.match_context();
+        self.tickets
+            .iter()
+            .filter(|ticket| {
+                StateCategory::of(&ticket.state).is_done()
+                    && filters.matches_in(ticket, self.bookmarks.contains(&ticket.key), &context)
+            })
+            .count()
+    }
+
+    /// Lists or hides finished work. The visible set is rebuilt rather than
+    /// filtered again, because showing them has to put rows back and filtering
+    /// can only take them away.
+    pub fn set_show_finished(&mut self, show: bool) {
+        if self.show_finished == show {
+            return;
+        }
+        self.show_finished = show;
+        self.session_dirty = true;
+        self.resubmit_query();
+        self.set_status(format!(
+            "Finished tickets: {}",
+            if show { "shown" } else { "hidden" }
+        ));
+    }
+
+    pub fn toggle_show_finished(&mut self) {
+        self.set_show_finished(!self.show_finished);
+    }
+
     /// What the query's sentinels stand for right now: who is signed in and
     /// which sprint contains today, beside the clock its relative date bounds
     /// are measured back from. Built fresh for every pass over the rows, so a
@@ -1834,7 +1924,7 @@ impl App {
 
     #[must_use]
     pub fn facets_for(&self, field: FilterField) -> Vec<FacetValue> {
-        let filters = self.parsed_query().filters;
+        let filters = self.effective_filters();
         facet_values(
             self.tickets(),
             &filters,
@@ -2051,7 +2141,7 @@ impl App {
 
     #[must_use]
     pub fn palette_commands(&self) -> Vec<Command> {
-        matching_commands(self.palette.query.text())
+        matching_commands(self.palette.query.text(), !self.show_finished)
     }
 
     #[must_use]
@@ -2064,7 +2154,7 @@ impl App {
 
     #[must_use]
     pub fn current_facets(&self) -> Vec<FacetValue> {
-        let filters = self.parsed_query().filters;
+        let filters = self.effective_filters();
         facet_values(
             self.tickets(),
             &filters,
@@ -2695,10 +2785,25 @@ impl App {
     /// Re-applies the filters and the sort to the rows already on screen, for
     /// when one of them changed under the current ordering. The selection
     /// follows its work item rather than its row number.
+    ///
+    /// A change that takes the selected work item off the table — marking it
+    /// Done while finished work is hidden — leaves the cursor where it was,
+    /// which is the row that has moved up into its place. The cursor lands on
+    /// the next piece of work rather than on nothing or back at the top, so
+    /// marking a run of items Done reads as working down the list.
     fn resettle_rows(&mut self) {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
+        let row = self.table_state.selected();
         self.apply_filters();
         self.sort_visible();
+        if let Some(row) = row
+            && selected
+                .as_ref()
+                .is_some_and(|key| self.visible_row(key).is_none())
+        {
+            self.select_row(row);
+            return;
+        }
         self.restore_selection(selected.as_ref());
     }
 
@@ -2832,10 +2937,16 @@ impl App {
     }
 
     fn after_query_edit(&mut self) {
-        let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.search_history_index = None;
         self.search_history_draft = self.query.text().to_owned();
         self.session_dirty = true;
+        self.resubmit_query();
+    }
+
+    /// Works the visible set out again from every row, for when what the table
+    /// asks of them has changed rather than which rows there are.
+    fn resubmit_query(&mut self) {
+        let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         if self.fuzzy_query().is_empty() {
             self.search_generation = self.search_generation.wrapping_add(1);
             self.search_pending = false;
@@ -3429,6 +3540,7 @@ impl App {
                 }
             }
             PointerTarget::RemoveChip(token) => self.remove_filter_token(token),
+            PointerTarget::ShowFinished => self.set_show_finished(true),
             PointerTarget::SortChoose(field) => {
                 self.toggle_sort(field);
                 self.mode = AppMode::Browse;
@@ -3908,8 +4020,16 @@ impl App {
             return;
         }
         let Some(row) = self.visible_row(key) else {
-            if self.ticket_by_key(key).is_some() {
-                self.set_status(format!("{id} is hidden by the current search", id = key.id));
+            if let Some(ticket) = self.ticket_by_key(key) {
+                // The family tree shows finished relatives whether or not the
+                // table does, so say which of the two is in the way.
+                let reason = if self.finished_hidden() && StateCategory::of(&ticket.state).is_done()
+                {
+                    "finished, and finished tickets are hidden"
+                } else {
+                    "hidden by the current search"
+                };
+                self.set_status(format!("{id} is {reason}", id = key.id));
             } else {
                 self.set_error(format!("{id} is not in this database", id = key.id));
             }
@@ -3944,7 +4064,7 @@ impl App {
     }
 
     fn apply_filters(&mut self) {
-        let filters = self.parsed_query().filters;
+        let filters = self.effective_filters();
         let context = self.match_context();
         let bookmarks = self.bookmarks.clone();
         let tickets = Arc::clone(&self.tickets);
@@ -5718,6 +5838,10 @@ impl App {
                 }
                 AppAction::None
             }
+            CommandId::ToggleFinished => {
+                self.toggle_show_finished();
+                AppAction::None
+            }
             CommandId::ToggleBookmark => {
                 self.toggle_bookmark();
                 AppAction::None
@@ -6050,6 +6174,7 @@ impl App {
             recent: self.recent.iter().map(session::SessionKey::from).collect(),
             views: self.views.clone(),
             active_view: self.active_view.clone(),
+            show_finished: self.show_finished,
             selected: self
                 .selected_ticket()
                 .map(|ticket| session::SessionKey::from(&ticket.key)),
@@ -6080,6 +6205,9 @@ impl App {
             .filter(|view| builtin_named(&view.name).is_none())
             .collect();
         self.active_view = session.active_view;
+        // Set before the rows are worked out, so the first pass over them
+        // already knows whether finished work belongs on the table.
+        self.show_finished = session.show_finished;
         let selected = session.selected.as_ref().map(TicketKey::from);
         if session.query.is_empty() {
             self.show_all(selected.as_ref());
@@ -7052,6 +7180,9 @@ mod tests {
     #[test]
     fn each_built_in_view_yields_the_rows_its_question_asks_for() {
         let mut app = views_app();
+        // What each view asks for is the subject, so the finished row answers
+        // its question rather than being taken off the table before it is put.
+        app.set_show_finished(true);
         let load = |app: &mut App, name: &str| {
             app.apply_view_at(view_row(app, name));
             visible_ids(app)
@@ -7150,6 +7281,7 @@ mod tests {
     #[test]
     fn the_mine_view_follows_the_name_the_session_is_signed_in_under() {
         let mut app = views_app();
+        app.set_show_finished(true);
         app.apply_view_at(view_row(&app, "Mine"));
         assert_eq!(visible_ids(&app), vec![1, 5]);
 
@@ -7172,6 +7304,7 @@ mod tests {
     #[test]
     fn the_current_sprint_view_follows_the_iteration_dates_rather_than_a_written_path() {
         let mut app = views_app();
+        app.set_show_finished(true);
         app.apply_view_at(view_row(&app, "Current sprint"));
 
         assert_eq!(
@@ -7206,6 +7339,210 @@ mod tests {
         assert!(
             visible_ids(&app).is_empty(),
             "with no sprint scheduled @current is no sprint at all"
+        );
+    }
+
+    /// A backlog with one work item in every category the table can hold, so
+    /// what the finished rule takes and what it leaves are both several rows.
+    fn backlog_app() -> App {
+        let row = |id: i64, title: &str, state: &str, changed: &str| Ticket {
+            state: state.into(),
+            ..ticket(id, title, changed)
+        };
+        App::new(vec![
+            row(1, "Still to start", "To Do", "2026-03-05T00:00:00Z"),
+            row(2, "Under way", "Doing", "2026-03-04T00:00:00Z"),
+            row(3, "Waiting on test", "Resolved", "2026-03-03T00:00:00Z"),
+            row(4, "Finished", "Done", "2026-03-02T00:00:00Z"),
+            row(5, "Cut", "Removed", "2026-03-01T00:00:00Z"),
+        ])
+    }
+
+    #[test]
+    fn a_fresh_session_opens_on_the_open_backlog_with_the_finished_rows_left_out() {
+        let app = backlog_app();
+
+        assert_eq!(
+            visible_ids(&app),
+            vec![1, 2, 3],
+            "Completed and Removed go; Resolved is still somebody's problem"
+        );
+        assert!(app.finished_hidden());
+        assert_eq!(app.hidden_finished(), 2);
+
+        let context = app.agent_context().tickets;
+        assert!(
+            context.finished_hidden,
+            "an agent is told the rows it can see are a subset"
+        );
+        assert_eq!(
+            (context.matching_count, context.total_count),
+            (3, 5),
+            "the total stays the whole database, so the difference is the count hidden"
+        );
+    }
+
+    #[test]
+    fn showing_the_finished_tickets_puts_them_back_and_the_choice_outlives_the_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tickets.session.json");
+        let mut app = backlog_app();
+
+        app.set_show_finished(true);
+
+        assert_eq!(visible_ids(&app), vec![1, 2, 3, 4, 5]);
+        assert!(!app.finished_hidden());
+        assert_eq!(app.hidden_finished(), 0);
+        session::save(&path, &app.snapshot_session()).unwrap();
+
+        let mut restored = backlog_app();
+        restored.restore_session(session::load(&path).unwrap());
+        assert!(
+            restored.show_finished(),
+            "the choice comes back off the session file"
+        );
+        assert_eq!(visible_ids(&restored), vec![1, 2, 3, 4, 5]);
+
+        // The palette command and the chip's `×` are the two ways to it, and
+        // they turn the same setting over.
+        restored.run_command(CommandId::ToggleFinished);
+        assert_eq!(visible_ids(&restored), vec![1, 2, 3]);
+        restored.activate_target(PointerTarget::ShowFinished, 0, 0);
+        assert_eq!(visible_ids(&restored), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_state_the_query_names_lists_finished_work_while_the_toggle_stays_on() {
+        let mut app = backlog_app();
+
+        app.set_query("state:done".into());
+
+        assert_eq!(visible_ids(&app), vec![4], "state:done just works");
+        assert!(
+            !app.finished_hidden(),
+            "the query names a state, so nothing is being left out behind it"
+        );
+        assert!(
+            !app.show_finished(),
+            "and the setting itself is untouched, so clearing the query hides them again"
+        );
+
+        app.set_query(String::new());
+        assert_eq!(visible_ids(&app), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn the_open_sentinel_and_the_toggle_ask_for_the_same_rows_rather_than_fighting() {
+        let mut app = backlog_app();
+        let hidden_by_the_toggle = visible_ids(&app);
+
+        app.set_query("state:@open".into());
+
+        assert_eq!(
+            visible_ids(&app),
+            hidden_by_the_toggle,
+            "the toggle is that sentinel, so writing it out changes nothing"
+        );
+        assert!(!app.finished_hidden());
+
+        app.set_show_finished(true);
+        assert_eq!(
+            visible_ids(&app),
+            hidden_by_the_toggle,
+            "and a query that asks for open work still means it once they are shown"
+        );
+    }
+
+    #[test]
+    fn a_built_in_view_that_names_a_state_takes_the_toggle_out_of_the_way() {
+        let mut app = views_app();
+        assert!(app.finished_hidden(), "nothing named a state yet");
+
+        app.apply_view_at(view_row(&app, "Mine"));
+        assert_eq!(
+            visible_ids(&app),
+            vec![1],
+            "Mine names no state, so the finished row it matches stays off the table"
+        );
+        assert!(app.finished_hidden());
+
+        app.apply_view_at(view_row(&app, "Doing"));
+        assert_eq!(visible_ids(&app), vec![1]);
+        assert!(
+            !app.finished_hidden(),
+            "state:doing is a state the query named, whatever it happens to match"
+        );
+
+        app.apply_view_at(view_row(&app, "Stale"));
+        assert_eq!(
+            visible_ids(&app),
+            vec![4, 3],
+            "Stale asks for open work itself; the finished row is out either way"
+        );
+        assert!(!app.finished_hidden());
+    }
+
+    #[test]
+    fn a_finished_relative_is_still_in_the_family_tree_of_the_row_that_holds_it() {
+        let mut app = App::new(epic_tickets());
+        app.set_workspace_graph(epic_graph());
+
+        assert_eq!(
+            visible_ids(&app),
+            vec![1, 4, 5],
+            "the closed and the removed child are off the table"
+        );
+
+        let family: Vec<i64> = app
+            .visible_family_tree()
+            .into_iter()
+            .map(|entry| entry.key.id)
+            .collect();
+        assert!(
+            family.contains(&2) && family.contains(&3),
+            "the epic's own children are its family however the table is filtered: {family:?}"
+        );
+        assert_eq!(
+            app.child_progress(&family_key(1))
+                .map(|progress| progress.done),
+            Some(2),
+            "and they still count towards how far it has got"
+        );
+
+        app.jump_to_ticket(&family_key(2));
+        assert_eq!(
+            app.notification(),
+            Some((
+                "2 is finished, and finished tickets are hidden",
+                NotificationLevel::Info
+            )),
+            "following one back to the table says which rule is in the way"
+        );
+    }
+
+    #[test]
+    fn the_facets_count_what_the_table_shows_but_still_offer_the_finished_states() {
+        let app = backlog_app();
+
+        let states: Vec<(String, usize)> = app
+            .facets_for(FilterField::State)
+            .into_iter()
+            .map(|facet| (facet.value, facet.count))
+            .collect();
+        assert!(
+            states.contains(&("Done".to_owned(), 1)),
+            "a state has to be listed to be checked off: {states:?}"
+        );
+
+        let types: Vec<usize> = app
+            .facets_for(FilterField::Type)
+            .into_iter()
+            .map(|facet| facet.count)
+            .collect();
+        assert_eq!(
+            types,
+            vec![3],
+            "every other field counts the rows the table is showing"
         );
     }
 
@@ -7476,6 +7813,8 @@ mod tests {
     fn sorting_by_progress_runs_least_finished_first_and_leaves_childless_rows_last() {
         let mut app = App::new(epic_tickets());
         app.set_workspace_graph(epic_graph());
+        // The ordering is the subject, so every row stays on the table.
+        app.set_show_finished(true);
 
         app.set_sort(SortField::Progress, SortDirection::Ascending);
 

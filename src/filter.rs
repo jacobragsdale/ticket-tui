@@ -236,6 +236,19 @@ impl Sentinel {
         }
     }
 
+    /// How the sentinel is written in a query, which is how a rule the app
+    /// applies on its own — hiding finished work — is spelled in the grammar
+    /// the search box already reads.
+    #[must_use]
+    pub const fn as_value(self) -> &'static str {
+        match self {
+            Self::Me => "@me",
+            Self::Nobody => "@none",
+            Self::CurrentIteration => "@current",
+            Self::Open => "@open",
+        }
+    }
+
     /// Whether a ticket satisfies the sentinel. One the context cannot fill in
     /// — nobody signed in, no sprint scheduled — matches nothing rather than
     /// everything, so a query never quietly widens to the whole project.

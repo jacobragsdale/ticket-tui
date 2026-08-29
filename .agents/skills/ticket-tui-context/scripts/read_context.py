@@ -159,6 +159,7 @@ def validate_context(data: dict[str, object]) -> None:
     tickets = object_mapping(data.get("tickets"))
     for name in ("total_count", "matching_count", "viewport_start", "viewport_size"):
         integer(tickets.get(name), f"tickets.{name}")
+    boolean(tickets.get("finished_hidden"), "tickets.finished_hidden")
     visible_rows = object_list(tickets.get("visible_rows"))
     for index, value in enumerate(visible_rows):
         validate_ticket(value, f"tickets.visible_rows[{index}]")
@@ -255,10 +256,11 @@ def print_summary(context_path: Path, data: dict[str, object]) -> None:
     rows = object_list(tickets.get("visible_rows"))
     end = start + len(rows)
     viewport = f"{start + 1}-{end}" if rows else "empty"
+    finished = " · finished hidden" if tickets.get("finished_hidden") else ""
     print(
         "Results: "
         f"{tickets.get('matching_count', 0)}/{tickets.get('total_count', 0)} matching "
-        f"· viewport={viewport}"
+        f"· viewport={viewport}{finished}"
     )
     print(f"Selected: {ticket_label(data.get('selected_ticket'))}")
 

@@ -30,6 +30,11 @@ pub struct Session {
     pub views: Vec<NamedView>,
     #[serde(default)]
     pub active_view: Option<String>,
+    /// Whether the table lists finished work. Absent from every session
+    /// written before the toggle existed, so `false` is what those load as and
+    /// an old session opens on the open backlog like a new one.
+    #[serde(default)]
+    pub show_finished: bool,
     #[serde(default)]
     pub selected: Option<SessionKey>,
     #[serde(default = "wide_split")]
@@ -70,6 +75,7 @@ impl Default for Session {
             recent: Vec::new(),
             views: Vec::new(),
             active_view: None,
+            show_finished: false,
             selected: None,
             pane_split_wide: wide_split(),
             pane_split_stacked: stacked_split(),
@@ -259,6 +265,34 @@ mod tests {
         assert!(
             restored.columns[index].visible,
             "the column the overlay switched on comes back switched on"
+        );
+    }
+
+    #[test]
+    fn a_session_written_before_the_toggle_kept_finished_tickets_hidden() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.session.json");
+        fs::write(&path, r#"{ "query": "" }"#).unwrap();
+
+        let loaded = load(&path).unwrap();
+
+        assert!(
+            !loaded.show_finished,
+            "a session with no toggle in it opens on the open backlog"
+        );
+
+        let session = Session {
+            show_finished: true,
+            ..Session::default()
+        };
+        save(&path, &session).unwrap();
+        let stored: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+
+        assert_eq!(stored["show_finished"], true);
+        assert!(
+            load(&path).unwrap().show_finished,
+            "the choice to list them again comes back on the next run"
         );
     }
 
