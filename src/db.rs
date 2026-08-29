@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -58,6 +58,7 @@ CREATE TABLE work_items (
     iteration_path TEXT NOT NULL,
     tags           TEXT NOT NULL DEFAULT '',
     description    TEXT NOT NULL DEFAULT '',
+    description_html TEXT NOT NULL DEFAULT '',
     created_at     TEXT NOT NULL,
     changed_at     TEXT NOT NULL,
     web_url        TEXT NOT NULL,
@@ -204,7 +205,7 @@ impl SqliteTicketRepository {
             "SELECT organization, project, work_item_id, revision, work_item_type,
                     title, state, reason, assigned_to, priority, area_path,
                     iteration_path, tags, description, created_at, changed_at, web_url,
-                    details_rev
+                    details_rev, description_html
              FROM work_items",
         )?;
         let rows = statement.query_map([], |row| {
@@ -235,6 +236,7 @@ impl SqliteTicketRepository {
                     .map(str::to_owned)
                     .collect(),
                 description: row.get(13)?,
+                description_html: row.get(18)?,
                 created_at: parse_row_timestamp(created_raw, "created_at", &organization, id)?,
                 changed_at: parse_row_timestamp(changed_raw, "changed_at", &organization, id)?,
                 web_url: row.get(16)?,
@@ -806,9 +808,9 @@ fn insert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
             organization, project, work_item_id, revision, work_item_type,
             title, state, reason, assigned_to, priority, area_path,
             iteration_path, tags, description, created_at, changed_at, web_url,
-            details_rev
+            details_rev, description_html
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                   ?18)",
+                   ?18, ?19)",
         params![
             ticket.key.organization,
             ticket.project,
@@ -828,6 +830,7 @@ fn insert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
             ticket.changed_at.to_rfc3339(),
             ticket.web_url,
             ticket.details_rev,
+            ticket.description_html,
         ],
     )?;
     Ok(())
@@ -923,6 +926,7 @@ mod tests {
             iteration_path: "Atlas\\2026\\Sprint 1".into(),
             tags: vec!["backend".into(), "rust".into()],
             description: "Cached from Azure DevOps.".into(),
+            description_html: "<p>Cached from <b>Azure DevOps</b>.</p>".into(),
             created_at: ts("2026-01-01T00:00:00Z"),
             changed_at: ts("2026-02-01T00:00:00Z"),
             web_url: format!("https://dev.azure.com/example-org/atlas/_workitems/edit/{id}"),
@@ -996,6 +1000,10 @@ mod tests {
         let mut loaded = repository.load_all().unwrap();
         loaded.sort_by_key(|ticket| ticket.key.id);
         assert_eq!(loaded, tickets);
+        assert_eq!(
+            loaded[0].description_html, "<p>Cached from <b>Azure DevOps</b>.</p>",
+            "the raw description survives the round trip beside its flattened reading"
+        );
         assert_eq!(repository.load_graph().unwrap(), graph);
 
         let survivor = vec![ticket(3)];
