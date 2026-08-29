@@ -1,7 +1,7 @@
 use ratatui::layout::Rect;
 
 use crate::filter::FacetTarget;
-use crate::model::{SortDirection, SortField, TicketKey};
+use crate::model::{Jump, SortDirection, SortField};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PointerLayer {
@@ -132,7 +132,9 @@ pub enum PointerTarget {
     /// resolves the key against its own columns.
     SortHeader(&'static str),
     OpenSelectedUrl,
-    JumpToTicket(TicketKey),
+    /// A reference in a details pane: the family tree's rows today, a pull
+    /// request's build or a run's branch once those tabs exist.
+    Follow(Jump),
     FacetPill(FacetTarget),
     FacetValue {
         index: usize,

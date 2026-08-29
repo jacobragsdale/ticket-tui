@@ -273,7 +273,7 @@ pub(super) fn render_details(
         if let Some(y) = row_of(hit.line) {
             shell.hit_regions.push(region(
                 Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
-                PointerTarget::JumpToTicket(hit.key.clone()),
+                PointerTarget::Follow(Jump::WorkItem(hit.key.clone())),
                 PointerLayer::Base,
                 Some(SelectableSurface::Details),
                 Some(ScrollSurface::Details),
@@ -284,7 +284,7 @@ pub(super) fn render_details(
         if let Some(y) = row_of(logical) {
             shell.hit_regions.push(region(
                 Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
-                PointerTarget::JumpToTicket(key),
+                PointerTarget::Follow(Jump::WorkItem(key)),
                 PointerLayer::Base,
                 Some(SelectableSurface::Details),
                 Some(ScrollSurface::Details),

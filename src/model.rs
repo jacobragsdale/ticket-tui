@@ -231,6 +231,43 @@ impl StateCatalog {
     }
 }
 
+/// Somewhere worth going, wherever it lives. The shell resolves one by
+/// switching to the tab that holds it and asking that screen to select it, so
+/// a work item's pull request and a run's branch are one keystroke apart.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "at", rename_all = "kebab-case")]
+pub enum Jump {
+    /// One work item, by key.
+    WorkItem(TicketKey),
+    /// Several at once, which the work items tab shows as `id:613 id:614`.
+    WorkItems(Vec<i64>),
+    Repo(String),
+    PullRequest {
+        repo: String,
+        id: i64,
+    },
+    Pipeline(i64),
+    Run(i64),
+}
+
+impl Jump {
+    /// How the notification names a target that is not on file.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::WorkItem(key) => format!("Work item #{}", key.id),
+            Self::WorkItems(ids) => match ids.as_slice() {
+                [id] => format!("Work item #{id}"),
+                ids => format!("{} work items", ids.len()),
+            },
+            Self::Repo(name) => format!("Repository {name}"),
+            Self::PullRequest { repo, id } => format!("Pull request !{id} in {repo}"),
+            Self::Pipeline(id) => format!("Pipeline #{id}"),
+            Self::Run(id) => format!("Run #{id}"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SortField {

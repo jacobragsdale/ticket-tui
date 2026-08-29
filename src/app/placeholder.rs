@@ -3,6 +3,8 @@
 //! every tab switches, and the empty ones say why they are empty.
 
 use crossterm::event::KeyEvent;
+
+use crate::command::{CommandId, command_for_key};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -11,6 +13,7 @@ use ratatui::widgets::{Block, Paragraph};
 
 use super::{AppAction, Screen, Shell, TabId};
 use crate::columns::ColumnLayout;
+use crate::model::Jump;
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 
 pub struct PlaceholderScreen {
@@ -40,8 +43,20 @@ impl PlaceholderScreen {
 }
 
 impl Screen for PlaceholderScreen {
-    fn handle_key(&mut self, _shell: &mut Shell, _key: KeyEvent) -> AppAction {
-        AppAction::None
+    /// A stub has no state to act on, so it answers the global keys that need
+    /// none — quit, sync, and the cross-tab history — and nothing else. The
+    /// rest arrive with the tab's own ticket.
+    fn handle_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        match command_for_key(key, self.tab) {
+            Some(CommandId::Quit) => {
+                shell.should_quit = true;
+                AppAction::None
+            }
+            Some(CommandId::Sync) => AppAction::Sync,
+            Some(CommandId::HistoryBack) => AppAction::HistoryBack,
+            Some(CommandId::HistoryForward) => AppAction::HistoryForward,
+            _ => AppAction::None,
+        }
     }
 
     fn handle_paste(&mut self, _shell: &mut Shell, _pasted: &str) {}
@@ -59,6 +74,18 @@ impl Screen for PlaceholderScreen {
     fn place_caret(&mut self, _shell: &mut Shell, _editor: TextEditor, _column: u16, _row: u16) {}
 
     fn close_overlay(&mut self, _shell: &mut Shell) {}
+
+    /// A placeholder has no rows to settle on, but it does hold the tab: a
+    /// jump to something it will one day show brings the tab up, and the
+    /// screen says which ticket fills it in. The rows arrive with that ticket.
+    fn select(&mut self, _shell: &mut Shell, jump: &Jump) -> bool {
+        matches!(
+            (self.tab, jump),
+            (TabId::Repos, Jump::Repo(_))
+                | (TabId::PullRequests, Jump::PullRequest { .. })
+                | (TabId::Pipelines, Jump::Pipeline(_) | Jump::Run(_))
+        )
+    }
 
     fn active_editor(&self) -> Option<TextEditor> {
         None

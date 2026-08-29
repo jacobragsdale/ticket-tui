@@ -140,10 +140,10 @@ impl WorkItemsScreen {
 
     #[must_use]
     pub fn facet_field(&self) -> FilterField {
-        FilterField::ALL[self
+        FilterField::OVERLAY[self
             .filter_overlay
             .field_index
-            .min(FilterField::ALL.len() - 1)]
+            .min(FilterField::OVERLAY.len() - 1)]
     }
 
     #[must_use]
@@ -575,7 +575,7 @@ impl WorkItemsScreen {
                 .filter_overlay
                 .field_index
                 .saturating_add_signed(delta)
-                .min(FilterField::ALL.len() - 1);
+                .min(FilterField::OVERLAY.len() - 1);
             self.filter_overlay.field_index
         };
         self.filter_overlay.scroll.ensure_visible(index);
@@ -834,14 +834,10 @@ impl WorkItemsScreen {
                 shell.set_status("Cleared selection");
                 AppAction::None
             }
-            CommandId::HistoryBack => {
-                self.history_back(shell);
-                AppAction::None
-            }
-            CommandId::HistoryForward => {
-                self.history_forward(shell);
-                AppAction::None
-            }
+            // Where this run has been is the shell's, not one screen's: the
+            // walk can cross tabs.
+            CommandId::HistoryBack => AppAction::HistoryBack,
+            CommandId::HistoryForward => AppAction::HistoryForward,
             CommandId::SprintSummary => {
                 self.open_sprint_summary();
                 AppAction::None

@@ -198,10 +198,13 @@ fn family_enter_selects_visible_tickets_records_history_once_and_explains_hidden
     assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 3);
     assert_eq!(app.shell.focus, Focus::Family);
     assert_eq!(
-        app.work_items
-            .recent
+        app.shell
+            .history()
             .iter()
-            .map(|key| key.id)
+            .map(|jump| match jump {
+                Jump::WorkItem(key) => key.id,
+                other => panic!("only work items so far: {other:?}"),
+            })
             .collect::<Vec<_>>(),
         vec![2, 3]
     );

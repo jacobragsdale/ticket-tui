@@ -27,6 +27,7 @@ use crate::filter::{
     FacetValue, FilterField, FilterSet, FilterToken, MatchContext, ParsedQuery, Sentinel,
     WorkItemSchema, days_untouched, facet_values, format_query, is_stale, parse_query, stale_query,
 };
+pub use crate::model::Jump;
 use crate::model::{
     CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity,
     RelationKind, RelationRecord, SortDirection, SortField, StateCatalog, StateCategory,
@@ -71,6 +72,13 @@ pub use work_items::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum AppAction {
     None,
+    /// Go where a reference points: the shell switches tabs if it has to and
+    /// asks the screen that holds it to select it.
+    Follow(Jump),
+    /// `[` and `]`: back and forward through everywhere this run has been,
+    /// across tabs.
+    HistoryBack,
+    HistoryForward,
     Sync,
     /// Write one field back to Azure DevOps, one request per work item. An
     /// ordinary edit carries a single request; a bulk change over the checked
@@ -220,6 +228,83 @@ impl App {
         self.tab = tab;
     }
 
+    /// Goes where a reference points: the tab that holds it comes up, and the
+    /// screen there settles on it. One nothing holds says so rather than
+    /// switching to an empty tab.
+    pub fn follow(&mut self, jump: &Jump) -> bool {
+        let tab = match jump {
+            Jump::WorkItem(_) | Jump::WorkItems(_) => TabId::WorkItems,
+            Jump::Repo(_) => TabId::Repos,
+            Jump::PullRequest { .. } => TabId::PullRequests,
+            Jump::Pipeline(_) | Jump::Run(_) => TabId::Pipelines,
+        };
+        let previous = self.tab;
+        self.select_tab(tab);
+        let (shell, screen) = self.screen();
+        let found = screen.select(shell, jump);
+        if !found {
+            self.tab = previous;
+            self.shell
+                .set_error(format!("{} is not in this database", jump.describe()));
+        }
+        found
+    }
+
+    /// `[`: back to wherever the run was before this, on whatever tab.
+    pub fn history_back(&mut self) {
+        if self.shell.history.len() < 2 {
+            self.shell.set_status("Nothing to go back to");
+            return;
+        }
+        let current = self.shell.history.pop().expect("a place to leave");
+        let Some(previous) = self.shell.history.last().cloned() else {
+            self.shell.history.push(current);
+            return;
+        };
+        self.shell.future.push(current);
+        self.walk_to(&previous);
+    }
+
+    /// `]`: forward again through what `[` came off.
+    pub fn history_forward(&mut self) {
+        let Some(next) = self.shell.future.pop() else {
+            self.shell.set_status("Nothing to go forward to");
+            return;
+        };
+        self.shell.history.push(next.clone());
+        self.walk_to(&next);
+    }
+
+    /// A step through the history, which does not record itself.
+    fn walk_to(&mut self, jump: &Jump) {
+        let history = std::mem::take(&mut self.shell.history);
+        let future = std::mem::take(&mut self.shell.future);
+        self.follow(jump);
+        self.shell.history = history;
+        self.shell.future = future;
+        self.shell.session_dirty = true;
+    }
+
+    /// Carries out the shell's own half of an action and passes the rest on to
+    /// the event loop.
+    fn apply(&mut self, action: AppAction) -> AppAction {
+        match action {
+            AppAction::Follow(jump) => {
+                self.follow(&jump);
+                AppAction::None
+            }
+            AppAction::HistoryBack => {
+                self.history_back();
+                AppAction::None
+            }
+            AppAction::HistoryForward => {
+                self.history_forward();
+                AppAction::None
+            }
+            other => other,
+        }
+    }
+
     /// The whole session: which tab was showing, each tab's slice, and what
     /// the shell keeps across all of them.
     #[must_use]
@@ -227,7 +312,7 @@ impl App {
         let mut session = Session {
             active_tab: self.tab,
             bookmarks: self.work_items.bookmark_keys(),
-            recent: self.work_items.recent_keys(),
+            history: self.shell.history().to_vec(),
             show_finished: self.work_items.show_finished(),
             selected: self
                 .work_items
@@ -255,6 +340,7 @@ impl App {
             .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
         self.work_items
             .restore_shared(session.stale_days, session.show_finished, &session);
+        self.shell.history = session.history.clone();
         self.tab = session.active_tab;
         let selected = session.selected.clone();
         let Session {
@@ -298,7 +384,8 @@ impl App {
             return AppAction::None;
         }
         let (shell, screen) = self.screen();
-        screen.handle_key(shell, key)
+        let action = screen.handle_key(shell, key);
+        self.apply(action)
     }
 
     /// The mouse still goes to the screen's own entry point: the pointer state
@@ -315,7 +402,13 @@ impl App {
             return PointerUpdate::none(true);
         }
         match self.tab {
-            TabId::WorkItems => self.work_items.handle_mouse(&mut self.shell, mouse),
+            TabId::WorkItems => {
+                let update = self.work_items.handle_mouse(&mut self.shell, mouse);
+                PointerUpdate {
+                    action: self.apply(update.action),
+                    redraw: update.redraw,
+                }
+            }
             _ => {
                 self.shell.pointer.set_position(mouse.column, mouse.row);
                 PointerUpdate::none(self.shell.refresh_hover())

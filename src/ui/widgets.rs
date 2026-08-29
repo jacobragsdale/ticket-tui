@@ -250,7 +250,7 @@ pub(super) fn row_like(target: &PointerTarget) -> bool {
             | PointerTarget::OpenInBrowser { .. }
             | PointerTarget::ToggleBookmark { .. }
             | PointerTarget::ToggleRowSelect { .. }
-            | PointerTarget::JumpToTicket(_)
+            | PointerTarget::Follow(_)
             | PointerTarget::FacetValue { .. }
             | PointerTarget::FilterRow { .. }
             | PointerTarget::PaletteCommand { .. }

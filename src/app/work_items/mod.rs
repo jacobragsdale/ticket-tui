@@ -267,8 +267,6 @@ pub struct WorkItemsScreen {
     pub prompt: Option<TextPrompt>,
     bookmarks: HashSet<TicketKey>,
     selected_keys: HashSet<TicketKey>,
-    recent: Vec<TicketKey>,
-    future: Vec<TicketKey>,
     views: Vec<NamedView>,
     pub active_view: Option<String>,
     graph: TicketGraph,
@@ -398,8 +396,6 @@ impl WorkItemsScreen {
             prompt: None,
             bookmarks: HashSet::new(),
             selected_keys: HashSet::new(),
-            recent: Vec::new(),
-            future: Vec::new(),
             views: Vec::new(),
             active_view: None,
             graph: prepared.graph,
@@ -758,7 +754,7 @@ impl WorkItemsScreen {
         self.select_row(shell, next);
     }
 
-    fn select_row(&mut self, shell: &mut Shell, row: usize) {
+    pub fn select_row(&mut self, shell: &mut Shell, row: usize) {
         if self.visible.is_empty() {
             self.table_state.select(None);
             self.table.offset = 0;
@@ -927,6 +923,10 @@ impl Screen for WorkItemsScreen {
 
     fn scroll_state_mut(&mut self, surface: ScrollSurface) -> &mut ScrollState {
         Self::scroll_state_mut(self, surface)
+    }
+
+    fn select(&mut self, shell: &mut Shell, jump: &Jump) -> bool {
+        self.select_jump(shell, jump)
     }
 
     fn snapshot(&self) -> TabSession {

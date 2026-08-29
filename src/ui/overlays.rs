@@ -540,7 +540,7 @@ pub(super) fn render_filter_overlay(
             })
             .collect()
     } else {
-        FilterField::ALL
+        FilterField::OVERLAY
             .iter()
             .enumerate()
             .map(|(index, field)| {

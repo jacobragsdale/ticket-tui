@@ -575,6 +575,8 @@ fn handle_action(
 ) -> bool {
     match action {
         AppAction::None => {}
+        // The shell answers these itself, before the event loop sees them.
+        AppAction::Follow(_) | AppAction::HistoryBack | AppAction::HistoryForward => {}
         AppAction::Sync => start_sync(app, runtime),
         // A bulk change over the checked rows hands over several: the worker
         // takes them in this order, each with its own revision test.

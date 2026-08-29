@@ -159,6 +159,10 @@ pub struct Shell {
     pub sync_pending: bool,
     /// Why there is nothing to write to, reported when an edit is attempted
     /// without a configured Azure DevOps project.
+    /// Everywhere this run has been, oldest last, across every tab. `[` walks
+    /// back through it and `]` forward through what `[` came off.
+    pub(crate) history: Vec<Jump>,
+    pub(crate) future: Vec<Jump>,
     pub(crate) offline_reason: Option<String>,
     /// Whether Azure DevOps is configured at all: an offline run browses the
     /// database and reports no sync state.
@@ -208,6 +212,8 @@ impl Default for Shell {
             stale: false,
             data_signature: 0,
             sync_pending: false,
+            history: Vec::new(),
+            future: Vec::new(),
             offline_reason: None,
             sync_enabled: false,
             sync_source: None,
@@ -222,6 +228,34 @@ impl Default for Shell {
 }
 
 impl Shell {
+    /// Records somewhere this run has been. Arriving where you already are is
+    /// not a move, and going somewhere new is what closes off the forward
+    /// list — the same rule a browser's back button follows.
+    pub fn record_jump(&mut self, jump: Jump) {
+        if self.history.last() == Some(&jump) {
+            return;
+        }
+        self.history.push(jump);
+        if self.history.len() > 50 {
+            self.history.remove(0);
+        }
+        self.future.clear();
+        self.session_dirty = true;
+    }
+
+    /// Everywhere this run has been, for the session file.
+    #[must_use]
+    pub fn history(&self) -> &[Jump] {
+        &self.history
+    }
+
+    /// Forgets a target that is not there any more, wherever it sits in the
+    /// history, so `[` never lands on a deleted row.
+    pub fn forget_jump(&mut self, jump: &Jump) {
+        self.history.retain(|held| held != jump);
+        self.future.retain(|held| held != jump);
+    }
+
     /// What the table title appends after the sort order, most urgent first.
     #[must_use]
     pub fn activity_label(&self) -> Option<String> {

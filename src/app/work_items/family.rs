@@ -146,6 +146,50 @@ impl ChildProgressIndex {
 
 impl WorkItemsScreen {
     #[must_use]
+    /// Settles on one of this screen's rows, if it holds it. A work item in the
+    /// family tree of the row already selected moves the family cursor rather
+    /// than the table, which is what clicking a tree row has always done.
+    pub fn select_jump(&mut self, shell: &mut Shell, jump: &Jump) -> bool {
+        match jump {
+            Jump::WorkItem(key) => {
+                if self.ticket_by_key(key).is_none() {
+                    return false;
+                }
+                if self
+                    .visible_family_tree()
+                    .iter()
+                    .any(|entry| &entry.key == key)
+                {
+                    shell.focus = Focus::Family;
+                    self.family_cursor = Some(key.clone());
+                    self.ensure_family_cursor_visible();
+                } else if self
+                    .selected_family()
+                    .is_some_and(|family| family.extra_parents.iter().any(|parent| parent == key))
+                {
+                    shell.focus = Focus::Family;
+                } else {
+                    shell.focus = Focus::Details;
+                }
+                self.jump_to_ticket(shell, key);
+                true
+            }
+            Jump::WorkItems(ids) => {
+                if ids.is_empty() {
+                    return false;
+                }
+                let query = ids
+                    .iter()
+                    .map(|id| format!("id:{id}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                self.set_query(shell, query);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn ticket_by_key(&self, key: &TicketKey) -> Option<&Ticket> {
         self.tickets.iter().find(|ticket| ticket.key == *key)
     }

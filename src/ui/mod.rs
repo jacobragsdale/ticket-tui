@@ -18,7 +18,7 @@ use crate::app::{
 use crate::command::{COMMANDS, Command, Scope, key_label_for};
 use crate::filter::{FacetTarget, FilterField, WorkItemSchema};
 use crate::model::{
-    FamilySnapshot, FamilyTreeEntry, HistoryRecord, SortDirection, SortField, StateCategory,
+    FamilySnapshot, FamilyTreeEntry, HistoryRecord, Jump, SortDirection, SortField, StateCategory,
     Ticket, TicketKey, path_leaf,
 };
 use crate::pointer::{

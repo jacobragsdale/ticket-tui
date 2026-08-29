@@ -1,5 +1,6 @@
 use super::*;
-use crate::app::TabId;
+use crate::app::{Jump, TabId};
+use crate::model::TicketKey;
 use crate::ui::render_tab_bar;
 
 /// One key, the way the event loop sends it.
@@ -150,5 +151,78 @@ fn a_tab_with_something_waiting_wears_a_badge() {
             .find_target(|target| matches!(target, PointerTarget::SelectTab { index: 2 }))
             .is_some(),
         "a badged tab is still clickable"
+    );
+}
+
+#[test]
+fn the_history_walks_back_and_forward_across_tabs() {
+    let mut second = ticket();
+    second.key.id = 10_002;
+    second.title = "Second ticket".into();
+    let mut app = App::new(vec![ticket(), second]);
+    render_text(110, 30, &mut app);
+
+    // Two work items, then somewhere on another tab, the way that tab's
+    // screen will record it once it has rows of its own.
+    app.work_items.select_row(&mut app.shell, 0);
+    app.work_items.record_visit(&mut app.shell);
+    app.work_items.select_row(&mut app.shell, 1);
+    app.work_items.record_visit(&mut app.shell);
+    app.select_tab(TabId::Repos);
+    app.shell.record_jump(Jump::Repo("ticket-tui".to_owned()));
+
+    press(&mut app, KeyCode::Char('['));
+    assert_eq!(app.tab, TabId::WorkItems, "back crosses tabs");
+    assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_002);
+
+    press(&mut app, KeyCode::Char(']'));
+    assert_eq!(app.tab, TabId::Repos, "and forward crosses back");
+
+    press(&mut app, KeyCode::Char('['));
+    press(&mut app, KeyCode::Char('['));
+    assert_eq!(app.tab, TabId::WorkItems);
+    assert_eq!(
+        app.work_items.selected_ticket().unwrap().key.id,
+        10_001,
+        "two steps back is the work item before the last one"
+    );
+}
+
+#[test]
+fn a_jump_to_something_this_database_does_not_hold_says_so_and_stays_put() {
+    let mut app = App::new(vec![ticket()]);
+    render_text(110, 30, &mut app);
+
+    let followed = app.follow(&Jump::WorkItem(TicketKey {
+        organization: "demo".into(),
+        id: 4_242,
+    }));
+
+    assert!(!followed);
+    assert_eq!(app.tab, TabId::WorkItems, "the tab did not move");
+    let (message, level) = app.shell.notification().expect("a refusal is reported");
+    assert_eq!(message, "Work item #4242 is not in this database");
+    assert_eq!(level, crate::app::NotificationLevel::Error);
+}
+
+#[test]
+fn following_several_work_items_at_once_filters_the_table_to_them() {
+    let mut second = ticket();
+    second.key.id = 10_002;
+    second.title = "Second ticket".into();
+    let mut third = ticket();
+    third.key.id = 10_003;
+    third.title = "Third ticket".into();
+    let mut app = App::new(vec![ticket(), second, third]);
+
+    assert!(app.follow(&Jump::WorkItems(vec![10_001, 10_003])));
+    assert_eq!(app.work_items.query(), "id:10001 id:10003");
+    assert_eq!(
+        app.work_items
+            .visible_tickets()
+            .map(|ticket| ticket.key.id)
+            .collect::<Vec<_>>(),
+        vec![10_001, 10_003],
+        "exactly the two the jump named"
     );
 }

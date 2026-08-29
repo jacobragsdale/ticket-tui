@@ -927,6 +927,13 @@ screen keeps its own query, cursor and scroll while another is showing, and a
 tab wears a badge after its name when it has something waiting. Repos, Pull
 requests and Pipelines say which ticket fills them in until it lands.
 
+`[` and `]` walk back and forward through everywhere the run has been,
+switching tabs as they go: a work item, then its repository, then back. A
+reference in a details pane — the family tree's rows today — is underlined and
+follows on `Enter` or a click; one this database does not hold says so rather
+than opening an empty screen. The walk is remembered in the session file, and a
+file written before the tabs becomes the first cross-tab history.
+
 ## Controls
 
 Everything above the tabs line is global; the work-item keys under it only do
@@ -948,6 +955,7 @@ anything on tab `1`.
 | `Esc` | Leave search, clear the query, or clear a multi-selection |
 | `s` | Open the sort menu; use arrows and `Enter` to apply |
 | `f` | Focus the filter bar; `h`/`l` change field, `j`/`k` values, `Space` toggles |
+| `id:613 id:614` | List exactly those work items — exact, ORed like any field, and a chip like any other. It is what a jump from another tab writes |
 | `F` | Open the full filter overlay for extra fields |
 | `c` | Show or hide (`Space`), reorder (`J`/`K`), and resize (`<`/`>`) columns, Progress among them |
 | `p` / `:` | Open the command palette |
@@ -1035,7 +1043,10 @@ under the pointer whether or not the terminal has colours.
 Search accepts a compact grammar such as `state:active type:bug
 assignee:"Avery Chen" priority:1 tag:rust`, plus `project:`, `area:`, and
 `iteration:`. Values in the same field are combined with OR; different fields
-are combined with AND. `is:bookmarked` limits the table to locally bookmarked
+are combined with AND. `id:` names work items by number — `id:613 id:614` is
+those two and nothing else — which is what a jump from another tab writes into
+the search box. It is the one field the `F` overlay does not offer a list of
+values for: that list would be as long as the database. `is:bookmarked` limits the table to locally bookmarked
 tickets. `changed:` and `created:` take a comparison rather than a value, so
 `changed:<7d` is what moved in the last seven days and `changed:>14d` what has
 gone untouched for longer, over units of minutes, hours, days, and weeks
@@ -1043,7 +1054,7 @@ gone untouched for longer, over units of minutes, hours, days, and weeks
 as `changed:`. An ISO date compares against the instant instead, at UTC
 midnight, so `created:>2026-08-01` is everything raised since the start of
 August. Relative windows are measured as the filter runs, so a view saved as
-`changed:<7d` still means the last seven days tomorrow, and the `+` overlay
+`changed:<7d` still means the last seven days tomorrow, and the `F` overlay
 offers 24h, 7d, 14d, and 30d presets for both fields, where a date has no list
 of values to check off.
 

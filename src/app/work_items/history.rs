@@ -91,51 +91,22 @@ impl WorkItemsScreen {
         }
     }
 
+    /// Records the row under the cursor as somewhere this run has been.
+    pub fn record_visit(&mut self, shell: &mut Shell) {
+        self.record_history(shell);
+    }
+
     pub(super) fn record_history(&mut self, shell: &mut Shell) {
         let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
             return;
         };
-        if self.recent.last() == Some(&key) {
-            return;
-        }
-        self.recent.push(key);
-        if self.recent.len() > 50 {
-            self.recent.remove(0);
-        }
-        self.future.clear();
-        shell.session_dirty = true;
-    }
-
-    pub(super) fn history_back(&mut self, shell: &mut Shell) {
-        if self.recent.len() < 2 {
-            return;
-        }
-        let current = self.recent.pop().expect("recent ticket exists");
-        self.future.push(current);
-        let key = self.recent.last().cloned();
-        self.restore_selection(shell, key.as_ref());
-        shell.session_dirty = true;
-    }
-
-    pub(super) fn history_forward(&mut self, shell: &mut Shell) {
-        let Some(key) = self.future.pop() else {
-            return;
-        };
-        self.recent.push(key.clone());
-        self.restore_selection(shell, Some(&key));
-        shell.session_dirty = true;
+        shell.record_jump(Jump::WorkItem(key));
     }
 
     /// The bookmarks, for the shell to save.
     #[must_use]
     pub fn bookmark_keys(&self) -> Vec<TicketKey> {
         self.bookmarks.iter().cloned().collect()
-    }
-
-    /// The work items visited this run, oldest first.
-    #[must_use]
-    pub fn recent_keys(&self) -> Vec<TicketKey> {
-        self.recent.clone()
     }
 
     /// What the shell keeps for this screen, put back before its own slice is:
@@ -145,7 +116,6 @@ impl WorkItemsScreen {
         self.stale_days = clamp_stale_days(stale_days);
         self.show_finished = show_finished;
         self.bookmarks = session.bookmarks.iter().cloned().collect();
-        self.recent = session.recent.clone();
     }
 
     /// This screen's slice of the session file. What the shell keeps —

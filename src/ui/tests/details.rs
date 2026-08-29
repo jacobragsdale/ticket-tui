@@ -542,7 +542,7 @@ fn family_rows_show_the_current_and_cursor_styles_and_click_through_to_a_ticket(
         .shell
         .hit_regions
         .find_target(
-            |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_002),
+            |target| matches!(target, PointerTarget::Follow(Jump::WorkItem(key)) if key.id == 10_002),
         )
         .map(|region| region.rect)
         .expect("current row");
@@ -550,7 +550,7 @@ fn family_rows_show_the_current_and_cursor_styles_and_click_through_to_a_ticket(
         .shell
         .hit_regions
         .find_target(
-            |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
+            |target| matches!(target, PointerTarget::Follow(Jump::WorkItem(key)) if key.id == 10_001),
         )
         .map(|region| region.rect)
         .expect("cursor row");
@@ -587,7 +587,7 @@ fn family_rows_show_the_current_and_cursor_styles_and_click_through_to_a_ticket(
             .hit_regions
             .resolve(summary_x, summary_y)
             .map(|region| &region.target),
-        Some(PointerTarget::JumpToTicket(_))
+        Some(PointerTarget::Follow(_))
     ));
     click(&mut app, summary_x, summary_y);
     assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_002);
@@ -710,7 +710,7 @@ fn family_hit_targets_follow_the_details_scroll_and_the_wheel_only_scrolls() {
         .shell
         .hit_regions
         .find_target(
-            |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
+            |target| matches!(target, PointerTarget::Follow(Jump::WorkItem(key)) if key.id == 10_001),
         )
         .map(|region| region.rect.y)
         .expect("parent row should be on screen");
@@ -719,7 +719,7 @@ fn family_hit_targets_follow_the_details_scroll_and_the_wheel_only_scrolls() {
         .scroll_to(app.work_items.details.max_offset());
     render_text(60, 24, &mut app);
     let after = app.shell.hit_regions.find_target(
-        |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
+        |target| matches!(target, PointerTarget::Follow(Jump::WorkItem(key)) if key.id == 10_001),
     );
     assert!(after.is_none() || after.is_some_and(|region| region.rect.y != before));
 

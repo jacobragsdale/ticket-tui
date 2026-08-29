@@ -269,25 +269,9 @@ impl WorkItemsScreen {
                 shell.narrow_details = true;
                 return self.open_selected();
             }
-            PointerTarget::JumpToTicket(key) => {
-                if self
-                    .visible_family_tree()
-                    .iter()
-                    .any(|entry| entry.key == key)
-                {
-                    shell.focus = Focus::Family;
-                    self.family_cursor = Some(key.clone());
-                    self.ensure_family_cursor_visible();
-                } else if self
-                    .selected_family()
-                    .is_some_and(|family| family.extra_parents.iter().any(|parent| parent == &key))
-                {
-                    shell.focus = Focus::Family;
-                } else {
-                    shell.focus = Focus::Details;
-                }
-                self.jump_to_ticket(shell, &key);
-            }
+            // Where a reference points is the shell's business: it switches
+            // to whichever tab holds it and asks that screen to select it.
+            PointerTarget::Follow(jump) => return AppAction::Follow(jump),
             PointerTarget::FacetPill(target) => match target {
                 FacetTarget::More => self.open_filters(),
                 FacetTarget::Field(key) => {

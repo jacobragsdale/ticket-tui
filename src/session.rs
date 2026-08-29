@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::app::TabId;
-use crate::model::{RowDensity, SearchOrder, SortDirection, TicketKey};
+use crate::model::{Jump, RowDensity, SearchOrder, SortDirection, TicketKey};
 
 /// One tab's slice of the session file: what it was showing, how it was
 /// arranged, and the views saved on it. Sort field and columns are key strings
@@ -55,6 +55,10 @@ pub(crate) struct FlatSession {
     views: Option<Vec<NamedView>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     active_view: Option<String>,
+    /// The work items the run had visited, before the history could cross
+    /// tabs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recent: Option<Vec<TicketKey>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -72,8 +76,9 @@ pub struct Session {
     pub pipelines: TabSession,
     #[serde(default)]
     pub bookmarks: Vec<TicketKey>,
+    /// Everywhere the run had been, oldest last, across every tab.
     #[serde(default)]
-    pub recent: Vec<TicketKey>,
+    pub history: Vec<Jump>,
     /// Whether the table lists finished work. Absent from every session
     /// written before the toggle existed, so `false` is what those load as and
     /// an old session opens on the open backlog like a new one.
@@ -128,6 +133,9 @@ impl Session {
         if flat.active_view.is_some() {
             tab.active_view = flat.active_view;
         }
+        if let Some(recent) = flat.recent {
+            self.history = recent.into_iter().map(Jump::WorkItem).collect();
+        }
     }
 
     /// One tab's slice.
@@ -176,7 +184,7 @@ impl Default for Session {
             pull_requests: TabSession::default(),
             pipelines: TabSession::default(),
             bookmarks: Vec::new(),
-            recent: Vec::new(),
+            history: Vec::new(),
             show_finished: false,
             selected: None,
             pane_split_wide: wide_split(),
@@ -325,6 +333,13 @@ mod tests {
             organization: "demo".into(),
             id: 7,
         });
+        session.history = vec![
+            Jump::WorkItem(TicketKey {
+                organization: "demo".into(),
+                id: 7,
+            }),
+            Jump::Repo("ticket-tui".to_owned()),
+        ];
         session.work_items.views.push(NamedView {
             name: "Active".into(),
             query: "state:active".into(),
@@ -364,6 +379,11 @@ mod tests {
         assert_eq!(loaded.pull_requests.query, "author:@me");
         assert_eq!(loaded.pipelines.query, "result:failed");
         assert_eq!(loaded.bookmarks[0].id, 7);
+        assert_eq!(
+            loaded.history[1],
+            Jump::Repo("ticket-tui".to_owned()),
+            "the history remembers other tabs too"
+        );
         assert_eq!(loaded.work_items.views[0].name, "Active");
         assert_eq!(loaded.work_items.views[0].sort_field, "changed");
         assert_eq!(
@@ -458,6 +478,7 @@ mod tests {
                     { "id": "title", "visible": true, "width": 0 }
                 ],
                 "auto_hide": false,
+                "recent": [{ "organization": "demo", "id": 613 }],
                 "views": [
                     { "name": "Mine", "query": "assignee:@me", "sort_field": "changed",
                       "sort_direction": "desc", "search_order": "relevance",
@@ -493,6 +514,14 @@ mod tests {
         assert!(
             loaded.repos.query.is_empty() && loaded.pipelines.views.is_empty(),
             "and the tabs that did not exist start empty"
+        );
+        assert_eq!(
+            loaded.history,
+            vec![Jump::WorkItem(TicketKey {
+                organization: "demo".into(),
+                id: 613
+            })],
+            "the work items it had visited become the first cross-tab history"
         );
         assert_eq!(
             (loaded.pane_split_wide, loaded.pane_split_stacked),

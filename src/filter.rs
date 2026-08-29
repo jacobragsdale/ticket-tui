@@ -84,6 +84,7 @@ impl FilterSchema for WorkItemSchema {
 
     fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
         match field {
+            FilterField::Id => vec![row.key.id.to_string()],
             FilterField::State => vec![row.state.clone()],
             FilterField::Type => vec![row.work_item_type.clone()],
             FilterField::Assignee => vec![
@@ -144,6 +145,10 @@ impl FilterSchema for WorkItemSchema {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum FilterField {
+    /// The work item's own number. Exact, and ORed like any other field, so
+    /// `id:613 id:614` is the two of them and nothing else. Typed or arrived
+    /// at by a jump rather than picked from a facet list.
+    Id,
     State,
     Type,
     Assignee,
@@ -157,7 +162,8 @@ pub enum FilterField {
 }
 
 impl FilterField {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
+        Self::Id,
         Self::State,
         Self::Type,
         Self::Assignee,
@@ -172,14 +178,38 @@ impl FilterField {
 
     pub const BAR: [Self; 4] = [Self::State, Self::Type, Self::Tags, Self::Assignee];
 
+    /// The fields the Filters overlay lists: every one whose values are worth
+    /// offering. `id:` is typed or jumped to, never picked off a list as long
+    /// as the database.
+    pub const OVERLAY: [Self; 10] = [
+        Self::State,
+        Self::Type,
+        Self::Assignee,
+        Self::Priority,
+        Self::Project,
+        Self::Area,
+        Self::Iteration,
+        Self::Tags,
+        Self::Changed,
+        Self::Created,
+    ];
+
     #[must_use]
     pub const fn on_bar(self) -> bool {
         matches!(self, Self::State | Self::Type | Self::Tags | Self::Assignee)
     }
 
+    /// Whether the Filters overlay offers a list of this field's values. An id
+    /// has as many values as there are rows, which is a list nobody wants.
+    #[must_use]
+    pub const fn enumerable(self) -> bool {
+        !matches!(self, Self::Id)
+    }
+
     #[must_use]
     pub const fn key(self) -> &'static str {
         match self {
+            Self::Id => "id",
             Self::State => "state",
             Self::Type => "type",
             Self::Assignee => "assignee",
@@ -196,6 +226,7 @@ impl FilterField {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::Id => "ID",
             Self::State => "State",
             Self::Type => "Type",
             Self::Assignee => "Assignee",
@@ -212,6 +243,7 @@ impl FilterField {
     #[must_use]
     pub fn parse(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
+            "id" => Some(Self::Id),
             "state" => Some(Self::State),
             "type" => Some(Self::Type),
             "assignee" | "assigned" => Some(Self::Assignee),
@@ -1782,6 +1814,75 @@ mod second_schema_tests {
             format_query(&parsed.filters, &parsed.fuzzy),
             "repo:ticket-tui author:@me needs review",
             "and the query round-trips through this screen's keys"
+        );
+    }
+}
+
+#[cfg(test)]
+mod id_filter_tests {
+    use super::*;
+    use crate::model::{Ticket, TicketKey};
+
+    fn ticket(id: i64, title: &str) -> Ticket {
+        Ticket {
+            key: TicketKey {
+                organization: "demo".into(),
+                id,
+            },
+            project: "atlas".into(),
+            revision: 1,
+            work_item_type: "Task".into(),
+            title: title.into(),
+            state: "Active".into(),
+            reason: None,
+            assigned_to: None,
+            priority: None,
+            area_path: "Atlas".into(),
+            iteration_path: "Atlas\\Sprint 1".into(),
+            tags: vec![],
+            description: String::new(),
+            description_html: String::new(),
+            created_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
+            changed_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
+            web_url: String::new(),
+            details_rev: 0,
+        }
+    }
+
+    #[test]
+    fn an_id_filter_lists_exactly_the_work_items_it_names() {
+        let rows = [
+            ticket(613, "First"),
+            ticket(614, "Second"),
+            ticket(615, "Third"),
+        ];
+        let parsed = parse_query::<WorkItemSchema>("id:613 id:614");
+        let context = MatchContext::now();
+
+        let matched: Vec<i64> = rows
+            .iter()
+            .filter(|row| parsed.filters.matches_in(row, false, &context))
+            .map(|row| row.key.id)
+            .collect();
+        assert_eq!(matched, [613, 614], "ids are ORed the way any field is");
+
+        assert_eq!(
+            format_query(&parsed.filters, ""),
+            "id:613 id:614",
+            "and the query round-trips through the chips"
+        );
+        assert_eq!(
+            parsed
+                .filters
+                .tokens()
+                .iter()
+                .map(FilterToken::chip_label)
+                .collect::<Vec<_>>(),
+            ["id:613", "id:614"]
+        );
+        assert!(
+            !FilterField::OVERLAY.contains(&FilterField::Id),
+            "the overlay does not offer a list as long as the database"
         );
     }
 }

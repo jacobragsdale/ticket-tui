@@ -131,7 +131,9 @@ fn detail_url(app: &App) -> Option<Rect> {
 fn family_row(app: &App, id: i64) -> Option<Rect> {
     app.shell
         .hit_regions
-        .find_target(|target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == id))
+        .find_target(
+            |target| matches!(target, PointerTarget::Follow(Jump::WorkItem(key)) if key.id == id),
+        )
         .map(|region| region.rect)
 }
 

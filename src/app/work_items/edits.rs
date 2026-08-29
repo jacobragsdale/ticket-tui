@@ -1180,8 +1180,7 @@ impl WorkItemsScreen {
         self.selected_keys.remove(key);
         self.pending_edits.remove(key);
         self.pending_comments.remove(key);
-        self.recent.retain(|held| held != key);
-        self.future.retain(|held| held != key);
+        shell.forget_jump(&Jump::WorkItem(key.clone()));
         if self.details_pending.as_ref() == Some(key) {
             self.details_pending = None;
         }

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{AppAction, Shell};
 use crate::columns::ColumnLayout;
+use crate::model::Jump;
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 use crate::session::TabSession;
 use crossterm::event::KeyEvent;
@@ -117,6 +118,13 @@ pub trait Screen {
     /// The same, to edit: whichever list this screen is
     /// showing, without the overlay knowing what its columns are.
     fn columns_mut(&mut self) -> &mut dyn ColumnLayout;
+
+    /// Settles on whatever a jump points at, and says whether this screen had
+    /// it. A screen that answers `false` is not switched to, and the shell
+    /// says the target is not on file.
+    fn select(&mut self, _shell: &mut Shell, _jump: &Jump) -> bool {
+        false
+    }
 
     /// This tab's slice of the session file: what it is showing and how it is
     /// arranged. A screen with nothing worth remembering keeps the default.
