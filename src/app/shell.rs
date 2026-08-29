@@ -2,6 +2,7 @@
 //! notification, the layout, and what the sync worker is doing.
 
 use super::*;
+use work_items::clamp_pos_to_snapshot;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Focus {
@@ -65,6 +66,71 @@ impl PointerUpdate {
     }
 }
 
+/// Percentage of the workspace given to the tickets pane when the panes sit
+/// side by side, and when they are stacked.
+pub const DEFAULT_PANE_SPLIT_WIDE: u16 = 62;
+
+pub const DEFAULT_PANE_SPLIT_STACKED: u16 = 56;
+
+/// Safety rails for a stored or dragged split, applied on top of the cell
+/// minimums below.
+pub(crate) const MIN_SPLIT_PERCENT: u16 = 20;
+
+pub(crate) const MAX_SPLIT_PERCENT: u16 = 80;
+
+/// Cells each pane keeps while the divider is dragged.
+const MIN_TICKETS_COLUMNS: u16 = 40;
+
+const MIN_DETAILS_COLUMNS: u16 = 30;
+
+const MIN_PANE_ROWS: u16 = 6;
+
+/// Compact wording for a wait still to come, coarse on purpose: the exact
+/// second the timer comes back is nobody's business, and a title that ticks
+/// every second is a title that has to be redrawn every second.
+fn remaining_wait(left: Duration) -> String {
+    // Rounded up, so a two minute pause read a millisecond after it started
+    // still says two minutes rather than counting down from one.
+    let seconds = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m", seconds.div_ceil(60))
+    }
+}
+
+/// Compact relative wording shared by the freshness and sync labels.
+fn relative_age(age: Duration) -> String {
+    if age.as_secs() < 45 {
+        "just now".into()
+    } else if age.as_secs() < 3600 {
+        format!("{}m ago", age.as_secs() / 60)
+    } else if age.as_secs() < 86_400 {
+        format!("{}h ago", age.as_secs() / 3600)
+    } else {
+        format!("{}d ago", age.as_secs() / 86_400)
+    }
+}
+
+/// Turns a divider position, measured in cells from the start of the workspace,
+/// into a percentage for the first pane. The clamp keeps `first_min` cells for
+/// that pane and `second_min` cells plus the one-cell divider for the other,
+/// then holds the result inside the 20..=80 safety rails.
+fn split_percent(cells: u16, span: u16, first_min: u16, second_min: u16) -> u16 {
+    if span == 0 {
+        return MIN_SPLIT_PERCENT;
+    }
+    let span = u32::from(span);
+    let low = (u32::from(first_min) * 100)
+        .div_ceil(span)
+        .clamp(u32::from(MIN_SPLIT_PERCENT), u32::from(MAX_SPLIT_PERCENT));
+    let high = (span.saturating_sub(u32::from(second_min) + 1) * 100 / span)
+        .min(u32::from(MAX_SPLIT_PERCENT))
+        .max(low);
+    let percent = u32::from(cells) * 100 / span;
+    u16::try_from(percent.clamp(low, high)).unwrap_or(MIN_SPLIT_PERCENT)
+}
+
 /// What every screen sits inside. A screen is handed one of these on
 /// each event, and reads and writes it rather than owning any of it.
 #[derive(Debug)]
@@ -119,6 +185,40 @@ pub struct Shell {
     /// Display name of the signed-in Azure DevOps user, so their own work
     /// items can stand out. `None` until a sync records one.
     pub(crate) me: Option<String>,
+}
+
+impl Default for Shell {
+    fn default() -> Self {
+        Self {
+            focus: Focus::Tickets,
+            narrow_details: false,
+            pane_split_wide: DEFAULT_PANE_SPLIT_WIDE,
+            pane_split_stacked: DEFAULT_PANE_SPLIT_STACKED,
+            content_area: Rect::ZERO,
+            divider: None,
+            reload_pending: false,
+            should_quit: false,
+            session_dirty: false,
+            notification: None,
+            hit_regions: HitRegions::default(),
+            pointer: PointerState::default(),
+            overlay_anchor: OverlayAnchor::Centered,
+            loaded_at: Instant::now(),
+            database_path: PathBuf::new(),
+            stale: false,
+            data_signature: 0,
+            sync_pending: false,
+            offline_reason: None,
+            sync_enabled: false,
+            sync_source: None,
+            sync_target: None,
+            synced_at: None,
+            synced_wall_clock: None,
+            sync_error: None,
+            sync_paused_until: None,
+            me: None,
+        }
+    }
 }
 
 impl Shell {

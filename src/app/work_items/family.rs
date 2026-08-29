@@ -144,7 +144,7 @@ impl ChildProgressIndex {
     }
 }
 
-impl App {
+impl WorkItemsScreen {
     #[must_use]
     pub fn ticket_by_key(&self, key: &TicketKey) -> Option<&Ticket> {
         self.tickets.iter().find(|ticket| ticket.key == *key)
@@ -199,11 +199,11 @@ impl App {
         }
     }
 
-    pub fn replace_tickets(&mut self, tickets: Vec<Ticket>) {
-        self.replace_prepared_tickets(PreparedTickets::new(tickets));
+    pub fn replace_tickets(&mut self, shell: &mut Shell, tickets: Vec<Ticket>) {
+        self.replace_prepared_tickets(shell, PreparedTickets::new(tickets));
     }
 
-    pub fn replace_prepared_tickets(&mut self, prepared: PreparedTickets) {
+    pub fn replace_prepared_tickets(&mut self, shell: &mut Shell, prepared: PreparedTickets) {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.tickets = Arc::new(prepared.tickets);
         self.graph = prepared.graph;
@@ -215,10 +215,10 @@ impl App {
         self.search.replace_documents(prepared.search_documents);
         self.reapply_pending_edits();
         self.refresh_child_progress();
-        self.shell.loaded_at = Instant::now();
-        self.shell.stale = false;
+        shell.loaded_at = Instant::now();
+        shell.stale = false;
         if self.fuzzy_query().is_empty() {
-            self.show_all(selected.as_ref());
+            self.show_all(shell, selected.as_ref());
         } else {
             self.pending_selection = selected;
             self.visible.clear();
@@ -264,26 +264,26 @@ impl App {
     /// which is the row that has moved up into its place. The cursor lands on
     /// the next piece of work rather than on nothing or back at the top, so
     /// marking a run of items Done reads as working down the list.
-    pub(super) fn resettle_rows(&mut self) {
+    pub(super) fn resettle_rows(&mut self, shell: &mut Shell) {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         let row = self.table_state.selected();
-        self.apply_filters();
+        self.apply_filters(shell);
         self.sort_visible();
         if let Some(row) = row
             && selected
                 .as_ref()
                 .is_some_and(|key| self.visible_row(key).is_none())
         {
-            self.select_row(row);
+            self.select_row(shell, row);
             return;
         }
-        self.restore_selection(selected.as_ref());
+        self.restore_selection(shell, selected.as_ref());
     }
 
-    pub(super) fn sync_family_state(&mut self) {
+    pub(super) fn sync_family_state(&mut self, shell: &mut Shell) {
         self.reset_family_cursor();
-        if self.shell.focus == Focus::Family && !self.selected_has_family() {
-            self.shell.focus = Focus::Details;
+        if shell.focus == Focus::Family && !self.selected_has_family() {
+            shell.focus = Focus::Details;
         }
     }
 

@@ -22,18 +22,24 @@ fn deletable_tickets() -> Vec<Ticket> {
 /// behind and a ratio to move.
 fn deleting_app() -> App {
     let mut app = App::new(deletable_tickets());
-    app.set_workspace_graph(TicketGraph {
-        relations: vec![child_of(2, 1), child_of(3, 1), child_of(4, 3)],
-        ..TicketGraph::default()
-    });
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            relations: vec![child_of(2, 1), child_of(3, 1), child_of(4, 3)],
+            ..TicketGraph::default()
+        },
+    );
     app.shell.enable_sync();
-    app.set_table_viewport(4);
+    app.work_items.set_table_viewport(4);
     app
 }
 
 /// The ids on the table, in the order it holds them.
 fn rows_of(app: &App) -> Vec<i64> {
-    app.visible_tickets().map(|ticket| ticket.key.id).collect()
+    app.work_items
+        .visible_tickets()
+        .map(|ticket| ticket.key.id)
+        .collect()
 }
 
 /// Opens the confirmation the way somebody would, through the Edit menu.
@@ -51,8 +57,9 @@ fn the_delete_confirmation_names_the_work_item_and_the_children_it_leaves_behind
 
     open_delete_menu(&mut app);
 
-    assert_eq!(app.mode, AppMode::ConfirmDelete);
+    assert_eq!(app.work_items.mode, WorkItemMode::ConfirmDelete);
     let confirm = app
+        .work_items
         .delete_confirm
         .clone()
         .expect("the Edit menu row opens the confirmation");
@@ -68,17 +75,18 @@ fn the_delete_confirmation_names_the_work_item_and_the_children_it_leaves_behind
         "what is at stake is the work under the row, so the overlay says so"
     );
     assert_eq!(rows_of(&app), [1, 2, 3, 4], "and nothing has gone yet");
-    assert!(!app.deletes_pending());
+    assert!(!app.work_items.deletes_pending());
 }
 
 #[test]
 fn a_work_item_with_nothing_under_it_is_confirmed_without_an_orphan_warning() {
     let mut app = deleting_app();
-    app.select_row(1);
+    app.work_items.select_row(&mut app.shell, 1);
 
     open_delete_menu(&mut app);
 
     let confirm = app
+        .work_items
         .delete_confirm
         .clone()
         .expect("the confirmation is open");
@@ -98,13 +106,13 @@ fn escaping_the_delete_confirmation_changes_nothing_at_all() {
 
     assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
 
-    assert_eq!(app.mode, AppMode::Browse);
-    assert!(app.delete_confirm.is_none());
-    assert!(!app.deletes_pending());
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(app.work_items.delete_confirm.is_none());
+    assert!(!app.work_items.deletes_pending());
     assert_eq!(app.shell.notification(), None, "cancelling closes silently");
     assert_eq!(rows_of(&app), [1, 2, 3, 4]);
     assert_eq!(
-        app.family_of(&family_key(1)).children,
+        app.work_items.family_of(&family_key(1)).children,
         vec![family_key(2), family_key(3)],
         "and the family is exactly as it was"
     );
@@ -113,35 +121,35 @@ fn escaping_the_delete_confirmation_changes_nothing_at_all() {
 #[test]
 fn a_delete_that_lands_takes_the_row_and_its_links_and_moves_the_cursor_on() {
     let mut app = deleting_app();
-    app.select_row(2);
+    app.work_items.select_row(&mut app.shell, 2);
     open_delete_menu(&mut app);
 
     let action = press(&mut app, KeyCode::Char('d'));
 
     assert_eq!(action, AppAction::Delete(vec![family_key(3)]));
-    assert_eq!(app.mode, AppMode::Browse);
-    assert!(app.deletes_pending());
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(app.work_items.deletes_pending());
     assert_eq!(
         rows_of(&app),
         [1, 2, 3, 4],
         "nothing leaves the table until Azure DevOps has taken the delete"
     );
 
-    app.apply_deleted(&family_key(3));
+    app.work_items.apply_deleted(&mut app.shell, &family_key(3));
 
     assert_eq!(rows_of(&app), [1, 2, 4]);
-    assert!(!app.deletes_pending());
+    assert!(!app.work_items.deletes_pending());
     assert_eq!(
-        app.selected_ticket().map(|ticket| ticket.key.id),
+        app.work_items.selected_ticket().map(|ticket| ticket.key.id),
         Some(4),
         "the cursor takes the row that moved up into its place"
     );
     assert!(
-        app.relations_from(&family_key(4)).is_empty(),
+        app.work_items.relations_from(&family_key(4)).is_empty(),
         "the task it was over stops claiming a parent that is gone"
     );
     assert_eq!(
-        app.family_of(&family_key(1)).children,
+        app.work_items.family_of(&family_key(1)).children,
         vec![family_key(2)],
         "and the epic is left with the one issue it still has"
     );
@@ -155,15 +163,15 @@ fn a_delete_that_lands_takes_the_row_and_its_links_and_moves_the_cursor_on() {
 #[test]
 fn deleting_the_last_row_leaves_the_cursor_on_the_one_above_it() {
     let mut app = deleting_app();
-    app.select_row(3);
+    app.work_items.select_row(&mut app.shell, 3);
     open_delete_menu(&mut app);
     press(&mut app, KeyCode::Char('d'));
 
-    app.apply_deleted(&family_key(4));
+    app.work_items.apply_deleted(&mut app.shell, &family_key(4));
 
     assert_eq!(rows_of(&app), [1, 2, 3]);
     assert_eq!(
-        app.selected_ticket().map(|ticket| ticket.key.id),
+        app.work_items.selected_ticket().map(|ticket| ticket.key.id),
         Some(3),
         "with nothing below it, the cursor takes the row above"
     );
@@ -175,10 +183,10 @@ fn deleting_a_child_leaves_its_parent_counting_the_children_it_still_has() {
     assert_eq!(progress_of(&app, 1), Some((0, 2)));
     assert_eq!(progress_of(&app, 3), Some((0, 1)));
 
-    app.select_row(2);
+    app.work_items.select_row(&mut app.shell, 2);
     open_delete_menu(&mut app);
     press(&mut app, KeyCode::Char('d'));
-    app.apply_deleted(&family_key(3));
+    app.work_items.apply_deleted(&mut app.shell, &family_key(3));
 
     assert_eq!(
         progress_of(&app, 1),
@@ -198,16 +206,20 @@ fn a_refused_delete_says_so_and_leaves_the_row_on_the_table() {
     open_delete_menu(&mut app);
     press(&mut app, KeyCode::Char('d'));
 
-    app.reject_delete(&family_key(1), "TF401232: the work item does not exist");
+    app.work_items.reject_delete(
+        &mut app.shell,
+        &family_key(1),
+        "TF401232: the work item does not exist",
+    );
 
-    assert!(!app.deletes_pending());
+    assert!(!app.work_items.deletes_pending());
     assert_eq!(
         rows_of(&app),
         [1, 2, 3, 4],
         "the row is exactly where it was"
     );
     assert_eq!(
-        app.family_of(&family_key(1)).children,
+        app.work_items.family_of(&family_key(1)).children,
         vec![family_key(2), family_key(3)],
         "and so are the links under it"
     );
@@ -223,13 +235,14 @@ fn a_refused_delete_says_so_and_leaves_the_row_on_the_table() {
 #[test]
 fn a_checked_set_deletes_one_at_a_time_and_speaks_once_at_the_end() {
     let mut app = deleting_app();
-    app.select_row(1);
+    app.work_items.select_row(&mut app.shell, 1);
     press(&mut app, KeyCode::Char(' '));
-    app.select_row(2);
+    app.work_items.select_row(&mut app.shell, 2);
     press(&mut app, KeyCode::Char(' '));
 
     open_delete_menu(&mut app);
     let confirm = app
+        .work_items
         .delete_confirm
         .clone()
         .expect("the confirmation is open");
@@ -247,14 +260,14 @@ fn a_checked_set_deletes_one_at_a_time_and_speaks_once_at_the_end() {
         "one request each, in the order the table holds them"
     );
 
-    app.apply_deleted(&family_key(2));
+    app.work_items.apply_deleted(&mut app.shell, &family_key(2));
     assert_eq!(
         app.shell.notification().map(|(message, _)| message),
         Some("Deleting 2 tickets\u{2026}"),
         "the first answer says nothing of its own"
     );
 
-    app.apply_deleted(&family_key(3));
+    app.work_items.apply_deleted(&mut app.shell, &family_key(3));
 
     assert_eq!(rows_of(&app), [1, 4]);
     assert_eq!(
@@ -267,15 +280,16 @@ fn a_checked_set_deletes_one_at_a_time_and_speaks_once_at_the_end() {
 #[test]
 fn a_checked_set_that_only_partly_lands_counts_what_went_and_names_what_stayed() {
     let mut app = deleting_app();
-    app.select_row(1);
+    app.work_items.select_row(&mut app.shell, 1);
     press(&mut app, KeyCode::Char(' '));
-    app.select_row(2);
+    app.work_items.select_row(&mut app.shell, 2);
     press(&mut app, KeyCode::Char(' '));
     open_delete_menu(&mut app);
     press(&mut app, KeyCode::Char('d'));
 
-    app.apply_deleted(&family_key(2));
-    app.reject_delete(&family_key(3), "it is locked");
+    app.work_items.apply_deleted(&mut app.shell, &family_key(2));
+    app.work_items
+        .reject_delete(&mut app.shell, &family_key(3), "it is locked");
 
     assert_eq!(
         app.shell.notification(),
@@ -290,19 +304,22 @@ fn a_checked_set_that_only_partly_lands_counts_what_went_and_names_what_stayed()
 #[test]
 fn a_delete_never_reaches_the_undo_stack() {
     let mut app = deleting_app();
-    app.select_row(2);
-    let AppAction::Edit(requests) = app.edit_selected(FieldEdit::state("Doing")) else {
+    app.work_items.select_row(&mut app.shell, 2);
+    let AppAction::Edit(requests) = app
+        .work_items
+        .edit_selected(&mut app.shell, FieldEdit::state("Doing"))
+    else {
         panic!("an ordinary edit should dispatch a request");
     };
     accept(&mut app, &only(requests));
-    assert_eq!(app.undo_stack.len(), 1, "an edit is undoable");
+    assert_eq!(app.work_items.undo_stack.len(), 1, "an edit is undoable");
 
     open_delete_menu(&mut app);
     press(&mut app, KeyCode::Char('d'));
-    app.apply_deleted(&family_key(3));
+    app.work_items.apply_deleted(&mut app.shell, &family_key(3));
 
     assert!(
-        app.undo_stack.is_empty(),
+        app.work_items.undo_stack.is_empty(),
         "the delete files nothing, and the edit under it has no row left to go back to"
     );
     assert_eq!(press(&mut app, KeyCode::Char('u')), AppAction::None);
@@ -319,10 +336,15 @@ fn a_delete_is_refused_before_the_confirmation_when_there_is_nothing_to_write_to
     app.shell
         .set_offline_reason(Some("no Azure DevOps organization is configured".into()));
 
-    app.run_command(CommandId::DeleteWorkItem);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::DeleteWorkItem);
 
-    assert_eq!(app.mode, AppMode::Browse, "the confirmation never opens");
-    assert!(app.delete_confirm.is_none());
+    assert_eq!(
+        app.work_items.mode,
+        WorkItemMode::Browse,
+        "the confirmation never opens"
+    );
+    assert!(app.work_items.delete_confirm.is_none());
     assert_eq!(
         app.shell.notification(),
         Some((
@@ -335,25 +357,25 @@ fn a_delete_is_refused_before_the_confirmation_when_there_is_nothing_to_write_to
 #[test]
 fn deleting_the_work_item_the_details_pane_is_showing_leaves_it_over_the_next_one() {
     let mut app = deleting_app();
-    app.select_row(2);
-    app.details.set_viewport(4, 40);
-    app.details.scroll_to(12);
+    app.work_items.select_row(&mut app.shell, 2);
+    app.work_items.details.set_viewport(4, 40);
+    app.work_items.details.scroll_to(12);
     open_delete_menu(&mut app);
     press(&mut app, KeyCode::Char('d'));
 
-    app.apply_deleted(&family_key(3));
+    app.work_items.apply_deleted(&mut app.shell, &family_key(3));
 
     assert_eq!(
-        app.selected_ticket().map(|ticket| ticket.key.id),
+        app.work_items.selected_ticket().map(|ticket| ticket.key.id),
         Some(4),
         "the pane is over a work item that is still there"
     );
     assert_eq!(
-        app.details.offset, 0,
+        app.work_items.details.offset, 0,
         "and reads from the top of it rather than from where the last one was"
     );
     assert_eq!(
-        app.family_cursor,
+        app.work_items.family_cursor,
         Some(family_key(4)),
         "the family cursor follows the selection rather than the work item that went"
     );

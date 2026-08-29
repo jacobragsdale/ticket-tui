@@ -276,13 +276,13 @@ pub(super) fn form_number(form: &FormOverlay, id: FormFieldId) -> Result<Option<
         .map_err(|_| format!("{} must be a whole number, not \"{text}\"", field.label))
 }
 
-impl App {
+impl WorkItemsScreen {
     /// Opens the new work item form: `n`. A draft `Esc` left behind comes back
     /// exactly as it was, cursor and all, so a form closed to go and read
     /// something is not a form retyped.
-    pub fn open_create_form(&mut self) -> AppAction {
+    pub fn open_create_form(&mut self, shell: &mut Shell) -> AppAction {
         if self.pending_create.is_some() {
-            self.shell.set_error("A work item is already being created");
+            shell.set_error("A work item is already being created");
             return AppAction::None;
         }
         let form = self.take_draft(FormKind::NewWorkItem).unwrap_or_else(|| {
@@ -292,7 +292,7 @@ impl App {
                 self.create_form_fields(None),
             )
         });
-        self.open_form(form)
+        self.open_form(shell, form)
     }
 
     /// Opens the new child form: `N`, the Edit menu's New child row, or the
@@ -302,13 +302,13 @@ impl App {
     /// down into, and the area and iteration the parent sits in. The draft is
     /// kept per parent, so a child half typed under one work item is not
     /// offered under the next.
-    pub fn open_child_form(&mut self) -> AppAction {
+    pub fn open_child_form(&mut self, shell: &mut Shell) -> AppAction {
         if self.pending_create.is_some() {
-            self.shell.set_error("A work item is already being created");
+            shell.set_error("A work item is already being created");
             return AppAction::None;
         }
         let Some(parent) = self.selected_ticket() else {
-            self.shell.set_error("No work item is selected");
+            shell.set_error("No work item is selected");
             return AppAction::None;
         };
         let id = parent.key.id;
@@ -320,16 +320,16 @@ impl App {
                 self.create_form_fields(Some(id)),
             )
         });
-        self.open_form(form)
+        self.open_form(shell, form)
     }
 
     /// Shows one form and asks for whatever it needs that is not in memory yet.
     /// Every form opens this way, so the placement, the cursor, and the single
     /// types fetch a session are the same for all of them.
-    fn open_form(&mut self, form: FormOverlay) -> AppAction {
+    fn open_form(&mut self, shell: &mut Shell, form: FormOverlay) -> AppAction {
         self.form = Some(form);
-        self.mode = AppMode::Form;
-        self.shell.overlay_anchor = OverlayAnchor::Centered;
+        self.mode = WorkItemMode::Form;
+        shell.overlay_anchor = OverlayAnchor::Centered;
         self.form_scroll.scroll_to(0);
         if self.work_item_types_requested {
             AppAction::None
@@ -419,15 +419,15 @@ impl App {
         self.tickets.iter().find(|ticket| ticket.key.id == id)
     }
 
-    pub(super) fn handle_form_key(&mut self, key: KeyEvent) -> AppAction {
+    pub(super) fn handle_form_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
         match key.code {
             KeyCode::Esc => self.cancel_form(),
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return self.submit_form();
+                return self.submit_form(shell);
             }
             KeyCode::Up | KeyCode::BackTab => self.move_form_focus(-1),
             KeyCode::Down | KeyCode::Tab => self.move_form_focus(1),
-            KeyCode::Enter => return self.activate_form_field(),
+            KeyCode::Enter => return self.activate_form_field(shell),
             // Everything else is typing, and a field filled from a picker or by
             // whoever opened the form takes none of it.
             _ => {
@@ -466,7 +466,7 @@ impl App {
     /// moves on to the next field. Submitting is deliberately not bound here —
     /// `Ctrl-S` and `[Create]` do that — so a stray `Enter` halfway down a form
     /// never files a half-typed work item.
-    fn activate_form_field(&mut self) -> AppAction {
+    fn activate_form_field(&mut self, shell: &mut Shell) -> AppAction {
         let Some(field) = self.form.as_ref().and_then(FormOverlay::focused) else {
             return AppAction::None;
         };
@@ -489,7 +489,7 @@ impl App {
             }
             Some(FormPicker::Assignee) => {
                 let current = (!current.trim().is_empty()).then_some(current);
-                self.show_assignee_picker(current, EditScope::Form(id))
+                self.show_assignee_picker(shell, current, EditScope::Form(id))
             }
             None => {
                 self.move_form_focus(1);
@@ -509,9 +509,9 @@ impl App {
             }
         }
         self.mode = if self.form.is_some() {
-            AppMode::Form
+            WorkItemMode::Form
         } else {
-            AppMode::Browse
+            WorkItemMode::Browse
         };
     }
 
@@ -519,9 +519,9 @@ impl App {
     /// that opened it, or to the table.
     pub(super) fn close_picker(&mut self, scope: EditScope) {
         self.mode = if matches!(scope, EditScope::Form(_)) && self.form.is_some() {
-            AppMode::Form
+            WorkItemMode::Form
         } else {
-            AppMode::Browse
+            WorkItemMode::Browse
         };
     }
 
@@ -543,36 +543,36 @@ impl App {
     /// written to the session file.
     pub(super) fn cancel_form(&mut self) {
         self.form_draft = self.form.take();
-        self.mode = AppMode::Browse;
+        self.mode = WorkItemMode::Browse;
     }
 
     /// Files the form: `Ctrl-S`, or `[Create]`. Everything that can be refused
     /// before the network is refused here — a required field left empty, a
     /// parent or a priority that is not a number — with the form left open on
     /// the field at fault rather than a document of nonsense sent out.
-    pub(super) fn submit_form(&mut self) -> AppAction {
+    pub(super) fn submit_form(&mut self, shell: &mut Shell) -> AppAction {
         let Some(form) = self.form.as_ref() else {
-            self.mode = AppMode::Browse;
+            self.mode = WorkItemMode::Browse;
             return AppAction::None;
         };
         if let Some(missing) = form.first_blank_required() {
             let (label, id) = (missing.label, missing.id);
             let index = form.index_of(id).unwrap_or_default();
             self.focus_form_field(index);
-            self.shell.set_error(format!("{label} is required"));
+            shell.set_error(format!("{label} is required"));
             return AppAction::None;
         }
         let parent = match form_number(form, FormFieldId::Parent) {
             Ok(parent) => parent,
             Err(message) => {
-                self.refuse_form(FormFieldId::Parent, message);
+                self.refuse_form(shell, FormFieldId::Parent, message);
                 return AppAction::None;
             }
         };
         let priority = match form_number(form, FormFieldId::Priority) {
             Ok(priority) => priority,
             Err(message) => {
-                self.refuse_form(FormFieldId::Priority, message);
+                self.refuse_form(shell, FormFieldId::Priority, message);
                 return AppAction::None;
             }
         };
@@ -597,18 +597,16 @@ impl App {
         if !tags.is_empty() {
             edits.push(FieldEdit::tags(&tags));
         }
-        if let Some(reason) = self.shell.write_refusal() {
-            self.shell
-                .set_error(format!("Work item not created: {reason}"));
+        if let Some(reason) = shell.write_refusal() {
+            shell.set_error(format!("Work item not created: {reason}"));
             return AppAction::None;
         }
         let patch: Vec<Value> = edits.iter().flat_map(FieldEdit::patch).collect();
         // The form is held rather than dropped: a refusal has to put it back
         // with everything still in it.
         self.pending_create = self.form.take();
-        self.mode = AppMode::Browse;
-        self.shell
-            .set_status(format!("Creating {work_item_type}\u{2026}"));
+        self.mode = WorkItemMode::Browse;
+        shell.set_status(format!("Creating {work_item_type}\u{2026}"));
         AppAction::Create {
             work_item_type,
             patch,
@@ -618,11 +616,11 @@ impl App {
 
     /// Refuses a submit and puts the cursor on the field that caused it, so the
     /// message and the caret name the same thing.
-    fn refuse_form(&mut self, id: FormFieldId, message: String) {
+    fn refuse_form(&mut self, shell: &mut Shell, id: FormFieldId, message: String) {
         if let Some(index) = self.form.as_ref().and_then(|form| form.index_of(id)) {
             self.focus_form_field(index);
         }
-        self.shell.set_error(message);
+        shell.set_error(message);
     }
 
     /// Whether a work item is waiting to be created. The database watcher
@@ -639,7 +637,12 @@ impl App {
     /// carrying, and the selection moves onto it. A row the current query would
     /// hide is no use to anybody, so the query is cleared and the status line
     /// says it was.
-    pub fn apply_created(&mut self, ticket: Ticket, relations: Vec<RelationRecord>) {
+    pub fn apply_created(
+        &mut self,
+        shell: &mut Shell,
+        ticket: Ticket,
+        relations: Vec<RelationRecord>,
+    ) {
         self.pending_create = None;
         let key = ticket.key.clone();
         let headline = format!("Created {} #{}", ticket.work_item_type, key.id);
@@ -650,11 +653,11 @@ impl App {
         self.graph.replace_relations_from(&key, relations);
         self.refresh_child_progress();
         if hidden {
-            self.set_query(String::new());
+            self.set_query(shell, String::new());
         }
-        self.show_all(Some(&key));
+        self.show_all(shell, Some(&key));
         self.details.scroll_to(0);
-        self.shell.set_status(if hidden {
+        shell.set_status(if hidden {
             format!("{headline} \u{b7} search cleared so it is visible")
         } else {
             headline
@@ -677,13 +680,12 @@ impl App {
     /// A work item that was never created. The form comes back exactly as it
     /// went out, so nothing typed is lost and the refusal can be answered where
     /// it was caused.
-    pub fn reject_create(&mut self, message: &str) {
+    pub fn reject_create(&mut self, shell: &mut Shell, message: &str) {
         if let Some(form) = self.pending_create.take() {
             self.form = Some(form);
-            self.mode = AppMode::Form;
-            self.shell.overlay_anchor = OverlayAnchor::Centered;
+            self.mode = WorkItemMode::Form;
+            shell.overlay_anchor = OverlayAnchor::Centered;
         }
-        self.shell
-            .set_error(format!("Work item not created: {message}"));
+        shell.set_error(format!("Work item not created: {message}"));
     }
 }

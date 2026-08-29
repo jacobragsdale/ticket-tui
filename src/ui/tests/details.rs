@@ -60,32 +60,35 @@ fn details_render_relationships_history_and_comments() {
     let mut app = App::new(vec![item.clone()]);
     app.shell.narrow_details = true;
     app.shell.focus = Focus::Details;
-    app.set_workspace_graph(TicketGraph {
-        relations: vec![RelationRecord {
-            from: item.key.clone(),
-            to: TicketKey {
-                organization: "demo".into(),
-                id: 99,
-            },
-            kind: RelationKind::Parent,
-        }],
-        comments: vec![CommentRecord {
-            ticket: item.key.clone(),
-            comment_id: 1,
-            created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
-            author: Some("Avery Chen".into()),
-            text: "Looks good".into(),
-        }],
-        history: vec![HistoryRecord {
-            ticket: item.key,
-            revision: 2,
-            changed_at: crate::timestamp::ts("2026-01-02T00:00:00Z"),
-            changed_by: Some("Jordan Patel".into()),
-            field_name: "State".into(),
-            old_value: Some("New".into()),
-            new_value: Some("Active".into()),
-        }],
-    });
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            relations: vec![RelationRecord {
+                from: item.key.clone(),
+                to: TicketKey {
+                    organization: "demo".into(),
+                    id: 99,
+                },
+                kind: RelationKind::Parent,
+            }],
+            comments: vec![CommentRecord {
+                ticket: item.key.clone(),
+                comment_id: 1,
+                created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
+                author: Some("Avery Chen".into()),
+                text: "Looks good".into(),
+            }],
+            history: vec![HistoryRecord {
+                ticket: item.key,
+                revision: 2,
+                changed_at: crate::timestamp::ts("2026-01-02T00:00:00Z"),
+                changed_by: Some("Jordan Patel".into()),
+                field_name: "State".into(),
+                old_value: Some("New".into()),
+                new_value: Some("Active".into()),
+            }],
+        },
+    );
 
     let text = render_text(60, 44, &mut app);
     assert!(text.contains("Family"));
@@ -121,24 +124,30 @@ fn a_comment_just_posted_shows_at_the_head_of_the_discussion() {
     let mut app = App::new(vec![item.clone()]);
     app.shell.narrow_details = true;
     app.shell.focus = Focus::Details;
-    app.set_workspace_graph(TicketGraph {
-        comments: vec![CommentRecord {
-            ticket: item.key.clone(),
-            comment_id: 1,
-            created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
-            author: Some("Avery Chen".into()),
-            text: "Looks good".into(),
-        }],
-        ..TicketGraph::default()
-    });
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            comments: vec![CommentRecord {
+                ticket: item.key.clone(),
+                comment_id: 1,
+                created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
+                author: Some("Avery Chen".into()),
+                text: "Looks good".into(),
+            }],
+            ..TicketGraph::default()
+        },
+    );
 
-    app.apply_comment(CommentRecord {
-        ticket: item.key,
-        comment_id: 2,
-        created_at: crate::timestamp::ts("2026-01-04T00:00:00Z"),
-        author: Some("Jacob Ragsdale".into()),
-        text: "Merged into main".into(),
-    });
+    app.work_items.apply_comment(
+        &mut app.shell,
+        CommentRecord {
+            ticket: item.key,
+            comment_id: 2,
+            created_at: crate::timestamp::ts("2026-01-04T00:00:00Z"),
+            author: Some("Jacob Ragsdale".into()),
+            text: "Merged into main".into(),
+        },
+    );
 
     let text = render_text(60, 36, &mut app);
     let earlier = text.find("Looks good").expect("the comment already held");
@@ -156,7 +165,7 @@ fn a_comment_just_posted_shows_at_the_head_of_the_discussion() {
 fn the_comment_prompt_opens_empty_and_names_the_work_item() {
     let mut app = App::new(vec![ticket()]);
     app.shell.enable_sync();
-    app.set_table_viewport(1);
+    app.work_items.set_table_viewport(1);
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
     let row = crate::command::EDIT_MENU
         .iter()
@@ -166,7 +175,7 @@ fn the_comment_prompt_opens_empty_and_names_the_work_item() {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.mode, AppMode::Prompt);
+    assert_eq!(app.work_items.mode, WorkItemMode::Prompt);
 
     let prompt = render_text(80, 20, &mut app);
     assert!(prompt.contains("Comment on #10001"), "{prompt}");
@@ -182,9 +191,10 @@ fn the_comment_prompt_opens_empty_and_names_the_work_item() {
 #[test]
 fn the_delete_confirmation_names_the_work_item_the_children_and_the_recycle_bin() {
     let mut app = App::new(progress_tickets());
-    app.set_workspace_graph(progress_graph());
+    app.work_items
+        .set_workspace_graph(&mut app.shell, progress_graph());
     app.shell.enable_sync();
-    app.set_table_viewport(5);
+    app.work_items.set_table_viewport(5);
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
     let row = crate::command::EDIT_MENU
         .iter()
@@ -194,7 +204,7 @@ fn the_delete_confirmation_names_the_work_item_the_children_and_the_recycle_bin(
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.mode, AppMode::ConfirmDelete);
+    assert_eq!(app.work_items.mode, WorkItemMode::ConfirmDelete);
 
     let confirm = render_text(90, 24, &mut app);
 
@@ -292,12 +302,14 @@ fn progress_graph() -> TicketGraph {
 
 fn progress_app() -> App {
     let mut app = App::new(progress_tickets());
-    app.set_workspace_graph(progress_graph());
+    app.work_items
+        .set_workspace_graph(&mut app.shell, progress_graph());
     app
 }
 
 fn column_index(app: &App, field: SortField) -> usize {
-    app.layout
+    app.work_items
+        .layout
         .columns
         .iter()
         .position(|column| column.id == field)
@@ -307,7 +319,7 @@ fn column_index(app: &App, field: SortField) -> usize {
 #[test]
 fn the_details_header_counts_the_children_and_a_childless_one_says_nothing() {
     let mut app = progress_app();
-    assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
+    assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_001);
 
     let epic = render_text(130, 30, &mut app);
     assert!(epic.contains("Children: 2/3 done"), "{epic}");
@@ -319,7 +331,7 @@ fn the_details_header_counts_the_children_and_a_childless_one_says_nothing() {
     for _ in 0..4 {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
-    assert_eq!(app.selected_ticket().unwrap().key.id, 10_005);
+    assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_005);
 
     let leaf = render_text(130, 30, &mut app);
     assert!(
@@ -333,7 +345,8 @@ fn an_epic_whose_children_have_all_finished_fills_its_bar() {
     let mut tickets = progress_tickets();
     tickets[3].state = "Closed".into();
     let mut app = App::new(tickets);
-    app.set_workspace_graph(progress_graph());
+    app.work_items
+        .set_workspace_graph(&mut app.shell, progress_graph());
 
     let text = render_text(130, 30, &mut app);
     assert!(text.contains("Children: 3/3 done"), "{text}");
@@ -376,11 +389,11 @@ fn the_progress_column_is_hidden_until_the_column_overlay_shows_it() {
         SortField::Assignee,
     ] {
         let index = column_index(&app, field);
-        app.layout.toggle_visible(index);
+        app.work_items.layout.toggle_visible(index);
     }
     let progress = column_index(&app, SortField::Progress);
     assert!(
-        !app.layout.columns[progress].visible,
+        !app.work_items.layout.columns[progress].visible,
         "the column is off until somebody asks for it"
     );
 
@@ -388,7 +401,7 @@ fn the_progress_column_is_hidden_until_the_column_overlay_shows_it() {
     assert!(!hidden.contains("Progress"), "{hidden}");
     assert!(!hidden.contains("2/3"), "{hidden}");
 
-    app.layout.toggle_visible(progress);
+    app.work_items.layout.toggle_visible(progress);
     let shown = render_text(60, 20, &mut app);
     assert!(shown.contains("Progress"), "{shown}");
     assert!(shown.contains("2/3"), "{shown}");
@@ -398,7 +411,7 @@ fn the_progress_column_is_hidden_until_the_column_overlay_shows_it() {
         "a work item with no children leaves the cell empty: {shown}"
     );
 
-    app.layout.toggle_visible(progress);
+    app.work_items.layout.toggle_visible(progress);
     let hidden_again = render_text(60, 20, &mut app);
     assert!(!hidden_again.contains("Progress"), "{hidden_again}");
     assert!(!hidden_again.contains("2/3"), "{hidden_again}");
@@ -443,10 +456,11 @@ fn details_render_family_tree_without_other_links() {
             "2026-01-21T00:00:00Z",
         ),
     ]);
-    app.set_workspace_graph(parent_child_graph());
+    app.work_items
+        .set_workspace_graph(&mut app.shell, parent_child_graph());
     app.shell.narrow_details = true;
     app.shell.focus = Focus::Details;
-    assert_eq!(app.selected_ticket().unwrap().key.id, 10_002);
+    assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_002);
 
     let text = render_text(60, 36, &mut app);
     assert!(text.contains("Family: Feature 10001  Auth rewrite › this"));
@@ -505,10 +519,11 @@ fn auth_family_app() -> App {
             "2026-01-21T00:00:00Z",
         ),
     ]);
-    app.set_workspace_graph(parent_child_graph());
+    app.work_items
+        .set_workspace_graph(&mut app.shell, parent_child_graph());
     // These read the details pane row by row, so the chip bar saying
     // finished work is hidden must not sit between it and the top.
-    app.set_show_finished(true);
+    app.work_items.set_show_finished(&mut app.shell, true);
     app.shell.narrow_details = true;
     app.shell.focus = Focus::Family;
     app
@@ -517,7 +532,7 @@ fn auth_family_app() -> App {
 #[test]
 fn family_rows_show_the_current_and_cursor_styles_and_click_through_to_a_ticket() {
     let mut app = auth_family_app();
-    app.family_cursor = Some(TicketKey {
+    app.work_items.family_cursor = Some(TicketKey {
         organization: "demo".into(),
         id: 10_001,
     });
@@ -574,12 +589,12 @@ fn family_rows_show_the_current_and_cursor_styles_and_click_through_to_a_ticket(
         Some(PointerTarget::JumpToTicket(_))
     ));
     click(&mut app, summary_x, summary_y);
-    assert_eq!(app.selected_ticket().unwrap().key.id, 10_002);
+    assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_002);
     assert_eq!(app.shell.focus, Focus::Details);
 
     let row = family_row(&app, 10_001).expect("parent row");
     click(&mut app, row.x + 8, row.y);
-    assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
+    assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_001);
     assert_eq!(app.shell.focus, Focus::Family);
 }
 
@@ -623,7 +638,7 @@ fn hovering_tints_a_row_without_recolouring_it_and_still_reverses_controls() {
 
         // The tint is painted after the selection highlight, so it wins.
         let title_x = column_x(&app, SortField::Title);
-        assert_eq!(app.selected_row(), Some(0));
+        assert_eq!(app.work_items.selected_row(), Some(0));
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let (_, selected_bg, _) = painted_cell(&terminal, title_x, body.y);
         assert_eq!(selected_bg, theme().selected_background);
@@ -651,7 +666,7 @@ fn hovering_tints_a_row_without_recolouring_it_and_still_reverses_controls() {
         "a hovered sort header should stay a reversed block"
     );
 
-    app.mode = AppMode::Help;
+    app.work_items.mode = WorkItemMode::Help;
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let close = app
         .shell
@@ -670,14 +685,16 @@ fn hovering_tints_a_row_without_recolouring_it_and_still_reverses_controls() {
 
 fn auth_family_app_with_long_details() -> App {
     let mut app = auth_family_app();
-    let mut tickets = app.tickets().to_vec();
+    let mut tickets = app.work_items.tickets().to_vec();
     tickets
         .iter_mut()
         .find(|ticket| ticket.key.id == 10_002)
         .expect("current ticket")
         .description = "line\n".repeat(40);
     let graph = parent_child_graph();
-    app.replace_prepared_tickets(crate::app::PreparedTickets::with_graph(tickets, graph));
+    let prepared = crate::app::PreparedTickets::with_graph(tickets, graph);
+    app.work_items
+        .replace_prepared_tickets(&mut app.shell, prepared);
     app.shell.narrow_details = true;
     app.shell.focus = Focus::Family;
     app
@@ -687,7 +704,7 @@ fn auth_family_app_with_long_details() -> App {
 fn family_hit_targets_follow_the_details_scroll_and_the_wheel_only_scrolls() {
     let mut app = auth_family_app_with_long_details();
     render_text(60, 24, &mut app);
-    assert!(app.details.max_offset() > 0);
+    assert!(app.work_items.details.max_offset() > 0);
     let before = app
         .shell
         .hit_regions
@@ -696,22 +713,27 @@ fn family_hit_targets_follow_the_details_scroll_and_the_wheel_only_scrolls() {
         )
         .map(|region| region.rect.y)
         .expect("parent row should be on screen");
-    app.details.scroll_to(app.details.max_offset());
+    app.work_items
+        .details
+        .scroll_to(app.work_items.details.max_offset());
     render_text(60, 24, &mut app);
     let after = app.shell.hit_regions.find_target(
         |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
     );
     assert!(after.is_none() || after.is_some_and(|region| region.rect.y != before));
 
-    app.details.scroll_to(0);
+    app.work_items.details.scroll_to(0);
     render_text(60, 24, &mut app);
     let row = family_row(&app, 10_002).expect("current family row");
-    let cursor = app.family_cursor.clone();
+    let cursor = app.work_items.family_cursor.clone();
     let focus = app.shell.focus;
     app.handle_mouse(mouse(MouseEventKind::ScrollDown, row.x + 8, row.y));
-    assert_eq!(app.family_cursor, cursor, "the wheel moves no cursor");
+    assert_eq!(
+        app.work_items.family_cursor, cursor,
+        "the wheel moves no cursor"
+    );
     assert_eq!(app.shell.focus, focus, "the wheel takes no focus");
-    assert!(app.details.offset > 0);
+    assert!(app.work_items.details.offset > 0);
 }
 
 fn text_at(terminal: &Terminal<TestBackend>, rect: Rect) -> String {
@@ -812,13 +834,15 @@ fn planning_fields_follow_the_details_scroll_and_a_breadcrumb_shifts_the_rest() 
     let before = edit_field_rect(&app, EditableField::Area);
     assert_eq!(text_at(&terminal, before), "Atlas\\Platform");
 
-    app.details.scroll_to(2);
+    app.work_items.details.scroll_to(2);
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let after = edit_field_rect(&app, EditableField::Area);
     assert_eq!(after.y + 2, before.y, "the value scrolled with the pane");
     assert_eq!(text_at(&terminal, after), "Atlas\\Platform");
 
-    app.details.scroll_to(app.details.max_offset());
+    app.work_items
+        .details
+        .scroll_to(app.work_items.details.max_offset());
     render_text(60, 24, &mut app);
     assert!(
         app.shell
@@ -837,7 +861,7 @@ fn the_heading_scrolls_away_and_its_fields_travel_with_it() {
     let before = edit_field_rect(&app, EditableField::Assignee);
     assert_eq!(text_at(&terminal, before), "Avery Chen");
 
-    app.details.scroll_to(2);
+    app.work_items.details.scroll_to(2);
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let after = edit_field_rect(&app, EditableField::Assignee);
     assert_eq!(
@@ -848,15 +872,17 @@ fn the_heading_scrolls_away_and_its_fields_travel_with_it() {
     assert_eq!(text_at(&terminal, after), "Avery Chen");
     click(&mut app, after.x, after.y);
     assert_eq!(
-        app.mode,
-        AppMode::AssigneePicker,
+        app.work_items.mode,
+        WorkItemMode::AssigneePicker,
         "a scrolled value still opens its editor"
     );
     assert_eq!(app.shell.overlay_anchor, OverlayAnchor::Below(after));
 
     let mut app = auth_family_app_with_long_details();
     render_text(60, 24, &mut app);
-    app.details.scroll_to(app.details.max_offset());
+    app.work_items
+        .details
+        .scroll_to(app.work_items.details.max_offset());
     render_text(60, 24, &mut app);
     assert!(
         app.shell
@@ -885,18 +911,21 @@ fn the_family_cursor_scrolls_itself_back_into_view_below_the_heading() {
     render_text(60, 14, &mut app);
     let pane = details_pane(&app);
     let fold = usize::from(pane.height.saturating_sub(2));
-    assert_eq!(app.details.offset, 0, "a fresh selection starts at the top");
+    assert_eq!(
+        app.work_items.details.offset, 0,
+        "a fresh selection starts at the top"
+    );
     assert!(
-        app.details_family_row >= fold,
+        app.work_items.details_family_row >= fold,
         "the heading fills this pane, so the tree starts below the fold: \
              {} rows down, {fold} visible",
-        app.details_family_row
+        app.work_items.details_family_row
     );
 
     app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
     render_text(60, 14, &mut app);
     assert!(
-        app.details.offset > 0,
+        app.work_items.details.offset > 0,
         "the pane scrolled down to the family cursor"
     );
     assert_cursor_row_visible(&app);
@@ -907,11 +936,15 @@ fn the_family_cursor_scrolls_itself_back_into_view_below_the_heading() {
 }
 
 fn assert_cursor_row_visible(app: &App) {
-    let cursor = app.family_cursor.clone().expect("a family cursor");
+    let cursor = app
+        .work_items
+        .family_cursor
+        .clone()
+        .expect("a family cursor");
     assert!(
         family_row(app, cursor.id).is_some(),
         "the cursor row should be on screen, offset {}",
-        app.details.offset
+        app.work_items.details.offset
     );
 }
 
@@ -921,17 +954,20 @@ fn end_scrolls_past_the_description_to_the_last_comment() {
     let mut long = item.clone();
     long.description = "line\n".repeat(60);
     let mut app = App::new(vec![long]);
-    app.set_workspace_graph(TicketGraph {
-        relations: Vec::new(),
-        comments: vec![CommentRecord {
-            ticket: item.key,
-            comment_id: 1,
-            created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
-            author: Some("Avery Chen".into()),
-            text: "The very last word".into(),
-        }],
-        history: Vec::new(),
-    });
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            relations: Vec::new(),
+            comments: vec![CommentRecord {
+                ticket: item.key,
+                comment_id: 1,
+                created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
+                author: Some("Avery Chen".into()),
+                text: "The very last word".into(),
+            }],
+            history: Vec::new(),
+        },
+    );
     app.shell.narrow_details = true;
     app.shell.focus = Focus::Details;
 

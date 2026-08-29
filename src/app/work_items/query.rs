@@ -37,7 +37,7 @@ pub struct PaletteState {
     pub scroll: ScrollState,
 }
 
-impl App {
+impl WorkItemsScreen {
     #[must_use]
     pub fn query(&self) -> &str {
         self.query.text()
@@ -80,9 +80,9 @@ impl App {
     /// saved `assignee:@me` follows the name and `iteration:@current` follows
     /// the sprint rather than whatever either was when the view was written.
     #[must_use]
-    pub fn match_context(&self) -> MatchContext {
+    pub fn match_context(&self, shell: &Shell) -> MatchContext {
         MatchContext::now()
-            .with_me(self.shell.me.clone())
+            .with_me(shell.me.clone())
             .with_current_iteration(self.current_iteration())
     }
 
@@ -108,21 +108,21 @@ impl App {
     }
 
     #[must_use]
-    pub fn facets_for(&self, field: FilterField) -> Vec<FacetValue> {
+    pub fn facets_for(&self, shell: &Shell, field: FilterField) -> Vec<FacetValue> {
         let filters = self.effective_filters();
         facet_values(
             self.tickets(),
             &filters,
             field,
             |ticket| self.bookmarks.contains(&ticket.key),
-            &self.match_context(),
+            &self.match_context(shell),
         )
     }
 
-    pub fn toggle_filter(&mut self, field: FilterField, value: &str) {
+    pub fn toggle_filter(&mut self, shell: &mut Shell, field: FilterField, value: &str) {
         let mut parsed = self.parsed_query();
         parsed.filters.toggle(field, value);
-        self.set_query(format_query(&parsed.filters, &parsed.fuzzy));
+        self.set_query(shell, format_query(&parsed.filters, &parsed.fuzzy));
     }
 
     #[must_use]
@@ -139,18 +139,18 @@ impl App {
     }
 
     #[must_use]
-    pub fn current_facets(&self) -> Vec<FacetValue> {
+    pub fn current_facets(&self, shell: &Shell) -> Vec<FacetValue> {
         let filters = self.effective_filters();
         facet_values(
             self.tickets(),
             &filters,
             self.facet_field(),
             |ticket| self.bookmarks.contains(&ticket.key),
-            &self.match_context(),
+            &self.match_context(shell),
         )
     }
 
-    pub fn poll_search(&mut self) -> bool {
+    pub fn poll_search(&mut self, shell: &mut Shell) -> bool {
         let Some(result) = self.search.try_result() else {
             return false;
         };
@@ -163,25 +163,25 @@ impl App {
             .take()
             .or_else(|| self.selected_ticket().map(|ticket| ticket.key.clone()));
         self.visible = result.matches;
-        self.apply_filters();
+        self.apply_filters(shell);
         self.sort_visible();
-        self.restore_selection(selected.as_ref());
+        self.restore_selection(shell, selected.as_ref());
         self.search_pending = false;
         true
     }
 
-    pub fn set_query(&mut self, query: String) {
+    pub fn set_query(&mut self, shell: &mut Shell, query: String) {
         if self.query.text() == query {
             self.query.move_end();
             return;
         }
         self.query.set_text(query);
-        self.after_query_edit();
+        self.after_query_edit(shell);
     }
 
-    pub fn handle_paste(&mut self, pasted: &str) {
+    pub fn handle_paste(&mut self, shell: &mut Shell, pasted: &str) {
         match self.active_editor() {
-            Some(TextEditor::Search) => self.edit_query(|query| query.paste(pasted, true)),
+            Some(TextEditor::Search) => self.edit_query(shell, |query| query.paste(pasted, true)),
             Some(TextEditor::Palette) => {
                 self.edit_palette_query(|query| query.paste(pasted, true));
             }
@@ -209,30 +209,30 @@ impl App {
 
     /// Runs one edit against the search field and re-runs the search when the text
     /// actually changed; a bare caret move leaves the results alone.
-    pub(super) fn edit_query(&mut self, edit: impl FnOnce(&mut TextInput)) {
+    pub(super) fn edit_query(&mut self, shell: &mut Shell, edit: impl FnOnce(&mut TextInput)) {
         let before = self.query.text().to_owned();
         edit(&mut self.query);
         if self.query.text() != before {
-            self.after_query_edit();
+            self.after_query_edit(shell);
         }
     }
 
-    fn after_query_edit(&mut self) {
+    fn after_query_edit(&mut self, shell: &mut Shell) {
         self.search_history_index = None;
         self.search_history_draft = self.query.text().to_owned();
-        self.shell.session_dirty = true;
-        self.resubmit_query();
+        shell.session_dirty = true;
+        self.resubmit_query(shell);
     }
 
     /// Works the visible set out again from every row, for when what the table
     /// asks of them has changed rather than which rows there are.
-    pub(super) fn resubmit_query(&mut self) {
+    pub(super) fn resubmit_query(&mut self, shell: &mut Shell) {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         if self.fuzzy_query().is_empty() {
             self.search_generation = self.search_generation.wrapping_add(1);
             self.search_pending = false;
             self.pending_selection = None;
-            self.show_all(selected.as_ref());
+            self.show_all(shell, selected.as_ref());
         } else {
             self.pending_selection = selected;
             self.submit_search();
@@ -250,50 +250,50 @@ impl App {
         }
     }
 
-    fn active_editor(&self) -> Option<TextEditor> {
+    pub(super) fn active_editor(&self) -> Option<TextEditor> {
         match self.mode {
-            AppMode::Search => Some(TextEditor::Search),
-            AppMode::Palette => Some(TextEditor::Palette),
-            AppMode::Views if self.views_overlay.naming.is_some() => Some(TextEditor::ViewName),
-            AppMode::Prompt => Some(TextEditor::Prompt),
-            AppMode::AssigneePicker => Some(TextEditor::Assignee),
-            AppMode::ParentPicker => Some(TextEditor::Parent),
-            AppMode::NodePicker => Some(TextEditor::Node),
-            AppMode::Form => Some(TextEditor::Form),
+            WorkItemMode::Search => Some(TextEditor::Search),
+            WorkItemMode::Palette => Some(TextEditor::Palette),
+            WorkItemMode::Views if self.views_overlay.naming.is_some() => {
+                Some(TextEditor::ViewName)
+            }
+            WorkItemMode::Prompt => Some(TextEditor::Prompt),
+            WorkItemMode::AssigneePicker => Some(TextEditor::Assignee),
+            WorkItemMode::ParentPicker => Some(TextEditor::Parent),
+            WorkItemMode::NodePicker => Some(TextEditor::Node),
+            WorkItemMode::Form => Some(TextEditor::Form),
             _ => None,
         }
     }
 
-    pub fn set_sort(&mut self, field: SortField, direction: SortDirection) {
+    pub fn set_sort(&mut self, shell: &mut Shell, field: SortField, direction: SortDirection) {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.sort_field = field;
         self.sort_direction = direction;
         self.sort_visible();
-        self.restore_selection(selected.as_ref());
-        self.shell.session_dirty = true;
+        self.restore_selection(shell, selected.as_ref());
+        shell.session_dirty = true;
     }
 
-    pub fn toggle_row_density(&mut self) {
+    pub fn toggle_row_density(&mut self, shell: &mut Shell) {
         self.row_density = self.row_density.toggled();
-        self.shell.session_dirty = true;
-        self.shell
-            .set_status(format!("Row density: {}", self.row_density.label()));
+        shell.session_dirty = true;
+        shell.set_status(format!("Row density: {}", self.row_density.label()));
     }
 
-    pub fn toggle_search_order(&mut self) {
+    pub fn toggle_search_order(&mut self, shell: &mut Shell) {
         if self.fuzzy_query().is_empty() {
             return;
         }
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.search_order = self.search_order.toggled();
         self.sort_visible();
-        self.restore_selection(selected.as_ref());
-        self.shell.session_dirty = true;
-        self.shell
-            .set_status(format!("Search order: {}", self.search_order.label()));
+        self.restore_selection(shell, selected.as_ref());
+        shell.session_dirty = true;
+        shell.set_status(format!("Search order: {}", self.search_order.label()));
     }
 
-    pub fn toggle_sort(&mut self, field: SortField) {
+    pub fn toggle_sort(&mut self, shell: &mut Shell, field: SortField) {
         let direction = if self.sort_field == field {
             self.sort_direction.toggled()
         } else if matches!(
@@ -304,17 +304,17 @@ impl App {
         } else {
             SortDirection::Ascending
         };
-        self.set_sort(field, direction);
+        self.set_sort(shell, field, direction);
     }
 
     pub(super) fn begin_search(&mut self) {
         self.query.move_end();
         self.search_history_index = None;
         self.search_history_draft = self.query.text().to_owned();
-        self.mode = AppMode::Search;
+        self.mode = WorkItemMode::Search;
     }
 
-    pub(super) fn finish_search(&mut self) {
+    pub(super) fn finish_search(&mut self, shell: &mut Shell) {
         if !self.query.is_empty()
             && self
                 .search_history
@@ -329,11 +329,11 @@ impl App {
         }
         self.search_history_index = None;
         self.search_history_draft.clear();
-        self.mode = AppMode::Browse;
-        self.record_history();
+        self.mode = WorkItemMode::Browse;
+        self.record_history(shell);
     }
 
-    pub(super) fn recall_previous_search(&mut self) {
+    pub(super) fn recall_previous_search(&mut self, shell: &mut Shell) {
         if self.search_history.is_empty() {
             return;
         }
@@ -346,12 +346,12 @@ impl App {
         }
         let draft = self.search_history_draft.clone();
         let query = self.search_history[target].clone();
-        self.set_query(query);
+        self.set_query(shell, query);
         self.search_history_draft = draft;
         self.search_history_index = Some(target);
     }
 
-    pub(super) fn recall_next_search(&mut self) {
+    pub(super) fn recall_next_search(&mut self, shell: &mut Shell) {
         let Some(index) = self.search_history_index else {
             return;
         };
@@ -359,11 +359,11 @@ impl App {
         if index + 1 < self.search_history.len() {
             let target = index + 1;
             let query = self.search_history[target].clone();
-            self.set_query(query);
+            self.set_query(shell, query);
             self.search_history_draft = draft;
             self.search_history_index = Some(target);
         } else {
-            self.set_query(draft);
+            self.set_query(shell, draft);
             self.search_history_index = None;
         }
     }
@@ -373,21 +373,21 @@ impl App {
         self.search_pending = true;
     }
 
-    pub(super) fn show_all(&mut self, selected: Option<&TicketKey>) {
+    pub(super) fn show_all(&mut self, shell: &mut Shell, selected: Option<&TicketKey>) {
         self.visible = (0..self.tickets.len())
             .map(|ticket_index| SearchMatch {
                 ticket_index,
                 score: 0,
             })
             .collect();
-        self.apply_filters();
+        self.apply_filters(shell);
         self.sort_visible();
-        self.restore_selection(selected);
+        self.restore_selection(shell, selected);
     }
 
-    pub(super) fn apply_filters(&mut self) {
+    pub(super) fn apply_filters(&mut self, shell: &mut Shell) {
         let filters = self.effective_filters();
-        let context = self.match_context();
+        let context = self.match_context(shell);
         let bookmarks = self.bookmarks.clone();
         let tickets = Arc::clone(&self.tickets);
         self.visible.retain(|entry| {
@@ -427,7 +427,7 @@ impl App {
         });
     }
 
-    pub(super) fn restore_selection(&mut self, selected: Option<&TicketKey>) {
+    pub(super) fn restore_selection(&mut self, shell: &mut Shell, selected: Option<&TicketKey>) {
         let row = selected.and_then(|key| {
             self.visible
                 .iter()
@@ -435,7 +435,7 @@ impl App {
         });
         self.table_state
             .select((!self.visible.is_empty()).then_some(row.unwrap_or_default()));
-        self.sync_family_state();
+        self.sync_family_state(shell);
         if selected.is_none() || row.is_none() {
             self.table.scroll_to(0);
             *self.table_state.offset_mut() = 0;
@@ -445,18 +445,18 @@ impl App {
 
     pub(super) fn open_filters(&mut self) {
         self.filter_overlay = FilterOverlay::default();
-        self.mode = AppMode::Filter;
+        self.mode = WorkItemMode::Filter;
     }
 
     pub(super) fn open_facets(&mut self, field_index: usize) {
         self.facet_bar.field_index = field_index.min(FilterField::BAR.len());
         self.facet_bar.value_index = 0;
-        self.mode = AppMode::Facets;
+        self.mode = WorkItemMode::Facets;
     }
 
-    pub(super) fn handle_facet_key(&mut self, key: KeyEvent) {
+    pub(super) fn handle_facet_key(&mut self, shell: &mut Shell, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('f') => self.mode = AppMode::Browse,
+            KeyCode::Esc | KeyCode::Char('f') => self.mode = WorkItemMode::Browse,
             KeyCode::Char('+') => self.open_filters(),
             KeyCode::Left | KeyCode::Char('h') => {
                 self.facet_bar.field_index = self.facet_bar.field_index.saturating_sub(1);
@@ -471,7 +471,7 @@ impl App {
                 self.focus_facet_value(self.facet_bar.value_index.saturating_sub(1));
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let count = self.focused_bar_facets().len();
+                let count = self.focused_bar_facets(shell).len();
                 if count > 0 {
                     self.focus_facet_value((self.facet_bar.value_index + 1).min(count - 1));
                 }
@@ -480,7 +480,7 @@ impl App {
                 if self.facet_bar.field_index >= FilterField::BAR.len() {
                     self.open_filters();
                 } else {
-                    self.toggle_current_bar_facet();
+                    self.toggle_current_bar_facet(shell);
                 }
             }
             _ => {}
@@ -496,42 +496,42 @@ impl App {
         FilterField::BAR.get(self.facet_bar.field_index).copied()
     }
 
-    fn focused_bar_facets(&self) -> Vec<FacetValue> {
+    fn focused_bar_facets(&self, shell: &Shell) -> Vec<FacetValue> {
         self.focused_bar_field()
-            .map_or_else(Vec::new, |field| self.facets_for(field))
+            .map_or_else(Vec::new, |field| self.facets_for(shell, field))
     }
 
-    pub(super) fn toggle_current_bar_facet(&mut self) {
+    pub(super) fn toggle_current_bar_facet(&mut self, shell: &mut Shell) {
         let Some(field) = self.focused_bar_field() else {
             return;
         };
         let Some(value) = self
-            .focused_bar_facets()
+            .focused_bar_facets(shell)
             .get(self.facet_bar.value_index)
             .map(|facet| facet.value.clone())
         else {
             return;
         };
-        self.toggle_filter(field, &value);
+        self.toggle_filter(shell, field, &value);
     }
 
     fn open_columns(&mut self) {
         self.column_overlay.index = 0;
-        self.mode = AppMode::Columns;
+        self.mode = WorkItemMode::Columns;
     }
 
     pub(super) fn open_palette(&mut self) {
         self.palette = PaletteState::default();
-        self.mode = AppMode::Palette;
+        self.mode = WorkItemMode::Palette;
     }
 
-    pub(super) fn handle_filter_key(&mut self, key: KeyEvent) {
+    pub(super) fn handle_filter_key(&mut self, shell: &mut Shell, key: KeyEvent) {
         match key.code {
             KeyCode::Esc if self.filter_overlay.showing_values => {
                 self.filter_overlay.showing_values = false;
                 self.filter_overlay.value_index = 0;
             }
-            KeyCode::Esc | KeyCode::Char('f') => self.mode = AppMode::Browse,
+            KeyCode::Esc | KeyCode::Char('f') => self.mode = WorkItemMode::Browse,
             KeyCode::Left | KeyCode::Char('h') if self.filter_overlay.showing_values => {
                 self.filter_overlay.showing_values = false;
             }
@@ -541,18 +541,18 @@ impl App {
                 self.filter_overlay.showing_values = true;
                 self.filter_overlay.value_index = 0;
             }
-            KeyCode::Up | KeyCode::Char('k') => self.move_filter_cursor(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.move_filter_cursor(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_filter_cursor(shell, -1),
+            KeyCode::Down | KeyCode::Char('j') => self.move_filter_cursor(shell, 1),
             KeyCode::Char(' ') | KeyCode::Enter if self.filter_overlay.showing_values => {
-                self.toggle_current_facet();
+                self.toggle_current_facet(shell);
             }
             _ => {}
         }
     }
 
-    fn move_filter_cursor(&mut self, delta: isize) {
+    fn move_filter_cursor(&mut self, shell: &mut Shell, delta: isize) {
         let index = if self.filter_overlay.showing_values {
-            let count = self.current_facets().len();
+            let count = self.current_facets(shell).len();
             if count == 0 {
                 return;
             }
@@ -573,31 +573,31 @@ impl App {
         self.filter_overlay.scroll.ensure_visible(index);
     }
 
-    pub(super) fn toggle_current_facet(&mut self) {
+    pub(super) fn toggle_current_facet(&mut self, shell: &mut Shell) {
         let field = self.facet_field();
         let Some(value) = self
-            .current_facets()
+            .current_facets(shell)
             .get(self.filter_overlay.value_index)
             .map(|facet| facet.value.clone())
         else {
             return;
         };
-        self.toggle_filter(field, &value);
+        self.toggle_filter(shell, field, &value);
     }
 
-    pub(super) fn remove_filter_token(&mut self, token: FilterToken) {
+    pub(super) fn remove_filter_token(&mut self, shell: &mut Shell, token: FilterToken) {
         let mut parsed = self.parsed_query();
         match token {
             FilterToken::Bookmarked => parsed.filters.bookmarked = false,
             FilterToken::Field { field, value } => parsed.filters.remove(field, &value),
         }
-        self.set_query(format_query(&parsed.filters, &parsed.fuzzy));
+        self.set_query(shell, format_query(&parsed.filters, &parsed.fuzzy));
     }
 
-    pub(super) fn handle_columns_key(&mut self, key: KeyEvent) {
+    pub(super) fn handle_columns_key(&mut self, shell: &mut Shell, key: KeyEvent) {
         let last = self.layout.columns.len().saturating_sub(1);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('w') | KeyCode::Enter => self.mode = AppMode::Browse,
+            KeyCode::Esc | KeyCode::Char('w') | KeyCode::Enter => self.mode = WorkItemMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.focus_column(self.column_overlay.index.saturating_sub(1));
             }
@@ -606,23 +606,23 @@ impl App {
             }
             KeyCode::Char(' ') => {
                 self.layout.toggle_visible(self.column_overlay.index);
-                self.shell.session_dirty = true;
+                shell.session_dirty = true;
             }
             KeyCode::Char('K') => {
                 self.column_overlay.index = self.layout.move_column(self.column_overlay.index, -1);
-                self.shell.session_dirty = true;
+                shell.session_dirty = true;
             }
             KeyCode::Char('J') => {
                 self.column_overlay.index = self.layout.move_column(self.column_overlay.index, 1);
-                self.shell.session_dirty = true;
+                shell.session_dirty = true;
             }
             KeyCode::Left | KeyCode::Char('-') | KeyCode::Char('<') => {
                 self.layout.resize(self.column_overlay.index, -1);
-                self.shell.session_dirty = true;
+                shell.session_dirty = true;
             }
             KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('>') => {
                 self.layout.resize(self.column_overlay.index, 1);
-                self.shell.session_dirty = true;
+                shell.session_dirty = true;
             }
             _ => {}
         }
@@ -633,9 +633,9 @@ impl App {
         self.column_overlay.scroll.ensure_visible(index);
     }
 
-    pub(super) fn handle_palette_key(&mut self, key: KeyEvent) -> AppAction {
+    pub(super) fn handle_palette_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
         match key.code {
-            KeyCode::Esc => self.mode = AppMode::Browse,
+            KeyCode::Esc => self.mode = WorkItemMode::Browse,
             KeyCode::Up | KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.move_palette_selection(-1);
             }
@@ -644,7 +644,7 @@ impl App {
             }
             KeyCode::Up => self.move_palette_selection(-1),
             KeyCode::Down => self.move_palette_selection(1),
-            KeyCode::Enter => return self.run_selected_command(),
+            KeyCode::Enter => return self.run_selected_command(shell),
             _ => self.edit_palette_query(|query| {
                 query.handle_key(key);
             }),
@@ -666,19 +666,19 @@ impl App {
         self.palette.scroll.ensure_visible(self.palette.selected);
     }
 
-    pub(super) fn run_selected_command(&mut self) -> AppAction {
+    pub(super) fn run_selected_command(&mut self, shell: &mut Shell) -> AppAction {
         let Some(command) = self.palette_commands().get(self.palette.selected).copied() else {
-            self.mode = AppMode::Browse;
+            self.mode = WorkItemMode::Browse;
             return AppAction::None;
         };
-        self.mode = AppMode::Browse;
-        self.run_command(command.id)
+        self.mode = WorkItemMode::Browse;
+        self.run_command(shell, command.id)
     }
 
-    pub(super) fn run_command(&mut self, id: CommandId) -> AppAction {
+    pub(super) fn run_command(&mut self, shell: &mut Shell, id: CommandId) -> AppAction {
         // Every command opens its overlay centred; clicking a field sets its
         // anchor afterwards, so a picker never inherits the last one's.
-        self.shell.overlay_anchor = OverlayAnchor::Centered;
+        shell.overlay_anchor = OverlayAnchor::Centered;
         match id {
             CommandId::Search => {
                 self.begin_search();
@@ -709,39 +709,39 @@ impl App {
                 AppAction::None
             }
             CommandId::ChangeState => {
-                self.open_state_picker();
+                self.open_state_picker(shell);
                 AppAction::None
             }
             CommandId::EditTitle => {
-                self.open_prompt(PromptField::Title);
+                self.open_prompt(shell, PromptField::Title);
                 AppAction::None
             }
             CommandId::EditPriority => {
-                self.open_priority_picker();
+                self.open_priority_picker(shell);
                 AppAction::None
             }
             CommandId::EditTags => {
-                self.open_prompt(PromptField::Tags);
+                self.open_prompt(shell, PromptField::Tags);
                 AppAction::None
             }
-            CommandId::EditAssignee => self.open_assignee_picker(),
-            CommandId::EditIteration => self.open_node_picker(NodeKind::Iteration),
-            CommandId::EditArea => self.open_node_picker(NodeKind::Area),
+            CommandId::EditAssignee => self.open_assignee_picker(shell),
+            CommandId::EditIteration => self.open_node_picker(shell, NodeKind::Iteration),
+            CommandId::EditArea => self.open_node_picker(shell, NodeKind::Area),
             CommandId::SetParent => {
-                self.open_parent_picker();
+                self.open_parent_picker(shell);
                 AppAction::None
             }
-            CommandId::RemoveParent => self.remove_parent(),
-            CommandId::EditDescription => self.edit_description(),
-            CommandId::UndoEdit => self.undo_last_edit(),
+            CommandId::RemoveParent => self.remove_parent(shell),
+            CommandId::EditDescription => self.edit_description(shell),
+            CommandId::UndoEdit => self.undo_last_edit(shell),
             CommandId::AddComment => {
-                self.open_prompt(PromptField::Comment);
+                self.open_prompt(shell, PromptField::Comment);
                 AppAction::None
             }
-            CommandId::NewWorkItem => self.open_create_form(),
-            CommandId::NewChild => self.open_child_form(),
+            CommandId::NewWorkItem => self.open_create_form(shell),
+            CommandId::NewChild => self.open_child_form(shell),
             CommandId::DeleteWorkItem => {
-                self.open_delete_confirm();
+                self.open_delete_confirm(shell);
                 AppAction::None
             }
             CommandId::SaveView => {
@@ -758,39 +758,39 @@ impl App {
                         .unwrap_or_default(),
                     direction: self.sort_direction,
                 };
-                self.mode = AppMode::Sort;
+                self.mode = WorkItemMode::Sort;
                 AppAction::None
             }
             CommandId::Help => {
                 self.help.scroll_to(0);
-                self.mode = AppMode::Help;
+                self.mode = WorkItemMode::Help;
                 AppAction::None
             }
             CommandId::Sync => AppAction::Sync,
             CommandId::Open => {
-                self.record_history();
+                self.record_history(shell);
                 self.open_selected()
             }
             CommandId::ToggleDensity => {
-                self.toggle_row_density();
+                self.toggle_row_density(shell);
                 AppAction::None
             }
             CommandId::ToggleDetails => {
-                self.shell.toggle_narrow_details();
+                shell.toggle_narrow_details();
                 AppAction::None
             }
             CommandId::ToggleSearchOrder => {
                 if !self.fuzzy_query().is_empty() {
-                    self.toggle_search_order();
+                    self.toggle_search_order(shell);
                 }
                 AppAction::None
             }
             CommandId::ToggleFinished => {
-                self.toggle_show_finished();
+                self.toggle_show_finished(shell);
                 AppAction::None
             }
             CommandId::ToggleBookmark => {
-                self.toggle_bookmark();
+                self.toggle_bookmark(shell);
                 AppAction::None
             }
             CommandId::CopyId => self.copy_with(CopiedContent::Id, export::copy_ids),
@@ -809,21 +809,20 @@ impl App {
                     .visible_tickets()
                     .map(|ticket| ticket.key.clone())
                     .collect();
-                self.shell
-                    .set_status(format!("Selected {} tickets", self.selected_keys.len()));
+                shell.set_status(format!("Selected {} tickets", self.selected_keys.len()));
                 AppAction::None
             }
             CommandId::ClearSelection => {
                 self.selected_keys.clear();
-                self.shell.set_status("Cleared selection");
+                shell.set_status("Cleared selection");
                 AppAction::None
             }
             CommandId::HistoryBack => {
-                self.history_back();
+                self.history_back(shell);
                 AppAction::None
             }
             CommandId::HistoryForward => {
-                self.history_forward();
+                self.history_forward(shell);
                 AppAction::None
             }
             CommandId::SprintSummary => {
@@ -831,19 +830,19 @@ impl App {
                 AppAction::None
             }
             CommandId::DatabaseInfo => {
-                self.mode = AppMode::Info;
+                self.mode = WorkItemMode::Info;
                 AppAction::None
             }
             CommandId::Quit => {
-                self.shell.should_quit = true;
+                shell.should_quit = true;
                 AppAction::None
             }
             CommandId::ResetPaneSplit => {
-                self.shell.reset_pane_split();
+                shell.reset_pane_split();
                 AppAction::None
             }
             CommandId::SetStaleThreshold => {
-                self.cycle_stale_days();
+                self.cycle_stale_days(shell);
                 AppAction::None
             }
         }

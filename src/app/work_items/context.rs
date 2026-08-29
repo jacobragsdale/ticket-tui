@@ -2,9 +2,9 @@
 
 use super::*;
 
-impl App {
+impl WorkItemsScreen {
     #[must_use]
-    pub fn agent_context(&self) -> AgentContext {
+    pub fn agent_context(&self, shell: &Shell) -> AgentContext {
         let parsed = self.parsed_query();
         let visible_rows = self
             .visible_tickets()
@@ -19,33 +19,30 @@ impl App {
             .map(|ticket| self.ticket_context(ticket))
             .collect();
         AgentContext {
-            database_path: self.shell.database_path.display().to_string(),
-            me: self.shell.me.clone(),
+            database_path: shell.database_path.display().to_string(),
+            me: shell.me.clone(),
             sync: SyncContext {
-                organization: self
-                    .shell
+                organization: shell
                     .sync_target
                     .as_ref()
                     .map(|target| target.organization.clone()),
-                project: self
-                    .shell
+                project: shell
                     .sync_target
                     .as_ref()
                     .map(|target| target.project.clone()),
-                refresh_seconds: self
-                    .shell
+                refresh_seconds: shell
                     .sync_target
                     .as_ref()
                     .map_or(0, |target| target.refresh_seconds),
-                in_progress: self.shell.sync_pending,
-                last_success_at: self.shell.synced_wall_clock.map(Timestamp::to_rfc3339),
-                last_error: self.shell.sync_error.clone(),
-                offline: !self.shell.sync_enabled,
+                in_progress: shell.sync_pending,
+                last_success_at: shell.synced_wall_clock.map(Timestamp::to_rfc3339),
+                last_error: shell.sync_error.clone(),
+                offline: !shell.sync_enabled,
             },
             pending_edits: self.pending_edit_contexts(),
             mode: mode_name(self.mode).into(),
-            focus: focus_name(self.shell.focus).into(),
-            screen: if self.shell.narrow_details {
+            focus: focus_name(shell.focus).into(),
+            screen: if shell.narrow_details {
                 "details"
             } else {
                 "workspace"

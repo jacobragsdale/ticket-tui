@@ -3,7 +3,7 @@
 
 use super::*;
 
-impl App {
+impl WorkItemsScreen {
     #[must_use]
     pub fn is_bookmarked(&self, key: &TicketKey) -> bool {
         self.bookmarks.contains(key)
@@ -14,27 +14,26 @@ impl App {
         self.selected_keys.contains(key)
     }
 
-    pub(super) fn open_copy_actions(&mut self) {
-        self.run_command(CommandId::Palette);
+    pub(super) fn open_copy_actions(&mut self, shell: &mut Shell) {
+        self.run_command(shell, CommandId::Palette);
         self.palette.query = TextInput::new("copy");
     }
 
-    pub(super) fn toggle_bookmark(&mut self) {
+    pub(super) fn toggle_bookmark(&mut self, shell: &mut Shell) {
         let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
             return;
         };
         if self.bookmarks.remove(&key) {
-            self.shell
-                .set_status(format!("Removed bookmark {}", key.id));
+            shell.set_status(format!("Removed bookmark {}", key.id));
         } else {
             self.bookmarks.insert(key.clone());
-            self.shell.set_status(format!("Bookmarked {}", key.id));
+            shell.set_status(format!("Bookmarked {}", key.id));
         }
-        self.shell.session_dirty = true;
+        shell.session_dirty = true;
         if self.parsed_query().filters.bookmarked {
             let selected = Some(key);
             if self.fuzzy_query().is_empty() {
-                self.show_all(selected.as_ref());
+                self.show_all(shell, selected.as_ref());
             } else {
                 self.pending_selection = selected;
                 self.submit_search();
@@ -91,7 +90,7 @@ impl App {
         }
     }
 
-    pub(super) fn record_history(&mut self) {
+    pub(super) fn record_history(&mut self, shell: &mut Shell) {
         let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
             return;
         };
@@ -103,30 +102,30 @@ impl App {
             self.recent.remove(0);
         }
         self.future.clear();
-        self.shell.session_dirty = true;
+        shell.session_dirty = true;
     }
 
-    pub(super) fn history_back(&mut self) {
+    pub(super) fn history_back(&mut self, shell: &mut Shell) {
         if self.recent.len() < 2 {
             return;
         }
         let current = self.recent.pop().expect("recent ticket exists");
         self.future.push(current);
         let key = self.recent.last().cloned();
-        self.restore_selection(key.as_ref());
-        self.shell.session_dirty = true;
+        self.restore_selection(shell, key.as_ref());
+        shell.session_dirty = true;
     }
 
-    pub(super) fn history_forward(&mut self) {
+    pub(super) fn history_forward(&mut self, shell: &mut Shell) {
         let Some(key) = self.future.pop() else {
             return;
         };
         self.recent.push(key.clone());
-        self.restore_selection(Some(&key));
-        self.shell.session_dirty = true;
+        self.restore_selection(shell, Some(&key));
+        shell.session_dirty = true;
     }
 
-    pub fn snapshot_session(&self) -> Session {
+    pub fn snapshot_session(&self, shell: &Shell) -> Session {
         Session {
             query: self.query.text().to_owned(),
             sort_field: self.sort_field,
@@ -141,22 +140,22 @@ impl App {
             active_view: self.active_view.clone(),
             show_finished: self.show_finished,
             selected: self.selected_ticket().map(|ticket| ticket.key.clone()),
-            pane_split_wide: self.shell.pane_split_wide,
-            pane_split_stacked: self.shell.pane_split_stacked,
+            pane_split_wide: shell.pane_split_wide,
+            pane_split_stacked: shell.pane_split_stacked,
             stale_days: self.stale_days,
         }
     }
 
-    pub fn restore_session(&mut self, session: Session) {
+    pub fn restore_session(&mut self, shell: &mut Shell, session: Session) {
         self.sort_field = session.sort_field;
         self.sort_direction = session.sort_direction;
         self.search_order = session.search_order;
         self.row_density = session.row_density;
         self.layout = TableLayout::from_session_columns(&session.columns, session.auto_hide);
-        self.shell.pane_split_wide = session
+        shell.pane_split_wide = session
             .pane_split_wide
             .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
-        self.shell.pane_split_stacked = session
+        shell.pane_split_stacked = session
             .pane_split_stacked
             .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
         self.stale_days = clamp_stale_days(session.stale_days);
@@ -173,13 +172,13 @@ impl App {
         self.show_finished = session.show_finished;
         let selected = session.selected;
         if session.query.is_empty() {
-            self.show_all(selected.as_ref());
+            self.show_all(shell, selected.as_ref());
         } else {
-            self.set_query(session.query);
+            self.set_query(shell, session.query);
             if let Some(selected) = selected {
                 self.pending_selection = Some(selected);
             }
         }
-        self.shell.session_dirty = false;
+        shell.session_dirty = false;
     }
 }

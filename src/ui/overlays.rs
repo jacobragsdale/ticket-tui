@@ -3,19 +3,23 @@
 
 use super::*;
 
-pub(super) fn render_sort_popup(frame: &mut Frame<'_>, app: &mut App) {
+pub(super) fn render_sort_popup(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
     let area = centered_rect(frame.area(), 48, 16);
-    let inner = render_modal_frame(frame, app, area, " Sort tickets ");
-    let selected = app.sort_draft.field_index;
+    let inner = render_modal_frame(frame, screen, shell, area, " Sort tickets ");
+    let selected = screen.sort_draft.field_index;
     let rows: Vec<Line> = SortField::ALL
         .iter()
         .enumerate()
         .map(|(index, field)| {
             let marker = if index == selected { "›" } else { " " };
             let direction = if index == selected {
-                app.sort_draft.direction.symbol()
-            } else if *field == app.sort_field {
-                app.sort_direction.symbol()
+                screen.sort_draft.direction.symbol()
+            } else if *field == screen.sort_field {
+                screen.sort_direction.symbol()
             } else {
                 " "
             };
@@ -24,7 +28,8 @@ pub(super) fn render_sort_popup(frame: &mut Frame<'_>, app: &mut App) {
         .collect();
     render_list_overlay(
         frame,
-        app,
+        screen,
+        shell,
         ListOverlay {
             area: inner,
             surface: ScrollSurface::Sort,
@@ -35,24 +40,28 @@ pub(super) fn render_sort_popup(frame: &mut Frame<'_>, app: &mut App) {
             rows,
             row_hit_width: Some(inner.width.saturating_sub(8)),
             target: &|index| PointerTarget::SortChoose(SortField::ALL[index]),
-            decorate: Some(&|frame: &mut Frame<'_>, app: &mut App, logical, y| {
+            decorate: Some(&|frame: &mut Frame<'_>,
+                             _screen: &mut WorkItemsScreen,
+                             shell: &mut Shell,
+                             logical,
+                             y| {
                 if logical == selected {
-                    render_sort_controls(frame, app, inner, y);
+                    render_sort_controls(frame, shell, inner, y);
                 }
             }),
         },
     );
-    capture_selectable(frame, app, SelectableSurface::Overlay, inner, false);
+    capture_selectable(frame, shell, SelectableSurface::Overlay, inner, false);
 }
 
-pub(super) fn render_sort_controls(frame: &mut Frame<'_>, app: &mut App, inner: Rect, y: u16) {
+pub(super) fn render_sort_controls(frame: &mut Frame<'_>, shell: &mut Shell, inner: Rect, y: u16) {
     for (offset, label, direction) in [
         (7, "[↑]", SortDirection::Ascending),
         (3, "[↓]", SortDirection::Descending),
     ] {
         render_control(
             frame,
-            app,
+            shell,
             Rect::new(
                 inner.x.saturating_add(inner.width.saturating_sub(offset)),
                 y,
@@ -67,7 +76,11 @@ pub(super) fn render_sort_controls(frame: &mut Frame<'_>, app: &mut App, inner: 
     }
 }
 
-pub(super) fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
+pub(super) fn render_help_popup(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
     let height = frame.area().height.saturating_sub(2).min(18);
     let area = centered_rect(frame.area(), 62, height);
     frame.render_widget(Clear, area);
@@ -132,47 +145,58 @@ pub(super) fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
     let inner = block.inner(area);
     let paragraph = Paragraph::new(help).block(block).wrap(Wrap { trim: false });
     let line_count = paragraph.line_count(area.width);
-    app.help.set_viewport(usize::from(inner.height), line_count);
-    let scroll = app.help.offset;
+    screen
+        .help
+        .set_viewport(usize::from(inner.height), line_count);
+    let scroll = screen.help.offset;
     frame.render_widget(
         paragraph.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
         area,
     );
-    app.shell.hit_regions.push(region(
+    shell.hit_regions.push(region(
         inner,
         PointerTarget::OverlayBody,
         PointerLayer::Modal,
         Some(SelectableSurface::Help),
         Some(ScrollSurface::Help),
     ));
-    register_close_button(app, area, PointerLayer::Modal);
+    register_close_button(shell, area, PointerLayer::Modal);
     let overflow = line_count > usize::from(inner.height);
     if overflow {
         render_scrollbar(
             frame,
-            app,
+            screen,
+            shell,
             inner,
             ScrollSurface::Help,
-            line_count,
-            scroll,
-            usize::from(inner.height),
+            ScrollState {
+                offset: scroll,
+                content: line_count,
+                viewport: usize::from(inner.height),
+            },
         );
     }
-    capture_selectable(frame, app, SelectableSurface::Help, inner, overflow);
+    capture_selectable(frame, shell, SelectableSurface::Help, inner, overflow);
 }
 
-pub(super) fn render_chips(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+pub(super) fn render_chips(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+    area: Rect,
+) {
     let mut spans = Vec::new();
     let mut x = area.x;
-    // The rule the app applies on its own leads the row, so it keeps its place
+    // The rule the screen applies on its own leads the row, so it keeps its place
     // however many filters are typed beside it, and reads like the rest: its
     // `×` puts finished work back on the table.
     let mut chips: Vec<(String, PointerTarget)> = Vec::new();
-    if app.finished_hidden() {
+    if screen.finished_hidden() {
         chips.push(("Finished hidden".to_owned(), PointerTarget::ShowFinished));
     }
     chips.extend(
-        app.overflow_filter_tokens()
+        screen
+            .overflow_filter_tokens()
             .into_iter()
             .map(|token| (token.chip_label(), PointerTarget::RemoveChip(token))),
     );
@@ -182,7 +206,7 @@ pub(super) fn render_chips(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         if x.saturating_add(width) > area.x.saturating_add(area.width) {
             break;
         }
-        app.shell.hit_regions.push(region(
+        shell.hit_regions.push(region(
             Rect::new(x, area.y, width, 1),
             target,
             PointerLayer::Base,
@@ -201,9 +225,14 @@ pub(super) fn render_chips(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-pub(super) fn render_facet_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let filters = app.parsed_query().filters;
-    let focused = app.mode == AppMode::Facets;
+pub(super) fn render_facet_bar(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+    area: Rect,
+) {
+    let filters = screen.parsed_query().filters;
+    let focused = screen.mode == WorkItemMode::Facets;
     let mut spans = Vec::new();
     let mut x = area.x;
     let mut remaining = area.width;
@@ -214,14 +243,14 @@ pub(super) fn render_facet_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             break;
         }
         let rect = Rect::new(x, area.y, width, 1);
-        app.shell.hit_regions.push(region(
+        shell.hit_regions.push(region(
             rect,
             PointerTarget::FacetPill(FacetTarget::Field(*field)),
             PointerLayer::Base,
             None,
             None,
         ));
-        let selected = focused && app.facet_bar.field_index == index;
+        let selected = focused && screen.facet_bar.field_index == index;
         let active = filters.selected_count(*field) > 0;
         spans.push(Span::styled(label, pill_style(selected, active)));
         spans.push(Span::raw(" "));
@@ -229,21 +258,21 @@ pub(super) fn render_facet_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect)
         remaining = remaining.saturating_sub(width.saturating_add(1));
     }
     if remaining >= 5 {
-        let more_count = app.overflow_filter_tokens().len();
+        let more_count = screen.overflow_filter_tokens().len();
         let more = if more_count == 0 {
             " + ".to_owned()
         } else {
             format!(" +{more_count} ")
         };
         let width = u16::try_from(more.chars().count()).unwrap_or(u16::MAX);
-        app.shell.hit_regions.push(region(
+        shell.hit_regions.push(region(
             Rect::new(x, area.y, width.min(remaining), 1),
             PointerTarget::FacetPill(FacetTarget::More),
             PointerLayer::Base,
             None,
             None,
         ));
-        let selected = focused && app.facet_bar.field_index >= FilterField::BAR.len();
+        let selected = focused && screen.facet_bar.field_index >= FilterField::BAR.len();
         spans.push(Span::styled(more, pill_style(selected, more_count > 0)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -295,7 +324,8 @@ pub(super) fn pill_style(selected: bool, active: bool) -> Style {
 }
 
 /// Paints extras for one visible overlay row, given its logical index and `y`.
-pub(super) type RowDecorator<'a> = &'a dyn Fn(&mut Frame<'_>, &mut App, usize, u16);
+pub(super) type RowDecorator<'a> =
+    &'a dyn Fn(&mut Frame<'_>, &mut WorkItemsScreen, &mut Shell, usize, u16);
 
 pub(super) struct ListOverlay<'a> {
     pub(super) area: Rect,
@@ -319,7 +349,12 @@ pub(super) struct ListOverlay<'a> {
 /// Renders one scrollable list inside an overlay: viewport bookkeeping, the visible
 /// window, selection styling, per-row hit regions, the scrollbar on overflow, and the
 /// text selection snapshot.
-pub(super) fn render_list_overlay(frame: &mut Frame<'_>, app: &mut App, overlay: ListOverlay<'_>) {
+pub(super) fn render_list_overlay(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+    overlay: ListOverlay<'_>,
+) {
     let ListOverlay {
         area,
         surface,
@@ -334,9 +369,10 @@ pub(super) fn render_list_overlay(frame: &mut Frame<'_>, app: &mut App, overlay:
     } = overlay;
     let content = rows.len();
     let viewport = usize::from(area.height);
-    app.scroll_state_mut(surface)
+    screen
+        .scroll_state_mut(surface)
         .set_viewport(viewport, content);
-    let scroll = app.scroll_state(surface).offset;
+    let scroll = screen.scroll_state(surface).offset;
     let lines: Vec<Line<'_>> = rows
         .into_iter()
         .enumerate()
@@ -348,7 +384,7 @@ pub(super) fn render_list_overlay(frame: &mut Frame<'_>, app: &mut App, overlay:
     let hit_width = row_hit_width.unwrap_or_else(|| area.width.saturating_sub(1));
     let visible = scroll..content.min(scroll.saturating_add(viewport));
     for (logical, y) in visible.clone().zip(area.y..) {
-        app.shell.hit_regions.push(region(
+        shell.hit_regions.push(region(
             Rect::new(area.x, y, hit_width, 1),
             target(logical),
             layer,
@@ -358,24 +394,39 @@ pub(super) fn render_list_overlay(frame: &mut Frame<'_>, app: &mut App, overlay:
     }
     if let Some(decorate) = decorate {
         for (logical, y) in visible.zip(area.y..) {
-            decorate(frame, app, logical, y);
+            decorate(frame, screen, shell, logical, y);
         }
     }
     let overflow = content > viewport;
     if overflow {
-        render_scrollbar(frame, app, area, surface, content, scroll, viewport);
+        render_scrollbar(
+            frame,
+            screen,
+            shell,
+            area,
+            surface,
+            ScrollState {
+                offset: scroll,
+                content,
+                viewport,
+            },
+        );
     }
     if capture && let Some(surface) = selectable {
-        capture_selectable(frame, app, surface, area, overflow);
+        capture_selectable(frame, shell, surface, area, overflow);
     }
 }
 
-pub(super) fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
-    let Some(field) = FilterField::BAR.get(app.facet_bar.field_index).copied() else {
+pub(super) fn render_facet_menu(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
+    let Some(field) = FilterField::BAR.get(screen.facet_bar.field_index).copied() else {
         return;
     };
-    let facets = app.facets_for(field);
-    let pill = app.shell.hit_regions.facet_pill(FacetTarget::Field(field));
+    let facets = screen.facets_for(shell, field);
+    let pill = shell.hit_regions.facet_pill(FacetTarget::Field(field));
     let width = 36.min(frame.area().width.saturating_sub(2)).max(20);
     let height = u16::try_from(facets.len().saturating_add(2))
         .unwrap_or(u16::MAX)
@@ -393,15 +444,15 @@ pub(super) fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
     if area.y.saturating_add(area.height) > frame.area().height {
         area.y = area.y.saturating_sub(area.height.saturating_add(1));
     }
-    app.shell.hit_regions.push(region(
+    shell.hit_regions.push(region(
         frame.area(),
         PointerTarget::DismissFacet,
         PointerLayer::Popup,
         None,
         None,
     ));
-    let inner = render_modal_frame(frame, app, area, &format!(" {} ", field.label()));
-    let selected = app.facet_bar.value_index;
+    let inner = render_modal_frame(frame, screen, shell, area, &format!(" {} ", field.label()));
+    let selected = screen.facet_bar.value_index;
     let rows: Vec<Line> = facets
         .iter()
         .enumerate()
@@ -416,7 +467,8 @@ pub(super) fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
         .collect();
     render_list_overlay(
         frame,
-        app,
+        screen,
+        shell,
         ListOverlay {
             area: inner,
             surface: ScrollSurface::FacetMenu,
@@ -432,22 +484,27 @@ pub(super) fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
     );
 }
 
-pub(super) fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
+pub(super) fn render_filter_overlay(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
     let area = centered_rect(frame.area(), 52, 16);
-    let title = if app.filter_overlay.showing_values {
-        format!(" {} ", app.facet_field().label())
+    let title = if screen.filter_overlay.showing_values {
+        format!(" {} ", screen.facet_field().label())
     } else {
         " Filters ".into()
     };
-    let inner = render_modal_frame(frame, app, area, &title);
-    let showing_values = app.filter_overlay.showing_values;
+    let inner = render_modal_frame(frame, screen, shell, area, &title);
+    let showing_values = screen.filter_overlay.showing_values;
     let selected = if showing_values {
-        app.filter_overlay.value_index
+        screen.filter_overlay.value_index
     } else {
-        app.filter_overlay.field_index
+        screen.filter_overlay.field_index
     };
     let rows: Vec<Line> = if showing_values {
-        app.current_facets()
+        screen
+            .current_facets(shell)
             .into_iter()
             .enumerate()
             .map(|(index, facet)| {
@@ -465,7 +522,7 @@ pub(super) fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
             .enumerate()
             .map(|(index, field)| {
                 let marker = if index == selected { "›" } else { " " };
-                let count = app.parsed_query().filters.selected_count(*field);
+                let count = screen.parsed_query().filters.selected_count(*field);
                 let suffix = if count == 0 {
                     String::new()
                 } else {
@@ -477,7 +534,8 @@ pub(super) fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
     };
     render_list_overlay(
         frame,
-        app,
+        screen,
+        shell,
         ListOverlay {
             area: inner,
             surface: ScrollSurface::Filter,
@@ -493,12 +551,16 @@ pub(super) fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
     );
 }
 
-pub(super) fn render_column_overlay(frame: &mut Frame<'_>, app: &mut App) {
+pub(super) fn render_column_overlay(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
     let area = centered_rect(frame.area(), 56, 18);
-    let inner = render_modal_frame(frame, app, area, " Columns ");
-    let content = app.layout.columns.len();
-    let selected = app.column_overlay.index;
-    let rows: Vec<Line> = app
+    let inner = render_modal_frame(frame, screen, shell, area, " Columns ");
+    let content = screen.layout.columns.len();
+    let selected = screen.column_overlay.index;
+    let rows: Vec<Line> = screen
         .layout
         .columns
         .iter()
@@ -519,7 +581,8 @@ pub(super) fn render_column_overlay(frame: &mut Frame<'_>, app: &mut App) {
         .collect();
     render_list_overlay(
         frame,
-        app,
+        screen,
+        shell,
         ListOverlay {
             area: inner,
             surface: ScrollSurface::Columns,
@@ -530,8 +593,12 @@ pub(super) fn render_column_overlay(frame: &mut Frame<'_>, app: &mut App) {
             rows,
             row_hit_width: Some(5),
             target: &|index| PointerTarget::ColumnToggle { index },
-            decorate: Some(&|frame: &mut Frame<'_>, app: &mut App, logical, y| {
-                render_column_controls(frame, app, inner, content, logical, y);
+            decorate: Some(&|frame: &mut Frame<'_>,
+                             screen: &mut WorkItemsScreen,
+                             shell: &mut Shell,
+                             logical,
+                             y| {
+                render_column_controls(frame, screen, shell, inner, content, logical, y);
             }),
         },
     );
@@ -539,13 +606,14 @@ pub(super) fn render_column_overlay(frame: &mut Frame<'_>, app: &mut App) {
 
 pub(super) fn render_column_controls(
     frame: &mut Frame<'_>,
-    app: &mut App,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
     inner: Rect,
     content: usize,
     logical: usize,
     y: u16,
 ) {
-    let resizable = app
+    let resizable = screen
         .layout
         .columns
         .get(logical)
@@ -591,7 +659,7 @@ pub(super) fn render_column_controls(
     for (offset, label, target, enabled) in controls {
         render_control(
             frame,
-            app,
+            shell,
             Rect::new(
                 inner.x.saturating_add(inner.width.saturating_sub(offset)),
                 y,
@@ -606,21 +674,25 @@ pub(super) fn render_column_controls(
     }
 }
 
-pub(super) fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
-    let commands = app.palette_commands();
+pub(super) fn render_palette(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
+    let commands = screen.palette_commands();
     let height = u16::try_from(commands.len().saturating_add(4))
         .unwrap_or(u16::MAX)
         .min(16);
     let area = centered_rect(frame.area(), 56, height.max(6));
-    let inner = render_modal_frame(frame, app, area, " Commands ");
+    let inner = render_modal_frame(frame, screen, shell, area, " Commands ");
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
     let (text, cursor) = (
-        app.palette.query.text().to_owned(),
-        app.palette.query.cursor(),
+        screen.palette.query.text().to_owned(),
+        screen.palette.query.cursor(),
     );
     render_query_field(
         frame,
-        app,
+        shell,
         chunks[0],
         &text,
         cursor,
@@ -628,7 +700,7 @@ pub(super) fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
         PointerTarget::PaletteQuery,
     );
     let list_area = chunks[1];
-    let selected = app.palette.selected;
+    let selected = screen.palette.selected;
     let rows: Vec<Line> = commands
         .iter()
         .enumerate()
@@ -643,7 +715,8 @@ pub(super) fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
         .collect();
     render_list_overlay(
         frame,
-        app,
+        screen,
+        shell,
         ListOverlay {
             area: list_area,
             surface: ScrollSurface::Palette,
@@ -659,15 +732,19 @@ pub(super) fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
     );
 }
 
-pub(super) fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
+pub(super) fn render_views_overlay(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
     let area = centered_rect(frame.area(), 56, 18);
-    let title = if app.views_overlay.naming.is_some() {
+    let title = if screen.views_overlay.naming.is_some() {
         " Save view "
     } else {
         " Views "
     };
-    let inner = render_modal_frame(frame, app, area, title);
-    if let Some((name, name_cursor)) = app
+    let inner = render_modal_frame(frame, screen, shell, area, title);
+    if let Some((name, name_cursor)) = screen
         .views_overlay
         .naming
         .as_ref()
@@ -692,14 +769,14 @@ pub(super) fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
             chunks[0].width.saturating_sub(6),
             1,
         );
-        app.shell.hit_regions.push(region(
+        shell.hit_regions.push(region(
             field,
             PointerTarget::ViewName,
             PointerLayer::Modal,
             Some(SelectableSurface::Overlay),
             None,
         ));
-        capture_selectable(frame, app, SelectableSurface::Overlay, field, false);
+        capture_selectable(frame, shell, SelectableSurface::Overlay, field, false);
         let cursor_x = field
             .x
             .saturating_add(u16::try_from(name_cursor).unwrap_or(u16::MAX))
@@ -707,7 +784,7 @@ pub(super) fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
         frame.set_cursor_position((cursor_x, field.y));
         render_control(
             frame,
-            app,
+            shell,
             Rect::new(chunks[1].x, chunks[1].y, 6, 1),
             "[Save]",
             PointerTarget::SaveView,
@@ -716,7 +793,7 @@ pub(super) fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
         );
         render_control(
             frame,
-            app,
+            shell,
             Rect::new(chunks[1].x.saturating_add(7), chunks[1].y, 8, 1),
             "[Cancel]",
             PointerTarget::CancelNaming,
@@ -728,7 +805,7 @@ pub(super) fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
     if inner.width >= 28 {
         render_control(
             frame,
-            app,
+            shell,
             Rect::new(inner.x, inner.y, 14, 1),
             "[Save current]",
             PointerTarget::SaveView,
@@ -737,12 +814,12 @@ pub(super) fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
         );
         render_control(
             frame,
-            app,
+            shell,
             Rect::new(inner.x.saturating_add(15), inner.y, 8, 1),
             "[Delete]",
             PointerTarget::DeleteView,
             PointerLayer::Modal,
-            app.can_delete_focused_view(),
+            screen.can_delete_focused_view(),
         );
     }
     let list = Rect::new(
@@ -751,8 +828,8 @@ pub(super) fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
         inner.width,
         inner.height.saturating_sub(1),
     );
-    let selected = app.views_overlay.index;
-    let rows: Vec<Line> = app
+    let selected = screen.views_overlay.index;
+    let rows: Vec<Line> = screen
         .view_rows()
         .iter()
         .enumerate()
@@ -772,7 +849,8 @@ pub(super) fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
         .collect();
     render_list_overlay(
         frame,
-        app,
+        screen,
+        shell,
         ListOverlay {
             area: list,
             surface: ScrollSurface::Views,
@@ -791,8 +869,12 @@ pub(super) fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
 /// The sprint summary: the per-assignee grid, the by-type tally under it, and
 /// the headline, all painted through the same list helper the other overlays
 /// use so the scrollbar and the hit regions come for free.
-pub(super) fn render_sprint_overlay(frame: &mut Frame<'_>, app: &mut App) {
-    let summary = app.summary_rows();
+pub(super) fn render_sprint_overlay(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
+    let summary = screen.summary_rows();
     // Cut to the grid rather than fixed: a one-person sprint should not open a
     // half-empty box, and a whole team still gets its scrollbar.
     let widest = summary
@@ -810,15 +892,15 @@ pub(super) fn render_sprint_overlay(frame: &mut Frame<'_>, app: &mut App) {
             .unwrap_or(u16::MAX)
             .min(SPRINT_OVERLAY_MAX_HEIGHT),
     );
-    let title = app.summary_title();
-    let inner = render_modal_frame(frame, app, area, &title);
+    let title = screen.summary_title();
+    let inner = render_modal_frame(frame, screen, shell, area, &title);
     // An overlay with no grid — an empty sprint, or none to count — has nothing
     // for the cursor to sit on, so nothing is highlighted rather than the first
     // line of an explanation being lit up as though it were a row.
     let selected = summary
-        .get(app.sprint_overlay.index)
+        .get(screen.sprint_overlay.index)
         .filter(|row| row.is_selectable())
-        .map_or(usize::MAX, |_| app.sprint_overlay.index);
+        .map_or(usize::MAX, |_| screen.sprint_overlay.index);
     let rows: Vec<Line> = summary
         .iter()
         .enumerate()
@@ -826,7 +908,8 @@ pub(super) fn render_sprint_overlay(frame: &mut Frame<'_>, app: &mut App) {
         .collect();
     render_list_overlay(
         frame,
-        app,
+        screen,
+        shell,
         ListOverlay {
             area: inner,
             surface: ScrollSurface::Sprint,
@@ -884,45 +967,49 @@ pub(super) fn terminate_underline(mut line: Line<'static>) -> Line<'static> {
     line
 }
 
-pub(super) fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
+pub(super) fn render_info_overlay(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
     let area = centered_rect(frame.area(), 62, 12);
-    let stale = if app.shell.stale { "stale" } else { "current" };
+    let stale = if shell.stale { "stale" } else { "current" };
     // What the difference between the count and the total is made of, so the
     // rows the table is leaving out are a number rather than a suspicion.
-    let finished = if app.finished_hidden() {
-        format!("{} hidden", app.hidden_finished())
+    let finished = if screen.finished_hidden() {
+        format!("{} hidden", screen.hidden_finished(shell))
     } else {
         "shown".to_owned()
     };
-    let path = if app.shell.database_path.as_os_str().is_empty() {
+    let path = if shell.database_path.as_os_str().is_empty() {
         "(not set)".into()
     } else {
-        app.shell.database_path.display().to_string()
+        shell.database_path.display().to_string()
     };
     let text = Text::from(vec![
         field_line("Path", path),
-        field_line("Tickets", app.tickets().len().to_string()),
-        field_line("Visible", app.visible_count().to_string()),
+        field_line("Tickets", screen.tickets().len().to_string()),
+        field_line("Visible", screen.visible_count().to_string()),
         field_line("Finished", finished),
-        field_line("Loaded", app.shell.freshness_label()),
+        field_line("Loaded", shell.freshness_label()),
         field_line("Freshness", stale),
-        field_line("Sync", app.shell.sync_summary()),
+        field_line("Sync", shell.sync_summary()),
         Line::default(),
         Line::styled(
             "Press Esc or i to close",
             Style::default().fg(theme().muted),
         ),
     ]);
-    let inner = render_modal_frame(frame, app, area, " Database ");
+    let inner = render_modal_frame(frame, screen, shell, area, " Database ");
     frame.render_widget(Paragraph::new(text), inner);
-    app.shell.hit_regions.push(region(
+    shell.hit_regions.push(region(
         inner,
         PointerTarget::OverlayBody,
         PointerLayer::Modal,
         Some(SelectableSurface::Overlay),
         None,
     ));
-    capture_selectable(frame, app, SelectableSurface::Overlay, inner, false);
+    capture_selectable(frame, shell, SelectableSurface::Overlay, inner, false);
 }
 
 pub(super) fn overlay_line(line: Line<'_>, selected: bool) -> Line<'_> {

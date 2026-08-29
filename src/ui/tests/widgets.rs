@@ -38,9 +38,9 @@ fn the_table_thumb_is_painted_where_it_can_be_grabbed_and_reaches_the_bottom() {
         .collect();
     let mut app = App::new(tickets);
     // No chip bar over the table, so the arithmetic below is the table's.
-    app.set_show_finished(true);
+    app.work_items.set_show_finished(&mut app.shell, true);
     for offset in [0, 45, 90] {
-        app.table.offset = offset;
+        app.work_items.table.offset = offset;
         // 29 rows of terminal leave the table body exactly 20 rows tall.
         let mut terminal = Terminal::new(TestBackend::new(120, 29)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
@@ -75,8 +75,8 @@ fn the_table_thumb_is_painted_where_it_can_be_grabbed_and_reaches_the_bottom() {
         }
     }
     assert_eq!(
-        app.table.offset,
-        app.table.max_offset(),
+        app.work_items.table.offset,
+        app.work_items.table.max_offset(),
         "90 clamps to the end"
     );
 }
@@ -88,7 +88,7 @@ fn the_details_thumb_finishes_on_the_last_row_of_its_track() {
     let mut app = App::new(vec![long_ticket]);
     app.shell.narrow_details = true;
     app.shell.focus = Focus::Details;
-    app.details.offset = usize::MAX;
+    app.work_items.details.offset = usize::MAX;
     let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let metrics = app
@@ -127,11 +127,14 @@ fn long_content_is_bounded_and_the_wheel_scrolls_without_moving_the_selection() 
 
     let text = render_text(60, 20, &mut app);
 
-    assert!(app.details.max_offset() > 0);
+    assert!(app.work_items.details.max_offset() > 0);
     assert!(text.contains('┃'));
-    app.details.offset = usize::MAX;
+    app.work_items.details.offset = usize::MAX;
     render_text(60, 20, &mut app);
-    assert_eq!(app.details.offset, app.details.max_offset());
+    assert_eq!(
+        app.work_items.details.offset,
+        app.work_items.details.max_offset()
+    );
 
     let tickets = (0..20)
         .map(|index| {
@@ -147,7 +150,7 @@ fn long_content_is_bounded_and_the_wheel_scrolls_without_moving_the_selection() 
         text.contains('┃'),
         "a long table renders a position scrollbar"
     );
-    let selected = app.selected_row();
+    let selected = app.work_items.selected_row();
     let body = table_body(&app);
     let column = body.x + body.width / 2;
     let row = body.y + 1;
@@ -158,15 +161,19 @@ fn long_content_is_bounded_and_the_wheel_scrolls_without_moving_the_selection() 
     );
 
     app.handle_mouse(mouse(MouseEventKind::ScrollDown, column, row));
-    assert_eq!(app.selected_row(), selected, "the wheel selects nothing");
+    assert_eq!(
+        app.work_items.selected_row(),
+        selected,
+        "the wheel selects nothing"
+    );
     assert_eq!(app.shell.focus, Focus::Tickets);
-    assert!(app.table.offset > 0);
+    assert!(app.work_items.table.offset > 0);
     let mut terminal = Terminal::new(TestBackend::new(60, 15)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     assert_eq!(
         app.shell.hovered(),
         Some(&PointerTarget::TableRow {
-            index: app.table.offset + 1,
+            index: app.work_items.table.offset + 1,
         })
     );
     assert_row_hovered(
@@ -237,7 +244,7 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
         .map(|region| (region.rect.x, region.rect.y))
         .expect("Actions button");
     click(&mut app, x, y);
-    assert_eq!(app.mode, AppMode::Palette);
+    assert_eq!(app.work_items.mode, WorkItemMode::Palette);
 
     render_text(110, 24, &mut app);
     let (x, y) = app
@@ -247,7 +254,7 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
         .map(|region| (region.rect.x, region.rect.y))
         .expect("palette close");
     click(&mut app, x, y);
-    assert_eq!(app.mode, AppMode::Browse);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
 
     render_text(110, 24, &mut app);
     let (x, y) = app
@@ -257,9 +264,9 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
         .map(|region| (region.rect.x, region.rect.y))
         .expect("help button");
     click(&mut app, x, y);
-    assert_eq!(app.mode, AppMode::Help);
+    assert_eq!(app.work_items.mode, WorkItemMode::Help);
 
-    app.mode = AppMode::Browse;
+    app.work_items.mode = WorkItemMode::Browse;
     render_text(110, 24, &mut app);
     let (x, y) = app
         .shell
@@ -268,7 +275,10 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
         .map(|region| (region.rect.x, region.rect.y))
         .expect("row checkbox");
     click(&mut app, x, y);
-    assert!(app.is_row_selected(&app.selected_ticket().unwrap().key));
+    assert!(
+        app.work_items
+            .is_row_selected(&app.work_items.selected_ticket().unwrap().key)
+    );
 
     let (x, y) = app
         .shell
@@ -277,8 +287,8 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
         .map(|region| (region.rect.x, region.rect.y))
         .expect("details copy");
     click(&mut app, x, y);
-    assert_eq!(app.mode, AppMode::Palette);
-    assert_eq!(app.palette.query.text(), "copy");
+    assert_eq!(app.work_items.mode, WorkItemMode::Palette);
+    assert_eq!(app.work_items.palette.query.text(), "copy");
 }
 
 fn divider(app: &App) -> Rect {

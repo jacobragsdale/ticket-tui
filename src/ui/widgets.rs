@@ -7,12 +7,13 @@ use super::*;
 /// registers its close button. The inner area is what the overlay paints in.
 pub(super) fn render_modal_frame(
     frame: &mut Frame<'_>,
-    app: &mut App,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
     area: Rect,
     title: &str,
 ) -> Rect {
-    let layer = match app.mode {
-        AppMode::Facets => PointerLayer::Popup,
+    let layer = match screen.mode {
+        WorkItemMode::Facets => PointerLayer::Popup,
         _ => PointerLayer::Modal,
     };
     let block = Block::default()
@@ -22,12 +23,12 @@ pub(super) fn render_modal_frame(
         .border_style(Style::default().fg(theme().accent));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    register_close_button(app, area, layer);
+    register_close_button(shell, area, layer);
     inner
 }
 
-pub(super) fn register_close_button(app: &mut App, area: Rect, layer: PointerLayer) {
-    app.shell.hit_regions.push(region(
+pub(super) fn register_close_button(shell: &mut Shell, area: Rect, layer: PointerLayer) {
+    shell.hit_regions.push(region(
         Rect::new(
             area.x.saturating_add(area.width.saturating_sub(4)),
             area.y,
@@ -46,7 +47,7 @@ pub(super) fn register_close_button(app: &mut App, area: Rect, layer: PointerLay
 /// caret, and dragging across it selects.
 pub(super) fn render_query_field(
     frame: &mut Frame<'_>,
-    app: &mut App,
+    shell: &mut Shell,
     area: Rect,
     text: &str,
     cursor: usize,
@@ -62,14 +63,14 @@ pub(super) fn render_query_field(
         Paragraph::new(query).style(Style::default().fg(theme().text)),
         area,
     );
-    app.shell.hit_regions.push(region(
+    shell.hit_regions.push(region(
         area,
         target,
         PointerLayer::Modal,
         Some(SelectableSurface::Overlay),
         None,
     ));
-    capture_selectable(frame, app, SelectableSurface::Overlay, area, false);
+    capture_selectable(frame, shell, SelectableSurface::Overlay, area, false);
     let cursor_x = area.x.saturating_add(
         u16::try_from(cursor)
             .unwrap_or(u16::MAX)
@@ -80,14 +81,14 @@ pub(super) fn render_query_field(
 
 pub(super) fn render_control(
     frame: &mut Frame<'_>,
-    app: &mut App,
+    shell: &mut Shell,
     area: Rect,
     label: &str,
     target: PointerTarget,
     layer: PointerLayer,
     enabled: bool,
 ) {
-    let hovered = app.shell.hovered() == Some(&target);
+    let hovered = shell.hovered() == Some(&target);
     let style = if !enabled {
         Style::default().fg(theme().muted)
     } else if hovered {
@@ -100,7 +101,7 @@ pub(super) fn render_control(
     };
     frame.render_widget(Paragraph::new(label).style(style), area);
     if enabled {
-        app.shell
+        shell
             .hit_regions
             .push(region(area, target, layer, None, None));
     }
@@ -116,13 +117,17 @@ pub(super) fn render_control(
 /// track at the maximum offset while the draggable one reached it.
 pub(super) fn render_scrollbar(
     frame: &mut Frame<'_>,
-    app: &mut App,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
     area: Rect,
     surface: ScrollSurface,
-    content: usize,
-    offset: usize,
-    viewport: usize,
+    scroll: ScrollState,
 ) {
+    let ScrollState {
+        offset,
+        content,
+        viewport,
+    } = scroll;
     let track = Rect::new(
         area.x.saturating_add(area.width.saturating_sub(1)),
         area.y,
@@ -137,39 +142,39 @@ pub(super) fn render_scrollbar(
     };
     let geometry = metrics.thumb();
     paint_scrollbar(frame, track, geometry);
-    app.shell.hit_regions.set_scroll(surface, metrics);
+    shell.hit_regions.set_scroll(surface, metrics);
     if let Some(thumb) = geometry {
         let thumb_rect = Rect::new(track.x, track.y.saturating_add(thumb.y), 1, thumb.height);
         let above = Rect::new(track.x, track.y, 1, thumb.y);
         let below_y = track.y.saturating_add(thumb.y).saturating_add(thumb.height);
         let below_height = track.y.saturating_add(track.height).saturating_sub(below_y);
         if above.height > 0 {
-            app.shell.hit_regions.push(region(
+            shell.hit_regions.push(region(
                 above,
                 PointerTarget::ScrollbarTrack {
                     surface,
                     page_down: false,
                 },
-                current_layer(app),
+                current_layer(screen),
                 None,
                 Some(surface),
             ));
         }
-        app.shell.hit_regions.push(region(
+        shell.hit_regions.push(region(
             thumb_rect,
             PointerTarget::ScrollbarThumb { surface },
-            current_layer(app),
+            current_layer(screen),
             None,
             Some(surface),
         ));
         if below_height > 0 {
-            app.shell.hit_regions.push(region(
+            shell.hit_regions.push(region(
                 Rect::new(track.x, below_y, 1, below_height),
                 PointerTarget::ScrollbarTrack {
                     surface,
                     page_down: true,
                 },
-                current_layer(app),
+                current_layer(screen),
                 None,
                 Some(surface),
             ));
@@ -199,7 +204,7 @@ pub(super) fn paint_scrollbar(frame: &mut Frame<'_>, track: Rect, thumb: Option<
 
 pub(super) fn capture_selectable(
     frame: &mut Frame<'_>,
-    app: &mut App,
+    shell: &mut Shell,
     surface: SelectableSurface,
     rect: Rect,
     skip_last_col: bool,
@@ -225,7 +230,7 @@ pub(super) fn capture_selectable(
         }
         cells.push(row);
     }
-    app.shell.hit_regions.add_selectable(SelectableSnapshot {
+    shell.hit_regions.add_selectable(SelectableSnapshot {
         surface,
         rect: Rect { width, ..rect },
         cells,
@@ -255,8 +260,8 @@ pub(super) fn row_like(target: &PointerTarget) -> bool {
     )
 }
 
-pub(super) fn paint_hover(frame: &mut Frame<'_>, app: &App) {
-    let Some(region) = app.shell.hovered_region() else {
+pub(super) fn paint_hover(frame: &mut Frame<'_>, shell: &Shell) {
+    let Some(region) = shell.hovered_region() else {
         return;
     };
     let target = &region.target;
@@ -307,15 +312,11 @@ pub(super) fn paint_hover(frame: &mut Frame<'_>, app: &App) {
     }
 }
 
-pub(super) fn paint_selection(frame: &mut Frame<'_>, app: &App) {
-    let Some(selection) = app
-        .shell
-        .selection()
-        .filter(|selection| !selection.is_empty())
-    else {
+pub(super) fn paint_selection(frame: &mut Frame<'_>, shell: &Shell) {
+    let Some(selection) = shell.selection().filter(|selection| !selection.is_empty()) else {
         return;
     };
-    let Some(snapshot) = app.shell.hit_regions.selectable(selection.surface) else {
+    let Some(snapshot) = shell.hit_regions.selectable(selection.surface) else {
         return;
     };
     let (start, end) = selection.ordered();

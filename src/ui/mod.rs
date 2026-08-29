@@ -11,9 +11,9 @@ use ratatui::widgets::{
 use time::OffsetDateTime;
 
 use crate::app::{
-    App, AppMode, ChildProgress, DividerOrientation, Focus, FormOverlay, HitRegions,
-    NotificationLevel, PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PromptField, RowDensity, SearchOrder,
-    UNASSIGNED_LABEL,
+    App, ChildProgress, DividerOrientation, Focus, FormOverlay, HitRegions, NotificationLevel,
+    PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PromptField, RowDensity, SearchOrder, Shell,
+    UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
 };
 use crate::command::{COMMANDS, key_label_for};
 use crate::filter::{FacetTarget, FilterField};
@@ -22,8 +22,8 @@ use crate::model::{
     Ticket, TicketKey, path_leaf,
 };
 use crate::pointer::{
-    EditableField, OverlayAnchor, PointerLayer, PointerTarget, ScrollMetrics, ScrollSurface,
-    SelectableSnapshot, SelectableSurface, ThumbGeometry, region,
+    EditableField, OverlayAnchor, PointerLayer, PointerTarget, ScrollMetrics, ScrollState,
+    ScrollSurface, SelectableSnapshot, SelectableSurface, ThumbGeometry, region,
 };
 use crate::search::QueryHighlighter;
 use crate::sprint::{SummaryRow, SummaryRowKind};
@@ -197,18 +197,31 @@ fn theme() -> &'static Theme {
     THEME.get_or_init(|| Theme::new(std::env::var_os("NO_COLOR").is_some()))
 }
 
+/// Paints the frame: the shell hands the active screen the whole area.
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
-    render_pass(frame, app);
-    if app.shell.refresh_hover() {
-        render_pass(frame, app);
-    }
-    paint_hover(frame, app);
-    paint_selection(frame, app);
+    let area = frame.area();
+    let (shell, screen) = app.screen();
+    screen.render(frame, shell, area);
 }
 
-fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
-    app.shell.hit_regions = HitRegions::default();
-    let area = frame.area();
+/// One screen, painted into the area the shell left it, then the hover and
+/// selection paint that go over everything.
+pub(crate) fn render_screen(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+    area: Rect,
+) {
+    render_pass(frame, screen, shell, area);
+    if shell.refresh_hover() {
+        render_pass(frame, screen, shell, area);
+    }
+    paint_hover(frame, shell);
+    paint_selection(frame, shell);
+}
+
+fn render_pass(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, shell: &mut Shell, area: Rect) {
+    shell.hit_regions = HitRegions::default();
     if area.width < 36 || area.height < 10 {
         frame.render_widget(
             Paragraph::new("Terminal too small\nResize to at least 36 × 10")
@@ -219,7 +232,8 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
         return;
     }
 
-    let chip_height = u16::from(app.finished_hidden() || !app.overflow_filter_tokens().is_empty());
+    let chip_height =
+        u16::from(screen.finished_hidden() || !screen.overflow_filter_tokens().is_empty());
     let sections = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(1),
@@ -228,19 +242,19 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
         Constraint::Length(1),
     ])
     .split(area);
-    render_search(frame, app, sections[0]);
-    render_facet_bar(frame, app, sections[1]);
+    render_search(frame, screen, shell, sections[0]);
+    render_facet_bar(frame, screen, shell, sections[1]);
     if chip_height > 0 {
-        render_chips(frame, app, sections[2]);
+        render_chips(frame, screen, shell, sections[2]);
     }
-    render_content(frame, app, sections[3]);
-    render_footer(frame, app, sections[4]);
+    render_content(frame, screen, shell, sections[3]);
+    render_footer(frame, screen, shell, sections[4]);
 
     // A dropdown is dismissed by clicking away from it, so everything outside
     // it becomes one target that closes it. The overlay's own regions are
     // pushed after this one and on the same layer, so they still win.
-    if anchored_overlay(app) {
-        app.shell.hit_regions.push(region(
+    if anchored_overlay(screen, shell) {
+        shell.hit_regions.push(region(
             area,
             PointerTarget::DismissOverlay,
             PointerLayer::Modal,
@@ -248,33 +262,38 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
             None,
         ));
     }
-    match app.mode {
-        AppMode::Sort => render_sort_popup(frame, app),
-        AppMode::Help => render_help_popup(frame, app),
-        AppMode::Filter => render_filter_overlay(frame, app),
-        AppMode::Columns => render_column_overlay(frame, app),
-        AppMode::Palette => render_palette(frame, app),
-        AppMode::Views => render_views_overlay(frame, app),
-        AppMode::Info => render_info_overlay(frame, app),
-        AppMode::Sprint => render_sprint_overlay(frame, app),
-        AppMode::Facets => render_facet_menu(frame, app),
-        AppMode::Edit => render_edit_menu(frame, app),
-        AppMode::StatePicker => render_state_picker(frame, app),
-        AppMode::PriorityPicker => render_priority_picker(frame, app),
-        AppMode::Prompt => render_prompt(frame, app),
-        AppMode::AssigneePicker => render_assignee_picker(frame, app),
-        AppMode::ParentPicker => render_parent_picker(frame, app),
-        AppMode::NodePicker => render_node_picker(frame, app),
-        AppMode::Form => render_form(frame, app),
-        AppMode::TypePicker => render_type_picker(frame, app),
-        AppMode::ConfirmDelete => render_delete_confirm(frame, app),
-        AppMode::Browse | AppMode::Search => {}
+    match screen.mode {
+        WorkItemMode::Sort => render_sort_popup(frame, screen, shell),
+        WorkItemMode::Help => render_help_popup(frame, screen, shell),
+        WorkItemMode::Filter => render_filter_overlay(frame, screen, shell),
+        WorkItemMode::Columns => render_column_overlay(frame, screen, shell),
+        WorkItemMode::Palette => render_palette(frame, screen, shell),
+        WorkItemMode::Views => render_views_overlay(frame, screen, shell),
+        WorkItemMode::Info => render_info_overlay(frame, screen, shell),
+        WorkItemMode::Sprint => render_sprint_overlay(frame, screen, shell),
+        WorkItemMode::Facets => render_facet_menu(frame, screen, shell),
+        WorkItemMode::Edit => render_edit_menu(frame, screen, shell),
+        WorkItemMode::StatePicker => render_state_picker(frame, screen, shell),
+        WorkItemMode::PriorityPicker => render_priority_picker(frame, screen, shell),
+        WorkItemMode::Prompt => render_prompt(frame, screen, shell),
+        WorkItemMode::AssigneePicker => render_assignee_picker(frame, screen, shell),
+        WorkItemMode::ParentPicker => render_parent_picker(frame, screen, shell),
+        WorkItemMode::NodePicker => render_node_picker(frame, screen, shell),
+        WorkItemMode::Form => render_form(frame, screen, shell),
+        WorkItemMode::TypePicker => render_type_picker(frame, screen, shell),
+        WorkItemMode::ConfirmDelete => render_delete_confirm(frame, screen, shell),
+        WorkItemMode::Browse | WorkItemMode::Search => {}
     }
 }
 
-fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let active = app.mode == AppMode::Search;
-    let title = if app.search_pending {
+fn render_search(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+    area: Rect,
+) {
+    let active = screen.mode == WorkItemMode::Search;
+    let title = if screen.search_pending {
         " Search (matching…) "
     } else {
         " Search / "
@@ -293,7 +312,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         block = block.title(Line::from(right_title.clone()).right_aligned());
     }
     let inner = block.inner(area);
-    let clear = if !app.query().is_empty() && inner.width > 4 {
+    let clear = if !screen.query().is_empty() && inner.width > 4 {
         3
     } else {
         0
@@ -304,15 +323,15 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         inner.width.saturating_sub(clear),
         inner.height.max(1),
     );
-    let text = if app.query().is_empty() && !active {
+    let text = if screen.query().is_empty() && !active {
         Line::styled(
             "Type / to search, or pick State, Type, Tags, or Assignee below",
             Style::default().fg(theme().muted),
         )
     } else {
-        Line::from(app.query())
+        Line::from(screen.query())
     };
-    let cursor_offset = u16::try_from(app.query_cursor()).unwrap_or(u16::MAX);
+    let cursor_offset = u16::try_from(screen.query_cursor()).unwrap_or(u16::MAX);
     let horizontal_scroll = cursor_offset.saturating_sub(field.width.saturating_sub(1));
     frame.render_widget(
         Paragraph::new(text)
@@ -329,7 +348,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
         render_control(
             frame,
-            app,
+            shell,
             clear_area,
             "[×]",
             PointerTarget::ClearQuery,
@@ -337,7 +356,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             true,
         );
     }
-    app.shell.hit_regions.push(region(
+    shell.hit_regions.push(region(
         field,
         PointerTarget::SearchField,
         PointerLayer::Base,
@@ -352,7 +371,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             actions_width.saturating_sub(1),
             1,
         );
-        app.shell.hit_regions.push(region(
+        shell.hit_regions.push(region(
             actions,
             PointerTarget::OpenPalette,
             PointerLayer::Base,
@@ -367,7 +386,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             3,
             1,
         );
-        app.shell.hit_regions.push(region(
+        shell.hit_regions.push(region(
             help,
             PointerTarget::OpenHelp,
             PointerLayer::Base,
@@ -375,7 +394,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             None,
         ));
     }
-    capture_selectable(frame, app, SelectableSurface::Search, field, false);
+    capture_selectable(frame, shell, SelectableSurface::Search, field, false);
 
     if active {
         let cursor_x = field
@@ -388,43 +407,52 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
-fn render_content(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+fn render_content(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+    area: Rect,
+) {
     if area.width >= WIDE_BREAKPOINT {
-        app.shell
-            .set_content_layout(area, Some(DividerOrientation::Vertical));
+        shell.set_content_layout(area, Some(DividerOrientation::Vertical));
         let panes = Layout::horizontal([
-            Constraint::Percentage(app.shell.pane_split_wide),
+            Constraint::Percentage(shell.pane_split_wide),
             Constraint::Fill(1),
         ])
         .spacing(1)
         .split(area);
-        render_table(frame, app, panes[0]);
-        render_details(frame, app, panes[1]);
-        render_divider(frame, app, panes[0], panes[1], DividerOrientation::Vertical);
-    } else if area.width >= NARROW_BREAKPOINT {
-        app.shell
-            .set_content_layout(area, Some(DividerOrientation::Horizontal));
-        let panes = Layout::vertical([
-            Constraint::Percentage(app.shell.pane_split_stacked),
-            Constraint::Fill(1),
-        ])
-        .spacing(1)
-        .split(area);
-        render_table(frame, app, panes[0]);
-        render_details(frame, app, panes[1]);
+        render_table(frame, screen, shell, panes[0]);
+        render_details(frame, screen, shell, panes[1]);
         render_divider(
             frame,
-            app,
+            shell,
+            panes[0],
+            panes[1],
+            DividerOrientation::Vertical,
+        );
+    } else if area.width >= NARROW_BREAKPOINT {
+        shell.set_content_layout(area, Some(DividerOrientation::Horizontal));
+        let panes = Layout::vertical([
+            Constraint::Percentage(shell.pane_split_stacked),
+            Constraint::Fill(1),
+        ])
+        .spacing(1)
+        .split(area);
+        render_table(frame, screen, shell, panes[0]);
+        render_details(frame, screen, shell, panes[1]);
+        render_divider(
+            frame,
+            shell,
             panes[0],
             panes[1],
             DividerOrientation::Horizontal,
         );
     } else {
-        app.shell.set_content_layout(area, None);
-        if app.shell.narrow_details {
-            render_details(frame, app, area);
+        shell.set_content_layout(area, None);
+        if shell.narrow_details {
+            render_details(frame, screen, shell, area);
         } else {
-            render_table(frame, app, area);
+            render_table(frame, screen, shell, area);
         }
     }
 }
@@ -433,7 +461,7 @@ fn render_content(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 /// draggable divider. Hovering reverses it through the usual hover pass.
 fn render_divider(
     frame: &mut Frame<'_>,
-    app: &mut App,
+    shell: &mut Shell,
     first: Rect,
     second: Rect,
     orientation: DividerOrientation,
@@ -451,7 +479,7 @@ fn render_divider(
         .map(|_| Line::styled(row.clone(), style))
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), rect);
-    app.shell.hit_regions.push(region(
+    shell.hit_regions.push(region(
         rect,
         PointerTarget::PaneDivider,
         PointerLayer::Base,
@@ -479,69 +507,15 @@ fn divider_rect(first: Rect, second: Rect, orientation: DividerOrientation) -> O
     (rect.width > 0 && rect.height > 0).then_some(rect)
 }
 
-fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let (text, style) = if let Some((message, level)) = app.shell.notification() {
+fn render_footer(frame: &mut Frame<'_>, screen: &WorkItemsScreen, shell: &Shell, area: Rect) {
+    let (text, style) = if let Some((message, level)) = shell.notification() {
         let color = match level {
             NotificationLevel::Info => theme().info,
             NotificationLevel::Error => theme().error,
         };
         (message, Style::default().fg(color))
     } else {
-        let text = match app.mode {
-            AppMode::Search => {
-                "←→ cursor  Ctrl-P/N history  Ctrl-W delete word  Ctrl-U clear  Enter/Esc finish"
-            }
-            AppMode::Sort => "↑↓ choose field  ←→ direction  Enter apply  Esc cancel",
-            AppMode::Help => "↑↓/jk scroll  PgUp/PgDn page  Home/End jump  ?/Esc close",
-            AppMode::Facets if app.facet_bar.field_index >= FilterField::BAR.len() => {
-                "←→ field  Enter more filters  Esc back"
-            }
-            AppMode::Facets => "←→/hl field  ↑↓/jk value  Space toggle  + more  Esc back",
-            AppMode::Filter if app.filter_overlay.showing_values => {
-                "↑↓ values  Space toggle  ← fields  Esc close"
-            }
-            AppMode::Filter => "↑↓ field  Enter values  Esc close",
-            AppMode::Columns => "↑↓ choose  Space show/hide  JK reorder  <> width  Esc close",
-            AppMode::Palette => "Type to filter  ↑↓ select  Enter run  Esc close",
-            AppMode::Views if app.views_overlay.naming.is_some() => {
-                "Type a view name  Enter save  Esc cancel"
-            }
-            AppMode::Views => "↑↓ choose  Enter load  n save  d delete  Esc close",
-            AppMode::Info => "Esc/i close",
-            AppMode::Sprint => "↑↓/jk row  ←→/hl sprint  Enter filter  Esc close",
-            AppMode::Edit => "\u{2191}\u{2193}/jk choose  Enter open  Esc close",
-            AppMode::StatePicker | AppMode::PriorityPicker => {
-                "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel"
-            }
-            AppMode::Prompt => app
-                .prompt
-                .as_ref()
-                .map_or("Enter save  Esc cancel", |prompt| prompt.field.hint()),
-            AppMode::AssigneePicker => {
-                "Type to filter  \u{2191}\u{2193} select  Enter assign  Esc cancel"
-            }
-            AppMode::NodePicker => {
-                "Type to filter  \u{2191}\u{2193} select  Enter move  Esc cancel"
-            }
-            AppMode::ParentPicker => {
-                "Type to filter  \u{2191}\u{2193} select  Enter file under  Esc cancel"
-            }
-            AppMode::TypePicker => "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel",
-            AppMode::Form => "\u{2191}\u{2193}/Tab fields  Enter picker  Ctrl-S create  Esc cancel",
-            AppMode::ConfirmDelete => "d delete  Esc cancel",
-            AppMode::Browse if app.shell.focus == Focus::Family => {
-                "↑↓ move  Enter select  Tab details"
-            }
-            AppMode::Browse if app.shell.focus == Focus::Details => {
-                "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
-            }
-            AppMode::Browse if !app.query().is_empty() => {
-                "↑↓/jk move  f filters  Esc clear  ? help  q quit"
-            }
-            AppMode::Browse => {
-                "↑↓/jk move  / search  click/drag copy  wheel scroll  ? help  q quit"
-            }
-        };
+        let text = screen.footer_hint(shell);
         (text, Style::default().fg(theme().muted))
     };
     frame.render_widget(
@@ -552,17 +526,17 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-fn register_narrow_tabs(app: &mut App, area: Rect) {
+fn register_narrow_tabs(shell: &mut Shell, area: Rect) {
     let tickets = Rect::new(area.x.saturating_add(1), area.y, 9, 1);
     let details = Rect::new(area.x.saturating_add(11), area.y, 9, 1);
-    app.shell.hit_regions.push(region(
+    shell.hit_regions.push(region(
         tickets,
         PointerTarget::NarrowTickets,
         PointerLayer::Base,
         None,
         None,
     ));
-    app.shell.hit_regions.push(region(
+    shell.hit_regions.push(region(
         details,
         PointerTarget::NarrowDetails,
         PointerLayer::Base,
@@ -571,10 +545,10 @@ fn register_narrow_tabs(app: &mut App, area: Rect) {
     ));
 }
 
-fn current_layer(app: &App) -> PointerLayer {
-    match app.mode {
-        AppMode::Facets => PointerLayer::Popup,
-        AppMode::Browse | AppMode::Search => PointerLayer::Base,
+fn current_layer(screen: &WorkItemsScreen) -> PointerLayer {
+    match screen.mode {
+        WorkItemMode::Facets => PointerLayer::Popup,
+        WorkItemMode::Browse | WorkItemMode::Search => PointerLayer::Base,
         _ => PointerLayer::Modal,
     }
 }
@@ -592,15 +566,15 @@ fn focused_block<'a>(title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
 
 /// Whether the overlay on screen is a dropdown hung off a details-pane field
 /// rather than a centred modal.
-fn anchored_overlay(app: &App) -> bool {
-    app.shell.overlay_anchor.is_anchored()
+fn anchored_overlay(screen: &WorkItemsScreen, shell: &Shell) -> bool {
+    shell.overlay_anchor.is_anchored()
         && matches!(
-            app.mode,
-            AppMode::StatePicker
-                | AppMode::PriorityPicker
-                | AppMode::AssigneePicker
-                | AppMode::NodePicker
-                | AppMode::Prompt
+            screen.mode,
+            WorkItemMode::StatePicker
+                | WorkItemMode::PriorityPicker
+                | WorkItemMode::AssigneePicker
+                | WorkItemMode::NodePicker
+                | WorkItemMode::Prompt
         )
 }
 

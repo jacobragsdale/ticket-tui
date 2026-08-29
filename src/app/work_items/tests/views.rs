@@ -69,19 +69,23 @@ fn views_app() -> App {
         ),
     ]);
     app.shell.set_me(Some("Avery Chen".into()));
-    app.set_classification_nodes(classification_trees(), None);
+    app.work_items
+        .set_classification_nodes(classification_trees(), None);
     app
 }
 
 fn visible_ids(app: &App) -> Vec<i64> {
-    app.visible_tickets().map(|ticket| ticket.key.id).collect()
+    app.work_items
+        .visible_tickets()
+        .map(|ticket| ticket.key.id)
+        .collect()
 }
 
 #[test]
 fn the_views_overlay_lists_the_built_ins_above_whatever_the_user_saved() {
     let mut app = views_app();
 
-    let rows = app.view_rows();
+    let rows = app.work_items.view_rows();
     let listed: Vec<(&str, &str)> = rows
         .iter()
         .map(|row| (row.label.as_str(), row.query.as_str()))
@@ -103,10 +107,10 @@ fn the_views_overlay_lists_the_built_ins_above_whatever_the_user_saved() {
         "with nothing saved there is no second heading to show"
     );
 
-    app.set_query("tag:rust".into());
-    app.save_view("Rust work".into());
+    app.work_items.set_query(&mut app.shell, "tag:rust".into());
+    app.work_items.save_view(&mut app.shell, "Rust work".into());
 
-    let rows = app.view_rows();
+    let rows = app.work_items.view_rows();
     assert_eq!(rows.len(), 8);
     assert!(rows[6].is_heading());
     assert_eq!(rows[6].label, "Saved");
@@ -119,9 +123,10 @@ fn each_built_in_view_yields_the_rows_its_question_asks_for() {
     let mut app = views_app();
     // What each view asks for is the subject, so the finished row answers
     // its question rather than being taken off the table before it is put.
-    app.set_show_finished(true);
+    app.work_items.set_show_finished(&mut app.shell, true);
     let load = |app: &mut App, name: &str| {
-        app.apply_view_at(view_row(app, name));
+        let row = view_row(app, name);
+        app.work_items.apply_view_at(&mut app.shell, row);
         visible_ids(app)
     };
 
@@ -130,11 +135,14 @@ fn each_built_in_view_yields_the_rows_its_question_asks_for() {
     assert_eq!(load(&mut app, "Doing"), vec![1]);
     assert_eq!(load(&mut app, "Current sprint"), vec![1, 6]);
 
-    assert_eq!(app.active_view.as_deref(), Some("Current sprint"));
-    assert_eq!(app.query(), "iteration:@current");
     assert_eq!(
-        app.mode,
-        AppMode::Browse,
+        app.work_items.active_view.as_deref(),
+        Some("Current sprint")
+    );
+    assert_eq!(app.work_items.query(), "iteration:@current");
+    assert_eq!(
+        app.work_items.mode,
+        WorkItemMode::Browse,
         "loading a view closes the overlay"
     );
 }
@@ -143,11 +151,13 @@ fn each_built_in_view_yields_the_rows_its_question_asks_for() {
 fn the_stale_view_leaves_out_finished_work_and_puts_the_quietest_row_first() {
     let mut app = views_app();
 
-    app.apply_view_at(view_row(&app, "Stale"));
+    let row = view_row(&app, "Stale");
 
-    assert_eq!(app.query(), "changed:>14d state:@open");
+    app.work_items.apply_view_at(&mut app.shell, row);
+
+    assert_eq!(app.work_items.query(), "changed:>14d state:@open");
     assert_eq!(
-        (app.sort_field, app.sort_direction),
+        (app.work_items.sort_field, app.work_items.sort_direction),
         (SortField::Changed, SortDirection::Ascending),
         "the one built-in that turns the default order around"
     );
@@ -162,20 +172,29 @@ fn the_stale_view_leaves_out_finished_work_and_puts_the_quietest_row_first() {
 #[test]
 fn a_built_in_view_cannot_be_saved_over_or_deleted() {
     let mut app = views_app();
-    app.set_query("tag:rust".into());
+    app.work_items.set_query(&mut app.shell, "tag:rust".into());
 
-    app.save_view("mine".into());
+    app.work_items.save_view(&mut app.shell, "mine".into());
 
-    assert!(app.views().is_empty(), "a built-in owns its name");
-    assert_eq!(app.view_rows().len(), 6, "and no second Mine is listed");
+    assert!(
+        app.work_items.views().is_empty(),
+        "a built-in owns its name"
+    );
+    assert_eq!(
+        app.work_items.view_rows().len(),
+        6,
+        "and no second Mine is listed"
+    );
     assert_eq!(
         app.shell.notification().map(|(message, _)| message),
         Some("'Mine' is a built-in view; choose another name")
     );
 
-    app.delete_view_at(view_row(&app, "Mine"));
+    let row = view_row(&app, "Mine");
 
-    assert_eq!(app.view_rows().len(), 6);
+    app.work_items.delete_view_at(&mut app.shell, row);
+
+    assert_eq!(app.work_items.view_rows().len(), 6);
     assert_eq!(
         app.shell.notification().map(|(message, _)| message),
         Some("'Mine' is a built-in view and cannot be deleted")
@@ -185,31 +204,40 @@ fn a_built_in_view_cannot_be_saved_over_or_deleted() {
 #[test]
 fn the_views_cursor_opens_on_the_first_built_in_and_steps_over_the_headings() {
     let mut app = views_app();
-    app.set_query("tag:rust".into());
-    app.save_view("Rust work".into());
+    app.work_items.set_query(&mut app.shell, "tag:rust".into());
+    app.work_items.save_view(&mut app.shell, "Rust work".into());
 
-    app.open_views();
+    app.work_items.open_views();
     assert_eq!(
-        app.views_overlay.index, 1,
+        app.work_items.views_overlay.index, 1,
         "row zero is the Built-in heading"
     );
 
     for _ in 0..4 {
         press(&mut app, KeyCode::Down);
     }
-    assert_eq!(app.views_overlay.index, 5, "the last built-in");
+    assert_eq!(app.work_items.views_overlay.index, 5, "the last built-in");
     press(&mut app, KeyCode::Down);
     assert_eq!(
-        app.views_overlay.index, 7,
+        app.work_items.views_overlay.index, 7,
         "the Saved heading is stepped over"
     );
     press(&mut app, KeyCode::Down);
-    assert_eq!(app.views_overlay.index, 7, "and the list stops at its end");
-    assert!(app.can_delete_focused_view(), "a saved view can be deleted");
+    assert_eq!(
+        app.work_items.views_overlay.index, 7,
+        "and the list stops at its end"
+    );
+    assert!(
+        app.work_items.can_delete_focused_view(),
+        "a saved view can be deleted"
+    );
 
     press(&mut app, KeyCode::Up);
-    assert_eq!(app.views_overlay.index, 5);
-    assert!(!app.can_delete_focused_view(), "a built-in cannot");
+    assert_eq!(app.work_items.views_overlay.index, 5);
+    assert!(
+        !app.work_items.can_delete_focused_view(),
+        "a built-in cannot"
+    );
 }
 
 /// `TICKET_TUI_ME` is resolved against the last sync's display name by
@@ -218,12 +246,13 @@ fn the_views_cursor_opens_on_the_first_built_in_and_steps_over_the_headings() {
 #[test]
 fn the_mine_view_follows_the_name_the_session_is_signed_in_under() {
     let mut app = views_app();
-    app.set_show_finished(true);
-    app.apply_view_at(view_row(&app, "Mine"));
+    app.work_items.set_show_finished(&mut app.shell, true);
+    let row = view_row(&app, "Mine");
+    app.work_items.apply_view_at(&mut app.shell, row);
     assert_eq!(visible_ids(&app), vec![1, 5]);
 
     app.shell.set_me(Some("Jordan Patel".into()));
-    app.show_all(None);
+    app.work_items.show_all(&mut app.shell, None);
     assert_eq!(
         visible_ids(&app),
         vec![6, 3, 4],
@@ -231,7 +260,7 @@ fn the_mine_view_follows_the_name_the_session_is_signed_in_under() {
     );
 
     app.shell.set_me(None);
-    app.show_all(None);
+    app.work_items.show_all(&mut app.shell, None);
     assert!(
         visible_ids(&app).is_empty(),
         "with nobody signed in @me is nobody rather than everybody"
@@ -241,11 +270,12 @@ fn the_mine_view_follows_the_name_the_session_is_signed_in_under() {
 #[test]
 fn the_current_sprint_view_follows_the_iteration_dates_rather_than_a_written_path() {
     let mut app = views_app();
-    app.set_show_finished(true);
-    app.apply_view_at(view_row(&app, "Current sprint"));
+    app.work_items.set_show_finished(&mut app.shell, true);
+    let row = view_row(&app, "Current sprint");
+    app.work_items.apply_view_at(&mut app.shell, row);
 
     assert_eq!(
-        app.current_iteration(),
+        app.work_items.current_iteration(),
         Some("development\\Sprint 1".to_owned())
     );
     assert_eq!(visible_ids(&app), vec![1, 6]);
@@ -263,16 +293,16 @@ fn the_current_sprint_view_follows_the_iteration_dates_rather_than_a_written_pat
             }
         })
         .collect();
-    app.set_classification_nodes(rolled_over, None);
-    app.show_all(None);
+    app.work_items.set_classification_nodes(rolled_over, None);
+    app.work_items.show_all(&mut app.shell, None);
     assert_eq!(
         visible_ids(&app),
         vec![2, 3, 4, 5],
         "the same saved query follows the sprint over its rollover"
     );
 
-    app.set_classification_nodes(Vec::new(), None);
-    app.show_all(None);
+    app.work_items.set_classification_nodes(Vec::new(), None);
+    app.work_items.show_all(&mut app.shell, None);
     assert!(
         visible_ids(&app).is_empty(),
         "with no sprint scheduled @current is no sprint at all"
@@ -304,10 +334,10 @@ fn a_fresh_session_opens_on_the_open_backlog_with_the_finished_rows_left_out() {
         vec![1, 2, 3],
         "Completed and Removed go; Resolved is still somebody's problem"
     );
-    assert!(app.finished_hidden());
-    assert_eq!(app.hidden_finished(), 2);
+    assert!(app.work_items.finished_hidden());
+    assert_eq!(app.work_items.hidden_finished(&app.shell), 2);
 
-    let context = app.agent_context().tickets;
+    let context = app.work_items.agent_context(&app.shell).tickets;
     assert!(
         context.finished_hidden,
         "an agent is told the rows it can see are a subset"
@@ -325,26 +355,32 @@ fn showing_the_finished_tickets_puts_them_back_and_the_choice_outlives_the_run()
     let path = directory.path().join("tickets.session.json");
     let mut app = backlog_app();
 
-    app.set_show_finished(true);
+    app.work_items.set_show_finished(&mut app.shell, true);
 
     assert_eq!(visible_ids(&app), vec![1, 2, 3, 4, 5]);
-    assert!(!app.finished_hidden());
-    assert_eq!(app.hidden_finished(), 0);
-    session::save(&path, &app.snapshot_session()).unwrap();
+    assert!(!app.work_items.finished_hidden());
+    assert_eq!(app.work_items.hidden_finished(&app.shell), 0);
+    session::save(&path, &app.work_items.snapshot_session(&app.shell)).unwrap();
 
     let mut restored = backlog_app();
-    restored.restore_session(session::load(&path).unwrap());
+    restored
+        .work_items
+        .restore_session(&mut restored.shell, session::load(&path).unwrap());
     assert!(
-        restored.show_finished(),
+        restored.work_items.show_finished(),
         "the choice comes back off the session file"
     );
     assert_eq!(visible_ids(&restored), vec![1, 2, 3, 4, 5]);
 
     // The palette command and the chip's `×` are the two ways to it, and
     // they turn the same setting over.
-    restored.run_command(CommandId::ToggleFinished);
+    restored
+        .work_items
+        .run_command(&mut restored.shell, CommandId::ToggleFinished);
     assert_eq!(visible_ids(&restored), vec![1, 2, 3]);
-    restored.activate_target(PointerTarget::ShowFinished, 0, 0);
+    restored
+        .work_items
+        .activate_target(&mut restored.shell, PointerTarget::ShowFinished, 0, 0);
     assert_eq!(visible_ids(&restored), vec![1, 2, 3, 4, 5]);
 }
 
@@ -352,19 +388,20 @@ fn showing_the_finished_tickets_puts_them_back_and_the_choice_outlives_the_run()
 fn a_state_the_query_names_lists_finished_work_while_the_toggle_stays_on() {
     let mut app = backlog_app();
 
-    app.set_query("state:done".into());
+    app.work_items
+        .set_query(&mut app.shell, "state:done".into());
 
     assert_eq!(visible_ids(&app), vec![4], "state:done just works");
     assert!(
-        !app.finished_hidden(),
+        !app.work_items.finished_hidden(),
         "the query names a state, so nothing is being left out behind it"
     );
     assert!(
-        !app.show_finished(),
+        !app.work_items.show_finished(),
         "and the setting itself is untouched, so clearing the query hides them again"
     );
 
-    app.set_query(String::new());
+    app.work_items.set_query(&mut app.shell, String::new());
     assert_eq!(visible_ids(&app), vec![1, 2, 3]);
 }
 
@@ -373,16 +410,17 @@ fn the_open_sentinel_and_the_toggle_ask_for_the_same_rows_rather_than_fighting()
     let mut app = backlog_app();
     let hidden_by_the_toggle = visible_ids(&app);
 
-    app.set_query("state:@open".into());
+    app.work_items
+        .set_query(&mut app.shell, "state:@open".into());
 
     assert_eq!(
         visible_ids(&app),
         hidden_by_the_toggle,
         "the toggle is that sentinel, so writing it out changes nothing"
     );
-    assert!(!app.finished_hidden());
+    assert!(!app.work_items.finished_hidden());
 
-    app.set_show_finished(true);
+    app.work_items.set_show_finished(&mut app.shell, true);
     assert_eq!(
         visible_ids(&app),
         hidden_by_the_toggle,
@@ -393,36 +431,46 @@ fn the_open_sentinel_and_the_toggle_ask_for_the_same_rows_rather_than_fighting()
 #[test]
 fn a_built_in_view_that_names_a_state_takes_the_toggle_out_of_the_way() {
     let mut app = views_app();
-    assert!(app.finished_hidden(), "nothing named a state yet");
+    assert!(
+        app.work_items.finished_hidden(),
+        "nothing named a state yet"
+    );
 
-    app.apply_view_at(view_row(&app, "Mine"));
+    let row = view_row(&app, "Mine");
+
+    app.work_items.apply_view_at(&mut app.shell, row);
     assert_eq!(
         visible_ids(&app),
         vec![1],
         "Mine names no state, so the finished row it matches stays off the table"
     );
-    assert!(app.finished_hidden());
+    assert!(app.work_items.finished_hidden());
 
-    app.apply_view_at(view_row(&app, "Doing"));
+    let row = view_row(&app, "Doing");
+
+    app.work_items.apply_view_at(&mut app.shell, row);
     assert_eq!(visible_ids(&app), vec![1]);
     assert!(
-        !app.finished_hidden(),
+        !app.work_items.finished_hidden(),
         "state:doing is a state the query named, whatever it happens to match"
     );
 
-    app.apply_view_at(view_row(&app, "Stale"));
+    let row = view_row(&app, "Stale");
+
+    app.work_items.apply_view_at(&mut app.shell, row);
     assert_eq!(
         visible_ids(&app),
         vec![4, 3],
         "Stale asks for open work itself; the finished row is out either way"
     );
-    assert!(!app.finished_hidden());
+    assert!(!app.work_items.finished_hidden());
 }
 
 #[test]
 fn a_finished_relative_is_still_in_the_family_tree_of_the_row_that_holds_it() {
     let mut app = App::new(epic_tickets());
-    app.set_workspace_graph(epic_graph());
+    app.work_items
+        .set_workspace_graph(&mut app.shell, epic_graph());
 
     assert_eq!(
         visible_ids(&app),
@@ -431,6 +479,7 @@ fn a_finished_relative_is_still_in_the_family_tree_of_the_row_that_holds_it() {
     );
 
     let family: Vec<i64> = app
+        .work_items
         .visible_family_tree()
         .into_iter()
         .map(|entry| entry.key.id)
@@ -440,13 +489,15 @@ fn a_finished_relative_is_still_in_the_family_tree_of_the_row_that_holds_it() {
         "the epic's own children are its family however the table is filtered: {family:?}"
     );
     assert_eq!(
-        app.child_progress(&family_key(1))
+        app.work_items
+            .child_progress(&family_key(1))
             .map(|progress| progress.done),
         Some(2),
         "and they still count towards how far it has got"
     );
 
-    app.jump_to_ticket(&family_key(2));
+    app.work_items
+        .jump_to_ticket(&mut app.shell, &family_key(2));
     assert_eq!(
         app.shell.notification(),
         Some((
@@ -462,7 +513,8 @@ fn the_facets_count_what_the_table_shows_but_still_offer_the_finished_states() {
     let app = backlog_app();
 
     let states: Vec<(String, usize)> = app
-        .facets_for(FilterField::State)
+        .work_items
+        .facets_for(&app.shell, FilterField::State)
         .into_iter()
         .map(|facet| (facet.value, facet.count))
         .collect();
@@ -472,7 +524,8 @@ fn the_facets_count_what_the_table_shows_but_still_offer_the_finished_states() {
     );
 
     let types: Vec<usize> = app
-        .facets_for(FilterField::Type)
+        .work_items
+        .facets_for(&app.shell, FilterField::Type)
         .into_iter()
         .map(|facet| facet.count)
         .collect();
@@ -488,24 +541,34 @@ fn sentinels_come_back_from_the_session_file_as_the_chips_they_were_typed_as() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("tickets.session.json");
     let mut app = views_app();
-    app.set_query("assignee:@me iteration:@current".into());
-    app.save_view("My sprint".into());
-    session::save(&path, &app.snapshot_session()).unwrap();
+    app.work_items
+        .set_query(&mut app.shell, "assignee:@me iteration:@current".into());
+    app.work_items.save_view(&mut app.shell, "My sprint".into());
+    session::save(&path, &app.work_items.snapshot_session(&app.shell)).unwrap();
 
     let mut restored = views_app();
-    restored.restore_session(session::load(&path).unwrap());
+    restored
+        .work_items
+        .restore_session(&mut restored.shell, session::load(&path).unwrap());
 
-    assert_eq!(restored.query(), "assignee:@me iteration:@current");
-    assert_eq!(restored.views()[0].name, "My sprint");
-    assert_eq!(restored.views()[0].query, "assignee:@me iteration:@current");
+    assert_eq!(
+        restored.work_items.query(),
+        "assignee:@me iteration:@current"
+    );
+    assert_eq!(restored.work_items.views()[0].name, "My sprint");
+    assert_eq!(
+        restored.work_items.views()[0].query,
+        "assignee:@me iteration:@current"
+    );
     let labels: Vec<String> = restored
+        .work_items
         .filter_tokens()
         .iter()
         .map(FilterToken::chip_label)
         .collect();
     assert_eq!(labels, vec!["assignee:@me", "iteration:@current"]);
 
-    let context = restored.agent_context();
+    let context = restored.work_items.agent_context(&restored.shell);
     assert_eq!(context.search.query, "assignee:@me iteration:@current");
     assert_eq!(
         context.search.filters,
@@ -524,30 +587,34 @@ fn sentinels_come_back_from_the_session_file_as_the_chips_they_were_typed_as() {
 fn a_stored_view_never_takes_a_name_a_built_in_owns() {
     let mut app = views_app();
 
-    app.restore_session(Session {
-        views: vec![NamedView {
-            name: "Mine".into(),
-            query: "tag:rust".into(),
-            sort_field: SortField::Changed,
-            sort_direction: SortDirection::Descending,
-            search_order: SearchOrder::Relevance,
-            row_density: RowDensity::Compact,
-            columns: Vec::new(),
-            auto_hide: true,
-        }],
-        ..Session::default()
-    });
+    app.work_items.restore_session(
+        &mut app.shell,
+        Session {
+            views: vec![NamedView {
+                name: "Mine".into(),
+                query: "tag:rust".into(),
+                sort_field: SortField::Changed,
+                sort_direction: SortDirection::Descending,
+                search_order: SearchOrder::Relevance,
+                row_density: RowDensity::Compact,
+                columns: Vec::new(),
+                auto_hide: true,
+            }],
+            ..Session::default()
+        },
+    );
 
-    assert!(app.views().is_empty());
+    assert!(app.work_items.views().is_empty());
     assert_eq!(
-        app.view_rows()
+        app.work_items
+            .view_rows()
             .iter()
             .filter(|row| row.label == "Mine")
             .count(),
         1,
         "a session written before the built-ins existed lists Mine once"
     );
-    assert_eq!(app.view_rows()[1].query, "assignee:@me");
+    assert_eq!(app.work_items.view_rows()[1].query, "assignee:@me");
 }
 
 #[test]
@@ -555,14 +622,23 @@ fn date_filters_come_back_from_the_session_file_as_the_chips_they_were_typed_as(
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("tickets.session.json");
     let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
-    app.set_query("changed:<7d created:>2026-08-01 rust".into());
-    session::save(&path, &app.snapshot_session()).unwrap();
+    app.work_items.set_query(
+        &mut app.shell,
+        "changed:<7d created:>2026-08-01 rust".into(),
+    );
+    session::save(&path, &app.work_items.snapshot_session(&app.shell)).unwrap();
 
     let mut restored = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
-    restored.restore_session(session::load(&path).unwrap());
+    restored
+        .work_items
+        .restore_session(&mut restored.shell, session::load(&path).unwrap());
 
-    assert_eq!(restored.query(), "changed:<7d created:>2026-08-01 rust");
+    assert_eq!(
+        restored.work_items.query(),
+        "changed:<7d created:>2026-08-01 rust"
+    );
     let labels: Vec<String> = restored
+        .work_items
         .filter_tokens()
         .iter()
         .map(FilterToken::chip_label)
@@ -583,7 +659,7 @@ fn the_stale_threshold_flags_open_work_past_it_and_never_finished_work() {
     let now = crate::timestamp::ts("2026-08-29T12:00:00Z");
     let app = App::new(vec![]);
 
-    assert_eq!(app.stale_days(), DEFAULT_STALE_DAYS);
+    assert_eq!(app.work_items.stale_days(), DEFAULT_STALE_DAYS);
     assert_eq!(
         BUILTIN_VIEWS
             .iter()
@@ -593,23 +669,27 @@ fn the_stale_threshold_flags_open_work_past_it_and_never_finished_work() {
         "the built-in view asks the question the highlight answers"
     );
     assert_eq!(
-        app.stale_age_days_at(&aged(1, "To Do", "2026-08-08T12:00:00Z"), now),
+        app.work_items
+            .stale_age_days_at(&aged(1, "To Do", "2026-08-08T12:00:00Z"), now),
         Some(21),
         "three weeks untouched is flagged, and the pane says how long"
     );
     assert_eq!(
-        app.stale_age_days_at(&aged(2, "To Do", "2026-08-15T12:00:00Z"), now),
+        app.work_items
+            .stale_age_days_at(&aged(2, "To Do", "2026-08-15T12:00:00Z"), now),
         None,
         "exactly fourteen days has not crossed the threshold yet"
     );
     assert_eq!(
-        app.stale_age_days_at(&aged(3, "To Do", "2026-08-15T11:59:59Z"), now),
+        app.work_items
+            .stale_age_days_at(&aged(3, "To Do", "2026-08-15T11:59:59Z"), now),
         Some(14),
         "a second past it has"
     );
     for finished in ["Done", "Closed", "Removed"] {
         assert_eq!(
-            app.stale_age_days_at(&aged(4, finished, "2025-01-01T00:00:00Z"), now),
+            app.work_items
+                .stale_age_days_at(&aged(4, finished, "2025-01-01T00:00:00Z"), now),
             None,
             "{finished} work is never stale, whatever its age"
         );
@@ -622,32 +702,52 @@ fn the_stale_threshold_takes_the_flag_over_the_session_and_the_palette_over_both
     let three_weeks_old = aged(1, "To Do", "2026-08-08T12:00:00Z");
     let mut app = App::new(vec![]);
 
-    app.set_stale_days(30);
-    let session = app.snapshot_session();
+    app.work_items.set_stale_days(&mut app.shell, 30);
+    let session = app.work_items.snapshot_session(&app.shell);
     let mut restored = App::new(vec![]);
-    restored.restore_session(session.clone());
-    assert_eq!(restored.stale_days(), 30, "the session remembers it");
-    assert_eq!(restored.stale_age_days_at(&three_weeks_old, now), None);
+    restored
+        .work_items
+        .restore_session(&mut restored.shell, session.clone());
+    assert_eq!(
+        restored.work_items.stale_days(),
+        30,
+        "the session remembers it"
+    );
+    assert_eq!(
+        restored.work_items.stale_age_days_at(&three_weeks_old, now),
+        None
+    );
 
     // `--stale-days`, or TICKET_TUI_STALE_DAYS, is applied after the
     // session has been restored, and beats what it carried.
-    restored.override_stale_days(7);
-    assert_eq!(restored.stale_days(), 7);
-    assert_eq!(restored.stale_age_days_at(&three_weeks_old, now), Some(21));
+    restored.work_items.override_stale_days(7);
+    assert_eq!(restored.work_items.stale_days(), 7);
     assert_eq!(
-        restored.snapshot_session().stale_days,
+        restored.work_items.stale_age_days_at(&three_weeks_old, now),
+        Some(21)
+    );
+    assert_eq!(
+        restored
+            .work_items
+            .snapshot_session(&restored.shell)
+            .stale_days,
         30,
         "a flag passed once does not quietly become the setting"
     );
 
-    restored.run_command(CommandId::SetStaleThreshold);
+    restored
+        .work_items
+        .run_command(&mut restored.shell, CommandId::SetStaleThreshold);
     assert_eq!(
-        restored.stale_days(),
+        restored.work_items.stale_days(),
         14,
         "the palette steps up from the seven days in force"
     );
     assert_eq!(
-        restored.snapshot_session().stale_days,
+        restored
+            .work_items
+            .snapshot_session(&restored.shell)
+            .stale_days,
         14,
         "and the palette is what gets remembered"
     );
@@ -659,8 +759,9 @@ fn setting_the_stale_threshold_steps_through_the_choices_and_names_the_query() {
 
     let steps: Vec<u16> = (0..5)
         .map(|_| {
-            app.run_command(CommandId::SetStaleThreshold);
-            app.stale_days()
+            app.work_items
+                .run_command(&mut app.shell, CommandId::SetStaleThreshold);
+            app.work_items.stale_days()
         })
         .collect();
     assert_eq!(
@@ -683,18 +784,25 @@ fn setting_the_stale_threshold_steps_through_the_choices_and_names_the_query() {
 fn a_threshold_of_no_days_at_all_is_held_at_the_one_day_floor() {
     let mut app = App::new(vec![]);
 
-    app.override_stale_days(0);
-    assert_eq!(app.stale_days(), 1);
+    app.work_items.override_stale_days(0);
+    assert_eq!(app.work_items.stale_days(), 1);
 
-    app.set_stale_days(0);
-    assert_eq!(app.stale_days(), 1);
+    app.work_items.set_stale_days(&mut app.shell, 0);
+    assert_eq!(app.work_items.stale_days(), 1);
 
     let mut restored = App::new(vec![]);
-    restored.restore_session(Session {
-        stale_days: 0,
-        ..Session::default()
-    });
-    assert_eq!(restored.stale_days(), 1, "including one edited by hand");
+    restored.work_items.restore_session(
+        &mut restored.shell,
+        Session {
+            stale_days: 0,
+            ..Session::default()
+        },
+    );
+    assert_eq!(
+        restored.work_items.stale_days(),
+        1,
+        "including one edited by hand"
+    );
 }
 
 /// A sprint of seven work items — two people and one pile nobody owns,
@@ -737,23 +845,28 @@ fn sprint_app() -> App {
 
 /// What the cursor is sitting on in the open sprint summary.
 fn summary_cursor(app: &App) -> SummaryRowKind {
-    app.summary_rows()[app.sprint_overlay.index].kind
+    app.work_items.summary_rows()[app.work_items.sprint_overlay.index].kind
 }
 
 #[test]
 fn the_sprint_summary_counts_every_row_including_the_finished_ones_the_table_hides() {
     let mut app = sprint_app();
-    assert!(app.finished_hidden(), "the table leaves finished work out");
+    assert!(
+        app.work_items.finished_hidden(),
+        "the table leaves finished work out"
+    );
     assert_eq!(
         visible_ids(&app),
         vec![1, 2, 5, 8, 7],
         "the three Done rows are off the table"
     );
 
-    app.run_command(CommandId::SprintSummary);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SprintSummary);
 
-    assert_eq!(app.mode, AppMode::Sprint);
+    assert_eq!(app.work_items.mode, WorkItemMode::Sprint);
     let summary = app
+        .work_items
         .sprint_summary()
         .expect("the selected row names a sprint");
     assert_eq!(summary.iteration, "development\\Sprint 1");
@@ -785,17 +898,19 @@ fn the_sprint_summary_counts_every_row_including_the_finished_ones_the_table_hid
 #[test]
 fn the_summary_stale_figure_is_the_one_the_changed_column_paints() {
     let mut app = sprint_app();
-    app.run_command(CommandId::SprintSummary);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SprintSummary);
     let now = Timestamp::now();
 
-    let summary = app.sprint_summary().expect("a sprint to count");
+    let summary = app.work_items.sprint_summary().expect("a sprint to count");
 
     assert_eq!(
         summary.stale,
-        app.tickets()
+        app.work_items
+            .tickets()
             .iter()
             .filter(|ticket| ticket.iteration_path == summary.iteration)
-            .filter(|ticket| is_stale(ticket, app.stale_days(), now))
+            .filter(|ticket| is_stale(ticket, app.work_items.stale_days(), now))
             .count(),
         "the summary and the highlight ask the same question of the same rows"
     );
@@ -810,22 +925,29 @@ fn the_summary_stale_figure_is_the_one_the_changed_column_paints() {
 fn the_summary_falls_back_to_the_sprint_the_selected_row_is_planned_into() {
     let mut app = sprint_app();
     assert_eq!(
-        app.current_iteration(),
+        app.work_items.current_iteration(),
         None,
         "no iteration is scheduled, which is every project whose sprints carry no dates"
     );
 
-    app.select_row(3);
-    assert_eq!(app.selected_ticket().map(|ticket| ticket.key.id), Some(8));
-    app.run_command(CommandId::SprintSummary);
+    app.work_items.select_row(&mut app.shell, 3);
+    assert_eq!(
+        app.work_items.selected_ticket().map(|ticket| ticket.key.id),
+        Some(8)
+    );
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SprintSummary);
 
     assert_eq!(
-        app.sprint_overlay.iteration.as_deref(),
+        app.work_items.sprint_overlay.iteration.as_deref(),
         Some("development\\Q3")
     );
-    assert_eq!(app.sprint_summary().expect("a sprint").items(), 1);
     assert_eq!(
-        app.summary_title(),
+        app.work_items.sprint_summary().expect("a sprint").items(),
+        1
+    );
+    assert_eq!(
+        app.work_items.summary_title(),
         " Sprint summary \u{b7} Q3 ",
         "the title names the sprint, not the path it hangs off"
     );
@@ -835,37 +957,48 @@ fn the_summary_falls_back_to_the_sprint_the_selected_row_is_planned_into() {
 fn the_summary_says_so_when_there_is_no_sprint_and_no_row_to_borrow_one_from() {
     let mut app = App::new(vec![]);
 
-    app.run_command(CommandId::SprintSummary);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SprintSummary);
 
-    assert_eq!(app.mode, AppMode::Sprint, "the overlay opens either way");
-    assert_eq!(app.sprint_overlay.iteration, None);
-    assert!(app.sprint_summary().is_none());
     assert_eq!(
-        app.summary_rows()
+        app.work_items.mode,
+        WorkItemMode::Sprint,
+        "the overlay opens either way"
+    );
+    assert_eq!(app.work_items.sprint_overlay.iteration, None);
+    assert!(app.work_items.sprint_summary().is_none());
+    assert_eq!(
+        app.work_items
+            .summary_rows()
             .iter()
             .map(|row| row.text.clone())
             .collect::<Vec<_>>(),
         NO_SPRINT_NOTICE.map(str::to_owned).to_vec(),
         "it explains itself rather than painting an empty grid"
     );
-    assert_eq!(app.summary_title(), " Sprint summary ");
+    assert_eq!(app.work_items.summary_title(), " Sprint summary ");
 
     press(&mut app, KeyCode::Right);
     assert_eq!(
-        app.sprint_overlay.iteration, None,
+        app.work_items.sprint_overlay.iteration, None,
         "with no tree cached there is nowhere to step to"
     );
     assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
-    assert_eq!(app.mode, AppMode::Sprint, "and nothing to filter to");
-    assert!(app.query().is_empty());
+    assert_eq!(
+        app.work_items.mode,
+        WorkItemMode::Sprint,
+        "and nothing to filter to"
+    );
+    assert!(app.work_items.query().is_empty());
     press(&mut app, KeyCode::Esc);
-    assert_eq!(app.mode, AppMode::Browse);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
 }
 
 #[test]
 fn the_summary_cursor_opens_on_the_first_grid_row_and_steps_over_the_rest() {
     let mut app = sprint_app();
-    app.run_command(CommandId::SprintSummary);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SprintSummary);
 
     assert_eq!(
         summary_cursor(&app),
@@ -894,24 +1027,25 @@ fn the_summary_cursor_opens_on_the_first_grid_row_and_steps_over_the_rest() {
 #[test]
 fn enter_on_a_grid_row_filters_the_table_to_that_persons_sprint_work() {
     let mut app = sprint_app();
-    app.run_command(CommandId::SprintSummary);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SprintSummary);
     assert_eq!(summary_cursor(&app), SummaryRowKind::Assignee(0));
 
     press(&mut app, KeyCode::Enter);
 
     assert_eq!(
-        app.mode,
-        AppMode::Browse,
+        app.work_items.mode,
+        WorkItemMode::Browse,
         "the overlay closes so the rows it counted are there to look at"
     );
     assert_eq!(
-        app.query(),
+        app.work_items.query(),
         "assignee:Avery iteration:\"development\\\\Sprint 1\"",
         "the full path the grid counted over, so the table shows exactly those rows"
     );
     assert_eq!(visible_ids(&app), vec![1, 2]);
     assert_eq!(
-        app.hidden_finished(),
+        app.work_items.hidden_finished(&app.shell),
         2,
         "the summary counted Avery's two finished items; the table's own rule \
              holds them back, and the chip over the table says how many"
@@ -925,7 +1059,8 @@ fn enter_on_a_grid_row_filters_the_table_to_that_persons_sprint_work() {
 #[test]
 fn enter_on_the_unassigned_row_asks_for_the_work_nobody_owns() {
     let mut app = sprint_app();
-    app.run_command(CommandId::SprintSummary);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SprintSummary);
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Down);
     assert_eq!(summary_cursor(&app), SummaryRowKind::Assignee(2));
@@ -933,7 +1068,7 @@ fn enter_on_the_unassigned_row_asks_for_the_work_nobody_owns() {
     press(&mut app, KeyCode::Enter);
 
     assert_eq!(
-        app.query(),
+        app.work_items.query(),
         "assignee:Unassigned iteration:\"development\\\\Sprint 1\""
     );
     assert_eq!(visible_ids(&app), vec![7]);
@@ -942,7 +1077,8 @@ fn enter_on_the_unassigned_row_asks_for_the_work_nobody_owns() {
 #[test]
 fn enter_on_the_total_row_asks_for_the_whole_sprint() {
     let mut app = sprint_app();
-    app.run_command(CommandId::SprintSummary);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SprintSummary);
     for _ in 0..3 {
         press(&mut app, KeyCode::Down);
     }
@@ -951,7 +1087,7 @@ fn enter_on_the_total_row_asks_for_the_whole_sprint() {
     press(&mut app, KeyCode::Enter);
 
     assert_eq!(
-        app.query(),
+        app.work_items.query(),
         "iteration:\"development\\\\Sprint 1\"",
         "nobody's name on it"
     );
@@ -972,10 +1108,12 @@ fn two_sprints_sharing_a_leaf_name_stay_apart_when_the_summary_filters() {
         ..ticket(9, "Another sprint of the same name", "2026-08-21T00:00:00Z")
     });
     let mut app = App::new(tickets);
-    app.select_row(0);
+    app.work_items.select_row(&mut app.shell, 0);
 
-    app.run_command(CommandId::SprintSummary);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SprintSummary);
     let summary = app
+        .work_items
         .sprint_summary()
         .expect("the selected row names a sprint");
     assert_eq!(summary.iteration, "development\\Sprint 1");
@@ -991,7 +1129,10 @@ fn two_sprints_sharing_a_leaf_name_stay_apart_when_the_summary_filters() {
     assert_eq!(summary_cursor(&app), SummaryRowKind::Total);
     press(&mut app, KeyCode::Enter);
 
-    assert_eq!(app.query(), "iteration:\"development\\\\Sprint 1\"");
+    assert_eq!(
+        app.work_items.query(),
+        "iteration:\"development\\\\Sprint 1\""
+    );
     assert_eq!(
         visible_ids(&app),
         vec![1, 2, 5, 7],
@@ -1002,35 +1143,40 @@ fn two_sprints_sharing_a_leaf_name_stay_apart_when_the_summary_filters() {
 #[test]
 fn left_and_right_walk_the_cached_iterations_and_stop_at_either_end() {
     let mut app = sprint_app();
-    app.set_classification_nodes(classification_trees(), None);
-    app.select_row(3);
-    assert_eq!(app.selected_ticket().map(|ticket| ticket.key.id), Some(8));
-
-    app.run_command(CommandId::SprintSummary);
+    app.work_items
+        .set_classification_nodes(classification_trees(), None);
+    app.work_items.select_row(&mut app.shell, 3);
     assert_eq!(
-        app.sprint_overlay.iteration.as_deref(),
+        app.work_items.selected_ticket().map(|ticket| ticket.key.id),
+        Some(8)
+    );
+
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SprintSummary);
+    assert_eq!(
+        app.work_items.sprint_overlay.iteration.as_deref(),
         Some("development\\Sprint 1"),
         "a scheduled sprint wins over the one the selected row sits in"
     );
 
     press(&mut app, KeyCode::Right);
     assert_eq!(
-        app.sprint_overlay.iteration.as_deref(),
+        app.work_items.sprint_overlay.iteration.as_deref(),
         Some("development\\Q3")
     );
     assert_eq!(
-        app.sprint_summary().expect("a sprint").items(),
+        app.work_items.sprint_summary().expect("a sprint").items(),
         1,
         "and the grid follows the step"
     );
     press(&mut app, KeyCode::Char('l'));
     assert_eq!(
-        app.sprint_overlay.iteration.as_deref(),
+        app.work_items.sprint_overlay.iteration.as_deref(),
         Some("development\\Q3\\Sprint 7")
     );
     press(&mut app, KeyCode::Right);
     assert_eq!(
-        app.sprint_overlay.iteration.as_deref(),
+        app.work_items.sprint_overlay.iteration.as_deref(),
         Some("development\\Q3\\Sprint 7"),
         "the last one is the last one, rather than wrapping round"
     );
@@ -1039,7 +1185,7 @@ fn left_and_right_walk_the_cached_iterations_and_stop_at_either_end() {
         press(&mut app, KeyCode::Char('h'));
     }
     assert_eq!(
-        app.sprint_overlay.iteration.as_deref(),
+        app.work_items.sprint_overlay.iteration.as_deref(),
         Some("development\\Sprint 1"),
         "and the project root is somewhere to file work, not a sprint to stop on"
     );

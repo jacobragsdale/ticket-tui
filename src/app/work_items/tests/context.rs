@@ -9,14 +9,15 @@ fn agent_context_describes_the_live_ticket_workspace() {
     ]);
     app.shell
         .configure_database(PathBuf::from("/tmp/tickets.sqlite3"), 0);
-    app.set_table_viewport(2);
-    app.set_query("state:Active".into());
-    app.toggle_row_selection();
+    app.work_items.set_table_viewport(2);
+    app.work_items
+        .set_query(&mut app.shell, "state:Active".into());
+    app.work_items.toggle_row_selection();
     app.shell.focus = Focus::Details;
-    app.mode = AppMode::Filter;
-    app.active_view = Some("Active work".into());
+    app.work_items.mode = WorkItemMode::Filter;
+    app.work_items.active_view = Some("Active work".into());
 
-    let context = app.agent_context();
+    let context = app.work_items.agent_context(&app.shell);
 
     assert_eq!(context.database_path, "/tmp/tickets.sqlite3");
     assert_eq!(context.mode, "filter");
@@ -31,11 +32,11 @@ fn agent_context_describes_the_live_ticket_workspace() {
     assert_eq!(context.checked_tickets.len(), 1);
     assert_eq!(context.checked_tickets[0].id, 3);
 
-    let mut mine = app.tickets()[0].clone();
+    let mut mine = app.work_items.tickets()[0].clone();
     mine.assigned_to = Some("  avery CHEN ".into());
-    let mut theirs = app.tickets()[1].clone();
+    let mut theirs = app.work_items.tickets()[1].clone();
     theirs.assigned_to = Some("Jordan Patel".into());
-    let mut unassigned = app.tickets()[1].clone();
+    let mut unassigned = app.work_items.tickets()[1].clone();
     unassigned.assigned_to = None;
     assert!(
         !app.shell.is_mine(&mine),
@@ -48,14 +49,17 @@ fn agent_context_describes_the_live_ticket_workspace() {
     assert!(app.shell.is_mine(&mine), "casing and padding do not matter");
     assert!(!app.shell.is_mine(&theirs));
     assert!(!app.shell.is_mine(&unassigned));
-    assert_eq!(app.agent_context().me.as_deref(), Some("Avery Chen"));
+    assert_eq!(
+        app.work_items.agent_context(&app.shell).me.as_deref(),
+        Some("Avery Chen")
+    );
 }
 
 #[test]
 fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() {
     let mut app = App::new(vec![ticket(1, "Alpha", "2026-01-01T00:00:00Z")]);
 
-    let offline = app.agent_context().sync;
+    let offline = app.work_items.agent_context(&app.shell).sync;
     assert!(offline.offline, "a run with no organization cannot sync");
     assert_eq!(offline.organization, None);
     assert_eq!(offline.project, None);
@@ -71,7 +75,7 @@ fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() 
     }));
     app.shell.begin_sync();
 
-    let running = app.agent_context().sync;
+    let running = app.work_items.agent_context(&app.shell).sync;
     assert!(!running.offline);
     assert_eq!(running.organization.as_deref(), Some("example-org"));
     assert_eq!(running.project.as_deref(), Some("atlas"));
@@ -80,7 +84,7 @@ fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() 
 
     app.shell.finish_sync();
 
-    let succeeded = app.agent_context().sync;
+    let succeeded = app.work_items.agent_context(&app.shell).sync;
     assert!(!succeeded.in_progress);
     assert_eq!(succeeded.last_error, None);
     let landed = succeeded.last_success_at.expect("a pull landed");
@@ -92,7 +96,7 @@ fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() 
     app.shell.begin_sync();
     app.shell.fail_sync("network unreachable", true);
 
-    let failed = app.agent_context().sync;
+    let failed = app.work_items.agent_context(&app.shell).sync;
     assert!(!failed.in_progress);
     assert_eq!(failed.last_error.as_deref(), Some("network unreachable"));
     assert_eq!(
@@ -103,7 +107,7 @@ fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() 
 
     app.shell.finish_sync();
     assert_eq!(
-        app.agent_context().sync.last_error,
+        app.work_items.agent_context(&app.shell).sync.last_error,
         None,
         "the next success clears the error"
     );
@@ -114,7 +118,7 @@ fn pending_edits_are_published_while_in_flight_and_gone_once_answered() {
     let mut app = editing_app();
     let request = edit_request(&mut app, FieldEdit::state("Doing"));
 
-    let pending = app.agent_context().pending_edits;
+    let pending = app.work_items.agent_context(&app.shell).pending_edits;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, request.key.id);
     assert_eq!(pending[0].field, "State");
@@ -125,27 +129,40 @@ fn pending_edits_are_published_while_in_flight_and_gone_once_answered() {
         pending[0].since
     );
 
-    app.apply_edit(EditApplied {
+    let applied = EditApplied {
         ticket: stored_copy(&app, &request.key, "Doing"),
         relations: Vec::new(),
         edit: request.edit,
-    });
+    };
+    app.work_items.apply_edit(&mut app.shell, applied);
     assert!(
-        app.agent_context().pending_edits.is_empty(),
+        app.work_items
+            .agent_context(&app.shell)
+            .pending_edits
+            .is_empty(),
         "an edit that landed is no longer in flight"
     );
 
     let refused = edit_request(&mut app, FieldEdit::priority(1));
-    assert_eq!(app.agent_context().pending_edits.len(), 1);
+    assert_eq!(
+        app.work_items.agent_context(&app.shell).pending_edits.len(),
+        1
+    );
 
-    app.reject_edit(&EditRejection {
-        key: refused.key,
-        label: "Priority".into(),
-        conflict: false,
-        message: "field is read only".into(),
-    });
+    app.work_items.reject_edit(
+        &mut app.shell,
+        &EditRejection {
+            key: refused.key,
+            label: "Priority".into(),
+            conflict: false,
+            message: "field is read only".into(),
+        },
+    );
     assert!(
-        app.agent_context().pending_edits.is_empty(),
+        app.work_items
+            .agent_context(&app.shell)
+            .pending_edits
+            .is_empty(),
         "a refused edit is no longer in flight either"
     );
 }

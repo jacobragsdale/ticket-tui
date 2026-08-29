@@ -6,39 +6,46 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
 
 ## State of `main`
 
-- The four-tab roadmap is under way: #661 is Done, #662 is next. Everything
-  before it is merged. `cargo fmt --check`, `cargo clippy --all-targets
+- The four-tab roadmap is under way: #661 and #662 are Done, #663 is next.
+  Everything before it is merged. `cargo fmt --check`, `cargo clippy --all-targets
   --all-features -D warnings`, `cargo test --all-targets` (415 tests, and again
   under `NO_COLOR=1`) and `cargo build --release` are clean.
 - Database schema is `PRAGMA user_version = 12`. The first launch of this build
   rebuilds any older database and does one full pull automatically.
 
-## The module tree (#661)
+## The module tree (#661, #662)
 
-`src/app.rs` and `src/ui.rs` are directory modules now; every file is under
-1,500 lines. Rust allows several `impl App` blocks across the files of one
-module, so each file below carries its own. Siblings reach each other through
-`use super::*` and the import block at the top of each `mod.rs`; what a sibling
-needs is `pub(super)`, and what the crate needs stays `pub`.
+`src/app.rs` and `src/ui.rs` are directory modules; every file is under 1,500
+lines. `App` is now only `{ shell, work_items }`: `Shell` is the state every
+screen shares and `WorkItemsScreen` is the first `Screen`. A screen method that
+needs the shell takes `shell: &mut Shell` (or `&Shell`) as its first argument
+after the receiver; nothing else reaches across.
 
-    src/app/mod.rs      App, its state, the key map and the mouse entry point
-        context.rs      the JSON context file agents read
-        edits.rs        edits, undo, bulk, comments, reparenting, deletion
-        family.rs       the family tree, its cursor, child progress
-        forms.rs        the new-work-item form
-        history.rs      bookmarks, the checked set, copy, export, the session
-        pickers.rs      state, priority, assignee, parent, node, type pickers
-        pointer.rs      hover, press, drag, release, the divider
-        query.rs        the search box, filters, facets, columns, commands
-        views.rs        saved and built-in views, the sprint summary, staleness
-        tests/          the same split, plus tests/deletes.rs
-    src/ui/mod.rs       render, the layout, the theme, the footer, anchoring
+    src/app/mod.rs      App, AppAction, and the event entry points
+        screen.rs       the Screen trait every tab implements
+        shell.rs        focus, the pointer, the notification, the layout, sync
+        work_items/     the work items screen
+            mod.rs      WorkItemsScreen, WorkItemMode, the key map, the footer
+            context.rs  the JSON context file agents read
+            edits.rs    edits, undo, bulk, comments, reparenting, deletion
+            family.rs   the family tree, its cursor, child progress
+            forms.rs    the new-work-item form
+            history.rs  bookmarks, the checked set, copy, export, the session
+            pickers.rs  state, priority, assignee, parent, node, type pickers
+            pointer.rs  hover, press, drag, release, the divider
+            query.rs    the search box, filters, facets, columns, commands
+            views.rs    saved and built-in views, the sprint summary, staleness
+            tests/      the same split, plus tests/deletes.rs
+    src/ui/mod.rs       render, render_screen, the layout, the theme, anchoring
         details.rs      the details pane and the family tree it draws
         overlays.rs     the list overlays, chips and facet bar
         pickers.rs      pickers, the prompt, the form, the delete confirmation
         table.rs        the table, its cells and their colours
         widgets.rs      the modal frame, query field, controls, scrollbar, paint
         tests/          the same split
+
+Every ui function takes `screen` and `shell` rather than `app`, and
+`ui::render` goes through `App::screen()` and `Screen::render`.
 
 ## Shipped 2026-08-29
 
@@ -119,8 +126,8 @@ subcommands and context v3.
 
 ## What is left
 
-The roadmap above. #661 is Done; start at **#662**, then the rest of Epic 656 in
-order, then #668 before anything in Epic 659. Query round-tripping was an
+The roadmap above. #661 and #662 are Done; start at **#663**, then the rest of
+Epic 656 in order, then #668 before anything in Epic 659. Query round-tripping was an
 earlier loose end and is fixed: `quote_if_needed` now escapes `\` and `take_quoted`
 unescapes it, so `iteration:"development\Sprint 1"` survives
 `format_query`/`parse_query` (#654), and a backslash typed once inside a quoted

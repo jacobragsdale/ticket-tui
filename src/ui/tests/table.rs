@@ -18,17 +18,17 @@ fn table_clicks_open_tickets_sort_columns_and_follow_the_row_density() {
     let action = click(&mut app, id.x, id.y);
 
     assert!(matches!(action, crate::app::AppAction::OpenUrl(_)));
-    assert_eq!(app.selected_row(), Some(1));
+    assert_eq!(app.work_items.selected_row(), Some(1));
 
     let id_header = header_rect(&app, SortField::Id);
     click(&mut app, id_header.x, id_header.y);
-    assert_eq!(app.sort_field, SortField::Id);
+    assert_eq!(app.work_items.sort_field, SortField::Id);
 
     app.handle_key(crossterm::event::KeyEvent::new(
         crossterm::event::KeyCode::Char('c'),
         KeyModifiers::NONE,
     ));
-    assert_eq!(app.row_density, RowDensity::Comfortable);
+    assert_eq!(app.work_items.row_density, RowDensity::Comfortable);
     let text = render_text(110, 24, &mut app);
     assert!(text.contains("[backend]"), "comfortable rows show tags");
     assert!(text.contains("[rust]"));
@@ -36,7 +36,7 @@ fn table_clicks_open_tickets_sort_columns_and_follow_the_row_density() {
     let body = table_body(&app);
     click(&mut app, body.x + 8, body.y + 2);
     assert_eq!(
-        app.selected_row(),
+        app.work_items.selected_row(),
         Some(1),
         "a comfortable row spans two lines"
     );
@@ -62,7 +62,7 @@ fn states_and_types_stay_distinct_while_completed_rows_fade() {
         ticket_at(10_003, "Gamma", "Issue", "Done", "2026-03-01T00:00:00Z"),
     ]);
     // How a finished row is painted, so it has to be on the table to look at.
-    app.set_show_finished(true);
+    app.work_items.set_show_finished(&mut app.shell, true);
     if theme() != &Theme::new(true) {
         // NO_COLOR renders every colour as Reset, so only compare palettes.
         let states = column_cell_colors(&mut app, SortField::State, 3);
@@ -119,7 +119,7 @@ fn states_and_types_stay_distinct_while_completed_rows_fade() {
     // The row highlight is painted over the faded cells, so a selected done
     // row stays readable.
     click(&mut app, title_x, body.y + 2);
-    assert_eq!(app.selected_row(), Some(2));
+    assert_eq!(app.work_items.selected_row(), Some(2));
     // Park the pointer on another row so the hover tint does not cover the
     // selection background this assertion is about.
     app.handle_mouse(mouse(MouseEventKind::Moved, title_x, body.y));
@@ -242,7 +242,7 @@ fn the_changed_cell_flags_work_left_untouched_and_never_finished_work() {
     ]);
     // The finished row is the point of the last two assertions, and the
     // table leaves finished work out until asked, so ask.
-    app.set_show_finished(true);
+    app.work_items.set_show_finished(&mut app.shell, true);
 
     let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
@@ -295,12 +295,13 @@ fn tag_colours_are_stable_and_shared_by_the_table_and_details() {
 
     let mut app = App::new(vec![ticket()]);
     let tags = app
+        .work_items
         .layout
         .columns
         .iter()
         .position(|column| column.id == SortField::Tags)
         .expect("tags column");
-    app.layout.toggle_visible(tags);
+    app.work_items.layout.toggle_visible(tags);
 
     let mut terminal = Terminal::new(TestBackend::new(150, 24)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
@@ -339,7 +340,7 @@ fn find_buffer_text(
 #[test]
 fn underlines_mark_search_matches_and_stop_after_the_id_digits() {
     let mut app = App::new(vec![ticket()]);
-    app.set_query("search".into());
+    app.work_items.set_query(&mut app.shell, "search".into());
     await_search(&mut app);
 
     let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();

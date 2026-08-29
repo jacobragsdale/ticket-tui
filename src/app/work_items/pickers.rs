@@ -101,7 +101,7 @@ pub struct ParentPicker {
 impl Default for ParentPicker {
     /// A picker nobody has opened yet, over no work item: id `0`, the same
     /// stand-in [`EditScope::default`] uses for a scope nothing has been
-    /// chosen for. [`App::open_parent_picker`] fills it in before it is read.
+    /// chosen for. [`WorkItemsScreen::open_parent_picker`] fills it in before it is read.
     fn default() -> Self {
         Self {
             candidates: Vec::new(),
@@ -238,7 +238,7 @@ pub(super) fn fuzzy_contains(haystack: &str, query: &str) -> bool {
         .all(|wanted| remaining.any(|found| found == wanted))
 }
 
-impl App {
+impl WorkItemsScreen {
     /// The people a previous session cached, read out of the database as the
     /// TUI opens so the first assignee picker of the run is already complete.
     pub fn set_identities(&mut self, identities: Vec<Identity>) {
@@ -254,7 +254,7 @@ impl App {
     /// into an open picker, so a list that opened without them fills in where
     /// it stands rather than closing and reopening. A name already held keeps
     /// its place and only gains an address it was missing.
-    pub fn merge_identities(&mut self, identities: Vec<Identity>) {
+    pub fn merge_identities(&mut self, shell: &mut Shell, identities: Vec<Identity>) {
         if identities.is_empty() {
             return;
         }
@@ -271,14 +271,14 @@ impl App {
                 None => self.identities.push(identity),
             }
         }
-        if self.mode != AppMode::AssigneePicker {
+        if self.mode != WorkItemMode::AssigneePicker {
             return;
         }
         let focused = self
             .assignee_matches()
             .get(self.assignee_picker.index)
             .map(|candidate| candidate.display.clone());
-        self.assignee_picker.candidates = self.assignee_candidates();
+        self.assignee_picker.candidates = self.assignee_candidates(shell);
         let matches = self.assignee_matches();
         let index = focused
             .and_then(|display| {
@@ -336,18 +336,17 @@ impl App {
     /// which is the only type it could ask about; a state another checked work
     /// item's type does not allow is refused by Azure DevOps and named in the
     /// summary.
-    pub(super) fn open_state_picker(&mut self) {
+    pub(super) fn open_state_picker(&mut self, shell: &mut Shell) {
         let scope = self.edit_scope();
         let Some(ticket) = self.selected_ticket() else {
-            self.shell.set_error("No work item is selected");
+            shell.set_error("No work item is selected");
             return;
         };
         let current = ticket.state.clone();
         let work_item_type = ticket.work_item_type.clone();
         let options = self.states_for(&work_item_type);
         if options.is_empty() {
-            self.shell
-                .set_error(format!("No states are known for {work_item_type}"));
+            shell.set_error(format!("No states are known for {work_item_type}"));
             return;
         }
         let index = options
@@ -362,13 +361,17 @@ impl App {
             scope,
         };
         self.state_picker.scroll.ensure_visible(index);
-        self.mode = AppMode::StatePicker;
+        self.mode = WorkItemMode::StatePicker;
     }
 
-    pub(super) fn handle_state_picker_key(&mut self, key: KeyEvent) -> AppAction {
+    pub(super) fn handle_state_picker_key(
+        &mut self,
+        shell: &mut Shell,
+        key: KeyEvent,
+    ) -> AppAction {
         let last = self.state_picker.options.len().saturating_sub(1);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('S') => self.mode = AppMode::Browse,
+            KeyCode::Esc | KeyCode::Char('S') => self.mode = WorkItemMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.focus_state(self.state_picker.index.saturating_sub(1));
             }
@@ -379,7 +382,7 @@ impl App {
             KeyCode::PageDown => self.focus_state((self.state_picker.index + 5).min(last)),
             KeyCode::Home => self.focus_state(0),
             KeyCode::End => self.focus_state(last),
-            KeyCode::Enter => return self.choose_state(self.state_picker.index),
+            KeyCode::Enter => return self.choose_state(shell, self.state_picker.index),
             _ => {}
         }
         AppAction::None
@@ -396,23 +399,23 @@ impl App {
     /// DevOps refuses the transition. A picker opened over the checked rows
     /// moves every one of them, so the state the row under the cursor is in is
     /// a change to make there rather than a no-op.
-    pub(super) fn choose_state(&mut self, index: usize) -> AppAction {
+    pub(super) fn choose_state(&mut self, shell: &mut Shell, index: usize) -> AppAction {
         let Some(option) = self.state_picker.options.get(index).cloned() else {
-            self.mode = AppMode::Browse;
+            self.mode = WorkItemMode::Browse;
             return AppAction::None;
         };
-        self.mode = AppMode::Browse;
+        self.mode = WorkItemMode::Browse;
         if !self.state_picker.scope.is_bulk() && option.name == self.state_picker.current {
             return AppAction::None;
         }
-        self.edit_checked(FieldEdit::state(&option.name))
+        self.edit_checked(shell, FieldEdit::state(&option.name))
     }
 
     /// The Edit menu's Priority row: 1 to 4 and a `Clear` row, with the
     /// priority the work item already has under the cursor.
-    pub(super) fn open_priority_picker(&mut self) {
+    pub(super) fn open_priority_picker(&mut self, shell: &mut Shell) {
         let Some(ticket) = self.selected_ticket() else {
-            self.shell.set_error("No work item is selected");
+            shell.set_error("No work item is selected");
             return;
         };
         let current = ticket.priority;
@@ -428,13 +431,17 @@ impl App {
             id,
         };
         self.priority_picker.scroll.ensure_visible(index);
-        self.mode = AppMode::PriorityPicker;
+        self.mode = WorkItemMode::PriorityPicker;
     }
 
-    pub(super) fn handle_priority_picker_key(&mut self, key: KeyEvent) -> AppAction {
+    pub(super) fn handle_priority_picker_key(
+        &mut self,
+        shell: &mut Shell,
+        key: KeyEvent,
+    ) -> AppAction {
         let last = PRIORITY_CHOICES.len().saturating_sub(1);
         match key.code {
-            KeyCode::Esc => self.mode = AppMode::Browse,
+            KeyCode::Esc => self.mode = WorkItemMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.focus_priority(self.priority_picker.index.saturating_sub(1));
             }
@@ -443,7 +450,7 @@ impl App {
             }
             KeyCode::Home => self.focus_priority(0),
             KeyCode::End => self.focus_priority(last),
-            KeyCode::Enter => return self.choose_priority(self.priority_picker.index),
+            KeyCode::Enter => return self.choose_priority(shell, self.priority_picker.index),
             _ => {}
         }
         AppAction::None
@@ -457,18 +464,18 @@ impl App {
     /// Confirms one priority. The priority the work item already has is a
     /// no-op, and `Clear` takes the field off it rather than writing an empty
     /// value, so the Pri cell empties.
-    pub(super) fn choose_priority(&mut self, index: usize) -> AppAction {
+    pub(super) fn choose_priority(&mut self, shell: &mut Shell, index: usize) -> AppAction {
         let Some(choice) = PRIORITY_CHOICES.get(index).copied() else {
-            self.mode = AppMode::Browse;
+            self.mode = WorkItemMode::Browse;
             return AppAction::None;
         };
-        self.mode = AppMode::Browse;
+        self.mode = WorkItemMode::Browse;
         if choice == self.priority_picker.current {
             return AppAction::None;
         }
         match choice {
-            Some(priority) => self.edit_selected(FieldEdit::priority(priority)),
-            None => self.edit_selected(FieldEdit::clear_priority()),
+            Some(priority) => self.edit_selected(shell, FieldEdit::priority(priority)),
+            None => self.edit_selected(shell, FieldEdit::clear_priority()),
         }
     }
 
@@ -477,15 +484,14 @@ impl App {
     /// assigned to, and then the rest of the project's teams. Nobody appears
     /// twice, so a team member already holding work keeps their earlier place.
     #[must_use]
-    fn assignee_candidates(&self) -> Vec<AssigneeCandidate> {
+    fn assignee_candidates(&self, shell: &Shell) -> Vec<AssigneeCandidate> {
         let mut candidates = vec![AssigneeCandidate {
             display: UNASSIGNED_LABEL.to_owned(),
             unique: None,
             unassigned: true,
             me: false,
         }];
-        if let Some(me) = self
-            .shell
+        if let Some(me) = shell
             .me
             .as_deref()
             .map(str::trim)
@@ -560,14 +566,14 @@ impl App {
     /// teams are asked for the first time it is opened and merged in when they
     /// arrive. With two or more rows checked it reassigns all of them, and
     /// says so in its title.
-    pub(super) fn open_assignee_picker(&mut self) -> AppAction {
+    pub(super) fn open_assignee_picker(&mut self, shell: &mut Shell) -> AppAction {
         let scope = self.edit_scope();
         let Some(ticket) = self.selected_ticket() else {
-            self.shell.set_error("No work item is selected");
+            shell.set_error("No work item is selected");
             return AppAction::None;
         };
         let current = ticket.assigned_to.clone();
-        self.show_assignee_picker(current, scope)
+        self.show_assignee_picker(shell, current, scope)
     }
 
     /// The assignee picker itself, over whoever holds the work item now — or
@@ -577,10 +583,11 @@ impl App {
     /// way.
     pub(super) fn show_assignee_picker(
         &mut self,
+        shell: &mut Shell,
         current: Option<String>,
         scope: EditScope,
     ) -> AppAction {
-        let candidates = self.assignee_candidates();
+        let candidates = self.assignee_candidates(shell);
         let index = candidates
             .iter()
             .position(|candidate| candidate.is_current(current.as_deref()))
@@ -594,7 +601,7 @@ impl App {
             scope,
         };
         self.assignee_picker.scroll.ensure_visible(index);
-        self.mode = AppMode::AssigneePicker;
+        self.mode = WorkItemMode::AssigneePicker;
         if self.identities_requested {
             AppAction::None
         } else {
@@ -603,14 +610,18 @@ impl App {
         }
     }
 
-    pub(super) fn handle_assignee_picker_key(&mut self, key: KeyEvent) -> AppAction {
+    pub(super) fn handle_assignee_picker_key(
+        &mut self,
+        shell: &mut Shell,
+        key: KeyEvent,
+    ) -> AppAction {
         match key.code {
             KeyCode::Esc => self.close_picker(self.assignee_picker.scope),
             KeyCode::Up => self.move_assignee_selection(-1),
             KeyCode::Down => self.move_assignee_selection(1),
             KeyCode::PageUp => self.move_assignee_selection(-5),
             KeyCode::PageDown => self.move_assignee_selection(5),
-            KeyCode::Enter => return self.choose_assignee(self.assignee_picker.index),
+            KeyCode::Enter => return self.choose_assignee(shell, self.assignee_picker.index),
             // Everything else is typing: Home, End, and the editing keys all
             // belong to the filter field, the way they do in the palette.
             _ => {
@@ -649,7 +660,7 @@ impl App {
     /// identity, so the Assignee cell empties. A picker opened over the checked
     /// rows reassigns every one of them, so whoever holds the row under the
     /// cursor is a change to make to the rest rather than a no-op.
-    pub(super) fn choose_assignee(&mut self, index: usize) -> AppAction {
+    pub(super) fn choose_assignee(&mut self, shell: &mut Shell, index: usize) -> AppAction {
         let scope = self.assignee_picker.scope;
         let Some(candidate) = self.assignee_matches().get(index).cloned() else {
             self.close_picker(scope);
@@ -666,19 +677,19 @@ impl App {
             self.fill_form_field(field, name);
             return AppAction::None;
         }
-        self.mode = AppMode::Browse;
+        self.mode = WorkItemMode::Browse;
         if !self.assignee_picker.scope.is_bulk()
             && candidate.is_current(self.assignee_picker.current.as_deref())
         {
             return AppAction::None;
         }
         if candidate.unassigned {
-            return self.edit_checked(FieldEdit::unassign());
+            return self.edit_checked(shell, FieldEdit::unassign());
         }
-        self.edit_checked(FieldEdit::assignee(
-            &candidate.display,
-            candidate.unique.as_deref(),
-        ))
+        self.edit_checked(
+            shell,
+            FieldEdit::assignee(&candidate.display, candidate.unique.as_deref()),
+        )
     }
 
     /// The parent one work item hangs under now, as the graph holds it. Azure
@@ -739,15 +750,14 @@ impl App {
     /// The Edit menu's `Set parent…` row: every work item this one could hang
     /// under, with the one it hangs under now under the cursor. The list is
     /// built from the rows already loaded, so the picker opens at once.
-    pub(super) fn open_parent_picker(&mut self) {
+    pub(super) fn open_parent_picker(&mut self, shell: &mut Shell) {
         let Some(child) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
-            self.shell.set_error("No work item is selected");
+            shell.set_error("No work item is selected");
             return;
         };
         let candidates = self.parent_candidates(&child);
         if candidates.is_empty() {
-            self.shell
-                .set_error("No other work item is loaded to file this one under");
+            shell.set_error("No other work item is loaded to file this one under");
             return;
         }
         let current = self.parent_of(&child);
@@ -768,17 +778,21 @@ impl App {
             current,
         };
         self.parent_picker.scroll.ensure_visible(index);
-        self.mode = AppMode::ParentPicker;
+        self.mode = WorkItemMode::ParentPicker;
     }
 
-    pub(super) fn handle_parent_picker_key(&mut self, key: KeyEvent) -> AppAction {
+    pub(super) fn handle_parent_picker_key(
+        &mut self,
+        shell: &mut Shell,
+        key: KeyEvent,
+    ) -> AppAction {
         match key.code {
-            KeyCode::Esc => self.mode = AppMode::Browse,
+            KeyCode::Esc => self.mode = WorkItemMode::Browse,
             KeyCode::Up => self.move_parent_selection(-1),
             KeyCode::Down => self.move_parent_selection(1),
             KeyCode::PageUp => self.move_parent_selection(-5),
             KeyCode::PageDown => self.move_parent_selection(5),
-            KeyCode::Enter => return self.choose_parent(self.parent_picker.index),
+            KeyCode::Enter => return self.choose_parent(shell, self.parent_picker.index),
             // Everything else is typing, the way it is in the assignee picker.
             _ => {
                 let before = self.parent_picker.query.text().to_owned();
@@ -805,17 +819,17 @@ impl App {
 
     /// `Enter` in the parent picker: the work item moves under whatever the
     /// cursor is on. Choosing the parent it already has writes nothing.
-    pub(super) fn choose_parent(&mut self, index: usize) -> AppAction {
+    pub(super) fn choose_parent(&mut self, shell: &mut Shell, index: usize) -> AppAction {
         let Some(candidate) = self.parent_matches().get(index).cloned() else {
-            self.mode = AppMode::Browse;
+            self.mode = WorkItemMode::Browse;
             return AppAction::None;
         };
-        self.mode = AppMode::Browse;
+        self.mode = WorkItemMode::Browse;
         if self.parent_picker.current.as_ref() == Some(&candidate.key) {
             return AppAction::None;
         }
         let child = self.parent_picker.child.clone();
-        self.begin_reparent(&child, Some(candidate.key))
+        self.begin_reparent(shell, &child, Some(candidate.key))
     }
 
     /// The project's iteration and area trees as the database holds them.
@@ -844,7 +858,7 @@ impl App {
         }
         self.classification_nodes = nodes;
         self.classification_fetched_at = Some(Timestamp::now());
-        if self.mode != AppMode::NodePicker {
+        if self.mode != WorkItemMode::NodePicker {
             return;
         }
         let focused = self
@@ -940,7 +954,7 @@ impl App {
     /// and its leftovers move on together — so with two or more rows checked
     /// it moves all of them and says so in its title. Area stays on the row
     /// under the cursor.
-    pub(super) fn open_node_picker(&mut self, kind: NodeKind) -> AppAction {
+    pub(super) fn open_node_picker(&mut self, shell: &mut Shell, kind: NodeKind) -> AppAction {
         let scope = match kind {
             NodeKind::Iteration => self.edit_scope(),
             NodeKind::Area => {
@@ -948,7 +962,7 @@ impl App {
             }
         };
         let Some(ticket) = self.selected_ticket() else {
-            self.shell.set_error("No work item is selected");
+            shell.set_error("No work item is selected");
             return AppAction::None;
         };
         let current = match kind {
@@ -983,7 +997,7 @@ impl App {
             scope,
         };
         self.node_picker.scroll.ensure_visible(index);
-        self.mode = AppMode::NodePicker;
+        self.mode = WorkItemMode::NodePicker;
         if self.should_fetch_classification_nodes() {
             self.classification_requested = true;
             AppAction::FetchClassificationNodes
@@ -1009,14 +1023,14 @@ impl App {
         })
     }
 
-    pub(super) fn handle_node_picker_key(&mut self, key: KeyEvent) -> AppAction {
+    pub(super) fn handle_node_picker_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
         match key.code {
             KeyCode::Esc => self.close_picker(self.node_picker.scope),
             KeyCode::Up => self.move_node_selection(-1),
             KeyCode::Down => self.move_node_selection(1),
             KeyCode::PageUp => self.move_node_selection(-5),
             KeyCode::PageDown => self.move_node_selection(5),
-            KeyCode::Enter => return self.choose_node(self.node_picker.index),
+            KeyCode::Enter => return self.choose_node(shell, self.node_picker.index),
             // Everything else is typing, the way it is in the assignee picker.
             _ => {
                 let before = self.node_picker.query.text().to_owned();
@@ -1055,7 +1069,7 @@ impl App {
     /// iteration picker opened over the checked rows moves every one of them,
     /// so the sprint the row under the cursor is in is a change to make to the
     /// rest rather than a no-op.
-    pub(super) fn choose_node(&mut self, index: usize) -> AppAction {
+    pub(super) fn choose_node(&mut self, shell: &mut Shell, index: usize) -> AppAction {
         let scope = self.node_picker.scope;
         let Some(row) = self.node_matches().get(index).cloned() else {
             self.close_picker(scope);
@@ -1065,13 +1079,13 @@ impl App {
             self.fill_form_field(field, row.path);
             return AppAction::None;
         }
-        self.mode = AppMode::Browse;
+        self.mode = WorkItemMode::Browse;
         if !self.node_picker.scope.is_bulk() && row.path == self.node_picker.current {
             return AppAction::None;
         }
         match self.node_picker.kind {
-            NodeKind::Iteration => self.edit_checked(FieldEdit::iteration(&row.path)),
-            NodeKind::Area => self.edit_selected(FieldEdit::area(&row.path)),
+            NodeKind::Iteration => self.edit_checked(shell, FieldEdit::iteration(&row.path)),
+            NodeKind::Area => self.edit_selected(shell, FieldEdit::area(&row.path)),
         }
     }
 
@@ -1096,7 +1110,7 @@ impl App {
             return;
         }
         self.work_item_types = types;
-        if self.mode != AppMode::TypePicker {
+        if self.mode != WorkItemMode::TypePicker {
             return;
         }
         let focused = self
@@ -1172,7 +1186,7 @@ impl App {
             field,
         };
         self.type_picker.scroll.ensure_visible(index);
-        self.mode = AppMode::TypePicker;
+        self.mode = WorkItemMode::TypePicker;
     }
 
     pub(super) fn handle_type_picker_key(&mut self, key: KeyEvent) -> AppAction {

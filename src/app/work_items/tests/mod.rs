@@ -58,8 +58,8 @@ fn ticket(id: i64, title: &str, changed_at: &str) -> Ticket {
 
 fn await_search(app: &mut App) {
     let deadline = Instant::now() + Duration::from_secs(2);
-    while app.search_pending {
-        app.poll_search();
+    while app.work_items.search_pending {
+        app.work_items.poll_search(&mut app.shell);
         assert!(Instant::now() < deadline, "search worker timed out");
         thread::yield_now();
     }
@@ -75,11 +75,12 @@ fn type_text(app: &mut App, text: &str) {
 /// Moves the form cursor onto one field by name.
 fn focus_field(app: &mut App, id: FormFieldId) {
     let index = app
+        .work_items
         .form
         .as_ref()
         .and_then(|form| form.index_of(id))
         .expect("the form has that field");
-    app.focus_form_field(index);
+    app.work_items.focus_form_field(index);
 }
 
 /// An app that can write, with one work item to hang new work under.
@@ -105,7 +106,8 @@ fn created(id: i64, work_item_type: &str, title: &str) -> Ticket {
 /// Where a view sits in the overlay, which is not its position among the
 /// user's own views: the built-ins and the headings are counted too.
 fn view_row(app: &App, name: &str) -> usize {
-    app.view_rows()
+    app.work_items
+        .view_rows()
         .iter()
         .position(|row| !row.is_heading() && row.label == name)
         .unwrap_or_else(|| panic!("no view named {name}"))
@@ -118,12 +120,17 @@ fn bookmarks_multi_select_and_copy_use_selected_tickets() {
         ticket(2, "Beta", "2026-02-01T00:00:00Z"),
     ]);
     app.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE));
-    assert!(app.is_bookmarked(&app.selected_ticket().unwrap().key));
+    assert!(
+        app.work_items
+            .is_bookmarked(&app.work_items.selected_ticket().unwrap().key)
+    );
 
     app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-    app.select_row(1);
+    app.work_items.select_row(&mut app.shell, 1);
     app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-    let action = app.copy_with(CopiedContent::Id, export::copy_ids);
+    let action = app
+        .work_items
+        .copy_with(CopiedContent::Id, export::copy_ids);
     assert_eq!(
         action,
         AppAction::Copy {
@@ -194,22 +201,26 @@ fn reparent_app() -> App {
     closed.state = "Closed".into();
     let task = ticket(5, "Validate email", "2026-01-01T00:00:00Z");
     let mut app = App::new(vec![epic, other, issue, closed, task]);
-    app.set_workspace_graph(TicketGraph {
-        relations: vec![
-            child_of(3, 1),
-            child_of(4, 1),
-            child_of(5, 3),
-            RelationRecord {
-                from: family_key(1),
-                to: family_key(3),
-                kind: RelationKind::Child,
-            },
-        ],
-        ..TicketGraph::default()
-    });
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            relations: vec![
+                child_of(3, 1),
+                child_of(4, 1),
+                child_of(5, 3),
+                RelationRecord {
+                    from: family_key(1),
+                    to: family_key(3),
+                    kind: RelationKind::Child,
+                },
+            ],
+            ..TicketGraph::default()
+        },
+    );
     app.shell.enable_sync();
-    app.set_table_viewport(5);
-    app.jump_to_ticket(&family_key(3));
+    app.work_items.set_table_viewport(5);
+    app.work_items
+        .jump_to_ticket(&mut app.shell, &family_key(3));
     app
 }
 
@@ -221,14 +232,16 @@ fn candidate_ids(candidates: &[ParentCandidate]) -> Vec<i64> {
 }
 
 fn menu_labels(app: &App) -> Vec<&'static str> {
-    app.edit_menu_entries()
+    app.work_items
+        .edit_menu_entries()
         .into_iter()
         .map(|entry| entry.label)
         .collect()
 }
 
 fn progress_of(app: &App, id: i64) -> Option<(usize, usize)> {
-    app.child_progress(&family_key(id))
+    app.work_items
+        .child_progress(&family_key(id))
         .map(|progress| (progress.done, progress.total))
 }
 
@@ -241,12 +254,12 @@ fn editing_app() -> App {
         ticket(3, "Gamma", "2026-03-01T00:00:00Z"),
     ]);
     app.shell.enable_sync();
-    app.set_table_viewport(3);
+    app.work_items.set_table_viewport(3);
     app
 }
 
 fn edit_request(app: &mut App, edit: FieldEdit) -> EditRequest {
-    match app.edit_selected(edit) {
+    match app.work_items.edit_selected(&mut app.shell, edit) {
         AppAction::Edit(requests) => only(requests),
         other => panic!("expected an edit to be dispatched, got {other:?}"),
     }
@@ -262,19 +275,24 @@ fn only(requests: Vec<EditRequest>) -> EditRequest {
 /// bulk changes.
 fn check_all(app: &mut App) {
     for key in app
+        .work_items
         .tickets()
         .iter()
         .map(|ticket| ticket.key.clone())
         .collect::<Vec<_>>()
     {
-        app.selected_keys.insert(key);
+        app.work_items.selected_keys.insert(key);
     }
 }
 
 /// The work item as Azure DevOps hands it back: the field written, and the
 /// revision and changed date it decided on.
 fn stored_copy(app: &App, key: &TicketKey, state: &str) -> Ticket {
-    let mut ticket = app.ticket_by_key(key).expect("the row is loaded").clone();
+    let mut ticket = app
+        .work_items
+        .ticket_by_key(key)
+        .expect("the row is loaded")
+        .clone();
     ticket.state = state.to_owned();
     ticket.revision += 1;
     ticket.changed_at = crate::timestamp::ts("2026-04-01T00:00:00Z");
@@ -302,10 +320,10 @@ fn picker_app() -> App {
     }
     let mut app = App::new(tickets);
     app.shell.enable_sync();
-    app.set_table_viewport(3);
+    app.work_items.set_table_viewport(3);
     let mut catalog = StateCatalog::default();
     catalog.insert("Task", task_states());
-    app.set_state_catalog(catalog);
+    app.work_items.set_state_catalog(catalog);
     app
 }
 
@@ -321,11 +339,14 @@ fn shift(app: &mut App, ch: char) -> AppAction {
 /// state written, on the revision it settled on.
 fn accept(app: &mut App, request: &EditRequest) {
     let ticket = stored_copy(app, &request.key, request.edit.value_text().as_str());
-    app.apply_edit(EditApplied {
-        ticket,
-        relations: Vec::new(),
-        edit: request.edit.clone(),
-    });
+    app.work_items.apply_edit(
+        &mut app.shell,
+        EditApplied {
+            ticket,
+            relations: Vec::new(),
+            edit: request.edit.clone(),
+        },
+    );
 }
 
 /// An editable app whose selected row — the most recently changed one — has
@@ -340,7 +361,7 @@ fn edit_app() -> App {
         gamma,
     ]);
     app.shell.enable_sync();
-    app.set_table_viewport(3);
+    app.work_items.set_table_viewport(3);
     app
 }
 
@@ -359,7 +380,8 @@ fn open_editor(app: &mut App, index: usize) {
 /// dynamic — `Remove parent` only appears when the selection has one — so a
 /// position taken from the static table walks to the wrong row.
 fn menu_row(app: &App, command: CommandId) -> usize {
-    app.edit_menu_entries()
+    app.work_items
+        .edit_menu_entries()
         .iter()
         .position(|entry| entry.command == command)
         .expect("the Edit menu offers the row")

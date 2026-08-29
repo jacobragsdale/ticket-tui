@@ -14,14 +14,16 @@ fn facet_pills_open_their_menu_and_the_filter_overlay_maps_scrolled_clicks() {
         .facet_pill(FacetTarget::Field(FilterField::Type))
         .expect("type pill should be clickable");
     click(&mut app, pill.x, pill.y);
-    assert_eq!(app.mode, AppMode::Facets);
+    assert_eq!(app.work_items.mode, WorkItemMode::Facets);
     assert_eq!(
-        FilterField::BAR.get(app.facet_bar.field_index).copied(),
+        FilterField::BAR
+            .get(app.work_items.facet_bar.field_index)
+            .copied(),
         Some(FilterField::Type)
     );
 
-    app.mode = AppMode::Filter;
-    app.filter_overlay.scroll.offset = 2;
+    app.work_items.mode = WorkItemMode::Filter;
+    app.work_items.filter_overlay.scroll.offset = 2;
     let overlay = render_text(110, 24, &mut app);
     assert!(overlay.contains("Filters"));
     let (x, y) = app
@@ -31,8 +33,8 @@ fn facet_pills_open_their_menu_and_the_filter_overlay_maps_scrolled_clicks() {
         .map(|region| (region.rect.x, region.rect.y))
         .expect("scrolled row 2 should be the first visible hit");
     click(&mut app, x, y);
-    assert!(app.filter_overlay.showing_values);
-    assert_eq!(app.filter_overlay.field_index, 2);
+    assert!(app.work_items.filter_overlay.showing_values);
+    assert_eq!(app.work_items.filter_overlay.field_index, 2);
 }
 
 #[test]
@@ -65,7 +67,7 @@ fn the_chip_bar_says_finished_work_is_hidden_and_its_cross_puts_it_back() {
 #[test]
 fn the_views_overlay_paints_the_built_ins_under_their_heading_above_the_saved_ones() {
     let mut app = App::new(vec![ticket()]);
-    app.set_query("tag:rust".into());
+    app.work_items.set_query(&mut app.shell, "tag:rust".into());
     app.handle_key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT));
     app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
     for character in "Rust work".chars() {
@@ -115,7 +117,11 @@ fn the_sprint_summary_draws_its_grid_and_a_clicked_row_filters_the_table() {
         app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.mode, AppMode::Sprint, "the palette has no key for it");
+    assert_eq!(
+        app.work_items.mode,
+        WorkItemMode::Sprint,
+        "the palette has no key for it"
+    );
 
     let screen = render_text(100, 30, &mut app);
     for needle in [
@@ -147,14 +153,14 @@ fn the_sprint_summary_draws_its_grid_and_a_clicked_row_filters_the_table() {
         .expect("each grid row is clickable");
     click(&mut app, x, y);
 
-    assert_eq!(app.mode, AppMode::Browse);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(
-        app.query(),
+        app.work_items.query(),
         "assignee:\"Avery Chen\" iteration:\"Atlas\\\\Sprint 1\""
     );
 
     let mut empty = App::new(vec![]);
-    empty.mode = AppMode::Sprint;
+    empty.work_items.mode = WorkItemMode::Sprint;
     let screen = render_text(100, 30, &mut empty);
     assert!(
         screen.contains("No sprint to summarise."),

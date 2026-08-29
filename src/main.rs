@@ -191,7 +191,7 @@ impl AgentContextPublisher {
     }
 
     fn publish(&mut self, app: &App) -> Result<()> {
-        let context = app.agent_context();
+        let context = app.work_items.agent_context(&app.shell);
         if self.last.as_ref() == Some(&context) {
             return Ok(());
         }
@@ -292,11 +292,13 @@ fn run() -> Result<()> {
     });
     let offline_reason = wrong_project.clone().or(offline_reason);
     let mut app = App::new(tickets);
-    app.set_workspace_graph(graph);
-    app.set_state_catalog(repository.load_type_states()?);
-    app.set_identities(repository.load_identities()?);
-    app.set_work_item_types(repository.load_work_item_types()?);
-    app.set_classification_nodes(
+    app.work_items.set_workspace_graph(&mut app.shell, graph);
+    app.work_items
+        .set_state_catalog(repository.load_type_states()?);
+    app.work_items.set_identities(repository.load_identities()?);
+    app.work_items
+        .set_work_item_types(repository.load_work_item_types()?);
+    app.work_items.set_classification_nodes(
         repository.load_classification_nodes()?,
         repository
             .meta(db::CLASSIFICATION_FETCHED_KEY)?
@@ -310,7 +312,7 @@ fn run() -> Result<()> {
     app.shell.set_offline_reason(offline_reason.clone());
     let session_path = session::path_for(repository.path());
     match session::load(&session_path) {
-        Ok(loaded) => app.restore_session(loaded),
+        Ok(loaded) => app.work_items.restore_session(&mut app.shell, loaded),
         Err(error) => app
             .shell
             .set_error(format!("Could not load session: {error:#}")),
@@ -318,7 +320,7 @@ fn run() -> Result<()> {
     // After the session, so a threshold asked for on this run beats the one
     // the last run left behind.
     if let Some(days) = stale_days {
-        app.override_stale_days(days);
+        app.work_items.override_stale_days(days);
     }
 
     let interval = (refresh > 0).then(|| Duration::from_secs(refresh));
@@ -371,7 +373,7 @@ fn run() -> Result<()> {
         &mut context_publisher,
     );
     let remove_context = context_publisher.remove();
-    if let Err(error) = session::save(&session_path, &app.snapshot_session()) {
+    if let Err(error) = session::save(&session_path, &app.work_items.snapshot_session(&app.shell)) {
         eprintln!("warning: could not save session: {error:#}");
     }
     if let Err(error) = remove_context {
@@ -494,7 +496,7 @@ fn run_terminal(
 
     let mut redraw = true;
     while !app.shell.should_quit {
-        redraw |= app.poll_search();
+        redraw |= app.work_items.poll_search(&mut app.shell);
         redraw |= poll_reload(app, repository, &mut reloader);
         redraw |= poll_sync(app, repository, runtime);
         redraw |= poll_watch(app, repository, &mut reloader);
@@ -513,7 +515,7 @@ fn run_terminal(
             }
         }
 
-        let timeout = if app.search_pending || app.shell.reload_pending {
+        let timeout = if app.work_items.search_pending || app.shell.reload_pending {
             Duration::from_millis(33)
         } else {
             // The loop has to wake for the next scheduled pull as well as for
@@ -656,7 +658,10 @@ fn apply_description_outcome(
 ) {
     match outcome {
         Ok(Some(html)) => {
-            if let AppAction::Edit(requests) = app.edit_ticket(key, FieldEdit::description(&html)) {
+            if let AppAction::Edit(requests) =
+                app.work_items
+                    .edit_ticket(&mut app.shell, key, FieldEdit::description(&html))
+            {
                 for request in requests {
                     start_edit(app, runtime, request);
                 }
@@ -788,11 +793,14 @@ fn dispatch_due_details(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     if runtime.worker.is_none() {
         return false;
     }
-    let Some(key) = runtime.details.due(app.selected_ticket(), Instant::now()) else {
+    let Some(key) = runtime
+        .details
+        .due(app.work_items.selected_ticket(), Instant::now())
+    else {
         return false;
     };
     match runtime.send(SyncRequest::Details(key.clone())) {
-        Ok(()) => app.details_pending = Some(key),
+        Ok(()) => app.work_items.details_pending = Some(key),
         Err(error) => runtime.stop(app, &error),
     }
     true
@@ -819,12 +827,15 @@ fn start_edit(app: &mut App, runtime: &mut SyncRuntime, request: EditRequest) {
     let key = request.key.clone();
     let label = request.edit.label().to_owned();
     if let Err(message) = runtime.send(SyncRequest::Edit(request)) {
-        app.reject_edit(&EditRejection {
-            key,
-            label,
-            conflict: false,
-            message,
-        });
+        app.work_items.reject_edit(
+            &mut app.shell,
+            &EditRejection {
+                key,
+                label,
+                conflict: false,
+                message,
+            },
+        );
     }
 }
 
@@ -840,7 +851,9 @@ fn start_comment(app: &mut App, runtime: &mut SyncRuntime, key: TicketKey, text:
         Ok(()) => app
             .shell
             .set_status(format!("Posting comment on #{}\u{2026}", key.id)),
-        Err(message) => app.reject_comment(&key, &message),
+        Err(message) => app
+            .work_items
+            .reject_comment(&mut app.shell, &key, &message),
     }
 }
 
@@ -849,7 +862,7 @@ fn start_comment(app: &mut App, runtime: &mut SyncRuntime, key: TicketKey, text:
 /// is gone only has to say the work item is still there.
 fn start_delete(app: &mut App, runtime: &mut SyncRuntime, key: TicketKey) {
     if let Err(message) = runtime.send(SyncRequest::Delete(key.clone())) {
-        app.reject_delete(&key, &message);
+        app.work_items.reject_delete(&mut app.shell, &key, &message);
     }
 }
 
@@ -870,7 +883,7 @@ fn start_create(
         parent,
     };
     if let Err(message) = runtime.send(request) {
-        app.reject_create(&message);
+        app.work_items.reject_create(&mut app.shell, &message);
     }
 }
 
@@ -888,11 +901,14 @@ fn start_reparent(
         new_parent,
     };
     if let Err(message) = runtime.send(request) {
-        app.reject_reparent(&ReparentRejection {
-            key,
-            conflict: false,
-            message,
-        });
+        app.work_items.reject_reparent(
+            &mut app.shell,
+            &ReparentRejection {
+                key,
+                conflict: false,
+                message,
+            },
+        );
     }
 }
 
@@ -946,7 +962,8 @@ fn poll_sync(
                         mode,
                         count,
                     } => {
-                        app.replace_prepared_tickets(prepared);
+                        app.work_items
+                            .replace_prepared_tickets(&mut app.shell, prepared);
                         app.shell.finish_sync();
                         stamp_database(app, repository);
                         if origin == PullOrigin::User {
@@ -985,7 +1002,7 @@ fn poll_sync(
             }
             SyncEvent::Edited(result) => match *result {
                 Ok(applied) => {
-                    app.apply_edit(applied);
+                    app.work_items.apply_edit(&mut app.shell, applied);
                     // The worker wrote that row itself, so the watcher below is
                     // told about it rather than reloading behind us.
                     stamp_database(app, repository);
@@ -996,7 +1013,7 @@ fn poll_sync(
                     if rejection.conflict {
                         start_sync(app, runtime);
                     }
-                    app.reject_edit(&rejection);
+                    app.work_items.reject_edit(&mut app.shell, &rejection);
                 }
             },
             // The worker wrote these rows itself, so the signature moves with
@@ -1004,11 +1021,11 @@ fn poll_sync(
             // item's comments and history change: the table, the search, and
             // every other row stay exactly as they were.
             SyncEvent::Details(outcome) => {
-                app.details_pending = None;
+                app.work_items.details_pending = None;
                 match *outcome {
                     DetailsOutcome::Fetched(update) => {
                         runtime.details.finish();
-                        app.apply_details(update);
+                        app.work_items.apply_details(update);
                         stamp_database(app, repository);
                     }
                     DetailsOutcome::Failed { key, message } => {
@@ -1020,35 +1037,46 @@ fn poll_sync(
                     }
                 }
             }
-            SyncEvent::Identities(identities) => app.merge_identities(identities),
+            SyncEvent::Identities(identities) => {
+                app.work_items.merge_identities(&mut app.shell, identities)
+            }
             // The worker inserted this comment itself, so the signature moves
             // with it and the watcher below leaves the file alone. Nothing else
             // about the work item changed: its own `details_rev` is untouched,
             // so the next details fetch still settles the discussion.
             SyncEvent::Commented(result) => match *result {
                 Ok(comment) => {
-                    app.apply_comment(comment);
+                    app.work_items.apply_comment(&mut app.shell, comment);
                     stamp_database(app, repository);
                 }
-                Err(rejection) => app.reject_comment(&rejection.key, &rejection.message),
+                Err(rejection) => app.work_items.reject_comment(
+                    &mut app.shell,
+                    &rejection.key,
+                    &rejection.message,
+                ),
             },
-            SyncEvent::ClassificationNodes(nodes) => app.merge_classification_nodes(nodes),
-            SyncEvent::WorkItemTypes(types) => app.merge_work_item_types(types),
+            SyncEvent::ClassificationNodes(nodes) => {
+                app.work_items.merge_classification_nodes(nodes)
+            }
+            SyncEvent::WorkItemTypes(types) => app.work_items.merge_work_item_types(types),
             // The worker stored this work item itself, so the signature moves
             // with it and the watcher below leaves the file alone.
             SyncEvent::Created(result) => match *result {
                 Ok(created) => {
-                    app.apply_created(created.ticket, created.relations);
+                    app.work_items
+                        .apply_created(&mut app.shell, created.ticket, created.relations);
                     stamp_database(app, repository);
                 }
-                Err(rejection) => app.reject_create(&rejection.message),
+                Err(rejection) => app
+                    .work_items
+                    .reject_create(&mut app.shell, &rejection.message),
             },
             // The worker rewrote both halves of this work item's hierarchy
             // link itself, so the signature moves with them and the watcher
             // below leaves the file alone.
             SyncEvent::Reparented(result) => match *result {
                 Ok(applied) => {
-                    app.apply_reparent(applied);
+                    app.work_items.apply_reparent(&mut app.shell, applied);
                     stamp_database(app, repository);
                 }
                 Err(rejection) => {
@@ -1057,17 +1085,20 @@ fn poll_sync(
                     if rejection.conflict {
                         start_sync(app, runtime);
                     }
-                    app.reject_reparent(&rejection);
+                    app.work_items.reject_reparent(&mut app.shell, &rejection);
                 }
             },
             // The worker took this work item out of the file itself, so the
             // signature moves with it and the watcher below leaves it alone.
             SyncEvent::Deleted(result) => match *result {
                 Ok(key) => {
-                    app.apply_deleted(&key);
+                    app.work_items.apply_deleted(&mut app.shell, &key);
                     stamp_database(app, repository);
                 }
-                Err(rejection) => app.reject_delete(&rejection.key, &rejection.message),
+                Err(rejection) => {
+                    app.work_items
+                        .reject_delete(&mut app.shell, &rejection.key, &rejection.message)
+                }
             },
             SyncEvent::Stopped => {
                 runtime.stop(app, "the Azure DevOps sync worker stopped");
@@ -1089,12 +1120,12 @@ fn poll_watch(
     if signature == app.shell.data_signature
         || app.shell.reload_pending
         || app.shell.sync_pending
-        || app.edits_pending()
-        || app.comments_pending()
-        || app.creates_pending()
-        || app.reparents_pending()
-        || app.deletes_pending()
-        || app.details_pending.is_some()
+        || app.work_items.edits_pending()
+        || app.work_items.comments_pending()
+        || app.work_items.creates_pending()
+        || app.work_items.reparents_pending()
+        || app.work_items.deletes_pending()
+        || app.work_items.details_pending.is_some()
     {
         return false;
     }
@@ -1108,7 +1139,7 @@ fn persist_session(app: &mut App, repository: &SqliteTicketRepository) -> bool {
         return false;
     }
     let path = session::path_for(repository.path());
-    match session::save(&path, &app.snapshot_session()) {
+    match session::save(&path, &app.work_items.snapshot_session(&app.shell)) {
         Ok(()) => app.shell.session_dirty = false,
         Err(error) => app
             .shell
@@ -1241,7 +1272,8 @@ fn poll_reload(
     match result {
         Ok(prepared) => {
             let count = prepared.ticket_count();
-            app.replace_prepared_tickets(prepared);
+            app.work_items
+                .replace_prepared_tickets(&mut app.shell, prepared);
             stamp_database(app, repository);
             app.shell.set_status(format!("Reloaded {count} tickets"));
         }
@@ -1306,7 +1338,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serde_json::Value;
     use tempfile::tempdir;
-    use ticket_tui::app::{AppMode, FormFieldId, NotificationLevel};
+    use ticket_tui::app::{FormFieldId, NotificationLevel, WorkItemMode};
     use ticket_tui::azure::{RequestRejected, SyncBatch, Throttled};
     use ticket_tui::edit::FieldEdit;
     use ticket_tui::model::{
@@ -1577,7 +1609,7 @@ mod tests {
         runtime: &mut SyncRuntime,
     ) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while app.edits_pending() {
+        while app.work_items.edits_pending() {
             poll_sync(app, repository, runtime);
             assert!(Instant::now() < deadline, "the sync worker timed out");
             thread::yield_now();
@@ -1591,7 +1623,7 @@ mod tests {
         runtime: &mut SyncRuntime,
     ) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while app.comments_pending() {
+        while app.work_items.comments_pending() {
             poll_sync(app, repository, runtime);
             assert!(Instant::now() < deadline, "the sync worker timed out");
             thread::yield_now();
@@ -1605,7 +1637,7 @@ mod tests {
         runtime: &mut SyncRuntime,
     ) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while app.creates_pending() {
+        while app.work_items.creates_pending() {
             poll_sync(app, repository, runtime);
             assert!(Instant::now() < deadline, "the sync worker timed out");
             thread::yield_now();
@@ -1640,7 +1672,10 @@ mod tests {
 
     /// The work items on the table, in the order it holds them.
     fn visible_ids(app: &App) -> Vec<i64> {
-        app.visible_tickets().map(|ticket| ticket.key.id).collect()
+        app.work_items
+            .visible_tickets()
+            .map(|ticket| ticket.key.id)
+            .collect()
     }
 
     fn seeded_repository(path: &Path) -> SqliteTicketRepository {
@@ -1914,8 +1949,8 @@ mod tests {
         );
 
         await_sync(&mut app, &mut repository, &mut runtime);
-        assert_eq!(app.tickets().len(), 1);
-        assert_eq!(app.tickets()[0].key.id, 9);
+        assert_eq!(app.work_items.tickets().len(), 1);
+        assert_eq!(app.work_items.tickets()[0].key.id, 9);
         assert_eq!(
             app.shell.activity_label().as_deref(),
             Some("Synced just now")
@@ -1955,7 +1990,11 @@ mod tests {
             Some("Synced just now"),
             "the pull still happened, so the title moves"
         );
-        assert_eq!(app.tickets().len(), 3, "the rows were never replaced");
+        assert_eq!(
+            app.work_items.tickets().len(),
+            3,
+            "the rows were never replaced"
+        );
         assert!(
             !poll_watch(&mut app, &repository, &mut ReloadEngine::default()),
             "an unchanged pull writes nothing, so there is nothing to reload"
@@ -1986,7 +2025,11 @@ mod tests {
         dispatch_due_pull(&mut app, &mut runtime);
         await_sync(&mut app, &mut repository, &mut runtime);
 
-        assert_eq!(app.tickets().len(), 3, "a failed pull changes nothing");
+        assert_eq!(
+            app.work_items.tickets().len(),
+            3,
+            "a failed pull changes nothing"
+        );
         let (message, level) = app
             .shell
             .notification()
@@ -2020,7 +2063,11 @@ mod tests {
         dispatch_due_pull(&mut app, &mut runtime);
         await_sync(&mut app, &mut repository, &mut runtime);
 
-        assert_eq!(app.tickets().len(), 3, "a throttled pull changes nothing");
+        assert_eq!(
+            app.work_items.tickets().len(),
+            3,
+            "a throttled pull changes nothing"
+        );
         assert_eq!(
             app.shell.activity_label().as_deref(),
             Some("Sync paused 2m")
@@ -2108,8 +2155,9 @@ mod tests {
         );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
-        assert_eq!(app.mode, AppMode::Form);
-        app.form
+        assert_eq!(app.work_items.mode, WorkItemMode::Form);
+        app.work_items
+            .form
             .as_mut()
             .expect("the form is open")
             .set_value(FormFieldId::Title, "Honour Retry-After");
@@ -2121,17 +2169,27 @@ mod tests {
             app.shell.notification().map(|(message, _)| message),
             Some("Creating Issue\u{2026}")
         );
-        assert_eq!(app.tickets().len(), 3, "nothing shows until it is stored");
+        assert_eq!(
+            app.work_items.tickets().len(),
+            3,
+            "nothing shows until it is stored"
+        );
         await_create(&mut app, &mut repository, &mut runtime);
 
-        assert_eq!(app.tickets().len(), 4);
+        assert_eq!(app.work_items.tickets().len(), 4);
         assert_eq!(
-            app.selected_ticket().map(|ticket| ticket.key.id),
+            app.work_items.selected_ticket().map(|ticket| ticket.key.id),
             Some(4),
             "the table selects the work item that was just filed"
         );
-        assert_eq!(app.family_of(&filed.key).ancestors, vec![parent.clone()]);
-        assert_eq!(app.family_of(&parent).children, vec![filed.key.clone()]);
+        assert_eq!(
+            app.work_items.family_of(&filed.key).ancestors,
+            vec![parent.clone()]
+        );
+        assert_eq!(
+            app.work_items.family_of(&parent).children,
+            vec![filed.key.clone()]
+        );
         assert!(
             repository
                 .load_all()
@@ -2150,7 +2208,8 @@ mod tests {
             FakeAzure::refusing(400, "TF401320: rule error", Vec::new()),
         );
         app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
-        app.form
+        app.work_items
+            .form
             .as_mut()
             .expect("the form is open")
             .set_value(FormFieldId::Title, "Honour Retry-After");
@@ -2159,12 +2218,16 @@ mod tests {
         await_create(&mut app, &mut repository, &mut runtime);
 
         assert_eq!(
-            app.mode,
-            AppMode::Form,
+            app.work_items.mode,
+            WorkItemMode::Form,
             "the form comes back to be answered"
         );
         assert_eq!(
-            app.form.as_ref().unwrap().value(FormFieldId::Title),
+            app.work_items
+                .form
+                .as_ref()
+                .unwrap()
+                .value(FormFieldId::Title),
             "Honour Retry-After",
             "with everything still in it"
         );
@@ -2189,10 +2252,12 @@ mod tests {
         };
         let (mut app, mut repository, mut runtime) =
             synced_app(&path, FakeAzure::commenting(stored.clone()));
-        let selected = app.selected_ticket().unwrap().key.clone();
+        let selected = app.work_items.selected_ticket().unwrap().key.clone();
         assert_eq!(selected.id, 3, "the newest work item starts selected");
 
-        let action = app.comment_selected("Merged into main".into());
+        let action = app
+            .work_items
+            .comment_selected(&mut app.shell, "Merged into main".into());
         assert!(matches!(action, AppAction::Comment { .. }));
         handle_action(action, &mut app, &mut runtime, &failing_opener);
         assert_eq!(
@@ -2200,12 +2265,12 @@ mod tests {
             Some("Posting comment on #3\u{2026}")
         );
         assert!(
-            app.comments_for(&selected).is_empty(),
+            app.work_items.comments_for(&selected).is_empty(),
             "nothing shows until Azure DevOps has stored it"
         );
         await_comment(&mut app, &mut repository, &mut runtime);
 
-        assert_eq!(app.comments_for(&selected), vec![&stored]);
+        assert_eq!(app.work_items.comments_for(&selected), vec![&stored]);
         assert_eq!(
             app.shell.notification().map(|(message, _)| message),
             Some("Commented on #3")
@@ -2218,7 +2283,9 @@ mod tests {
 
         let (mut app, mut repository, mut runtime) =
             synced_app(&path, FakeAzure::returning(Vec::new()));
-        let action = app.comment_selected("Merged into main".into());
+        let action = app
+            .work_items
+            .comment_selected(&mut app.shell, "Merged into main".into());
         handle_action(action, &mut app, &mut runtime, &failing_opener);
         await_comment(&mut app, &mut repository, &mut runtime);
 
@@ -2227,7 +2294,7 @@ mod tests {
         assert!(message.contains("read only"), "{message}");
         assert_eq!(level, NotificationLevel::Error);
         assert!(
-            app.comments_for(&selected).is_empty(),
+            app.work_items.comments_for(&selected).is_empty(),
             "a refused comment files nothing"
         );
     }
@@ -2243,27 +2310,29 @@ mod tests {
             synced_app(&path, FakeAzure::storing(stored.clone()));
         // The edit itself is the subject, so the row it finishes stays on the
         // table for the assertions below to find it on.
-        app.set_show_finished(true);
-        let selected = app.selected_ticket().unwrap().key.clone();
+        app.work_items.set_show_finished(&mut app.shell, true);
+        let selected = app.work_items.selected_ticket().unwrap().key.clone();
         assert_eq!(selected.id, 3, "the newest work item starts selected");
 
-        let action = app.edit_selected(FieldEdit::state("Done"));
+        let action = app
+            .work_items
+            .edit_selected(&mut app.shell, FieldEdit::state("Done"));
         assert!(matches!(action, AppAction::Edit(_)));
         assert_eq!(
-            app.selected_ticket().unwrap().state,
+            app.work_items.selected_ticket().unwrap().state,
             "Done",
             "the row changes before the worker is even asked"
         );
         handle_action(action, &mut app, &mut runtime, &failing_opener);
         await_edit(&mut app, &mut repository, &mut runtime);
 
-        assert_eq!(app.ticket_by_key(&selected), Some(&stored));
+        assert_eq!(app.work_items.ticket_by_key(&selected), Some(&stored));
         assert_eq!(
             app.shell.notification().map(|(message, _)| message),
             Some("Updated #3 · State → Done")
         );
         assert_eq!(
-            app.selected_ticket().map(|ticket| ticket.key.id),
+            app.work_items.selected_ticket().map(|ticket| ticket.key.id),
             Some(3),
             "an edit landing leaves the selection where it was"
         );
@@ -2297,7 +2366,9 @@ mod tests {
         let (mut app, mut repository, mut runtime) = synced_app(&path, FakeAzure::storing(stored));
         assert_eq!(visible_ids(&app), vec![3, 2, 1]);
 
-        let action = app.edit_selected(FieldEdit::state("Done"));
+        let action = app
+            .work_items
+            .edit_selected(&mut app.shell, FieldEdit::state("Done"));
         handle_action(action, &mut app, &mut runtime, &failing_opener);
         assert_eq!(
             visible_ids(&app),
@@ -2313,12 +2384,12 @@ mod tests {
             "the copy Azure DevOps stored is finished, so the row leaves"
         );
         assert_eq!(
-            app.selected_ticket().map(|ticket| ticket.key.id),
+            app.work_items.selected_ticket().map(|ticket| ticket.key.id),
             Some(2),
             "the cursor lands on the next piece of work rather than on nothing"
         );
         assert_eq!(
-            app.hidden_finished(),
+            app.work_items.hidden_finished(&app.shell),
             1,
             "and the row it took off the table is counted for the `i` overlay"
         );
@@ -2344,7 +2415,9 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
             app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
-        let action = app.edit_checked(FieldEdit::state("Done"));
+        let action = app
+            .work_items
+            .edit_checked(&mut app.shell, FieldEdit::state("Done"));
         assert!(
             matches!(&action, AppAction::Edit(requests) if requests.len() == 2),
             "one request a checked row, got {action:?}"
@@ -2354,13 +2427,14 @@ mod tests {
 
         for copy in &stored {
             assert_eq!(
-                app.ticket_by_key(&copy.key),
+                app.work_items.ticket_by_key(&copy.key),
                 Some(copy),
                 "every checked work item carries the copy Azure DevOps stored"
             );
         }
         assert_eq!(
-            app.ticket_by_key(&ticket(1).key)
+            app.work_items
+                .ticket_by_key(&ticket(1).key)
                 .map(|ticket| ticket.state.clone()),
             Some("Active".to_owned()),
             "the row that was never checked is untouched"
@@ -2391,14 +2465,17 @@ mod tests {
             &path,
             FakeAzure::refusing(409, "the work item has been changed", vec![ticket(3)]),
         );
-        let selected = app.selected_ticket().unwrap().key.clone();
+        let selected = app.work_items.selected_ticket().unwrap().key.clone();
 
-        let action = app.edit_selected(FieldEdit::state("Done"));
+        let action = app
+            .work_items
+            .edit_selected(&mut app.shell, FieldEdit::state("Done"));
         handle_action(action, &mut app, &mut runtime, &failing_opener);
         await_edit(&mut app, &mut repository, &mut runtime);
 
         assert_eq!(
-            app.ticket_by_key(&selected)
+            app.work_items
+                .ticket_by_key(&selected)
                 .map(|ticket| ticket.state.clone()),
             Some("Active".to_owned()),
             "the row goes back to what Azure DevOps still holds"
@@ -2417,7 +2494,7 @@ mod tests {
 
         await_sync(&mut app, &mut repository, &mut runtime);
         assert_eq!(
-            app.tickets().len(),
+            app.work_items.tickets().len(),
             1,
             "the pull the conflict asked for ran"
         );
@@ -2429,18 +2506,22 @@ mod tests {
         let path = directory.path().join("tickets.sqlite3");
         let (mut app, _repository, mut runtime) =
             synced_app(&path, FakeAzure::returning(vec![ticket(3)]));
-        let action = app.edit_selected(FieldEdit::state("Done"));
+        let action = app
+            .work_items
+            .edit_selected(&mut app.shell, FieldEdit::state("Done"));
         runtime.worker = None;
         runtime.offline_reason = Some("no Azure DevOps organization; pass --org".into());
 
         handle_action(action, &mut app, &mut runtime, &failing_opener);
 
         assert_eq!(
-            app.selected_ticket().map(|ticket| ticket.state.clone()),
+            app.work_items
+                .selected_ticket()
+                .map(|ticket| ticket.state.clone()),
             Some("Active".to_owned()),
             "an edit that never left is not left showing"
         );
-        assert!(!app.edits_pending());
+        assert!(!app.work_items.edits_pending());
         let (message, level) = app.shell.notification().unwrap();
         assert!(message.contains("--org"), "{message}");
         assert_eq!(level, NotificationLevel::Error);
@@ -2494,7 +2575,7 @@ mod tests {
         runtime: &mut SyncRuntime,
     ) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while app.details_pending.is_some() {
+        while app.work_items.details_pending.is_some() {
             poll_sync(app, repository, runtime);
             assert!(Instant::now() < deadline, "the sync worker timed out");
             thread::yield_now();
@@ -2605,15 +2686,18 @@ mod tests {
         };
         let (mut app, mut repository, mut runtime) =
             synced_app(&path, FakeAzure::detailing(3, details.clone()));
-        let selected = app.selected_ticket().unwrap().key.clone();
+        let selected = app.work_items.selected_ticket().unwrap().key.clone();
         assert_eq!(selected.id, 3, "the newest work item starts selected");
         // Another work item's discussion, which this fetch must not disturb.
         let elsewhere = ticket(1).key;
-        app.set_workspace_graph(TicketGraph {
-            comments: vec![comment(1, "Someone else's thread")],
-            history: vec![transition(1, "Done")],
-            ..TicketGraph::default()
-        });
+        app.work_items.set_workspace_graph(
+            &mut app.shell,
+            TicketGraph {
+                comments: vec![comment(1, "Someone else's thread")],
+                history: vec![transition(1, "Done")],
+                ..TicketGraph::default()
+            },
+        );
 
         assert!(
             !dispatch_due_details(&mut app, &mut runtime),
@@ -2625,7 +2709,7 @@ mod tests {
 
         assert!(dispatch_due_details(&mut app, &mut runtime));
         assert_eq!(
-            app.details_pending.as_ref(),
+            app.work_items.details_pending.as_ref(),
             Some(&selected),
             "the pane says it is reading while the request is out"
         );
@@ -2636,16 +2720,26 @@ mod tests {
 
         await_details(&mut app, &mut repository, &mut runtime);
 
-        assert_eq!(app.comments_for(&selected), vec![&details.comments[0]]);
-        assert_eq!(app.history_for(&selected), vec![&details.history[0]]);
         assert_eq!(
-            app.comments_for(&elsewhere),
+            app.work_items.comments_for(&selected),
+            vec![&details.comments[0]]
+        );
+        assert_eq!(
+            app.work_items.history_for(&selected),
+            vec![&details.history[0]]
+        );
+        assert_eq!(
+            app.work_items.comments_for(&elsewhere),
             vec![&comment(1, "Someone else's thread")],
             "another work item's discussion is left exactly as it was"
         );
-        assert_eq!(app.history_for(&elsewhere), vec![&transition(1, "Done")]);
         assert_eq!(
-            app.ticket_by_key(&selected)
+            app.work_items.history_for(&elsewhere),
+            vec![&transition(1, "Done")]
+        );
+        assert_eq!(
+            app.work_items
+                .ticket_by_key(&selected)
                 .map(|ticket| ticket.details_rev),
             Some(1),
             "the row records the revision its details came from"
@@ -2672,7 +2766,7 @@ mod tests {
         let mut app = App::new(repository.load_all().unwrap());
         app.shell
             .configure_database(path.clone(), db::data_signature(&path));
-        app.set_table_viewport(3);
+        app.work_items.set_table_viewport(3);
         let mut publisher = AgentContextPublisher::new(&path);
         publisher.publish(&app).unwrap();
 
@@ -2680,7 +2774,7 @@ mod tests {
             crossterm::event::KeyCode::Down,
             crossterm::event::KeyModifiers::NONE,
         ));
-        let expected = app.selected_ticket().unwrap().key.clone();
+        let expected = app.work_items.selected_ticket().unwrap().key.clone();
         publisher.publish(&app).unwrap();
 
         let context_path = agent_context::path_for(&path);
@@ -2805,8 +2899,8 @@ mod tests {
         let directory = tempdir().unwrap();
         let mut app = App::new(vec![ticket(3)]);
         app.shell.enable_sync();
-        app.set_table_viewport(3);
-        let key = app.selected_ticket().unwrap().key.clone();
+        app.work_items.set_table_viewport(3);
+        let key = app.work_items.selected_ticket().unwrap().key.clone();
         let mut runtime = offline_runtime();
 
         let unchanged = run_description_editor(
@@ -2821,7 +2915,7 @@ mod tests {
         let (message, level) = app.shell.notification().expect("the run says what it did");
         assert!(message.contains("description unchanged"), "{message}");
         assert_eq!(level, NotificationLevel::Info);
-        assert!(!app.edits_pending(), "nothing was sent");
+        assert!(!app.work_items.edits_pending(), "nothing was sent");
 
         let failed = run_description_editor(
             directory.path(),
@@ -2837,7 +2931,7 @@ mod tests {
         let (message, level) = app.shell.notification().expect("a failure is reported");
         assert!(message.contains("description not saved"), "{message}");
         assert_eq!(level, NotificationLevel::Error);
-        assert!(!app.edits_pending());
+        assert!(!app.work_items.edits_pending());
 
         let missing = run_description_editor(
             directory.path(),
@@ -2850,9 +2944,9 @@ mod tests {
             "an editor that cannot start saves nothing"
         );
         apply_description_outcome(&mut app, &mut runtime, &key, missing);
-        assert!(!app.edits_pending());
+        assert!(!app.work_items.edits_pending());
         assert_eq!(
-            app.selected_ticket().unwrap().description_html,
+            app.work_items.selected_ticket().unwrap().description_html,
             "",
             "the row is exactly as it was"
         );
@@ -2868,7 +2962,7 @@ mod tests {
         stored.revision = 9;
         let (mut app, mut repository, mut runtime) =
             synced_app(&path, FakeAzure::storing(stored.clone()));
-        let key = app.selected_ticket().unwrap().key.clone();
+        let key = app.work_items.selected_ticket().unwrap().key.clone();
 
         apply_description_outcome(
             &mut app,
@@ -2877,13 +2971,13 @@ mod tests {
             Ok(Some("<p>Rewritten in the editor.</p>".to_owned())),
         );
         assert_eq!(
-            app.selected_ticket().unwrap().description,
+            app.work_items.selected_ticket().unwrap().description,
             "Rewritten in the editor.",
             "the details pane reads the new description before the network answers"
         );
         await_edit(&mut app, &mut repository, &mut runtime);
 
-        assert_eq!(app.ticket_by_key(&key), Some(&stored));
+        assert_eq!(app.work_items.ticket_by_key(&key), Some(&stored));
         assert_eq!(
             app.shell.notification().map(|(message, _)| message),
             Some("Updated #3 · Description → updated")

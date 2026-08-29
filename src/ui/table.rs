@@ -2,27 +2,31 @@
 
 use super::*;
 
-pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let count = app.visible_count();
-    let total = app.tickets().len();
-    let ordering = if app.query().is_empty() || app.search_order == SearchOrder::Field {
-        format!("{} {}", app.sort_field, app.sort_direction.symbol())
+pub(super) fn render_table(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+    area: Rect,
+) {
+    let count = screen.visible_count();
+    let total = screen.tickets().len();
+    let ordering = if screen.query().is_empty() || screen.search_order == SearchOrder::Field {
+        format!("{} {}", screen.sort_field, screen.sort_direction.symbol())
     } else {
         format!(
             "Relevance → {} {}",
-            app.sort_field,
-            app.sort_direction.symbol()
+            screen.sort_field,
+            screen.sort_direction.symbol()
         )
     };
-    let activity = app
-        .shell
+    let activity = shell
         .activity_label()
         .map_or_else(String::new, |label| format!(" · {label}"));
     let title = if area.width < NARROW_BREAKPOINT {
-        let short_order = if app.query().is_empty() {
-            app.sort_direction.symbol()
+        let short_order = if screen.query().is_empty() {
+            screen.sort_direction.symbol()
         } else {
-            match app.search_order {
+            match screen.search_order {
                 SearchOrder::Relevance => "Rel",
                 SearchOrder::Field => "Field",
             }
@@ -31,9 +35,9 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         format!(" Tickets {count}/{total} · {ordering}{activity} ")
     };
-    let block = focused_block(title, app.shell.focus == Focus::Tickets);
+    let block = focused_block(title, shell.focus == Focus::Tickets);
     let inner = block.inner(area);
-    let columns = app.layout.visible_columns(inner.width.saturating_sub(5));
+    let columns = screen.layout.visible_columns(inner.width.saturating_sub(5));
     let mut constraints = vec![Constraint::Length(4)];
     constraints.extend(
         columns
@@ -44,8 +48,8 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let mut header_cells = vec![Cell::from("")];
     header_cells.extend(columns.iter().map(|column| {
-        let direction = if column.id == app.sort_field {
-            app.sort_direction.symbol()
+        let direction = if column.id == screen.sort_field {
+            screen.sort_direction.symbol()
         } else {
             ""
         };
@@ -74,16 +78,16 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // The same instant the relative labels read against, so a row's age and
     // whether it is flagged for that age are decided by one clock.
     let table_now = Timestamp::from_offset_date_time(now);
-    let density = app.row_density;
+    let density = screen.row_density;
     let row_height = density.row_height();
     let body_height = inner.height.saturating_sub(2);
     let visible_rows = usize::from(body_height / row_height).max(1);
-    app.set_table_viewport(visible_rows);
-    let offset = app.table.offset;
-    let selected = app.selected_row();
-    let fuzzy = app.fuzzy_query();
+    screen.set_table_viewport(visible_rows);
+    let offset = screen.table.offset;
+    let selected = screen.selected_row();
+    let fuzzy = screen.fuzzy_query();
     let mut highlighter = QueryHighlighter::new(&fuzzy);
-    let tickets: Vec<&Ticket> = app.visible_tickets().collect();
+    let tickets: Vec<&Ticket> = screen.visible_tickets().collect();
     let slice = tickets
         .get(offset..)
         .unwrap_or(&[])
@@ -91,14 +95,14 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .copied()
         .take(visible_rows);
     let rows = slice.map(|ticket| {
-        let bookmarked = app.is_bookmarked(&ticket.key);
-        let checked = app.is_row_selected(&ticket.key);
+        let bookmarked = screen.is_bookmarked(&ticket.key);
+        let checked = screen.is_row_selected(&ticket.key);
         let mut cells = vec![Cell::from(row_marker_line(checked, bookmarked))];
         let row = RowContext {
             tone: RowTone::of(&ticket.state),
-            mine: app.shell.is_mine(ticket),
-            progress: app.child_progress(&ticket.key),
-            stale: app.stale_age_days_at(ticket, table_now).is_some(),
+            mine: shell.is_mine(ticket),
+            progress: screen.child_progress(&ticket.key),
+            stale: screen.stale_age_days_at(ticket, table_now).is_some(),
         };
         cells.extend(
             columns
@@ -127,7 +131,7 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_stateful_widget(table, area, &mut local_state);
 
     if area.width < NARROW_BREAKPOINT {
-        register_narrow_tabs(app, area);
+        register_narrow_tabs(shell, area);
     }
     if inner.height >= 2 {
         let header_area = Rect::new(
@@ -140,7 +144,7 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .spacing(1)
             .split(header_area);
         for (header_rect, column) in header_columns.iter().skip(1).zip(columns.iter()) {
-            app.shell.hit_regions.push(region(
+            shell.hit_regions.push(region(
                 *header_rect,
                 PointerTarget::SortHeader(column.id),
                 PointerLayer::Base,
@@ -149,7 +153,7 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ));
         }
         let body = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, body_height);
-        app.shell.hit_regions.push(region(
+        shell.hit_regions.push(region(
             body,
             PointerTarget::FocusTickets,
             PointerLayer::Base,
@@ -171,7 +175,7 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 body.width.saturating_sub(1),
                 row_height.min(body.y.saturating_add(body.height).saturating_sub(y)),
             );
-            app.shell.hit_regions.push(region(
+            shell.hit_regions.push(region(
                 row_rect,
                 PointerTarget::TableRow { index: logical },
                 PointerLayer::Base,
@@ -179,14 +183,14 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Some(ScrollSurface::Table),
             ));
             if let Some(marker) = header_columns.first() {
-                app.shell.hit_regions.push(region(
+                shell.hit_regions.push(region(
                     Rect::new(marker.x, y, 3, 1),
                     PointerTarget::ToggleRowSelect { index: logical },
                     PointerLayer::Base,
                     None,
                     None,
                 ));
-                app.shell.hit_regions.push(region(
+                shell.hit_regions.push(region(
                     Rect::new(marker.x.saturating_add(3), y, 1, 1),
                     PointerTarget::ToggleBookmark { index: logical },
                     PointerLayer::Base,
@@ -195,7 +199,7 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 ));
             }
             if let Some(id_area) = header_columns.get(1) {
-                app.shell.hit_regions.push(region(
+                shell.hit_regions.push(region(
                     Rect::new(id_area.x, y, id_area.width, 1),
                     PointerTarget::OpenTicket { index: logical },
                     PointerLayer::Base,
@@ -208,25 +212,28 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         if overflow {
             render_scrollbar(
                 frame,
-                app,
+                screen,
+                shell,
                 body,
                 ScrollSurface::Table,
-                count,
-                offset,
-                visible_rows,
+                ScrollState {
+                    offset,
+                    content: count,
+                    viewport: visible_rows,
+                },
             );
         }
-        capture_selectable(frame, app, SelectableSurface::Table, body, overflow);
+        capture_selectable(frame, shell, SelectableSurface::Table, body, overflow);
     }
 
     if count == 0 && inner.height > 2 {
-        let message = if app.shell.sync_pending {
+        let message = if shell.sync_pending {
             "Syncing with Azure DevOps…"
-        } else if app.shell.reload_pending {
+        } else if shell.reload_pending {
             "Reloading tickets…"
-        } else if !app.parsed_query().is_active() {
+        } else if !screen.parsed_query().is_active() {
             "No tickets in this database"
-        } else if app.search_pending {
+        } else if screen.search_pending {
             "Searching…"
         } else {
             "No tickets match this search"

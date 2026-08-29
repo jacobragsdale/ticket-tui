@@ -93,7 +93,7 @@ pub struct SprintOverlay {
     pub scroll: ScrollState,
 }
 
-impl App {
+impl WorkItemsScreen {
     /// Whether the table is leaving finished work out right now: the setting
     /// says to, and the query names no state of its own that overrides it.
     #[must_use]
@@ -122,12 +122,12 @@ impl App {
     /// says how much finished work the filters hold rather than how much that
     /// search would have found.
     #[must_use]
-    pub fn hidden_finished(&self) -> usize {
+    pub fn hidden_finished(&self, shell: &Shell) -> usize {
         if !self.finished_hidden() {
             return 0;
         }
         let filters = self.parsed_query().filters;
-        let context = self.match_context();
+        let context = self.match_context(shell);
         self.tickets
             .iter()
             .filter(|ticket| {
@@ -140,21 +140,21 @@ impl App {
     /// Lists or hides finished work. The visible set is rebuilt rather than
     /// filtered again, because showing them has to put rows back and filtering
     /// can only take them away.
-    pub fn set_show_finished(&mut self, show: bool) {
+    pub fn set_show_finished(&mut self, shell: &mut Shell, show: bool) {
         if self.show_finished == show {
             return;
         }
         self.show_finished = show;
-        self.shell.session_dirty = true;
-        self.resubmit_query();
-        self.shell.set_status(format!(
+        shell.session_dirty = true;
+        self.resubmit_query(shell);
+        shell.set_status(format!(
             "Finished tickets: {}",
             if show { "shown" } else { "hidden" }
         ));
     }
 
-    pub fn toggle_show_finished(&mut self) {
-        self.set_show_finished(!self.show_finished);
+    pub fn toggle_show_finished(&mut self, shell: &mut Shell) {
+        self.set_show_finished(shell, !self.show_finished);
     }
 
     /// How long a work item may sit untouched before it is flagged.
@@ -182,25 +182,24 @@ impl App {
     /// the one in force, wrapping round at the end of the list. A value that
     /// came from a flag is stepped away from and then forgotten, because the
     /// setting has now been asked for explicitly.
-    pub fn cycle_stale_days(&mut self) {
+    pub fn cycle_stale_days(&mut self, shell: &mut Shell) {
         let current = self.stale_days();
         let next = STALE_DAY_CHOICES
             .into_iter()
             .find(|choice| *choice > current)
             .unwrap_or(STALE_DAY_CHOICES[0]);
-        self.set_stale_days(next);
+        self.set_stale_days(shell, next);
     }
 
     /// Moves the threshold and remembers it. The status line names the query
     /// the highlight now stands for, so the filter and the colour are visibly
     /// the same question.
-    pub fn set_stale_days(&mut self, days: u16) {
+    pub fn set_stale_days(&mut self, shell: &mut Shell, days: u16) {
         let days = clamp_stale_days(days);
         self.stale_days = days;
         self.stale_days_override = None;
-        self.shell.session_dirty = true;
-        self.shell
-            .set_status(format!("Stale after {days} days · {}", stale_query(days)));
+        shell.session_dirty = true;
+        shell.set_status(format!("Stale after {days} days · {}", stale_query(days)));
     }
 
     /// How many whole days a work item has been sitting when it counts as
@@ -268,10 +267,10 @@ impl App {
     pub(super) fn open_views(&mut self) {
         self.views_overlay = ViewsOverlay::default();
         self.focus_view(0);
-        self.mode = AppMode::Views;
+        self.mode = WorkItemMode::Views;
     }
 
-    pub(super) fn handle_views_key(&mut self, key: KeyEvent) -> AppAction {
+    pub(super) fn handle_views_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
         if self.views_overlay.naming.is_some() {
             match key.code {
                 KeyCode::Esc => self.views_overlay.naming = None,
@@ -283,7 +282,7 @@ impl App {
                         .map(|name| name.text().trim().to_owned())
                         .filter(|name| !name.is_empty())
                     {
-                        self.save_view(name);
+                        self.save_view(shell, name);
                     }
                 }
                 _ => {
@@ -295,12 +294,14 @@ impl App {
             return AppAction::None;
         }
         match key.code {
-            KeyCode::Esc | KeyCode::Char('V') => self.mode = AppMode::Browse,
+            KeyCode::Esc | KeyCode::Char('V') => self.mode = WorkItemMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => self.move_view_focus(false),
             KeyCode::Down | KeyCode::Char('j') => self.move_view_focus(true),
-            KeyCode::Enter => self.apply_view_at(self.views_overlay.index),
+            KeyCode::Enter => self.apply_view_at(shell, self.views_overlay.index),
             KeyCode::Char('n') => self.views_overlay.naming = Some(TextInput::default()),
-            KeyCode::Char('d') | KeyCode::Delete => self.delete_view_at(self.views_overlay.index),
+            KeyCode::Char('d') | KeyCode::Delete => {
+                self.delete_view_at(shell, self.views_overlay.index)
+            }
             _ => {}
         }
         AppAction::None
@@ -346,11 +347,10 @@ impl App {
         }
     }
 
-    pub(super) fn save_view(&mut self, name: String) {
+    pub(super) fn save_view(&mut self, shell: &mut Shell, name: String) {
         if let Some(builtin) = builtin_named(&name) {
             let name = builtin.name;
-            self.shell
-                .set_status(format!("'{name}' is a built-in view; choose another name"));
+            shell.set_status(format!("'{name}' is a built-in view; choose another name"));
             return;
         }
         let view = NamedView {
@@ -373,34 +373,35 @@ impl App {
             self.views.push(view);
         }
         self.active_view = Some(name.clone());
-        self.shell.session_dirty = true;
-        self.shell.set_status(format!("Saved view '{name}'"));
+        shell.session_dirty = true;
+        shell.set_status(format!("Saved view '{name}'"));
     }
 
     /// Loads the view on one row of the overlay, whichever kind it is. A
     /// heading loads nothing.
-    pub(super) fn apply_view_at(&mut self, index: usize) {
+    pub(super) fn apply_view_at(&mut self, shell: &mut Shell, index: usize) {
         match self.view_rows().get(index).map(|row| row.kind) {
-            Some(ViewRowKind::Builtin(builtin)) => self.apply_builtin_view(BUILTIN_VIEWS[builtin]),
-            Some(ViewRowKind::Saved(saved)) => self.apply_saved_view(saved),
+            Some(ViewRowKind::Builtin(builtin)) => {
+                self.apply_builtin_view(shell, BUILTIN_VIEWS[builtin])
+            }
+            Some(ViewRowKind::Saved(saved)) => self.apply_saved_view(shell, saved),
             Some(ViewRowKind::Heading) | None => {}
         }
     }
 
     /// A built-in sets the query and the sort and leaves the rest of the table
     /// alone, so loading one never rearranges the columns somebody has set up.
-    fn apply_builtin_view(&mut self, view: BuiltinView) {
+    fn apply_builtin_view(&mut self, shell: &mut Shell, view: BuiltinView) {
         self.active_view = Some(view.name.to_owned());
         self.sort_field = view.sort_field;
         self.sort_direction = view.sort_direction;
-        self.shell.session_dirty = true;
-        self.set_query(view.query.to_owned());
-        self.mode = AppMode::Browse;
-        self.shell
-            .set_status(format!("Loaded view '{}'", view.name));
+        shell.session_dirty = true;
+        self.set_query(shell, view.query.to_owned());
+        self.mode = WorkItemMode::Browse;
+        shell.set_status(format!("Loaded view '{}'", view.name));
     }
 
-    fn apply_saved_view(&mut self, index: usize) {
+    fn apply_saved_view(&mut self, shell: &mut Shell, index: usize) {
         let Some(view) = self.views.get(index).cloned() else {
             return;
         };
@@ -410,20 +411,18 @@ impl App {
         self.search_order = view.search_order;
         self.row_density = view.row_density;
         self.layout = TableLayout::from_session_columns(&view.columns, Some(view.auto_hide));
-        self.shell.session_dirty = true;
-        self.set_query(view.query);
-        self.mode = AppMode::Browse;
-        self.shell
-            .set_status(format!("Loaded view '{}'", view.name));
+        shell.session_dirty = true;
+        self.set_query(shell, view.query);
+        self.mode = WorkItemMode::Browse;
+        shell.set_status(format!("Loaded view '{}'", view.name));
     }
 
-    pub(super) fn delete_view_at(&mut self, index: usize) {
+    pub(super) fn delete_view_at(&mut self, shell: &mut Shell, index: usize) {
         let saved = match self.view_rows().get(index).map(|row| row.kind) {
             Some(ViewRowKind::Saved(saved)) => saved,
             Some(ViewRowKind::Builtin(builtin)) => {
                 let name = BUILTIN_VIEWS[builtin].name;
-                self.shell
-                    .set_status(format!("'{name}' is a built-in view and cannot be deleted"));
+                shell.set_status(format!("'{name}' is a built-in view and cannot be deleted"));
                 return;
             }
             Some(ViewRowKind::Heading) | None => return,
@@ -433,9 +432,8 @@ impl App {
             self.active_view = None;
         }
         self.focus_view(index);
-        self.shell.session_dirty = true;
-        self.shell
-            .set_status(format!("Deleted view '{}'", removed.name));
+        shell.session_dirty = true;
+        shell.set_status(format!("Deleted view '{}'", removed.name));
     }
 
     /// The iteration the sprint summary counts: the sprint the project is in,
@@ -505,17 +503,17 @@ impl App {
         self.sprint_overlay.iteration = self.summary_iteration();
         self.sprint_overlay.scroll.scroll_to(0);
         self.focus_summary_row(0);
-        self.mode = AppMode::Sprint;
+        self.mode = WorkItemMode::Sprint;
     }
 
-    pub(super) fn handle_sprint_key(&mut self, key: KeyEvent) {
+    pub(super) fn handle_sprint_key(&mut self, shell: &mut Shell, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.mode = AppMode::Browse,
+            KeyCode::Esc | KeyCode::Char('q') => self.mode = WorkItemMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => self.move_summary_focus(false),
             KeyCode::Down | KeyCode::Char('j') => self.move_summary_focus(true),
             KeyCode::Left | KeyCode::Char('h') => self.step_summary_iteration(-1),
             KeyCode::Right | KeyCode::Char('l') => self.step_summary_iteration(1),
-            KeyCode::Enter => self.apply_summary_row(self.sprint_overlay.index),
+            KeyCode::Enter => self.apply_summary_row(shell, self.sprint_overlay.index),
             _ => {}
         }
     }
@@ -611,7 +609,7 @@ impl App {
     /// `Sprint 1` under different parents would put rows in the table the grid
     /// never counted. The status line still says the leaf, which is what the
     /// table, the chips, and the picker all call it.
-    pub(super) fn apply_summary_row(&mut self, index: usize) {
+    pub(super) fn apply_summary_row(&mut self, shell: &mut Shell, index: usize) {
         let Some(summary) = self.sprint_summary() else {
             return;
         };
@@ -634,9 +632,9 @@ impl App {
             filters.insert(FilterField::Assignee, assignee);
         }
         self.active_view = None;
-        self.set_query(format_query(&filters, ""));
-        self.mode = AppMode::Browse;
-        self.shell.set_status(match assignee {
+        self.set_query(shell, format_query(&filters, ""));
+        self.mode = WorkItemMode::Browse;
+        shell.set_status(match assignee {
             Some(name) => format!("{name} in {leaf}"),
             None => format!("All work in {leaf}"),
         });

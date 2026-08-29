@@ -7,14 +7,19 @@ use super::*;
 /// Planning, Description, History, and Comments are lines of a single
 /// paragraph, so the title scrolls away with everything under it and the
 /// scrollbar measures the whole pane.
-pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let mut block = focused_block(" Details ", app.shell.focus.is_details_pane());
+pub(super) fn render_details(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+    area: Rect,
+) {
+    let mut block = focused_block(" Details ", shell.focus.is_details_pane());
     if area.width >= 24 {
         block = block.title(Line::from("[Copy]").right_aligned());
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    app.shell.hit_regions.push(region(
+    shell.hit_regions.push(region(
         area,
         PointerTarget::FocusDetails,
         PointerLayer::Base,
@@ -22,7 +27,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Some(ScrollSurface::Details),
     ));
     if area.width >= 24 {
-        app.shell.hit_regions.push(region(
+        shell.hit_regions.push(region(
             Rect::new(
                 area.x.saturating_add(area.width.saturating_sub(8)),
                 area.y,
@@ -36,10 +41,10 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ));
     }
 
-    let Some(ticket) = app.selected_ticket().cloned() else {
+    let Some(ticket) = screen.selected_ticket().cloned() else {
         // Nothing scrollable this frame; keep the measured height.
-        let viewport = app.details.viewport;
-        app.details.set_viewport(viewport, 0);
+        let viewport = screen.details.viewport;
+        screen.details.set_viewport(viewport, 0);
         frame.render_widget(
             Paragraph::new("Select a ticket to view details")
                 .style(Style::default().fg(theme().muted)),
@@ -49,17 +54,17 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     };
     if inner.width == 0 || inner.height == 0 {
         // Nothing scrollable this frame; keep the measured height.
-        let viewport = app.details.viewport;
-        app.details.set_viewport(viewport, 0);
+        let viewport = screen.details.viewport;
+        screen.details.set_viewport(viewport, 0);
         return;
     }
 
-    let family = app.family_of(&ticket.key);
+    let family = screen.family_of(&ticket.key);
     let has_family = family.has_family();
     let width = inner.width;
-    let cursor = app.family_cursor.clone();
-    let family_focused = app.shell.focus == Focus::Family;
-    let mut highlighter = QueryHighlighter::new(app.query());
+    let cursor = screen.family_cursor.clone();
+    let family_focused = shell.focus == Focus::Family;
+    let mut highlighter = QueryHighlighter::new(screen.query());
     let title_style = Style::default()
         .fg(theme().text)
         .add_modifier(Modifier::BOLD);
@@ -80,11 +85,11 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     ));
     lines.push(ticket_identity_line(&ticket, &mut highlighter));
     if has_family {
-        lines.push(family_breadcrumb_line(app, &family));
+        lines.push(family_breadcrumb_line(screen, &family));
     }
     lines.push(ticket_assignment_line(
         &ticket,
-        app.shell.is_mine(&ticket),
+        shell.is_mine(&ticket),
         &mut highlighter,
     ));
     lines.push(tags_field_line(&ticket.tags, &mut highlighter));
@@ -100,7 +105,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     // Below the editable fields, so nothing a click aims at moves when a
     // parent gains this line and a childless work item does without it.
-    if let Some(progress) = app.child_progress(&ticket.key) {
+    if let Some(progress) = screen.child_progress(&ticket.key) {
         lines.push(child_progress_line(progress));
     }
     let url_line = u16::try_from(lines.len()).ok();
@@ -109,13 +114,13 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     if has_family {
         lines.push(family_section_line(
-            app.child_progress(&ticket.key),
+            screen.child_progress(&ticket.key),
             family_focused,
         ));
-        for entry in app.visible_family_tree() {
-            let related = app.ticket_by_key(&entry.key);
+        for entry in screen.visible_family_tree() {
+            let related = screen.ticket_by_key(&entry.key);
             let is_cursor = family_focused && cursor.as_ref() == Some(&entry.key);
-            let progress = app.child_progress(&entry.key);
+            let progress = screen.child_progress(&entry.key);
             let line = family_tree_line(&entry, related, progress, is_cursor, width);
             if let Ok(index) = u16::try_from(lines.len()) {
                 tree_start.get_or_insert(index);
@@ -128,7 +133,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             lines.push(line);
         }
         for parent in &family.extra_parents {
-            let related = app.ticket_by_key(parent);
+            let related = screen.ticket_by_key(parent);
             let is_cursor = family_focused && cursor.as_ref() == Some(parent);
             if let Ok(index) = u16::try_from(lines.len())
                 && related.is_some()
@@ -170,7 +175,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         &mut highlighter,
     ));
     lines.push(field_line("Created", ticket.created_at.exact_utc()));
-    lines.push(changed_field_line(&ticket, app.stale_age_days(&ticket)));
+    lines.push(changed_field_line(&ticket, screen.stale_age_days(&ticket)));
 
     lines.push(Line::default());
     lines.push(section_line("Description"));
@@ -192,8 +197,8 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
     }
 
-    let history = app.history_for(&ticket.key);
-    let loading_details = app.details_pending.as_ref() == Some(&ticket.key);
+    let history = screen.history_for(&ticket.key);
+    let loading_details = screen.details_pending.as_ref() == Some(&ticket.key);
     if loading_details || !history.is_empty() {
         let now = OffsetDateTime::now_utc();
         lines.push(Line::default());
@@ -206,7 +211,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
         lines.extend(history.into_iter().map(|entry| history_line(entry, now)));
     }
-    let comments = app.comments_for(&ticket.key);
+    let comments = screen.comments_for(&ticket.key);
     if !comments.is_empty() {
         lines.push(Line::default());
         lines.push(section_line("Comments"));
@@ -234,7 +239,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let rows = last_hit.map_or_else(Vec::new, |last| {
         wrapped_row_starts(&lines, width, usize::from(last).saturating_add(1))
     });
-    app.details_family_row = tree_start
+    screen.details_family_row = tree_start
         .and_then(|line| rows.get(usize::from(line)).copied())
         .map_or(0, usize::from);
 
@@ -243,8 +248,8 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .style(Style::default().fg(theme().body));
     let line_count = paragraph.line_count(width);
     let viewport = usize::from(inner.height);
-    app.details.set_viewport(viewport, line_count);
-    let scroll = app.details.offset;
+    screen.details.set_viewport(viewport, line_count);
+    let scroll = screen.details.offset;
     let scroll_rows = u16::try_from(scroll).unwrap_or(u16::MAX);
     frame.render_widget(paragraph.scroll((scroll_rows, 0)), inner);
 
@@ -253,7 +258,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         visible_row_y(inner, row, scroll_rows)
     };
     if let Some(y) = url_line.and_then(row_of) {
-        app.shell.hit_regions.push(region(
+        shell.hit_regions.push(region(
             Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
             PointerTarget::OpenSelectedUrl,
             PointerLayer::Base,
@@ -266,7 +271,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             continue;
         }
         if let Some(y) = row_of(hit.line) {
-            app.shell.hit_regions.push(region(
+            shell.hit_regions.push(region(
                 Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
                 PointerTarget::JumpToTicket(hit.key.clone()),
                 PointerLayer::Base,
@@ -277,7 +282,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     for (logical, key) in line_links {
         if let Some(y) = row_of(logical) {
-            app.shell.hit_regions.push(region(
+            shell.hit_regions.push(region(
                 Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
                 PointerTarget::JumpToTicket(key),
                 PointerLayer::Base,
@@ -288,22 +293,25 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     for (logical, field, x, span_width) in field_hits {
         if let Some(y) = row_of(logical) {
-            register_edit_field(app, inner, field, y, x, span_width);
+            register_edit_field(shell, inner, field, y, x, span_width);
         }
     }
     let overflow = line_count > viewport;
     if overflow {
         render_scrollbar(
             frame,
-            app,
+            screen,
+            shell,
             inner,
             ScrollSurface::Details,
-            line_count,
-            scroll,
-            viewport,
+            ScrollState {
+                offset: scroll,
+                content: line_count,
+                viewport,
+            },
         );
     }
-    capture_selectable(frame, app, SelectableSurface::Details, inner, overflow);
+    capture_selectable(frame, shell, SelectableSurface::Details, inner, overflow);
 }
 
 /// The first row each of the leading `upto` lines is drawn on once the details
@@ -565,13 +573,16 @@ pub(super) fn pack_family_row(
     PackedFamilyRow::plain(take_chars(head, width))
 }
 
-pub(super) fn family_breadcrumb_line(app: &App, family: &FamilySnapshot) -> Line<'static> {
+pub(super) fn family_breadcrumb_line(
+    screen: &WorkItemsScreen,
+    family: &FamilySnapshot,
+) -> Line<'static> {
     let mut spans = vec![Span::styled(
         "Family: ",
         Style::default().add_modifier(Modifier::BOLD),
     )];
     if let Some(parent) = family.parent() {
-        let ticket = app.ticket_by_key(parent);
+        let ticket = screen.ticket_by_key(parent);
         let type_label = ticket.map_or("?", |ticket| ticket.work_item_type.as_str());
         let title = ticket.map_or("missing ticket", |ticket| ticket.title.as_str());
         spans.push(Span::raw(format!("{type_label} ")));
@@ -819,7 +830,7 @@ pub(super) fn tags_run_width(tags: &[String]) -> u16 {
 /// pane and dropped when the value starts past its right edge. It stays part of
 /// the details text surface, so dragging across it still selects and copies.
 pub(super) fn register_edit_field(
-    app: &mut App,
+    shell: &mut Shell,
     area: Rect,
     field: EditableField,
     y: u16,
@@ -829,7 +840,7 @@ pub(super) fn register_edit_field(
     if x >= area.width || width == 0 {
         return;
     }
-    app.shell.hit_regions.push(region(
+    shell.hit_regions.push(region(
         Rect::new(
             area.x.saturating_add(x),
             y,

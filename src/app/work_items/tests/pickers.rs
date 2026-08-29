@@ -4,32 +4,34 @@ use super::*;
 fn the_parent_picker_leaves_out_the_work_item_itself_and_everything_below_it() {
     let mut app = reparent_app();
 
-    app.run_command(CommandId::SetParent);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SetParent);
 
-    assert_eq!(app.mode, AppMode::ParentPicker);
+    assert_eq!(app.work_items.mode, WorkItemMode::ParentPicker);
     assert_eq!(
-        candidate_ids(&app.parent_picker.candidates),
+        candidate_ids(&app.work_items.parent_picker.candidates),
         [1, 2, 4],
         "#3 cannot be its own parent and #5 is already under it, so neither is offered"
     );
     assert_eq!(
-        app.parent_picker.current,
+        app.work_items.parent_picker.current,
         Some(family_key(1)),
         "the epic it hangs under now opens under the cursor"
     );
-    assert_eq!(app.parent_picker.index, 0);
+    assert_eq!(app.work_items.parent_picker.index, 0);
 }
 
 #[test]
 fn the_parent_picker_filters_on_the_id_as_well_as_the_title() {
     let mut app = reparent_app();
-    app.run_command(CommandId::SetParent);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SetParent);
 
     for ch in "pay".chars() {
         press(&mut app, KeyCode::Char(ch));
     }
     assert_eq!(
-        candidate_ids(&app.parent_matches()),
+        candidate_ids(&app.work_items.parent_matches()),
         [2],
         "the title matches"
     );
@@ -39,7 +41,7 @@ fn the_parent_picker_filters_on_the_id_as_well_as_the_title() {
     }
     press(&mut app, KeyCode::Char('4'));
     assert_eq!(
-        candidate_ids(&app.parent_matches()),
+        candidate_ids(&app.work_items.parent_matches()),
         [4],
         "and so does the id"
     );
@@ -55,20 +57,25 @@ fn remove_parent_is_offered_only_when_the_work_item_has_one_to_remove() {
         menu_labels(&app)
     );
     assert_eq!(
-        app.edit_menu_entries()[7].command,
+        app.work_items.edit_menu_entries()[7].command,
         CommandId::SetParent,
         "the removal follows the row that sets a parent"
     );
-    assert_eq!(app.edit_menu_entries()[8].command, CommandId::RemoveParent);
+    assert_eq!(
+        app.work_items.edit_menu_entries()[8].command,
+        CommandId::RemoveParent
+    );
 
-    app.jump_to_ticket(&family_key(2));
+    app.work_items
+        .jump_to_ticket(&mut app.shell, &family_key(2));
     assert!(
         !menu_labels(&app).contains(&"Remove parent"),
         "#2 hangs under nothing, so there is nothing to take off: {:?}",
         menu_labels(&app)
     );
     assert_eq!(
-        app.run_command(CommandId::RemoveParent),
+        app.work_items
+            .run_command(&mut app.shell, CommandId::RemoveParent),
         AppAction::None,
         "and asking for it anyway writes nothing"
     );
@@ -79,14 +86,16 @@ fn choosing_a_new_parent_moves_the_work_item_in_the_graph_and_in_both_ratios() {
     let mut app = reparent_app();
     assert_eq!(progress_of(&app, 1), Some((1, 2)));
     assert_eq!(progress_of(&app, 2), None);
-    app.run_command(CommandId::SetParent);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SetParent);
 
     let index = app
+        .work_items
         .parent_matches()
         .iter()
         .position(|candidate| candidate.key == family_key(2))
         .expect("the other epic is on offer");
-    let action = app.choose_parent(index);
+    let action = app.work_items.choose_parent(&mut app.shell, index);
 
     assert_eq!(
         action,
@@ -95,18 +104,21 @@ fn choosing_a_new_parent_moves_the_work_item_in_the_graph_and_in_both_ratios() {
             new_parent: Some(2),
         }
     );
-    assert_eq!(app.mode, AppMode::Browse);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(
-        app.parent_of(&family_key(3)),
+        app.work_items.parent_of(&family_key(3)),
         Some(family_key(2)),
         "the work item names its new epic at once"
     );
     assert_eq!(
-        app.family_of(&family_key(1)).children,
+        app.work_items.family_of(&family_key(1)).children,
         vec![family_key(4)],
         "and the epic it left no longer names it, which is the other half of the link"
     );
-    assert_eq!(app.family_of(&family_key(2)).children, vec![family_key(3)]);
+    assert_eq!(
+        app.work_items.family_of(&family_key(2)).children,
+        vec![family_key(3)]
+    );
     assert_eq!(
         progress_of(&app, 1),
         Some((1, 1)),
@@ -118,7 +130,10 @@ fn choosing_a_new_parent_moves_the_work_item_in_the_graph_and_in_both_ratios() {
         "and the epic it joined has one more"
     );
     assert_eq!(
-        app.visible_family_tree().first().map(|entry| entry.key.id),
+        app.work_items
+            .visible_family_tree()
+            .first()
+            .map(|entry| entry.key.id),
         Some(2),
         "the family tree redraws from the graph, so the new epic is the root"
     );
@@ -128,7 +143,9 @@ fn choosing_a_new_parent_moves_the_work_item_in_the_graph_and_in_both_ratios() {
 fn removing_a_parent_detaches_the_work_item_in_both_directions() {
     let mut app = reparent_app();
 
-    let action = app.run_command(CommandId::RemoveParent);
+    let action = app
+        .work_items
+        .run_command(&mut app.shell, CommandId::RemoveParent);
 
     assert_eq!(
         action,
@@ -137,15 +154,15 @@ fn removing_a_parent_detaches_the_work_item_in_both_directions() {
             new_parent: None,
         }
     );
-    assert_eq!(app.parent_of(&family_key(3)), None);
+    assert_eq!(app.work_items.parent_of(&family_key(3)), None);
     assert_eq!(
-        app.family_of(&family_key(1)).children,
+        app.work_items.family_of(&family_key(1)).children,
         vec![family_key(4)],
         "the epic keeps the issue it still has and loses the one that left"
     );
     assert_eq!(progress_of(&app, 1), Some((1, 1)));
     assert_eq!(
-        app.family_of(&family_key(3)).children,
+        app.work_items.family_of(&family_key(3)).children,
         vec![family_key(5)],
         "what hangs under the detached work item comes with it"
     );
@@ -154,33 +171,41 @@ fn removing_a_parent_detaches_the_work_item_in_both_directions() {
 #[test]
 fn a_refused_move_puts_both_halves_of_the_link_and_both_ratios_back() {
     let mut app = reparent_app();
-    app.run_command(CommandId::SetParent);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SetParent);
     let index = app
+        .work_items
         .parent_matches()
         .iter()
         .position(|candidate| candidate.key == family_key(2))
         .expect("the other epic is on offer");
-    app.choose_parent(index);
-    assert_eq!(app.parent_of(&family_key(3)), Some(family_key(2)));
+    app.work_items.choose_parent(&mut app.shell, index);
+    assert_eq!(
+        app.work_items.parent_of(&family_key(3)),
+        Some(family_key(2))
+    );
 
-    app.reject_reparent(&ReparentRejection {
-        key: family_key(3),
-        conflict: true,
-        message: "it changed in Azure DevOps".into(),
-    });
+    app.work_items.reject_reparent(
+        &mut app.shell,
+        &ReparentRejection {
+            key: family_key(3),
+            conflict: true,
+            message: "it changed in Azure DevOps".into(),
+        },
+    );
 
     assert_eq!(
-        app.parent_of(&family_key(3)),
+        app.work_items.parent_of(&family_key(3)),
         Some(family_key(1)),
         "the work item is back under the epic it was under"
     );
     assert_eq!(
-        app.family_of(&family_key(1)).children,
+        app.work_items.family_of(&family_key(1)).children,
         vec![family_key(3), family_key(4)],
         "and that epic names it again"
     );
     assert_eq!(
-        app.family_of(&family_key(2)).children,
+        app.work_items.family_of(&family_key(2)).children,
         Vec::new(),
         "the epic it never joined is empty again"
     );
@@ -203,32 +228,40 @@ fn a_cycle_the_stale_graph_could_not_see_is_refused_and_put_back_in_its_own_word
     // a graph the project has already moved on from: #2 became a child of
     // #3 in Azure DevOps, and nothing here has read that yet.
     let mut app = reparent_app();
-    app.run_command(CommandId::SetParent);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SetParent);
     let index = app
+        .work_items
         .parent_matches()
         .iter()
         .position(|candidate| candidate.key == family_key(2))
         .expect("the other epic still looks like a candidate");
-    app.choose_parent(index);
+    app.work_items.choose_parent(&mut app.shell, index);
 
-    app.reject_reparent(&ReparentRejection {
-        key: family_key(3),
-        conflict: false,
-        message: "TF201036: adding this link would create a circular relationship".into(),
-    });
+    app.work_items.reject_reparent(
+        &mut app.shell,
+        &ReparentRejection {
+            key: family_key(3),
+            conflict: false,
+            message: "TF201036: adding this link would create a circular relationship".into(),
+        },
+    );
 
     assert_eq!(
-        app.parent_of(&family_key(3)),
+        app.work_items.parent_of(&family_key(3)),
         Some(family_key(1)),
         "the move is undone whole, not left half applied"
     );
     assert_eq!(
-        app.family_of(&family_key(1)).children,
+        app.work_items.family_of(&family_key(1)).children,
         vec![family_key(3), family_key(4)]
     );
-    assert_eq!(app.family_of(&family_key(2)).children, Vec::new());
+    assert_eq!(
+        app.work_items.family_of(&family_key(2)).children,
+        Vec::new()
+    );
     assert_eq!(progress_of(&app, 1), Some((1, 2)));
-    assert!(!app.reparents_pending());
+    assert!(!app.work_items.reparents_pending());
     let (message, _) = app
         .shell
         .notification()
@@ -242,25 +275,45 @@ fn a_cycle_the_stale_graph_could_not_see_is_refused_and_put_back_in_its_own_word
 #[test]
 fn an_accepted_move_settles_on_the_links_azure_devops_sent_back() {
     let mut app = reparent_app();
-    app.run_command(CommandId::RemoveParent);
-    let mut stored = app.ticket_by_key(&family_key(3)).unwrap().clone();
+    app.work_items
+        .run_command(&mut app.shell, CommandId::RemoveParent);
+    let mut stored = app
+        .work_items
+        .ticket_by_key(&family_key(3))
+        .unwrap()
+        .clone();
     stored.revision += 1;
 
     // The server filed it under the other epic after all, which is what the
     // graph has to settle on rather than the detachment that was asked for.
-    app.apply_reparent(ReparentApplied {
-        ticket: stored,
-        relations: vec![child_of(3, 2)],
-        parent: Some(family_key(2)),
-    });
+    app.work_items.apply_reparent(
+        &mut app.shell,
+        ReparentApplied {
+            ticket: stored,
+            relations: vec![child_of(3, 2)],
+            parent: Some(family_key(2)),
+        },
+    );
 
-    assert!(!app.reparents_pending());
-    assert_eq!(app.parent_of(&family_key(3)), Some(family_key(2)));
-    assert_eq!(app.family_of(&family_key(2)).children, vec![family_key(3)]);
-    assert_eq!(app.family_of(&family_key(1)).children, vec![family_key(4)]);
+    assert!(!app.work_items.reparents_pending());
+    assert_eq!(
+        app.work_items.parent_of(&family_key(3)),
+        Some(family_key(2))
+    );
+    assert_eq!(
+        app.work_items.family_of(&family_key(2)).children,
+        vec![family_key(3)]
+    );
+    assert_eq!(
+        app.work_items.family_of(&family_key(1)).children,
+        vec![family_key(4)]
+    );
     assert_eq!(progress_of(&app, 2), Some((0, 1)));
     assert_eq!(
-        app.ticket_by_key(&family_key(3)).unwrap().revision,
+        app.work_items
+            .ticket_by_key(&family_key(3))
+            .unwrap()
+            .revision,
         2,
         "the row takes the revision the server settled on"
     );
@@ -270,25 +323,28 @@ fn an_accepted_move_settles_on_the_links_azure_devops_sent_back() {
 fn a_second_move_is_refused_while_the_first_is_still_in_flight() {
     let mut app = reparent_app();
     assert!(matches!(
-        app.run_command(CommandId::RemoveParent),
+        app.work_items
+            .run_command(&mut app.shell, CommandId::RemoveParent),
         AppAction::Reparent { .. }
     ));
-    assert!(app.reparents_pending());
+    assert!(app.work_items.reparents_pending());
 
-    app.run_command(CommandId::SetParent);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::SetParent);
     let index = app
+        .work_items
         .parent_matches()
         .iter()
         .position(|candidate| candidate.key == family_key(2))
         .expect("the other epic is on offer");
 
     assert_eq!(
-        app.choose_parent(index),
+        app.work_items.choose_parent(&mut app.shell, index),
         AppAction::None,
         "the second move would be tested against a revision that is already stale"
     );
     assert_eq!(
-        app.parent_of(&family_key(3)),
+        app.work_items.parent_of(&family_key(3)),
         None,
         "and the graph still shows only the move that is in flight"
     );
@@ -299,18 +355,18 @@ fn the_state_picker_opens_on_the_current_state_and_enter_writes_the_one_chosen()
     let mut app = picker_app();
 
     assert_eq!(shift(&mut app, 'S'), AppAction::None);
-    assert_eq!(app.mode, AppMode::StatePicker);
+    assert_eq!(app.work_items.mode, WorkItemMode::StatePicker);
     assert_eq!(
-        state_names(&app.state_picker.options),
+        state_names(&app.work_items.state_picker.options),
         ["To Do", "Doing", "Done"]
     );
-    assert_eq!(app.state_picker.current, "To Do");
+    assert_eq!(app.work_items.state_picker.current, "To Do");
     assert_eq!(
-        app.state_picker.index, 0,
+        app.work_items.state_picker.index, 0,
         "the state the work item is in starts under the cursor"
     );
     assert_eq!(
-        app.state_picker.scope,
+        app.work_items.state_picker.scope,
         EditScope::Ticket(3),
         "the picker names the selected row"
     );
@@ -321,7 +377,7 @@ fn the_state_picker_opens_on_the_current_state_and_enter_writes_the_one_chosen()
     };
     let request = only(requests);
 
-    assert_eq!(app.mode, AppMode::Browse);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(request.key.id, 3);
     assert_eq!(
         request.document(),
@@ -331,11 +387,13 @@ fn the_state_picker_opens_on_the_current_state_and_enter_writes_the_one_chosen()
         ]
     );
     assert_eq!(
-        app.selected_ticket().map(|ticket| ticket.state.as_str()),
+        app.work_items
+            .selected_ticket()
+            .map(|ticket| ticket.state.as_str()),
         Some("Doing"),
         "the row shows the new state without waiting for Azure DevOps"
     );
-    assert!(app.edits_pending());
+    assert!(app.work_items.edits_pending());
 }
 
 #[test]
@@ -348,19 +406,21 @@ fn choosing_the_current_state_or_pressing_escape_writes_nothing() {
         AppAction::None,
         "the state it is already in is a no-op"
     );
-    assert_eq!(app.mode, AppMode::Browse);
-    assert!(!app.edits_pending());
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(!app.work_items.edits_pending());
     assert_eq!(app.shell.notification(), None, "a no-op closes silently");
 
     shift(&mut app, 'S');
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Down);
     assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
-    assert_eq!(app.mode, AppMode::Browse);
-    assert!(!app.edits_pending());
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(!app.work_items.edits_pending());
     assert_eq!(app.shell.notification(), None);
     assert_eq!(
-        app.selected_ticket().map(|ticket| ticket.state.as_str()),
+        app.work_items
+            .selected_ticket()
+            .map(|ticket| ticket.state.as_str()),
         Some("To Do"),
         "cancelling leaves the row exactly as it was"
     );
@@ -371,20 +431,20 @@ fn the_priority_picker_opens_on_the_current_value_and_writes_the_one_chosen() {
     let mut app = edit_app();
 
     open_editor(&mut app, 2);
-    assert_eq!(app.mode, AppMode::PriorityPicker);
-    assert_eq!(app.priority_picker.current, Some(1));
+    assert_eq!(app.work_items.mode, WorkItemMode::PriorityPicker);
+    assert_eq!(app.work_items.priority_picker.current, Some(1));
     assert_eq!(
-        app.priority_picker.index, 0,
+        app.work_items.priority_picker.index, 0,
         "the priority the work item has starts under the cursor"
     );
-    assert_eq!(app.priority_picker.id, 3);
+    assert_eq!(app.work_items.priority_picker.id, 3);
 
     assert_eq!(
         press(&mut app, KeyCode::Enter),
         AppAction::None,
         "the priority it already has is a no-op"
     );
-    assert!(!app.edits_pending());
+    assert!(!app.work_items.edits_pending());
     assert_eq!(app.shell.notification(), None);
 
     open_editor(&mut app, 2);
@@ -405,7 +465,9 @@ fn the_priority_picker_opens_on_the_current_value_and_writes_the_one_chosen() {
         ]
     );
     assert_eq!(
-        app.selected_ticket().and_then(|ticket| ticket.priority),
+        app.work_items
+            .selected_ticket()
+            .and_then(|ticket| ticket.priority),
         Some(2),
         "the Pri cell shows the new priority at once"
     );
@@ -433,7 +495,9 @@ fn clearing_the_priority_removes_the_field_and_empties_the_cell() {
         "a priority goes back to unset by being removed"
     );
     assert_eq!(
-        app.selected_ticket().and_then(|ticket| ticket.priority),
+        app.work_items
+            .selected_ticket()
+            .and_then(|ticket| ticket.priority),
         None
     );
 }
@@ -456,13 +520,13 @@ fn the_picker_lists_cached_states_and_otherwise_the_ones_already_in_the_database
     ]);
 
     assert_eq!(
-        state_names(&app.states_for("Bug")),
+        state_names(&app.work_items.states_for("Bug")),
         ["Approved", "New", "Active", "Done"],
         "the fallback runs Proposed, InProgress, Resolved, Completed, Removed, then name"
     );
-    assert_eq!(state_names(&app.states_for("Task")), ["Doing"]);
+    assert_eq!(state_names(&app.work_items.states_for("Task")), ["Doing"]);
     assert!(
-        app.states_for("Epic").is_empty(),
+        app.work_items.states_for("Epic").is_empty(),
         "a type with no rows and nothing cached has no states"
     );
 
@@ -476,15 +540,15 @@ fn the_picker_lists_cached_states_and_otherwise_the_ones_already_in_the_database
             StateOption::new("Closed", StateCategory::Completed),
         ],
     );
-    app.set_state_catalog(catalog);
+    app.work_items.set_state_catalog(catalog);
 
     assert_eq!(
-        state_names(&app.states_for("Bug")),
+        state_names(&app.work_items.states_for("Bug")),
         ["New", "Active", "Resolved", "Closed"],
         "cached states win, in the order the process template runs them"
     );
     assert_eq!(
-        state_names(&app.states_for("Task")),
+        state_names(&app.work_items.states_for("Task")),
         ["Doing"],
         "a type without cached states still falls back"
     );
@@ -501,13 +565,14 @@ fn assignee_app() -> App {
     gamma.assigned_to = Some("Avery Chen".into());
     let mut app = App::new(vec![alpha, beta, gamma]);
     app.shell.enable_sync();
-    app.set_table_viewport(3);
+    app.work_items.set_table_viewport(3);
     app.shell.set_me(Some("Jacob Ragsdale".into()));
     app
 }
 
 fn candidate_names(app: &App) -> Vec<String> {
-    app.assignee_matches()
+    app.work_items
+        .assignee_matches()
         .into_iter()
         .map(|candidate| candidate.display)
         .collect()
@@ -522,28 +587,28 @@ fn the_assignee_picker_lists_nobody_then_me_then_the_database_and_starts_on_the_
         AppAction::FetchIdentities,
         "the first open asks for the project's teams"
     );
-    assert_eq!(app.mode, AppMode::AssigneePicker);
+    assert_eq!(app.work_items.mode, WorkItemMode::AssigneePicker);
     assert_eq!(
         candidate_names(&app),
         ["Unassigned", "Jacob Ragsdale", "Avery Chen", "Priya Nair"],
         "nobody, then me, then everybody the rows name, sorted"
     );
     assert!(
-        app.assignee_matches()[1].me,
+        app.work_items.assignee_matches()[1].me,
         "the signed-in user is marked as such"
     );
     assert_eq!(
-        app.assignee_picker.index, 2,
+        app.work_items.assignee_picker.index, 2,
         "the picker opens on whoever holds the work item"
     );
     assert_eq!(
-        app.assignee_picker.scope,
+        app.work_items.assignee_picker.scope,
         EditScope::Ticket(3),
         "it names the selected row"
     );
 
     press(&mut app, KeyCode::Esc);
-    assert_eq!(app.mode, AppMode::Browse);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(
         press(&mut app, KeyCode::Char('a')),
         AppAction::None,
@@ -558,7 +623,7 @@ fn checking_several_rows_hands_all_of_them_to_whoever_the_picker_names() {
 
     press(&mut app, KeyCode::Char('a'));
     assert_eq!(
-        app.assignee_picker.scope,
+        app.work_items.assignee_picker.scope,
         EditScope::Checked(3),
         "reassigning a departing engineer's work is one change, not three"
     );
@@ -578,7 +643,8 @@ fn checking_several_rows_hands_all_of_them_to_whoever_the_picker_names() {
         assert_eq!(request.edit.summary(), "Assignee \u{2192} Jacob Ragsdale");
     }
     assert!(
-        app.tickets()
+        app.work_items
+            .tickets()
             .iter()
             .all(|ticket| ticket.assigned_to.as_deref() == Some("Jacob Ragsdale")),
         "every row shows its new owner at once"
@@ -605,7 +671,7 @@ fn checking_several_rows_hands_all_of_them_to_whoever_the_picker_names() {
 #[test]
 fn typing_filters_the_assignee_picker_and_enter_assigns_who_is_left() {
     let mut app = assignee_app();
-    app.set_identities(vec![Identity::new(
+    app.work_items.set_identities(vec![Identity::new(
         "Jacob Ragsdale",
         Some("jacob@example.com".into()),
     )]);
@@ -618,7 +684,7 @@ fn typing_filters_the_assignee_picker_and_enter_assigns_who_is_left() {
         "the filter matches characters in order, not only whole words"
     );
     assert_eq!(
-        app.assignee_picker.index, 0,
+        app.work_items.assignee_picker.index, 0,
         "typing moves to the first hit"
     );
 
@@ -626,7 +692,7 @@ fn typing_filters_the_assignee_picker_and_enter_assigns_who_is_left() {
         panic!("choosing somebody else should dispatch an edit");
     };
     let request = only(requests);
-    assert_eq!(app.mode, AppMode::Browse);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(request.key.id, 3);
     assert_eq!(
         request.document(),
@@ -641,12 +707,13 @@ fn typing_filters_the_assignee_picker_and_enter_assigns_who_is_left() {
         "the write carries the address when the picker knows one"
     );
     assert_eq!(
-        app.selected_ticket()
+        app.work_items
+            .selected_ticket()
             .and_then(|ticket| ticket.assigned_to.clone()),
         Some("Jacob Ragsdale".to_owned()),
         "the cell reads as the display name, not the address"
     );
-    assert!(app.shell.is_mine(app.selected_ticket().unwrap()));
+    assert!(app.shell.is_mine(app.work_items.selected_ticket().unwrap()));
 }
 
 #[test]
@@ -683,7 +750,8 @@ fn a_person_with_no_address_is_written_by_name_and_unassigned_removes_the_field(
         "nobody is written by taking the field off the work item"
     );
     assert_eq!(
-        app.selected_ticket()
+        app.work_items
+            .selected_ticket()
             .and_then(|ticket| ticket.assigned_to.clone()),
         None,
         "the Assignee cell empties at once"
@@ -700,29 +768,30 @@ fn choosing_the_current_assignee_or_pressing_escape_writes_nothing() {
         AppAction::None,
         "whoever holds it already is a no-op"
     );
-    assert_eq!(app.mode, AppMode::Browse);
-    assert!(!app.edits_pending());
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(!app.work_items.edits_pending());
     assert_eq!(app.shell.notification(), None, "a no-op closes silently");
 
     // The same again for a work item nobody holds, where Unassigned is the
     // row the picker opens on.
-    app.select_row(1);
+    app.work_items.select_row(&mut app.shell, 1);
     assert_eq!(
-        app.selected_ticket()
+        app.work_items
+            .selected_ticket()
             .and_then(|ticket| ticket.assigned_to.clone()),
         None
     );
     press(&mut app, KeyCode::Char('a'));
-    assert_eq!(app.assignee_picker.index, 0);
+    assert_eq!(app.work_items.assignee_picker.index, 0);
     assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
-    assert!(!app.edits_pending());
+    assert!(!app.work_items.edits_pending());
     assert_eq!(app.shell.notification(), None);
 
     press(&mut app, KeyCode::Char('a'));
     press(&mut app, KeyCode::Down);
     assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
-    assert_eq!(app.mode, AppMode::Browse);
-    assert!(!app.edits_pending());
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(!app.work_items.edits_pending());
 }
 
 #[test]
@@ -730,15 +799,18 @@ fn team_members_land_in_an_open_picker_without_moving_the_cursor() {
     let mut app = assignee_app();
 
     press(&mut app, KeyCode::Char('a'));
-    let focused = app.assignee_matches()[app.assignee_picker.index]
+    let focused = app.work_items.assignee_matches()[app.work_items.assignee_picker.index]
         .display
         .clone();
     assert_eq!(focused, "Avery Chen");
 
-    app.merge_identities(vec![
-        Identity::new("Avery Chen", Some("avery@example.com".into())),
-        Identity::new("Dana Okafor", Some("dana@example.com".into())),
-    ]);
+    app.work_items.merge_identities(
+        &mut app.shell,
+        vec![
+            Identity::new("Avery Chen", Some("avery@example.com".into())),
+            Identity::new("Dana Okafor", Some("dana@example.com".into())),
+        ],
+    );
 
     assert_eq!(
         candidate_names(&app),
@@ -752,12 +824,12 @@ fn team_members_land_in_an_open_picker_without_moving_the_cursor() {
         "a team member nobody holds work for is appended after the database's"
     );
     assert_eq!(
-        app.assignee_matches()[app.assignee_picker.index].display,
+        app.work_items.assignee_matches()[app.work_items.assignee_picker.index].display,
         focused,
         "the cursor stays on the person it was on"
     );
     assert_eq!(
-        app.assignee_matches()[2].unique.as_deref(),
+        app.work_items.assignee_matches()[2].unique.as_deref(),
         Some("avery@example.com"),
         "somebody already listed gains the address the teams knew"
     );
@@ -782,6 +854,7 @@ fn team_members_land_in_an_open_picker_without_moving_the_cursor() {
 fn planned_app() -> App {
     let mut app = edit_app();
     let planned: Vec<Ticket> = app
+        .work_items
         .tickets()
         .iter()
         .map(|ticket| Ticket {
@@ -790,22 +863,25 @@ fn planned_app() -> App {
             ..ticket.clone()
         })
         .collect();
-    app.replace_prepared_tickets(PreparedTickets::new(planned));
-    app.set_table_viewport(3);
+    app.work_items
+        .replace_prepared_tickets(&mut app.shell, PreparedTickets::new(planned));
+    app.work_items.set_table_viewport(3);
     app
 }
 
 /// The same app with the project's trees already cached.
 fn node_app() -> App {
     let mut app = planned_app();
-    app.set_classification_nodes(classification_trees(), None);
+    app.work_items
+        .set_classification_nodes(classification_trees(), None);
     app
 }
 
 /// The rows the open picker is showing, as they are drawn: the indent, the
 /// leaf, and whether the row is marked as running today.
 fn node_rows(app: &App) -> Vec<String> {
-    app.node_matches()
+    app.work_items
+        .node_matches()
         .into_iter()
         .map(|row| {
             let current = if row.current_period { " current" } else { "" };
@@ -816,10 +892,13 @@ fn node_rows(app: &App) -> Vec<String> {
 
 /// Runs the Edit menu's Iteration or Area row.
 fn open_nodes(app: &mut App, kind: NodeKind) -> AppAction {
-    app.run_command(match kind {
-        NodeKind::Iteration => CommandId::EditIteration,
-        NodeKind::Area => CommandId::EditArea,
-    })
+    app.work_items.run_command(
+        &mut app.shell,
+        match kind {
+            NodeKind::Iteration => CommandId::EditIteration,
+            NodeKind::Area => CommandId::EditArea,
+        },
+    )
 }
 
 #[test]
@@ -831,23 +910,23 @@ fn the_iteration_picker_draws_the_tree_indented_and_opens_on_the_current_node() 
         AppAction::FetchClassificationNodes,
         "the first open asks for the project's trees"
     );
-    assert_eq!(app.mode, AppMode::NodePicker);
+    assert_eq!(app.work_items.mode, WorkItemMode::NodePicker);
     assert_eq!(
         node_rows(&app),
         ["development", "  Sprint 1 current", "  Q3", "    Sprint 7"],
         "two spaces a level, the leaf named, and the sprint running today marked"
     );
     assert!(
-        app.node_matches()[1].dates.is_some(),
+        app.work_items.node_matches()[1].dates.is_some(),
         "a scheduled iteration carries its date range"
     );
     assert_eq!(
-        app.node_picker.index, 2,
+        app.work_items.node_picker.index, 2,
         "the picker opens on the node the work item sits in"
     );
-    assert_eq!(app.node_picker.current, "development\\Q3");
+    assert_eq!(app.work_items.node_picker.current, "development\\Q3");
     assert_eq!(
-        app.node_picker.scope,
+        app.work_items.node_picker.scope,
         EditScope::Ticket(3),
         "it names the selected row"
     );
@@ -869,7 +948,7 @@ fn the_iteration_picker_draws_the_tree_indented_and_opens_on_the_current_node() 
         ["development", "  Platform"],
         "the area picker draws the other tree, with no dates on it"
     );
-    assert_eq!(app.node_picker.index, 1);
+    assert_eq!(app.work_items.node_picker.index, 1);
 }
 
 #[test]
@@ -888,7 +967,7 @@ fn enter_on_another_node_writes_the_full_path_and_the_row_shows_its_leaf() {
     };
     let request = only(requests);
 
-    assert_eq!(app.mode, AppMode::Browse);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(request.key.id, 3);
     assert_eq!(
         request.edit.patch(),
@@ -899,7 +978,7 @@ fn enter_on_another_node_writes_the_full_path_and_the_row_shows_its_leaf() {
         })],
         "the write carries the full backslash path, not the leaf"
     );
-    let moved = app.selected_ticket().expect("a selected row");
+    let moved = app.work_items.selected_ticket().expect("a selected row");
     assert_eq!(moved.iteration_path, "development\\Sprint 1");
     assert_eq!(
         path_leaf(&moved.iteration_path),
@@ -923,7 +1002,9 @@ fn enter_on_another_node_writes_the_full_path_and_the_row_shows_its_leaf() {
         })]
     );
     assert_eq!(
-        app.selected_ticket().map(|ticket| ticket.area_path.clone()),
+        app.work_items
+            .selected_ticket()
+            .map(|ticket| ticket.area_path.clone()),
         Some("development".to_owned())
     );
 }
@@ -938,15 +1019,15 @@ fn choosing_the_node_the_work_item_is_already_in_writes_nothing() {
         AppAction::None,
         "the node it sits in already is a no-op"
     );
-    assert_eq!(app.mode, AppMode::Browse);
-    assert!(!app.edits_pending());
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(!app.work_items.edits_pending());
     assert_eq!(app.shell.notification(), None, "a no-op closes silently");
 
     open_nodes(&mut app, NodeKind::Iteration);
     press(&mut app, KeyCode::Up);
     assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
-    assert_eq!(app.mode, AppMode::Browse);
-    assert!(!app.edits_pending());
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(!app.work_items.edits_pending());
 }
 
 #[test]
@@ -956,7 +1037,7 @@ fn checking_several_rows_moves_them_all_to_the_sprint_chosen_but_not_to_an_area(
 
     open_nodes(&mut app, NodeKind::Iteration);
     assert_eq!(
-        app.node_picker.scope,
+        app.work_items.node_picker.scope,
         EditScope::Checked(3),
         "a sprint's leftovers move on together"
     );
@@ -972,7 +1053,8 @@ fn checking_several_rows_moves_them_all_to_the_sprint_chosen_but_not_to_an_area(
         [1, 2, 3]
     );
     assert!(
-        app.tickets()
+        app.work_items
+            .tickets()
             .iter()
             .all(|ticket| ticket.iteration_path == "development\\Sprint 1"),
         "every row carries the full path at once"
@@ -982,7 +1064,7 @@ fn checking_several_rows_moves_them_all_to_the_sprint_chosen_but_not_to_an_area(
     check_all(&mut app);
     open_nodes(&mut app, NodeKind::Area);
     assert_eq!(
-        app.node_picker.scope,
+        app.work_items.node_picker.scope,
         EditScope::Ticket(3),
         "the area tree stays on the row under the cursor"
     );
@@ -1003,7 +1085,10 @@ fn a_picker_with_nothing_cached_lists_the_paths_the_database_holds() {
         ["  Q3"],
         "every work item is in development\\Q3, indented by its own depth"
     );
-    assert_eq!(app.node_picker.index, 0, "which is where the cursor starts");
+    assert_eq!(
+        app.work_items.node_picker.index, 0,
+        "which is where the cursor starts"
+    );
 
     press(&mut app, KeyCode::Esc);
     open_nodes(&mut app, NodeKind::Area);
@@ -1019,16 +1104,19 @@ fn fetched_trees_land_in_an_open_picker_without_moving_the_cursor() {
         AppAction::FetchClassificationNodes
     );
     assert_eq!(node_rows(&app), ["  Q3"]);
-    let focused = app.node_matches()[app.node_picker.index].path.clone();
+    let focused = app.work_items.node_matches()[app.work_items.node_picker.index]
+        .path
+        .clone();
 
-    app.merge_classification_nodes(classification_trees());
+    app.work_items
+        .merge_classification_nodes(classification_trees());
     assert_eq!(
         node_rows(&app),
         ["development", "  Sprint 1 current", "  Q3", "    Sprint 7"],
         "the fetched tree replaces the fallback in the open picker"
     );
     assert_eq!(
-        app.node_matches()[app.node_picker.index].path,
+        app.work_items.node_matches()[app.work_items.node_picker.index].path,
         focused,
         "the cursor stays on the node it was on"
     );
@@ -1052,14 +1140,15 @@ fn fetched_trees_land_in_an_open_picker_without_moving_the_cursor() {
 fn the_current_iteration_is_the_scheduled_one_containing_today() {
     let mut app = planned_app();
     assert_eq!(
-        app.current_iteration(),
+        app.work_items.current_iteration(),
         None,
         "a project whose trees were never fetched has no current sprint"
     );
 
-    app.set_classification_nodes(classification_trees(), None);
+    app.work_items
+        .set_classification_nodes(classification_trees(), None);
     assert_eq!(
-        app.current_iteration(),
+        app.work_items.current_iteration(),
         Some("development\\Sprint 1".to_owned())
     );
 
@@ -1067,9 +1156,9 @@ fn the_current_iteration_is_the_scheduled_one_containing_today() {
         .into_iter()
         .map(|node| ClassificationNode::new(node.kind, node.path, node.depth))
         .collect();
-    app.set_classification_nodes(undated, None);
+    app.work_items.set_classification_nodes(undated, None);
     assert_eq!(
-        app.current_iteration(),
+        app.work_items.current_iteration(),
         None,
         "an iteration nobody scheduled is never the current one"
     );
@@ -1078,11 +1167,12 @@ fn the_current_iteration_is_the_scheduled_one_containing_today() {
 #[test]
 fn a_pull_without_cached_states_keeps_the_ones_an_earlier_pull_brought() {
     let mut app = picker_app();
-    let tickets = app.tickets().to_vec();
+    let tickets = app.work_items.tickets().to_vec();
 
-    app.replace_prepared_tickets(PreparedTickets::new(tickets.clone()));
+    app.work_items
+        .replace_prepared_tickets(&mut app.shell, PreparedTickets::new(tickets.clone()));
     assert_eq!(
-        state_names(&app.states_for("Task")),
+        state_names(&app.work_items.states_for("Task")),
         ["To Do", "Doing", "Done"],
         "a pull that has not read the states endpoint must not empty the picker"
     );
@@ -1092,6 +1182,9 @@ fn a_pull_without_cached_states_keeps_the_ones_an_earlier_pull_brought() {
         "Task",
         vec![StateOption::new("Cut", StateCategory::Removed)],
     );
-    app.replace_prepared_tickets(PreparedTickets::new(tickets).with_states(catalog));
-    assert_eq!(state_names(&app.states_for("Task")), ["Cut"]);
+    app.work_items.replace_prepared_tickets(
+        &mut app.shell,
+        PreparedTickets::new(tickets).with_states(catalog),
+    );
+    assert_eq!(state_names(&app.work_items.states_for("Task")), ["Cut"]);
 }

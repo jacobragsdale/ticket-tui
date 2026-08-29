@@ -12,7 +12,7 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
     app.shell.enable_sync();
 
     app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
-    assert_eq!(app.mode, AppMode::Form);
+    assert_eq!(app.work_items.mode, WorkItemMode::Form);
 
     let form = render_text(90, 24, &mut app);
     assert!(form.contains("New work item"), "{form}");
@@ -45,6 +45,7 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
     render_text(90, 24, &mut app);
 
     let tags = app
+        .work_items
         .form
         .as_ref()
         .and_then(|form| form.index_of(FormFieldId::Tags))
@@ -59,12 +60,13 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
         .expect("every field is clickable");
     click(&mut app, x, y);
     assert_eq!(
-        app.form.as_ref().unwrap().focused().unwrap().id,
+        app.work_items.form.as_ref().unwrap().focused().unwrap().id,
         FormFieldId::Tags,
         "clicking a row focuses it"
     );
 
     let iteration = app
+        .work_items
         .form
         .as_ref()
         .and_then(|form| form.index_of(FormFieldId::Iteration))
@@ -86,8 +88,8 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
     );
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(
-        app.mode,
-        AppMode::Form,
+        app.work_items.mode,
+        WorkItemMode::Form,
         "escaping the picker comes back to the form, not the table"
     );
     render_text(90, 24, &mut app);
@@ -99,8 +101,8 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
         .map(|region| (region.rect.x, region.rect.y))
         .expect("the form offers a Cancel button");
     click(&mut app, x, y);
-    assert_eq!(app.mode, AppMode::Browse);
-    assert!(app.form.is_none());
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(app.work_items.form.is_none());
 }
 
 #[test]
@@ -115,7 +117,7 @@ fn the_child_form_names_the_parent_it_is_filing_under_rather_than_its_id() {
     app.shell.enable_sync();
 
     app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
-    assert_eq!(app.mode, AppMode::Form);
+    assert_eq!(app.work_items.mode, WorkItemMode::Form);
 
     let form = render_text(90, 24, &mut app);
     assert!(form.contains("New child of #595"), "{form}");
@@ -143,7 +145,7 @@ fn the_title_prompt_renders_a_prefilled_field_with_save_and_cancel() {
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.mode, AppMode::Prompt);
+    assert_eq!(app.work_items.mode, WorkItemMode::Prompt);
 
     let prompt = render_text(80, 20, &mut app);
     assert!(prompt.contains("Title \u{b7} #10001"), "{prompt}");
@@ -162,8 +164,8 @@ fn the_title_prompt_renders_a_prefilled_field_with_save_and_cancel() {
         .map(|region| (region.rect.x, region.rect.y))
         .expect("the prompt should offer a Cancel button");
     click(&mut app, x, y);
-    assert_eq!(app.mode, AppMode::Browse);
-    assert!(app.prompt.is_none());
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(app.work_items.prompt.is_none());
 
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -214,7 +216,7 @@ fn the_assignee_picker_renders_a_filter_field_over_the_people_it_offers() {
     app.shell.set_me(Some("Jacob Ragsdale".into()));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-    assert_eq!(app.mode, AppMode::AssigneePicker);
+    assert_eq!(app.work_items.mode, WorkItemMode::AssigneePicker);
 
     let picker = render_text(90, 24, &mut app);
     assert!(picker.contains("Assignee \u{b7} #10001"), "{picker}");
@@ -249,7 +251,7 @@ fn the_assignee_picker_renders_a_filter_field_over_the_people_it_offers() {
     let crate::app::AppAction::Edit(requests) = click(&mut app, x, y) else {
         panic!("clicking somebody else should dispatch an edit");
     };
-    assert_eq!(app.mode, AppMode::Browse);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(requests[0].edit.value_text(), "Priya Nair");
 }
 
@@ -279,11 +281,15 @@ fn the_parent_picker_renders_the_work_items_that_could_hold_this_one() {
             "2026-03-02T00:00:00Z",
         ),
     ]);
-    app.set_workspace_graph(parent_child_graph());
+    app.work_items
+        .set_workspace_graph(&mut app.shell, parent_child_graph());
     app.shell.enable_sync();
-    app.set_table_viewport(4);
+    app.work_items.set_table_viewport(4);
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(app.selected_ticket().map(|item| item.key.id), Some(10_002));
+    assert_eq!(
+        app.work_items.selected_ticket().map(|item| item.key.id),
+        Some(10_002)
+    );
 
     // The Edit menu's Set parent row, which is the eighth, with Remove
     // parent under it because this work item has a parent.
@@ -295,7 +301,7 @@ fn the_parent_picker_renders_the_work_items_that_could_hold_this_one() {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.mode, AppMode::ParentPicker);
+    assert_eq!(app.work_items.mode, WorkItemMode::ParentPicker);
 
     let picker = render_text(90, 24, &mut app);
     assert!(picker.contains("Parent of #10002"), "{picker}");
@@ -329,7 +335,7 @@ fn the_iteration_picker_renders_an_indented_tree_with_dates_and_the_current_spri
     app.shell.enable_sync();
     let today = Timestamp::now().calendar_date();
     let day = || Timestamp::parse(&format!("{today}T00:00:00Z")).ok();
-    app.set_classification_nodes(
+    app.work_items.set_classification_nodes(
         vec![
             ClassificationNode::new(NodeKind::Iteration, "development", 0),
             ClassificationNode {
@@ -349,7 +355,7 @@ fn the_iteration_picker_renders_an_indented_tree_with_dates_and_the_current_spri
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.mode, AppMode::NodePicker);
+    assert_eq!(app.work_items.mode, WorkItemMode::NodePicker);
 
     let picker = render_text(90, 24, &mut app);
     assert!(picker.contains("Iteration \u{b7} #10001"), "{picker}");
@@ -391,7 +397,7 @@ fn the_iteration_picker_renders_an_indented_tree_with_dates_and_the_current_spri
     let crate::app::AppAction::Edit(requests) = click(&mut app, x, y) else {
         panic!("clicking another node should dispatch an edit");
     };
-    assert_eq!(app.mode, AppMode::Browse);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(
         requests[0].edit.value_text(),
         "development\\Q3\\Sprint 7",
@@ -432,7 +438,7 @@ fn the_edit_menu_and_the_state_picker_render_their_rows_and_state_colours() {
             StateOption::new("Done", StateCategory::Completed),
         ],
     );
-    app.set_state_catalog(catalog);
+    app.work_items.set_state_catalog(catalog);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
     let menu = render_text(80, 20, &mut app);
@@ -447,7 +453,7 @@ fn the_edit_menu_and_the_state_picker_render_their_rows_and_state_colours() {
         .map(|region| (region.rect.x, region.rect.y))
         .expect("the State row should be clickable");
     assert_eq!(click(&mut app, x, y), crate::app::AppAction::None);
-    assert_eq!(app.mode, AppMode::StatePicker);
+    assert_eq!(app.work_items.mode, WorkItemMode::StatePicker);
 
     let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
@@ -501,7 +507,7 @@ fn the_edit_menu_and_the_state_picker_render_their_rows_and_state_colours() {
         panic!("clicking a state should dispatch an edit, got {action:?}");
     };
     assert_eq!(requests[0].edit.summary(), "State \u{2192} Doing");
-    assert_eq!(app.mode, AppMode::Browse);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
 }
 
 #[test]
@@ -531,7 +537,7 @@ fn a_picker_over_checked_rows_counts_them_in_its_title() {
             StateOption::new("Doing", StateCategory::InProgress),
         ],
     );
-    app.set_state_catalog(catalog);
+    app.work_items.set_state_catalog(catalog);
 
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
@@ -556,19 +562,19 @@ fn a_picker_over_checked_rows_counts_them_in_its_title() {
 #[test]
 fn clicking_a_field_opens_its_editor_anchored_under_the_value() {
     for (field, mode) in [
-        (EditableField::Title, AppMode::Prompt),
-        (EditableField::State, AppMode::StatePicker),
-        (EditableField::Assignee, AppMode::AssigneePicker),
-        (EditableField::Priority, AppMode::PriorityPicker),
-        (EditableField::Tags, AppMode::Prompt),
-        (EditableField::Area, AppMode::NodePicker),
-        (EditableField::Iteration, AppMode::NodePicker),
+        (EditableField::Title, WorkItemMode::Prompt),
+        (EditableField::State, WorkItemMode::StatePicker),
+        (EditableField::Assignee, WorkItemMode::AssigneePicker),
+        (EditableField::Priority, WorkItemMode::PriorityPicker),
+        (EditableField::Tags, WorkItemMode::Prompt),
+        (EditableField::Area, WorkItemMode::NodePicker),
+        (EditableField::Iteration, WorkItemMode::NodePicker),
     ] {
         let mut app = issue_app();
         render_text(130, 40, &mut app);
         let rect = edit_field_rect(&app, field);
         click(&mut app, rect.x, rect.y);
-        assert_eq!(app.mode, mode, "clicking {field:?}");
+        assert_eq!(app.work_items.mode, mode, "clicking {field:?}");
         assert_eq!(
             app.shell.overlay_anchor,
             OverlayAnchor::Below(rect),
@@ -586,7 +592,7 @@ fn an_anchored_dropdown_is_drawn_under_the_field_and_dismissed_by_a_click_away()
         click(&mut app, field.x, field.y),
         crate::app::AppAction::FetchIdentities | crate::app::AppAction::None
     ));
-    assert_eq!(app.mode, AppMode::AssigneePicker);
+    assert_eq!(app.work_items.mode, WorkItemMode::AssigneePicker);
 
     let mut terminal = Terminal::new(TestBackend::new(130, 40)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
@@ -608,7 +614,7 @@ fn an_anchored_dropdown_is_drawn_under_the_field_and_dismissed_by_a_click_away()
     );
 
     // A field near the right edge keeps its dropdown on screen.
-    app.mode = AppMode::Browse;
+    app.work_items.mode = WorkItemMode::Browse;
     render_text(130, 40, &mut app);
     let state = edit_field_rect(&app, EditableField::State);
     click(&mut app, state.x, state.y);
@@ -628,9 +634,15 @@ fn an_anchored_dropdown_is_drawn_under_the_field_and_dismissed_by_a_click_away()
     // Everything outside the dropdown closes it and reaches nothing else.
     let action = click(&mut app, 2, 1);
     assert_eq!(action, crate::app::AppAction::None);
-    assert_eq!(app.mode, AppMode::Browse);
-    assert!(app.query().is_empty(), "the click never reached the search");
-    assert!(app.tickets()[0].state == "To Do", "and wrote nothing");
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(
+        app.work_items.query().is_empty(),
+        "the click never reached the search"
+    );
+    assert!(
+        app.work_items.tickets()[0].state == "To Do",
+        "and wrote nothing"
+    );
 }
 
 #[test]
@@ -659,7 +671,11 @@ fn a_drag_across_a_field_copies_its_text_and_opens_no_editor() {
         matches!(action, crate::app::AppAction::Copy { .. }),
         "a drag still selects text, got {action:?}"
     );
-    assert_eq!(app.mode, AppMode::Browse, "and opens nothing");
+    assert_eq!(
+        app.work_items.mode,
+        WorkItemMode::Browse,
+        "and opens nothing"
+    );
 }
 
 #[test]
@@ -671,7 +687,7 @@ fn enter_opens_the_field_under_the_pointer_and_still_opens_the_link() {
     app.handle_mouse(mouse(MouseEventKind::Moved, field.x, field.y));
     let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(action, crate::app::AppAction::None);
-    assert_eq!(app.mode, AppMode::PriorityPicker);
+    assert_eq!(app.work_items.mode, WorkItemMode::PriorityPicker);
     assert_eq!(app.shell.overlay_anchor, OverlayAnchor::Below(field));
 
     let mut app = App::new(vec![ticket()]);
@@ -705,7 +721,7 @@ fn an_anchored_picker_writes_the_same_edit_as_the_keyboard_one() {
     clicked.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     let action = clicked.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(action, expected, "both paths produce the same edit");
-    assert_eq!(clicked.mode, AppMode::Browse);
+    assert_eq!(clicked.work_items.mode, WorkItemMode::Browse);
 }
 
 #[test]

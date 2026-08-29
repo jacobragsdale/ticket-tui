@@ -244,7 +244,7 @@ fn the_table_title_reports_the_sync_state_in_both_layouts() {
 #[test]
 fn the_database_overlay_reports_the_last_sync() {
     let mut app = App::new(vec![ticket()]);
-    app.mode = AppMode::Info;
+    app.work_items.mode = WorkItemMode::Info;
     assert!(render_text(90, 24, &mut app).contains("offline"));
 
     app.shell.enable_sync();
@@ -263,13 +263,13 @@ fn the_database_overlay_counts_the_finished_rows_the_table_is_leaving_out() {
         ticket_at(10_002, "Beta", "Issue", "Done", "2026-03-02T00:00:00Z"),
         ticket_at(10_003, "Gamma", "Issue", "Removed", "2026-03-01T00:00:00Z"),
     ]);
-    app.mode = AppMode::Info;
+    app.work_items.mode = WorkItemMode::Info;
 
     let hiding = render_text(90, 24, &mut app);
     assert!(hiding.contains("Finished"), "{hiding}");
     assert!(hiding.contains("2 hidden"), "{hiding}");
 
-    app.set_show_finished(true);
+    app.work_items.set_show_finished(&mut app.shell, true);
     let showing = render_text(90, 24, &mut app);
     assert!(showing.contains("Finished"), "{showing}");
     assert!(showing.contains("shown"), "{showing}");
@@ -286,8 +286,11 @@ fn empty_reloading_and_no_result_states_render_with_a_usable_search_field() {
     assert!(loading.contains("Reloading tickets"));
     app.shell.reload_pending = false;
 
-    app.mode = AppMode::Search;
-    app.set_query("a very long query whose visible tail is unique".into());
+    app.work_items.mode = WorkItemMode::Search;
+    app.work_items.set_query(
+        &mut app.shell,
+        "a very long query whose visible tail is unique".into(),
+    );
     let long_search = render_text(40, 12, &mut app);
     assert!(
         long_search.contains("visible tail is unique"),
@@ -295,12 +298,14 @@ fn empty_reloading_and_no_result_states_render_with_a_usable_search_field() {
     );
 
     let mut searched = App::new(vec![ticket()]);
-    searched.set_query("qqqqqqqqqq".into());
+    searched
+        .work_items
+        .set_query(&mut searched.shell, "qqqqqqqqqq".into());
     await_search(&mut searched);
     let no_results = render_text(90, 24, &mut searched);
     assert!(no_results.contains("No tickets match this search"));
 
-    searched.mode = AppMode::Sort;
+    searched.work_items.mode = WorkItemMode::Sort;
     let sort = render_text(90, 24, &mut searched);
     assert!(sort.contains("Sort tickets"));
     assert!(sort.contains("Priority"));
@@ -309,14 +314,14 @@ fn empty_reloading_and_no_result_states_render_with_a_usable_search_field() {
 #[test]
 fn help_documents_every_bound_command() {
     let mut app = App::new(Vec::new());
-    app.mode = AppMode::Help;
+    app.work_items.mode = WorkItemMode::Help;
     let mut help = String::new();
     for _ in 0..40 {
         help.push_str(&render_text(90, 24, &mut app));
-        if app.help.offset >= app.help.max_offset() {
+        if app.work_items.help.offset >= app.work_items.help.max_offset() {
             break;
         }
-        app.help.scroll_by(4);
+        app.work_items.help.scroll_by(4);
     }
     for command in COMMANDS.iter().filter(|command| !command.keys.is_empty()) {
         assert!(
@@ -367,8 +372,8 @@ fn column_x(app: &App, field: SortField) -> u16 {
 
 fn await_search(app: &mut App) {
     let deadline = Instant::now() + Duration::from_secs(2);
-    while app.search_pending {
-        app.poll_search();
+    while app.work_items.search_pending {
+        app.work_items.poll_search(&mut app.shell);
         assert!(Instant::now() < deadline, "search worker timed out");
         thread::yield_now();
     }
@@ -449,6 +454,6 @@ fn issue_app() -> App {
             StateOption::new("Done", StateCategory::Completed),
         ],
     );
-    app.set_state_catalog(catalog);
+    app.work_items.set_state_catalog(catalog);
     app
 }
