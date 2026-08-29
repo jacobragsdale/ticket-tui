@@ -29,6 +29,18 @@ pub fn set_field(field: &str, value: impl Into<Value>) -> Value {
     })
 }
 
+/// One JSON Patch operation taking a field off a work item, so it has no value
+/// at all rather than an empty one. This is how a priority goes back to unset;
+/// a field Azure DevOps accepts an empty string for, such as `System.Tags`, is
+/// better written with [`set_field`].
+#[must_use]
+pub fn remove_field(field: &str) -> Value {
+    json!({
+        "op": "remove",
+        "path": format!("/fields/{field}"),
+    })
+}
+
 /// The operation that makes a write refuse to land on a work item somebody else
 /// changed after we read it: Azure DevOps rejects the whole document when the
 /// revision no longer matches.
@@ -37,13 +49,39 @@ pub fn revision_test(expected_revision: i64) -> Value {
     json!({"op": "test", "path": "/rev", "value": expected_revision})
 }
 
+/// What an edit writes: either a value, or nothing at all. A cleared field is
+/// taken off the work item rather than set to an empty value, which is the only
+/// way a number such as the priority goes back to unset.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FieldValue {
+    Set(Value),
+    Clear,
+}
+
+impl FieldValue {
+    /// The value as text, for the fields the TUI models as strings. A cleared
+    /// field reads as the empty string, which is what removing it leaves.
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Set(value) => value.as_str(),
+            Self::Clear => Some(""),
+        }
+    }
+
+    #[must_use]
+    pub const fn is_clear(&self) -> bool {
+        matches!(self, Self::Clear)
+    }
+}
+
 /// One field change, with everything needed to write it, undo it, and talk
 /// about it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldEdit {
     field: String,
     label: String,
-    value: Value,
+    value: FieldValue,
 }
 
 impl FieldEdit {
@@ -57,7 +95,17 @@ impl FieldEdit {
         Self {
             field: field.into(),
             label: label.into(),
-            value: value.into(),
+            value: FieldValue::Set(value.into()),
+        }
+    }
+
+    /// An edit that takes the field off the work item entirely.
+    #[must_use]
+    pub fn clearing(field: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            label: label.into(),
+            value: FieldValue::Clear,
         }
     }
 
@@ -65,6 +113,34 @@ impl FieldEdit {
     #[must_use]
     pub fn state(state: &str) -> Self {
         Self::new(STATE_FIELD, "State", state)
+    }
+
+    /// Rename a work item. The title prompt trims before it gets here, and
+    /// refuses an empty one rather than sending it.
+    #[must_use]
+    pub fn title(title: &str) -> Self {
+        Self::new(TITLE_FIELD, "Title", title)
+    }
+
+    /// Set the priority to one of the values Azure DevOps offers.
+    #[must_use]
+    pub fn priority(priority: i64) -> Self {
+        Self::new(PRIORITY_FIELD, "Priority", priority)
+    }
+
+    /// Put the priority back to unset, which needs the field removed: there is
+    /// no empty number.
+    #[must_use]
+    pub fn clear_priority() -> Self {
+        Self::clearing(PRIORITY_FIELD, "Priority")
+    }
+
+    /// Replace the tag list. `tags` is the normalised `a; b; c` text
+    /// [`normalize_tags`] produces; an empty one clears the tags, which
+    /// `System.Tags` accepts as an empty string.
+    #[must_use]
+    pub fn tags(tags: &str) -> Self {
+        Self::new(TAGS_FIELD, "Tags", tags)
     }
 
     #[must_use]
@@ -78,7 +154,7 @@ impl FieldEdit {
     }
 
     #[must_use]
-    pub const fn value(&self) -> &Value {
+    pub const fn value(&self) -> &FieldValue {
         &self.value
     }
 
@@ -86,10 +162,10 @@ impl FieldEdit {
     #[must_use]
     pub fn value_text(&self) -> String {
         match &self.value {
-            Value::String(text) if text.trim().is_empty() => "(none)".to_owned(),
-            Value::String(text) => text.clone(),
-            Value::Null => "(none)".to_owned(),
-            other => other.to_string(),
+            FieldValue::Clear | FieldValue::Set(Value::Null) => "(none)".to_owned(),
+            FieldValue::Set(Value::String(text)) if text.trim().is_empty() => "(none)".to_owned(),
+            FieldValue::Set(Value::String(text)) => text.clone(),
+            FieldValue::Set(other) => other.to_string(),
         }
     }
 
@@ -102,7 +178,10 @@ impl FieldEdit {
     /// The operations that write this edit, without the revision test.
     #[must_use]
     pub fn patch(&self) -> Vec<Value> {
-        vec![set_field(&self.field, self.value.clone())]
+        match &self.value {
+            FieldValue::Set(value) => vec![set_field(&self.field, value.clone())],
+            FieldValue::Clear => vec![remove_field(&self.field)],
+        }
     }
 
     /// Applies the change to a work item held in memory, so the row can show it
@@ -111,8 +190,9 @@ impl FieldEdit {
     pub fn apply(&self, ticket: &mut Ticket) {
         let text = self.value.as_str().map(str::trim);
         match self.field.as_str() {
-            STATE_FIELD => ticket.state = self.value_string(),
-            TITLE_FIELD => ticket.title = self.value_string(),
+            // A state or a title is never cleared, so a clear leaves it alone.
+            STATE_FIELD if !self.value.is_clear() => ticket.state = self.value_string(),
+            TITLE_FIELD if !self.value.is_clear() => ticket.title = self.value_string(),
             ASSIGNED_TO_FIELD => {
                 ticket.assigned_to = text.filter(|name| !name.is_empty()).map(str::to_owned);
             }
@@ -126,20 +206,44 @@ impl FieldEdit {
                     .collect();
             }
             PRIORITY_FIELD => {
-                ticket.priority = self
-                    .value
-                    .as_i64()
-                    .or_else(|| text.and_then(|raw| raw.parse().ok()));
+                ticket.priority = match &self.value {
+                    FieldValue::Clear => None,
+                    FieldValue::Set(value) => value
+                        .as_i64()
+                        .or_else(|| text.and_then(|raw| raw.parse().ok())),
+                };
             }
             _ => {}
         }
     }
 
     fn value_string(&self) -> String {
-        self.value
-            .as_str()
-            .map_or_else(|| self.value.to_string(), str::to_owned)
+        match &self.value {
+            FieldValue::Clear => String::new(),
+            FieldValue::Set(value) => value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_owned),
+        }
     }
+}
+
+/// Tidies a semicolon separated tag list the way the tags prompt saves it:
+/// split on `;`, trim each tag, drop the empty ones, drop a later repeat of a
+/// tag already listed whatever its case, and join what is left with `; `.
+/// An empty result clears the tags.
+#[must_use]
+pub fn normalize_tags(raw: &str) -> String {
+    let mut seen: Vec<String> = Vec::new();
+    let mut tags: Vec<&str> = Vec::new();
+    for tag in raw.split(';').map(str::trim).filter(|tag| !tag.is_empty()) {
+        let folded = tag.to_lowercase();
+        if seen.contains(&folded) {
+            continue;
+        }
+        seen.push(folded);
+        tags.push(tag);
+    }
+    tags.join("; ")
 }
 
 /// One field edit on its way to Azure DevOps.
@@ -313,6 +417,48 @@ mod tests {
         assert_eq!(
             rejection.notification(),
             "#613 State not saved: HTTP 400: field is read only"
+        );
+    }
+
+    #[test]
+    fn a_cleared_field_is_removed_rather_than_emptied() {
+        let edit = FieldEdit::clear_priority();
+        assert_eq!(edit.value(), &FieldValue::Clear);
+        assert_eq!(
+            edit.patch(),
+            vec![json!({"op": "remove", "path": "/fields/Microsoft.VSTS.Common.Priority"})]
+        );
+        assert_eq!(edit.summary(), "Priority → (none)");
+
+        let mut cleared = ticket();
+        edit.apply(&mut cleared);
+        assert_eq!(cleared.priority, None);
+        assert_eq!(cleared.title, ticket().title, "only the field it names");
+
+        FieldEdit::priority(3).apply(&mut cleared);
+        assert_eq!(cleared.priority, Some(3));
+    }
+
+    #[test]
+    fn a_tag_list_is_trimmed_deduplicated_and_rejoined() {
+        assert_eq!(normalize_tags("rust; Rust ;; tui"), "rust; tui");
+        assert_eq!(normalize_tags("  "), "");
+        assert_eq!(normalize_tags(";;"), "");
+        assert_eq!(
+            normalize_tags("Azure DevOps ; azure devops ; cli"),
+            "Azure DevOps; cli",
+            "the first spelling of a tag is the one kept"
+        );
+
+        let mut tagged = ticket();
+        FieldEdit::tags(&normalize_tags("rust; Rust ;; tui")).apply(&mut tagged);
+        assert_eq!(tagged.tags, ["rust", "tui"]);
+        FieldEdit::tags("").apply(&mut tagged);
+        assert!(tagged.tags.is_empty(), "an empty list clears the tags");
+        assert_eq!(
+            FieldEdit::tags("").patch(),
+            vec![json!({"op": "add", "path": "/fields/System.Tags", "value": ""})],
+            "System.Tags takes an empty string rather than a remove"
         );
     }
 

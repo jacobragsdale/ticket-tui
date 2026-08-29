@@ -215,6 +215,34 @@ states already in the database for that type, ordered by category — Proposed,
 In Progress, Resolved, Completed, Removed — then by name, so it opens instantly
 on a database that has never reached Azure DevOps.
 
+The Edit menu's other three rows are the small text edits that would otherwise
+mean opening a browser. None of them has a key of its own; they are reached
+through `e`, or by name in the command palette as `Edit title`, `Edit priority`,
+and `Edit tags`.
+
+**Title** opens a one-line field prefilled with the title, edited with the same
+keys as the named-view editor — `←`/`→`, `Home`/`End`, `Ctrl-W`, `Ctrl-U`, and
+paste. `Enter` writes `System.Title`, `Esc` changes nothing. Surrounding
+whitespace is trimmed before the write; a title that is empty or only whitespace
+is refused here rather than sent, and the prompt stays open on it; a title
+saved back unchanged closes without a request.
+
+**Priority** opens a five-row list — 1, 2, 3, 4, and `Clear` — in the colours
+the Pri column uses, with the priority the work item already has under the
+cursor. Choosing a number writes `Microsoft.VSTS.Common.Priority`; choosing
+`Clear` sends a JSON Patch `remove` for the field, because a priority goes back
+to unset by being taken off the work item rather than set to an empty value, and
+the Pri cell empties. Choosing the priority it already has closes without a
+write.
+
+**Tags** opens a one-line field prefilled with the tags as `a; b; c`. On save
+the text is split on `;`, each tag trimmed, empties dropped, and a repeat of a
+tag already listed dropped whatever its case — the first spelling is the one
+kept — then rejoined with `; ` for `System.Tags`. So `rust; Rust ;; tui` saves
+as `rust; tui`. An empty result clears the tags, which `System.Tags` accepts as
+an empty string rather than a `remove`. A list that normalises to what is
+already there closes without a write.
+
 ## Controls
 
 | Input | Action |
@@ -240,6 +268,7 @@ on a database that has never reached Azure DevOps.
 | `V` | Open named views; `n` saves, `Enter` loads, `d` deletes |
 | `e` | Open the Edit menu of field editors; `Enter` opens the one chosen |
 | `S` | Change the selected work item's state; `Enter` applies, `Esc` cancels |
+| `e` → Title/Priority/Tags | Edit the title, priority, or tags; also `Edit title`, `Edit priority`, and `Edit tags` in the palette |
 | `m` | Bookmark or unbookmark the selected ticket |
 | `Space` | Toggle ticket multi-select |
 | `y` | Copy selected (or current) ticket IDs |
@@ -265,7 +294,8 @@ visible control under the pointer on release: search, filter pills, sort
 headers, ticket rows, checkboxes, bookmark markers,
 underlined IDs and URLs, tabs, overlay rows, and close/action buttons. Dragging over visible text
 selects it and copies the plain text on release. Bracketed paste inserts at
-the caret in search, the command palette, and the named-view editor.
+the caret in search, the command palette, the named-view editor, and the title
+and tags prompts.
 Scrollbar tracks page by a viewport-minus-one step; thumbs can be
 dragged. Dragging the divider between the Tickets and Details panes resizes
 them, both side by side and stacked; the tickets pane keeps at least 40 columns
@@ -280,8 +310,8 @@ assignee:"Avery Chen" priority:1 tag:rust`, plus `project:`, `area:`, and
 `iteration:`. Values in the same field are combined with OR; different fields
 are combined with AND. `is:bookmarked` limits the table to locally bookmarked
 tickets. Active filters appear as removable chips. The command palette copies
-IDs, URLs, titles, Markdown links, or summaries and exports the selection as
-JSON or CSV. Press `i` for database path, row count, freshness, and the last
+IDs, URLs, titles, Markdown links, or summaries, edits the title, priority, or
+tags, and exports the selection as JSON or CSV. Press `i` for database path, row count, freshness, and the last
 sync. A database another process writes reloads automatically; the table title
 shows `Stale` until that reload finishes, and `Syncing…`, `Synced 2m ago`, or
 `Sync failed` for the pulls from Azure DevOps.
