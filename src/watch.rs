@@ -97,6 +97,8 @@ pub enum WatchEvent {
         lines: Vec<String>,
         finished: bool,
     },
+    /// The work items one run built, read once when it is focused.
+    RunWorkItems { run_id: i64, work_items: Vec<i64> },
     /// One run's stages, jobs and tasks, as they stand.
     Timeline {
         run_id: i64,
@@ -136,6 +138,11 @@ pub trait PipelineSource: Send {
     /// One run as it stands, for a watched one that has left the live list.
     fn run(&self, _run_id: i64) -> Result<Option<Run>> {
         Ok(None)
+    }
+
+    /// The work items one run built.
+    fn run_work_items(&self, _run_id: i64) -> Result<Vec<i64>> {
+        Ok(Vec::new())
     }
 
     /// One node's log, from `start_line` on.
@@ -239,6 +246,8 @@ pub struct Watcher {
     quiet_polls: u32,
     /// Logs read whole because their node had finished: never read again.
     settled_logs: Vec<(i64, i64)>,
+    /// Runs whose work items have been read, which happens once each.
+    read_work_items: Vec<i64>,
     /// Runs whose timeline has finished moving. One of these is read once and
     /// never again: nothing about a finished run changes.
     settled: Vec<i64>,
@@ -256,6 +265,7 @@ impl Watcher {
             tab_showing: false,
             watched: Vec::new(),
             focus: None,
+            read_work_items: Vec::new(),
             node: None,
             log: Cadence::new(LOG_CADENCE),
             approvals: Cadence::new(APPROVALS_CADENCE),
@@ -360,6 +370,15 @@ impl Watcher {
                 }
             }
             self.live.polled(now);
+        }
+        if let Some(run) = self.focus.filter(|run| !self.read_work_items.contains(run)) {
+            self.read_work_items.push(run);
+            if let Ok(work_items) = self.source.run_work_items(run) {
+                events.push(WatchEvent::RunWorkItems {
+                    run_id: run,
+                    work_items,
+                });
+            }
         }
         if let Some(run) = self.focus.filter(|run| !self.settled.contains(run))
             && self.timeline.is_due(now)
@@ -484,6 +503,10 @@ impl PipelineSource for crate::azure::AzureClient {
 
     fn approvals(&self) -> Result<Vec<Approval>> {
         self.fetch_approvals()
+    }
+
+    fn run_work_items(&self, run_id: i64) -> Result<Vec<i64>> {
+        self.fetch_run_work_items(run_id)
     }
 
     fn throttled_for(&self) -> Option<Duration> {

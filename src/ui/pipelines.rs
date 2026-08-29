@@ -6,7 +6,7 @@ use crate::app::pipelines::rows::{duration_label, run_glyph};
 use crate::app::pipelines::{
     Level, PipelineColumn, PipelineMode, PipelineRow, PipelinesScreen, RunColumn, RunRow,
 };
-use crate::model::{RunResult, RunStatus, TimelineKind, TimelineRecord};
+use crate::model::{Jump, RunResult, RunStatus, TimelineKind, TimelineRecord};
 use crate::ui::details::section_line;
 use crate::ui::table::{TableSpec, render_list_table, table_geometry};
 
@@ -531,6 +531,29 @@ fn render_run_details(
         Span::styled(" [Cancel] ", Style::default().fg(theme().muted)),
         Span::styled(" [Retry] ", Style::default().fg(theme().muted)),
     ]));
+    // Where this run came from and what it carried, each one a jump.
+    let jumps = screen.run_jumps(shell);
+    if !jumps.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section_line("Related"));
+    }
+    let jump_start = lines.len();
+    for (label, jump) in &jumps {
+        let what = match jump {
+            Jump::Repo(_) => "Repository",
+            Jump::PullRequest { .. } => "Pull request",
+            _ => "Work items",
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{what}: "), Style::default().fg(theme().muted)),
+            Span::styled(
+                label.clone(),
+                Style::default()
+                    .fg(theme().link)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+        ]));
+    }
     if !timeline.is_empty() {
         lines.push(Line::from(""));
         lines.push(section_line("Timeline"));
@@ -543,6 +566,22 @@ fn render_run_details(
         shell.focus == Focus::Details,
     ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // One hit region per reference, so a click follows it.
+    for (index, (_, jump)) in jumps.iter().enumerate() {
+        let y = inner
+            .y
+            .saturating_add(u16::try_from(jump_start + index).unwrap_or(u16::MAX));
+        if y >= inner.y.saturating_add(inner.height) {
+            break;
+        }
+        shell.hit_regions.push(region(
+            Rect::new(inner.x, y, inner.width, 1),
+            PointerTarget::Follow(jump.clone()),
+            PointerLayer::Base,
+            None,
+            None,
+        ));
+    }
     // One hit region per node, so a click picks the node the log follows.
     for index in 0..timeline.len() {
         let y = inner

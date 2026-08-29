@@ -1073,6 +1073,9 @@ fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
         match event {
             WatchEvent::LiveRuns(runs) => app.pipelines.merge_live_runs(runs),
             WatchEvent::Approvals(approvals) => app.pipelines.set_approvals(approvals),
+            WatchEvent::RunWorkItems { run_id, work_items } => {
+                app.pipelines.set_run_work_items(run_id, work_items);
+            }
             // A watched run has stopped: say so wherever the user is, which is
             // the whole point of having watched it.
             WatchEvent::RunFinished(run) => {

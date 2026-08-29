@@ -840,6 +840,35 @@ impl AzureClient {
         Ok(())
     }
 
+    /// The work items one run says it built, which is what its details pane
+    /// jumps to.
+    pub fn fetch_run_work_items(&self, run_id: i64) -> Result<Vec<i64>> {
+        let id = run_id.to_string();
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "build",
+            "builds",
+            id.as_str(),
+            "workitems",
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&version_query()));
+        let response = self.get(url.as_str())?;
+        Ok(response["value"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|entry| {
+                entry["id"]
+                    .as_str()
+                    .and_then(|id| id.parse().ok())
+                    .or_else(|| entry["id"].as_i64())
+            })
+            .collect())
+    }
+
     /// The teams hang off `_apis/projects` rather than off the project. `tail`
     /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {

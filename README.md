@@ -956,6 +956,12 @@ that is going asks `Cancel 20260829.4?` and a second `x` stops it; `R` on one
 that has stopped retries the jobs that failed, in place. A refusal is a toast
 and nothing changes.
 
+A run's details carry a Related section: the repository it built, the pull
+request it was raised for when there is one, and the work items it says it
+carried. Each is underlined and follows on a click — to the Repos tab, the Pull
+requests tab, or the work items table filtered to `id:613 id:614` — and `[`
+comes back the way it does anywhere else.
+
 `A` opens the approvals the project is waiting on — pipeline, run, stage, what
 the approver is asked to check, and how long it has waited. `a` approves and
 `x` rejects, each through a prompt for a word about why, which may be left

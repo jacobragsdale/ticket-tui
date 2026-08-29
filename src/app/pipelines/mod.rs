@@ -126,6 +126,8 @@ pub struct PipelinesScreen {
     /// The approval being answered, and whether the answer is yes.
     pending_answer: Option<(String, bool)>,
     pub approval_comment: TextInput,
+    /// The work items each focused run said it built.
+    run_work_items: Vec<(i64, Vec<i64>)>,
 }
 
 impl Default for PipelinesScreen {
@@ -161,6 +163,7 @@ impl Default for PipelinesScreen {
             approval_cursor: ListCursor::default(),
             pending_answer: None,
             approval_comment: TextInput::default(),
+            run_work_items: Vec::new(),
         }
     }
 }
@@ -856,6 +859,8 @@ impl Screen for PipelinesScreen {
             }
             PointerTarget::SortHeader(key) => self.toggle_sort(key),
             // The branch picker's own rows and filter field.
+            // A reference in the details pane is the shell's to follow.
+            PointerTarget::Follow(jump) => return AppAction::Follow(jump),
             PointerTarget::ApprovalRow { index } => {
                 self.approval_cursor.focus(index);
             }
@@ -1297,6 +1302,64 @@ impl PipelinesScreen {
 }
 
 impl PipelinesScreen {
+    /// The work items one run says it built, as the watcher read them.
+    pub fn set_run_work_items(&mut self, run_id: i64, work_items: Vec<i64>) {
+        self.run_work_items.retain(|(held, _)| *held != run_id);
+        self.run_work_items.push((run_id, work_items));
+        if self.run_work_items.len() > 8 {
+            self.run_work_items.remove(0);
+        }
+    }
+
+    #[must_use]
+    pub fn run_work_items(&self, run_id: i64) -> &[i64] {
+        self.run_work_items
+            .iter()
+            .find(|(held, _)| *held == run_id)
+            .map_or(&[], |(_, ids)| ids.as_slice())
+    }
+
+    /// Where the details pane's references point: the repository the run
+    /// built, the pull request it was raised for, and the work items it says
+    /// it carried.
+    #[must_use]
+    pub fn run_jumps(&self, shell: &Shell) -> Vec<(String, Jump)> {
+        let Some(row) = self.selected_run(shell) else {
+            return Vec::new();
+        };
+        let mut jumps = Vec::new();
+        if let Some(pipeline) = self
+            .pipelines
+            .iter()
+            .find(|pipeline| pipeline.id == row.run.pipeline_id)
+            && let Some(repo_id) = pipeline.repo_id.as_deref()
+        {
+            jumps.push((
+                shell.repo_name(repo_id),
+                Jump::Repo(shell.repo_name(repo_id)),
+            ));
+        }
+        if let Some(pr) = row.run.pr_id {
+            let repo = self
+                .pipelines
+                .iter()
+                .find(|pipeline| pipeline.id == row.run.pipeline_id)
+                .and_then(|pipeline| pipeline.repo_id.as_deref())
+                .map_or_else(String::new, |id| shell.repo_name(id));
+            jumps.push((format!("!{pr}"), Jump::PullRequest { repo, id: pr }));
+        }
+        let work_items = self.run_work_items(row.run.id);
+        if !work_items.is_empty() {
+            let label = work_items
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            jumps.push((label, Jump::WorkItems(work_items.to_vec())));
+        }
+        jumps
+    }
+
     /// What the watcher last read. The cursor holds its place, so an overlay
     /// open while the list is refreshed does not jump under the hand.
     pub fn set_approvals(&mut self, approvals: Vec<Approval>) {

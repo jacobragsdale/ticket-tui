@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::pipelines::Level;
 use crate::app::pipelines::tests::{pipeline, pipelines_app, run};
-use crate::app::{Screen, TabId};
+use crate::app::{Jump, Screen, TabId};
 use crate::model::{RunResult, RunStatus, TimelineKind, TimelineRecord};
 
 /// The tab, drawn, with the Pipelines tab showing.
@@ -285,14 +285,14 @@ fn timeline_fixture() -> Vec<TimelineRecord> {
 fn the_details_pane_draws_the_timeline_as_a_tree_with_a_glyph_and_a_duration_each() {
     let mut app = pipelines_app();
     app.select_tab(TabId::Pipelines);
-    render_text(140, 48, &mut app);
+    render_text(140, 60, &mut app);
     let run = app
         .pipelines
         .focused_run()
         .expect("the details pane settles on a run");
     app.pipelines.set_timeline(run, timeline_fixture());
 
-    let text = render_text(140, 48, &mut app);
+    let text = render_text(140, 60, &mut app);
     assert!(text.contains("Timeline"), "{text}");
     assert!(
         text.contains("\u{2713} Build"),
@@ -328,10 +328,10 @@ fn the_details_pane_draws_the_timeline_as_a_tree_with_a_glyph_and_a_duration_eac
 fn the_timeline_cursor_moves_with_the_keyboard_and_a_click() {
     let mut app = pipelines_app();
     app.select_tab(TabId::Pipelines);
-    render_text(140, 48, &mut app);
+    render_text(140, 60, &mut app);
     let run = app.pipelines.focused_run().expect("a run");
     app.pipelines.set_timeline(run, timeline_fixture());
-    render_text(140, 48, &mut app);
+    render_text(140, 60, &mut app);
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     assert_eq!(app.shell.focus, Focus::Details);
@@ -356,7 +356,7 @@ fn the_timeline_cursor_moves_with_the_keyboard_and_a_click() {
 fn logging_app() -> App {
     let mut app = pipelines_app();
     app.select_tab(TabId::Pipelines);
-    render_text(140, 48, &mut app);
+    render_text(140, 60, &mut app);
     let run = app.pipelines.focused_run().expect("a run");
     app.pipelines.set_timeline(run, timeline_fixture());
     app
@@ -385,7 +385,7 @@ fn the_log_pane_paints_every_marker_and_says_what_it_is_following() {
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
 
-    let text = render_text(140, 48, &mut app);
+    let text = render_text(140, 60, &mut app);
     assert!(
         text.contains("Log \u{00b7} cargo test \u{00b7} 7 lines \u{00b7} following"),
         "the title names the node, the size and the state: {text}"
@@ -732,5 +732,62 @@ fn x_in_the_approvals_overlay_rejects_rather_than_cancelling_a_run() {
             crate::app::AppAction::AnswerApproval { approve: false, .. }
         ),
         "got {action:?}"
+    );
+}
+
+#[test]
+fn a_runs_details_follow_its_repository_its_pull_request_and_the_work_items_it_built() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    // A run raised for a pull request, carrying two work items.
+    let mut from_pr = run(15, 1, RunStatus::Completed, Some(RunResult::Succeeded));
+    from_pr.pr_id = Some(42);
+    from_pr.reason = "pullRequest".into();
+    app.pipelines.merge_live_runs(vec![from_pr]);
+    app.pipelines.pipeline_cursor.focus(0);
+    app.pipelines.open_runs(&app.shell);
+    app.pipelines.run_cursor.focus(0);
+    render_text(140, 60, &mut app);
+    app.pipelines.set_run_work_items(15, vec![10_001, 10_002]);
+    let text = render_text(140, 60, &mut app);
+
+    assert!(text.contains("Related"), "{text}");
+    assert!(text.contains("Repository: ticket-tui"), "{text}");
+    assert!(text.contains("Pull request: !42"), "{text}");
+    assert!(text.contains("#10001 #10002"), "{text}");
+
+    // Following the repository takes the Repos tab, and `[` comes back.
+    let repo = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::Follow(Jump::Repo(_))))
+        .expect("the repository line is a jump")
+        .rect;
+    click(&mut app, repo.x + 12, repo.y);
+    assert_eq!(app.tab, TabId::Repos);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+    let pull_request = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::Follow(Jump::PullRequest { .. })))
+        .expect("the pull request line is a jump")
+        .rect;
+    click(&mut app, pull_request.x + 14, pull_request.y);
+    assert_eq!(app.tab, TabId::PullRequests);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+    let work_items = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::Follow(Jump::WorkItems(_))))
+        .expect("the work items line is a jump")
+        .rect;
+    click(&mut app, work_items.x + 14, work_items.y);
+    assert_eq!(app.tab, TabId::WorkItems);
+    assert_eq!(
+        app.work_items.query(),
+        "id:10001 id:10002",
+        "the work items the run built are what the table is filtered to"
     );
 }
