@@ -566,6 +566,11 @@ pub struct App {
     pub table_state: TableState,
     pub table: ScrollState,
     pub details: ScrollState,
+    /// Which row of the details pane's scrolling content the family tree's
+    /// first row was last drawn on. The heading above it wraps, so only the
+    /// renderer knows where the tree starts, and the family cursor needs it to
+    /// scroll itself back into view.
+    pub details_family_row: usize,
     pub family_cursor: Option<TicketKey>,
     pub help: ScrollState,
     pub sort: ScrollState,
@@ -709,6 +714,7 @@ impl App {
             table_state: TableState::default(),
             table: ScrollState::default(),
             details: ScrollState::default(),
+            details_family_row: 0,
             family_cursor: None,
             help: ScrollState::default(),
             sort: ScrollState::default(),
@@ -2694,11 +2700,11 @@ impl App {
         let Some(index) = tree.iter().position(|entry| entry.key == cursor) else {
             return;
         };
-        let line = index.saturating_add(1);
+        // The tree sits below a heading that scrolls with it, so the row it
+        // was last drawn on is where the cursor has to be kept.
+        let line = self.details_family_row.saturating_add(index);
         let viewport = self.details.viewport.max(1);
-        if index == 0 {
-            self.details.offset = 0;
-        } else if line < self.details.offset {
+        if line < self.details.offset {
             self.details.offset = line;
         } else if line >= self.details.offset.saturating_add(viewport) {
             self.details.offset = line
