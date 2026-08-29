@@ -1,4 +1,4 @@
 interface:
-  display_name: "Ticket TUI Context"
-  short_description: "Read and interpret the live ticket-tui view"
-  default_prompt: "Use $ticket-tui-context to inspect what the user is currently viewing in ticket-tui."
+  display_name: "ticket-tui"
+  short_description: "Read and change Azure DevOps work items through ticket-tui"
+  default_prompt: "Use $ticket-tui-context to read the backlog, see what the user has selected, and change work items through the ticket-tui subcommands."
