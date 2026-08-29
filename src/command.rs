@@ -18,6 +18,7 @@ pub enum CommandId {
     EditArea,
     EditDescription,
     AddComment,
+    UndoEdit,
     Sort,
     Help,
     Sync,
@@ -203,6 +204,12 @@ pub const COMMANDS: &[Command] = &[
         title: "Add comment",
         keys: &[],
         help: "One line on the discussion",
+    },
+    Command {
+        id: CommandId::UndoEdit,
+        title: "Undo last edit",
+        keys: &[key('u')],
+        help: "Put the value back",
     },
     Command {
         id: CommandId::SaveView,
