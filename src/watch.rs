@@ -95,6 +95,9 @@ pub enum WatchEvent {
         run_id: i64,
         records: Vec<TimelineRecord>,
     },
+    /// A watched run has stopped. The shell toasts this whatever tab is
+    /// showing, which is the point of watching one.
+    RunFinished(Run),
     /// Azure DevOps asked to be left alone, and for how long. Not an error:
     /// the cadences stretch and the overlay says so.
     Throttled(Duration),
@@ -114,6 +117,11 @@ pub trait PipelineSource: Send {
     /// One run's timeline: its stages, jobs and tasks.
     fn timeline(&self, _run_id: i64) -> Result<Vec<TimelineRecord>> {
         Ok(Vec::new())
+    }
+
+    /// One run as it stands, for a watched one that has left the live list.
+    fn run(&self, _run_id: i64) -> Result<Option<Run>> {
+        Ok(None)
     }
 
     /// One node's log, from `start_line` on.
@@ -309,7 +317,22 @@ impl Watcher {
                 Ok(runs) => {
                     self.failing = false;
                     self.live.relax();
+                    // A watched run that is no longer among the live ones has
+                    // stopped; its own record says how it went.
+                    let live_ids: Vec<i64> = runs.iter().map(|run| run.id).collect();
+                    let finished: Vec<i64> = self
+                        .watched
+                        .iter()
+                        .copied()
+                        .filter(|run| !live_ids.contains(run))
+                        .collect();
                     events.push(WatchEvent::LiveRuns(runs));
+                    for run in finished {
+                        self.watched.retain(|held| *held != run);
+                        if let Ok(Some(record)) = self.source.run(run) {
+                            events.push(WatchEvent::RunFinished(record));
+                        }
+                    }
                 }
                 Err(error) => {
                     self.live.stretch();
@@ -426,6 +449,10 @@ impl PipelineSource for crate::azure::AzureClient {
 
     fn log_lines(&self, run_id: i64, log_id: i64, start_line: usize) -> Result<Vec<String>> {
         self.fetch_log_lines(run_id, log_id, start_line)
+    }
+
+    fn run(&self, run_id: i64) -> Result<Option<Run>> {
+        self.fetch_run(run_id)
     }
 
     fn throttled_for(&self) -> Option<Duration> {

@@ -698,6 +698,25 @@ impl AzureClient {
             .collect())
     }
 
+    /// One run as it stands now, which is what a watched run that has left
+    /// the live list is read with.
+    pub fn fetch_run(&self, run_id: i64) -> Result<Option<Run>> {
+        let id = run_id.to_string();
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "build",
+            "builds",
+            id.as_str(),
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&version_query()));
+        let response = self.get(url.as_str())?;
+        Ok(parse_runs(&serde_json::json!({ "value": [response] }))
+            .into_iter()
+            .next())
+    }
+
     /// The teams hang off `_apis/projects` rather than off the project. `tail`
     /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {

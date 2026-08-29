@@ -84,6 +84,9 @@ pub struct PipelinesScreen {
     log_full: bool,
     /// Whether the log on screen has stopped growing.
     log_finished: bool,
+    /// The runs being followed whatever tab is showing. They live for the
+    /// session only.
+    watched: Vec<i64>,
 }
 
 impl Default for PipelinesScreen {
@@ -111,6 +114,7 @@ impl Default for PipelinesScreen {
             log_follow: true,
             log_full: false,
             log_finished: false,
+            watched: Vec::new(),
         }
     }
 }
@@ -340,6 +344,57 @@ impl PipelinesScreen {
 
     pub const fn toggle_log_pane(&mut self) {
         self.log_full = !self.log_full;
+    }
+
+    /// Turns a watch on one run on or off. A watched run is followed whatever
+    /// tab is showing, and says so when it stops.
+    pub fn toggle_watch(&mut self, shell: &Shell) -> Option<(i64, bool)> {
+        let run = match self.level {
+            Level::Runs(_) => self
+                .visible_runs(shell)
+                .get(self.run_cursor.index)
+                .map(|row| row.run.id),
+            // On a definition, the run it last had: watching a pipeline means
+            // watching what it is doing now.
+            Level::Pipelines => self
+                .visible_pipelines(shell)
+                .get(self.pipeline_cursor.index)
+                .and_then(|row| row.last_run.as_ref())
+                .map(|run| run.id),
+        }?;
+        let watching = if self.watched.contains(&run) {
+            self.watched.retain(|held| *held != run);
+            false
+        } else {
+            self.watched.push(run);
+            true
+        };
+        Some((run, watching))
+    }
+
+    /// Starts watching one run, which is what a run triggered from the TUI
+    /// asks for.
+    pub fn watch_run(&mut self, run_id: i64) {
+        if !self.watched.contains(&run_id) {
+            self.watched.push(run_id);
+        }
+    }
+
+    pub fn unwatch_run(&mut self, run_id: i64) {
+        self.watched.retain(|held| *held != run_id);
+    }
+
+    /// Whether one run is being followed, which is what the marker column
+    /// paints.
+    #[must_use]
+    pub fn is_watched(&self, run_id: i64) -> bool {
+        self.watched.contains(&run_id)
+    }
+
+    /// The runs being followed, which the watcher is told about.
+    #[must_use]
+    pub fn watched_runs(&self) -> Vec<i64> {
+        self.watched.clone()
     }
 
     /// The runs still going, which is what the watcher is asked to follow.
@@ -664,6 +719,18 @@ impl Screen for PipelinesScreen {
                 self.sync_focus(shell);
             }
             KeyCode::Backspace | KeyCode::Char('h') => self.close_runs(),
+            KeyCode::Char('W') => {
+                if let Some((run, watching)) = self.toggle_watch(shell) {
+                    let word = if watching {
+                        "Watching"
+                    } else {
+                        "Stopped watching"
+                    };
+                    shell.set_status(format!("{word} run {run}"));
+                } else {
+                    shell.set_error("No run to watch here");
+                }
+            }
             KeyCode::Esc if !self.query().is_empty() => {
                 self.query_mut().clear();
                 self.cursor_mut().reset();
@@ -704,6 +771,23 @@ impl Screen for PipelinesScreen {
                     if index < count {
                         self.focused = Some((run, index));
                     }
+                }
+            }
+            // The gutter of a row: its left half moves the cursor, and the
+            // marker itself is the watch, which is what it paints.
+            PointerTarget::ToggleRowSelect { index } => {
+                let count = self.row_count(shell);
+                if index < count {
+                    self.cursor_mut().focus(index);
+                    self.sync_focus(shell);
+                }
+            }
+            PointerTarget::ToggleBookmark { index } => {
+                let count = self.row_count(shell);
+                if index < count {
+                    self.cursor_mut().focus(index);
+                    self.sync_focus(shell);
+                    self.toggle_watch(shell);
                 }
             }
             // The id column of a list opens what the row is about in the

@@ -1,6 +1,6 @@
 use super::*;
-use crate::app::TabId;
 use crate::app::pipelines::tests::{pipeline, pipelines_app, run};
+use crate::app::{Screen, TabId};
 use crate::model::{RunResult, RunStatus, TimelineKind, TimelineRecord};
 
 /// The tab, drawn, with the Pipelines tab showing.
@@ -457,5 +457,64 @@ fn a_log_past_the_cap_keeps_the_tail_and_says_how_much_it_dropped() {
         held.last().unwrap(),
         "line 20010",
         "the tail is what is kept"
+    );
+}
+
+#[test]
+fn w_watches_the_run_under_the_cursor_and_the_marker_says_so() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    render_text(140, 30, &mut app);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT));
+    let run = app
+        .pipelines
+        .visible_pipelines(&app.shell)
+        .first()
+        .and_then(|row| row.last_run.as_ref())
+        .map(|run| run.id)
+        .expect("the row under the cursor has a run");
+    assert!(app.pipelines.is_watched(run));
+    assert_eq!(app.pipelines.watched_runs(), vec![run]);
+
+    let text = render_text(140, 30, &mut app);
+    assert!(
+        text.contains("\u{25c9}"),
+        "a watched row wears its marker: {text}"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT));
+    assert!(!app.pipelines.is_watched(run), "and W again lets it go");
+}
+
+#[test]
+fn a_watched_run_finishing_is_reported_while_another_tab_is_showing() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    render_text(140, 30, &mut app);
+    app.handle_key(KeyEvent::new(KeyCode::Char('W'), KeyModifiers::SHIFT));
+    app.select_tab(TabId::WorkItems);
+
+    // What main.rs does with a RunFinished event, which is what the watcher
+    // sends once a watched run leaves the live list.
+    let mut finished = run(14, 1, RunStatus::Completed, Some(RunResult::Succeeded));
+    finished.finish_time = Some(crate::timestamp::ts("2026-08-29T10:04:17Z"));
+    app.shell
+        .set_status("\u{2713} Build 20260829.14 succeeded \u{00b7} 4m 12s".to_owned());
+    app.pipelines.unwatch_run(finished.id);
+    app.pipelines.merge_live_runs(vec![finished]);
+
+    let (message, level) = app.shell.notification().expect("the toast is up");
+    assert_eq!(
+        message,
+        "\u{2713} Build 20260829.14 succeeded \u{00b7} 4m 12s"
+    );
+    assert_eq!(level, crate::app::NotificationLevel::Info);
+    assert_eq!(app.tab, TabId::WorkItems, "wherever the user is");
+    assert!(!app.pipelines.is_watched(14), "and the watch is spent");
+    assert_eq!(
+        Screen::badge(&app.pipelines),
+        None,
+        "the badge goes with the last running run"
     );
 }

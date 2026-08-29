@@ -947,6 +947,12 @@ the short commit, who set it going and why, when it was queued, started and
 finished, and how long it took. `o` opens the run, or the pipeline, in the
 browser; column headers sort; the tab wears a `◐2` badge while anything runs.
 
+`W` on a run — or on a pipeline, meaning the run it is having now — follows it:
+the row wears a `◉` in its gutter, the watcher keeps polling it whatever tab is
+showing, and when it stops the footer says so for eight seconds, `✓ Build
+20260829.4 succeeded · 4m 12s` or `✗ Build 20260829.4 failed`. Clicking the
+marker does the same. Watches live for the session only.
+
 Each level has its own search box and its own grammar. Pipelines filter on
 `name:`, `folder:`, `repo:` and `result:` — the result of the run they last
 had, so `result:failed` is every pipeline that is currently red. Runs filter on

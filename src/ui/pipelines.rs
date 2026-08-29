@@ -99,6 +99,15 @@ fn render_pipeline_table(
         rows.get(index)
             .map_or_else(|| Cell::from(""), |row| pipeline_cell(row, column, now))
     };
+    let watched: Vec<bool> = rows
+        .iter()
+        .map(|row| {
+            row.last_run
+                .as_ref()
+                .is_some_and(|run| screen.is_watched(run.id))
+        })
+        .collect();
+    let marker = |index: usize| watch_marker(watched.get(index).copied().unwrap_or_default());
     let mut spec = TableSpec {
         title: format!(" Pipelines {} ", rows.len()),
         focused: true,
@@ -111,7 +120,7 @@ fn render_pipeline_table(
         layer: PointerLayer::Base,
         scroll: ScrollSurface::Table,
         selectable: SelectableSurface::Table,
-        marker: None,
+        marker: Some(&marker),
         cell: &mut cell,
     };
     render_list_table(frame, shell, area, &mut spec);
@@ -137,6 +146,11 @@ fn render_run_table(
         || " Runs ".to_owned(),
         |pipeline| format!(" {} \u{00b7} {} runs ", pipeline.name, rows.len()),
     );
+    let watched: Vec<bool> = rows
+        .iter()
+        .map(|row| screen.is_watched(row.run.id))
+        .collect();
+    let marker = |index: usize| watch_marker(watched.get(index).copied().unwrap_or_default());
     let mut cell = |index: usize, column: RunColumn| {
         rows.get(index)
             .map_or_else(|| Cell::from(""), |row| run_cell(row, column, now))
@@ -153,10 +167,20 @@ fn render_run_table(
         layer: PointerLayer::Base,
         scroll: ScrollSurface::Table,
         selectable: SelectableSurface::Table,
-        marker: None,
+        marker: Some(&marker),
         cell: &mut cell,
     };
     render_list_table(frame, shell, area, &mut spec);
+}
+
+/// The gutter of a watched row: a filled circle, the way a bookmarked work
+/// item wears one.
+fn watch_marker(watched: bool) -> Line<'static> {
+    if watched {
+        Line::styled(" \u{25c9}", Style::default().fg(theme().accent))
+    } else {
+        Line::from("  ")
+    }
 }
 
 fn pipeline_cell(row: &PipelineRow, column: PipelineColumn, now: Timestamp) -> Cell<'static> {

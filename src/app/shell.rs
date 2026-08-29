@@ -569,6 +569,16 @@ impl Shell {
         self.set_notification(message, NotificationLevel::Info, INFO_NOTIFICATION_DURATION);
     }
 
+    /// A notice worth the longer wait an error gets, without being one: a
+    /// watched build finishing is news you may have looked away from.
+    pub fn set_news(&mut self, message: impl Into<String>) {
+        self.set_notification(
+            message,
+            NotificationLevel::Info,
+            ERROR_NOTIFICATION_DURATION,
+        );
+    }
+
     /// Where the rows are pulled from, as the database overlay reports it.
     pub fn set_sync_source(&mut self, source: Option<String>) {
         self.sync_source = source;

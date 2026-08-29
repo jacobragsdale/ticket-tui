@@ -26,7 +26,7 @@ use ticket_tui::cli::{self, Cli, resolve_me};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
 use ticket_tui::edit::{EditRejection, EditRequest, FieldEdit};
 use ticket_tui::markdown;
-use ticket_tui::model::{Ticket, TicketKey};
+use ticket_tui::model::{Run, RunResult, Ticket, TicketKey};
 use ticket_tui::session;
 use ticket_tui::sync::{
     self, AzureConnector, DetailsOutcome, PullOrigin, PulledExtras, ReparentRejection, SyncEvent,
@@ -56,6 +56,8 @@ struct SyncRuntime {
     /// The run and log node the watcher was last told about, for the same
     /// reason.
     watching_run: (Option<i64>, Option<LogTarget>),
+    /// The runs the watcher has been asked to follow.
+    watched_runs: Vec<i64>,
     scheduler: SyncScheduler,
     config: Option<AzureConfig>,
     /// Why Azure DevOps could not be resolved, reported when the user asks for
@@ -363,6 +365,7 @@ fn run() -> Result<()> {
         pipelines: None,
         watching_tab: false,
         watching_run: (None, None),
+        watched_runs: Vec::new(),
     };
     if let Some(config) = config.filter(|_| wrong_project.is_none()) {
         runtime.worker = Some(SyncHandle::spawn(
@@ -954,6 +957,31 @@ fn send_pull(app: &mut App, runtime: &mut SyncRuntime, origin: PullOrigin) {
     }
 }
 
+/// What a finished watch says: the glyph, the build number, how it went, and
+/// how long it took.
+fn run_finished_summary(run: &Run) -> String {
+    let glyph = match run.result {
+        Some(RunResult::Succeeded) => "\u{2713}",
+        Some(RunResult::PartiallySucceeded) => "\u{25d1}",
+        Some(RunResult::Failed) => "\u{2717}",
+        _ => "\u{2298}",
+    };
+    let word = match run.result {
+        Some(RunResult::Succeeded) => "succeeded",
+        Some(RunResult::PartiallySucceeded) => "partly succeeded",
+        Some(RunResult::Failed) => "failed",
+        _ => "was canceled",
+    };
+    let duration = match (run.start_time, run.finish_time) {
+        (Some(start), Some(finish)) => {
+            let seconds = start.seconds_until(finish).max(0);
+            format!(" \u{00b7} {}m {:02}s", seconds / 60, seconds % 60)
+        }
+        _ => String::new(),
+    };
+    format!("{glyph} Build {} {word}{duration}", run.build_number)
+}
+
 /// Tells the pipeline watcher what is worth polling and folds in what it has
 /// seen. None of it is written to SQLite: the next pull is what persists a run,
 /// and until then the screen shows what the watcher has and the file has not.
@@ -976,6 +1004,20 @@ fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
             }),
         );
     }
+    let watched = app.pipelines.watched_runs();
+    if watched != runtime.watched_runs {
+        for run in &watched {
+            if !runtime.watched_runs.contains(run) {
+                let _ = watcher.send(WatchRequest::Watch(*run));
+            }
+        }
+        for run in &runtime.watched_runs {
+            if !watched.contains(run) {
+                let _ = watcher.send(WatchRequest::Unwatch(*run));
+            }
+        }
+        runtime.watched_runs = watched;
+    }
     if showing != runtime.watching_tab {
         runtime.watching_tab = showing;
         let _ = watcher.send(WatchRequest::TabShowing(showing));
@@ -993,6 +1035,20 @@ fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
         redraw = true;
         match event {
             WatchEvent::LiveRuns(runs) => app.pipelines.merge_live_runs(runs),
+            // A watched run has stopped: say so wherever the user is, which is
+            // the whole point of having watched it.
+            WatchEvent::RunFinished(run) => {
+                let summary = run_finished_summary(&run);
+                if matches!(run.result, Some(RunResult::Failed)) {
+                    app.shell.set_error(summary);
+                } else {
+                    // Eight seconds, like an error: it is news whether it went
+                    // well or badly, and you may have looked away.
+                    app.shell.set_news(summary);
+                }
+                app.pipelines.unwatch_run(run.id);
+                app.pipelines.merge_live_runs(vec![run]);
+            }
             WatchEvent::Timeline { run_id, records } => {
                 app.pipelines.set_timeline(run_id, records);
             }
@@ -1689,6 +1745,7 @@ mod tests {
             pipelines: None,
             watching_tab: false,
             watching_run: (None, None),
+            watched_runs: Vec::new(),
         };
         (app, repository, runtime)
     }
@@ -1975,6 +2032,7 @@ mod tests {
             pipelines: None,
             watching_tab: false,
             watching_run: (None, None),
+            watched_runs: Vec::new(),
         };
 
         handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
@@ -2235,6 +2293,7 @@ mod tests {
             pipelines: None,
             watching_tab: false,
             watching_run: (None, None),
+            watched_runs: Vec::new(),
         };
 
         handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
@@ -2941,6 +3000,7 @@ mod tests {
             pipelines: None,
             watching_tab: false,
             watching_run: (None, None),
+            watched_runs: Vec::new(),
         }
     }
 
