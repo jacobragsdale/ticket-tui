@@ -124,6 +124,14 @@ pub enum AppAction {
         key: TicketKey,
         text: String,
     },
+    /// Hand one work item's description to the user's editor. It carries the
+    /// markup Azure DevOps stores, because that is what the editor is opened
+    /// on and what an edit has to hand back. This is the one action that takes
+    /// the terminal away from the TUI while it runs.
+    EditDescription {
+        key: TicketKey,
+        html: String,
+    },
     OpenUrl(String),
     Copy {
         text: String,
@@ -3482,6 +3490,30 @@ impl App {
         }
     }
 
+    /// Asks for the selected work item's description to be opened in the
+    /// user's editor. Nothing is written here: the action carries the markup
+    /// out to the editor hand-off, which brings back whatever was saved and
+    /// sends it down [`Self::edit_ticket`] like any other field. Only the
+    /// refusals worth making before somebody spends minutes typing are made
+    /// here.
+    fn edit_description(&mut self) -> AppAction {
+        let Some(ticket) = self.selected_ticket() else {
+            self.set_error("No work item is selected");
+            return AppAction::None;
+        };
+        let key = ticket.key.clone();
+        let html = ticket.description_html.clone();
+        if !self.sync_enabled {
+            let reason = self
+                .offline_reason
+                .clone()
+                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned());
+            self.set_error(format!("#{} description not saved: {reason}", key.id));
+            return AppAction::None;
+        }
+        AppAction::EditDescription { key, html }
+    }
+
     /// Asks for a comment to be left on the selected work item. Unlike a field
     /// edit nothing is shown until Azure DevOps has stored it: a comment has no
     /// id, date, or author until the server gives it one, and a line that
@@ -3736,6 +3768,7 @@ impl App {
             CommandId::EditAssignee => self.open_assignee_picker(),
             CommandId::EditIteration => self.open_node_picker(NodeKind::Iteration),
             CommandId::EditArea => self.open_node_picker(NodeKind::Area),
+            CommandId::EditDescription => self.edit_description(),
             CommandId::AddComment => {
                 self.open_prompt(PromptField::Comment);
                 AppAction::None
@@ -5053,6 +5086,7 @@ mod tests {
                 "Assignee",
                 "Iteration",
                 "Area",
+                "Description",
                 "Add comment"
             ],
             "later field editors append their own row"
@@ -5301,6 +5335,64 @@ mod tests {
         assert_eq!(app.mode, AppMode::Browse);
         assert!(!app.edits_pending());
         assert_eq!(app.notification(), None);
+    }
+
+    /// The Edit menu row for one command, found by the command itself so a new
+    /// field editor above it moves nothing here.
+    fn menu_row(command: CommandId) -> usize {
+        EDIT_MENU
+            .iter()
+            .position(|entry| entry.command == command)
+            .expect("the Edit menu offers the row")
+    }
+
+    #[test]
+    fn the_description_row_hands_the_raw_html_to_the_editor() {
+        let mut gamma = ticket(3, "Gamma", "2026-03-01T00:00:00Z");
+        gamma.description_html = "<p>Hand it to <code>$EDITOR</code>.</p>".into();
+        gamma.description = "Hand it to `$EDITOR`.".into();
+        let mut app = App::new(vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+            gamma,
+        ]);
+        app.enable_sync();
+        app.set_table_viewport(3);
+        let key = app.selected_ticket().unwrap().key.clone();
+
+        press(&mut app, KeyCode::Char('e'));
+        for _ in 0..menu_row(CommandId::EditDescription) {
+            press(&mut app, KeyCode::Down);
+        }
+        let action = press(&mut app, KeyCode::Enter);
+
+        assert_eq!(
+            action,
+            AppAction::EditDescription {
+                key,
+                html: "<p>Hand it to <code>$EDITOR</code>.</p>".into(),
+            },
+            "the editor is opened on the markup Azure DevOps stores, not the reading of it"
+        );
+        assert_eq!(app.mode, AppMode::Browse, "the TUI is on its way out");
+        assert!(
+            !app.edits_pending(),
+            "nothing is written until the editor is"
+        );
+        assert_eq!(app.notification(), None);
+    }
+
+    #[test]
+    fn an_offline_run_refuses_the_description_before_the_editor_opens() {
+        let mut app = App::new(vec![ticket(3, "Gamma", "2026-03-01T00:00:00Z")]);
+        app.set_table_viewport(3);
+
+        open_editor(&mut app, menu_row(CommandId::EditDescription));
+
+        let (message, level) = app.notification().expect("an offline run says so");
+        assert!(message.contains("#3 description not saved"), "{message}");
+        assert_eq!(level, NotificationLevel::Error);
+        assert!(!app.edits_pending());
     }
 
     /// The Edit menu row that opens the comment box, found by the command it
