@@ -114,13 +114,26 @@ fn count_label(count: usize) -> String {
     }
 }
 
+/// The glyph turns four times a second while git works, so a clone that takes
+/// a minute is visibly alive rather than merely stuck.
+fn spinner() -> char {
+    const FRAMES: [char; 4] = ['\u{25d0}', '\u{25d3}', '\u{25d1}', '\u{25d2}'];
+    let ticks = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() / 250);
+    FRAMES[usize::try_from(ticks % 4).unwrap_or(0)]
+}
+
 /// `main ✓` clean · `feat/x *` dirty · `main ↑2 ↓1` · `—` not here.
 pub(crate) fn local_line(row: &RepoRow) -> Line<'static> {
     let Some(local) = row.local.as_ref() else {
         return Line::styled("\u{2014}", Style::default().fg(theme().muted));
     };
     if let Some(job) = local.busy {
-        return Line::styled(job.label(), Style::default().fg(theme().state_in_progress));
+        return Line::styled(
+            format!("{} {}", spinner(), job.label()),
+            Style::default().fg(theme().state_in_progress),
+        );
     }
     let mut spans = vec![Span::raw(local.branch.clone()), Span::raw(" ")];
     if local.dirty {

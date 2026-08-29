@@ -27,7 +27,7 @@ use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
 use ticket_tui::edit::{EditRejection, EditRequest, FieldEdit};
 use ticket_tui::local::{self, LocalEvent, LocalHandle, LocalRequest};
 use ticket_tui::markdown;
-use ticket_tui::model::{Run, RunResult, Ticket, TicketKey};
+use ticket_tui::model::{GitJob, Run, RunResult, Ticket, TicketKey};
 use ticket_tui::session;
 use ticket_tui::sync::{
     self, AzureConnector, DetailsOutcome, PullOrigin, PulledExtras, ReparentRejection, SyncEvent,
@@ -583,6 +583,9 @@ fn run_terminal(
 
         let timeout = if app.work_items.search_pending || app.shell.reload_pending {
             Duration::from_millis(33)
+        } else if app.repos.busy() {
+            // Four times a second, which is how often the git glyph turns.
+            Duration::from_millis(250)
         } else {
             // The loop has to wake for the next scheduled pull as well as for
             // an expiring notification.
@@ -1120,19 +1123,26 @@ fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     // Drained first, so the events can be answered without holding a borrow of
     // the thread that sent them.
     let events: Vec<LocalEvent> = std::iter::from_fn(|| worker.try_event()).collect();
-    let redraw = !events.is_empty();
+    // A running job redraws on its own, so its glyph turns.
+    let redraw = !events.is_empty() || app.repos.busy();
     for event in events {
         match event {
             LocalEvent::Scanned(local) => app.repos.set_local(local),
             LocalEvent::Started { repo_id, job } => app.repos.set_job(&repo_id, Some(job)),
             LocalEvent::Finished {
                 repo_id,
+                job,
                 message,
                 error,
             } => {
                 app.repos.set_job(&repo_id, None);
                 if error {
-                    app.shell.set_error(message);
+                    // A pull git will not fast-forward wants a real git
+                    // client, or the repository's own page.
+                    app.shell.set_error(match job {
+                        GitJob::Pulling => format!("{message} \u{2014} o opens the repository"),
+                        _ => message,
+                    });
                 } else {
                     app.shell.set_news(message);
                 }

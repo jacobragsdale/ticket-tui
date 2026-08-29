@@ -259,4 +259,19 @@ fn a_repository_git_is_busy_with_is_left_alone() {
             .is_some_and(|(text, _)| text.contains("Already pulling")),
         "one git command at a time on one clone"
     );
+
+    // Including a second clone of a repository already being cloned.
+    focus(&mut app, "home-server");
+    app.repos.set_job("ccc-333", Some(GitJob::Cloning));
+    assert_eq!(
+        press(&mut app, crossterm::event::KeyCode::Char('C')),
+        crate::app::AppAction::None
+    );
+    assert!(
+        app.shell
+            .notification()
+            .is_some_and(|(text, _)| text.contains("Already cloning")),
+        "and the second C says so rather than starting another"
+    );
+    assert!(app.repos.busy(), "which is what makes the glyph turn");
 }

@@ -104,6 +104,13 @@ impl ReposScreen {
         }
     }
 
+    /// Whether git is working on any of them, which is what makes the row
+    /// glyph turn.
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        !self.jobs.is_empty()
+    }
+
     /// What git is doing to one repository, if anything.
     #[must_use]
     pub fn job_for(&self, repo_id: &str) -> Option<GitJob> {
@@ -261,6 +268,14 @@ impl ReposScreen {
         let Some(row) = self.selected(shell) else {
             return AppAction::None;
         };
+        if let Some(job) = self.job_for(&row.repo.id) {
+            shell.set_error(format!(
+                "Already {} {}",
+                job.label().trim_end_matches('\u{2026}'),
+                row.repo.name
+            ));
+            return AppAction::None;
+        }
         if let Some(local) = row.local.as_ref() {
             shell.set_error(format!(
                 "{} is already at {}",

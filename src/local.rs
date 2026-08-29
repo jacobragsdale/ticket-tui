@@ -65,6 +65,7 @@ pub enum LocalEvent {
     /// It finished. `message` is what to say; `error` is whether it failed.
     Finished {
         repo_id: String,
+        job: GitJob,
         message: String,
         error: bool,
     },
@@ -155,6 +156,7 @@ fn run_job(
     };
     events.send(LocalEvent::Finished {
         repo_id: repo_id.to_owned(),
+        job,
         message,
         error,
     })

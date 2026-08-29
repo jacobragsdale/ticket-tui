@@ -991,6 +991,11 @@ the pull nor an edit.
 | `G` | `git fetch --prune` in the clone |
 | `P` | `git pull --ff-only` in the clone |
 
+While one runs, the row reads `◐ cloning…`, `fetching…` or `pulling…` where its
+status goes, with a glyph that turns four times a second; the status is re-read
+when it finishes, and a notification says what happened — `Cloned ticket-tui`,
+or git's own last line when it failed.
+
 `C` clones over ssh, or over https when `TICKET_TUI_CLONE_PROTOCOL=https` or
 Azure DevOps gave no ssh URL. Each is refused, with a word about why, when it
 cannot be what you meant: cloning what is already here, fetching or pulling what
