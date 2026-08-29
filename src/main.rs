@@ -18,7 +18,7 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use ticket_tui::agent_context::{self, AgentContext};
 use ticket_tui::app::{
-    App, AppAction, CopiedContent, DividerOrientation, PointerTarget, PreparedTickets,
+    App, AppAction, CopiedContent, DividerOrientation, PointerTarget, PreparedTickets, SyncTarget,
 };
 use ticket_tui::azure::{AzureClient, AzureConfig};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
@@ -341,6 +341,11 @@ fn run() -> Result<()> {
     // Where the rows come from, for the database overlay: the project, how
     // often it is pulled, and whatever narrows it.
     app.set_sync_source(config.as_ref().map(|config| sync_source(config, refresh)));
+    app.set_sync_target(config.as_ref().map(|config| SyncTarget {
+        organization: config.organization.clone(),
+        project: config.project.clone(),
+        refresh_seconds: refresh,
+    }));
     let mut runtime = SyncRuntime {
         worker: None,
         scheduler: SyncScheduler::new(interval),
@@ -2442,7 +2447,7 @@ mod tests {
 
         let context_path = agent_context::path_for(&path);
         let observed: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(context_path).unwrap()).unwrap();
+            serde_json::from_str(&fs::read_to_string(&context_path).unwrap()).unwrap();
         assert_eq!(
             observed["selected_ticket"]["organization"],
             expected.organization
@@ -2454,6 +2459,21 @@ mod tests {
                 .unwrap()
                 .len(),
             3
+        );
+        assert_eq!(observed["schema_version"], agent_context::SCHEMA_VERSION);
+        assert!(
+            observed["sync"]["offline"].as_bool().unwrap(),
+            "a run with no worker says so"
+        );
+        assert!(observed["pending_edits"].as_array().unwrap().is_empty());
+
+        // A view that has not moved is not republished, which is what keeps the
+        // file quiet enough for a watcher to trust every write it sees.
+        fs::remove_file(&context_path).unwrap();
+        publisher.publish(&app).unwrap();
+        assert!(
+            !context_path.exists(),
+            "nothing changed, so nothing was written"
         );
     }
 

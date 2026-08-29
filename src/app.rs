@@ -9,7 +9,8 @@ use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 
 use crate::agent_context::{
-    AgentContext, SearchContext, SortContext, TicketContext, TicketReference, TicketsContext,
+    AgentContext, PendingEditContext, SearchContext, SortContext, SyncContext, TicketContext,
+    TicketReference, TicketsContext,
 };
 use crate::classification::{self, ClassificationNode, NodeKind};
 use crate::columns::TableLayout;
@@ -497,6 +498,9 @@ pub struct ViewsOverlay {
 struct PendingEdit {
     original: Ticket,
     edit: FieldEdit,
+    /// When the edit was dispatched, so the agent context can say how long it
+    /// has been in flight.
+    since: Timestamp,
 }
 
 impl PendingEdit {
@@ -505,6 +509,18 @@ impl PendingEdit {
         self.edit.apply(&mut ticket);
         ticket
     }
+}
+
+/// The Azure DevOps project a run pulls from, as the agent context reports it.
+/// The database overlay says the same thing in prose; this is the machine
+/// readable half.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyncTarget {
+    pub organization: String,
+    pub project: String,
+    /// Seconds between timer pulls, `0` when `--refresh 0` left the sync key
+    /// as the only thing that pulls.
+    pub refresh_seconds: u64,
 }
 
 #[derive(Debug)]
@@ -645,9 +661,15 @@ pub struct App {
     /// are pulled, and the scope narrowing them — as the database overlay
     /// reports it. `None` until the run resolves a project.
     sync_source: Option<String>,
+    /// The same project, as the agent context publishes it. `None` until the
+    /// run resolves one.
+    sync_target: Option<SyncTarget>,
     /// When the last successful pull finished, which is not `loaded_at`: a
     /// SQLite reload moves that too.
     synced_at: Option<Instant>,
+    /// The same moment on the wall clock, because the agent context has to say
+    /// when the last pull landed and an `Instant` only says how long ago.
+    synced_wall_clock: Option<Timestamp>,
     /// The last pull's error, kept so the same timer failure is reported once.
     sync_error: Option<String>,
     /// When the next pull may go out, for a timer Azure DevOps asked to hold
@@ -794,7 +816,9 @@ impl App {
             offline_reason: None,
             sync_enabled: false,
             sync_source: None,
+            sync_target: None,
             synced_at: None,
+            synced_wall_clock: None,
             sync_error: None,
             sync_paused_until: None,
             me: None,
@@ -854,6 +878,25 @@ impl App {
         AgentContext {
             database_path: self.database_path.display().to_string(),
             me: self.me.clone(),
+            sync: SyncContext {
+                organization: self
+                    .sync_target
+                    .as_ref()
+                    .map(|target| target.organization.clone()),
+                project: self
+                    .sync_target
+                    .as_ref()
+                    .map(|target| target.project.clone()),
+                refresh_seconds: self
+                    .sync_target
+                    .as_ref()
+                    .map_or(0, |target| target.refresh_seconds),
+                in_progress: self.sync_pending,
+                last_success_at: self.synced_wall_clock.map(Timestamp::to_rfc3339),
+                last_error: self.sync_error.clone(),
+                offline: !self.sync_enabled,
+            },
+            pending_edits: self.pending_edit_contexts(),
             mode: mode_name(self.mode).into(),
             focus: focus_name(self.focus).into(),
             screen: if self.narrow_details {
@@ -897,6 +940,29 @@ impl App {
             }),
             details_scroll_line: u16::try_from(self.details.offset).unwrap_or(u16::MAX),
         }
+    }
+
+    /// The edits still waiting on Azure DevOps, lowest work item first. Sorted
+    /// rather than taken in map order, because the context file is only
+    /// rewritten when it changes and a reshuffled list would look like a change
+    /// on every render.
+    fn pending_edit_contexts(&self) -> Vec<PendingEditContext> {
+        let mut edits: Vec<PendingEditContext> = self
+            .pending_edits
+            .iter()
+            .map(|(key, pending)| PendingEditContext {
+                id: key.id,
+                field: pending.edit.label().to_owned(),
+                value: pending.edit.value_text(),
+                since: pending.since.to_rfc3339(),
+            })
+            .collect();
+        edits.sort_by(|left, right| {
+            left.id
+                .cmp(&right.id)
+                .then_with(|| left.field.cmp(&right.field))
+        });
+        edits
     }
 
     fn ticket_context(&self, ticket: &Ticket) -> TicketContext {
@@ -1152,6 +1218,7 @@ impl App {
         self.sync_error = None;
         self.sync_paused_until = None;
         self.synced_at = Some(Instant::now());
+        self.synced_wall_clock = Some(Timestamp::now());
     }
 
     /// Azure DevOps asked to be left alone until `until`, and the timer agreed.
@@ -1205,6 +1272,12 @@ impl App {
     /// Where the rows are pulled from, as the database overlay reports it.
     pub fn set_sync_source(&mut self, source: Option<String>) {
         self.sync_source = source;
+    }
+
+    /// The same project, for the agent context, which needs the organization,
+    /// the project, and the interval apart rather than as one line of prose.
+    pub fn set_sync_target(&mut self, target: Option<SyncTarget>) {
+        self.sync_target = target;
     }
 
     /// The database overlay's one-line account of the sync: where the rows come
@@ -1381,6 +1454,7 @@ impl App {
         let pending = PendingEdit {
             original: self.tickets[index].clone(),
             edit: edit.clone(),
+            since: Timestamp::now(),
         };
         let request = EditRequest {
             key: key.clone(),
@@ -4336,6 +4410,105 @@ mod tests {
         assert!(!app.is_mine(&theirs));
         assert!(!app.is_mine(&unassigned));
         assert_eq!(app.agent_context().me.as_deref(), Some("Avery Chen"));
+    }
+
+    #[test]
+    fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() {
+        let mut app = App::new(vec![ticket(1, "Alpha", "2026-01-01T00:00:00Z")]);
+
+        let offline = app.agent_context().sync;
+        assert!(offline.offline, "a run with no organization cannot sync");
+        assert_eq!(offline.organization, None);
+        assert_eq!(offline.project, None);
+        assert_eq!(offline.refresh_seconds, 0);
+        assert_eq!(offline.last_success_at, None);
+        assert_eq!(offline.last_error, None);
+
+        app.enable_sync();
+        app.set_sync_target(Some(SyncTarget {
+            organization: "example-org".into(),
+            project: "atlas".into(),
+            refresh_seconds: 60,
+        }));
+        app.begin_sync();
+
+        let running = app.agent_context().sync;
+        assert!(!running.offline);
+        assert_eq!(running.organization.as_deref(), Some("example-org"));
+        assert_eq!(running.project.as_deref(), Some("atlas"));
+        assert_eq!(running.refresh_seconds, 60);
+        assert!(running.in_progress, "a pull is out");
+
+        app.finish_sync();
+
+        let succeeded = app.agent_context().sync;
+        assert!(!succeeded.in_progress);
+        assert_eq!(succeeded.last_error, None);
+        let landed = succeeded.last_success_at.expect("a pull landed");
+        assert!(
+            Timestamp::parse(&landed).is_ok(),
+            "the last sync is RFC 3339: {landed}"
+        );
+
+        app.begin_sync();
+        app.fail_sync("network unreachable", true);
+
+        let failed = app.agent_context().sync;
+        assert!(!failed.in_progress);
+        assert_eq!(failed.last_error.as_deref(), Some("network unreachable"));
+        assert_eq!(
+            failed.last_success_at.as_deref(),
+            Some(landed.as_str()),
+            "a failure does not erase when the rows last arrived"
+        );
+
+        app.finish_sync();
+        assert_eq!(
+            app.agent_context().sync.last_error,
+            None,
+            "the next success clears the error"
+        );
+    }
+
+    #[test]
+    fn pending_edits_are_published_while_in_flight_and_gone_once_answered() {
+        let mut app = editing_app();
+        let request = edit_request(&mut app, FieldEdit::state("Doing"));
+
+        let pending = app.agent_context().pending_edits;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, request.key.id);
+        assert_eq!(pending[0].field, "State");
+        assert_eq!(pending[0].value, "Doing");
+        assert!(
+            Timestamp::parse(&pending[0].since).is_ok(),
+            "the dispatch time is RFC 3339: {}",
+            pending[0].since
+        );
+
+        app.apply_edit(EditApplied {
+            ticket: stored_copy(&app, &request.key, "Doing"),
+            relations: Vec::new(),
+            edit: request.edit,
+        });
+        assert!(
+            app.agent_context().pending_edits.is_empty(),
+            "an edit that landed is no longer in flight"
+        );
+
+        let refused = edit_request(&mut app, FieldEdit::priority(1));
+        assert_eq!(app.agent_context().pending_edits.len(), 1);
+
+        app.reject_edit(&EditRejection {
+            key: refused.key,
+            label: "Priority".into(),
+            conflict: false,
+            message: "field is read only".into(),
+        });
+        assert!(
+            app.agent_context().pending_edits.is_empty(),
+            "a refused edit is no longer in flight either"
+        );
     }
 
     #[test]

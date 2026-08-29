@@ -9,7 +9,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::model::{RowDensity, SearchOrder, SortDirection, SortField};
 
-pub const SCHEMA_VERSION: u8 = 1;
+pub const SCHEMA_VERSION: u8 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct AgentContext {
@@ -17,6 +17,13 @@ pub struct AgentContext {
     /// Display name of the signed-in Azure DevOps user, or `null` when the
     /// last sync could not read a profile.
     pub me: Option<String>,
+    /// How fresh the rows are: where they are pulled from, whether a pull is
+    /// running, and how the last one went.
+    pub sync: SyncContext,
+    /// Edits sent to Azure DevOps and not answered yet. The rows already show
+    /// them, so a value named here is optimistic until the edit leaves this
+    /// list.
+    pub pending_edits: Vec<PendingEditContext>,
     pub mode: String,
     pub focus: String,
     pub screen: String,
@@ -28,6 +35,46 @@ pub struct AgentContext {
     pub checked_tickets: Vec<TicketContext>,
     pub family_cursor: Option<TicketReference>,
     pub details_scroll_line: u16,
+}
+
+/// What the run knows about its own sync, so an agent can tell data that is a
+/// minute old from data that stopped arriving an hour ago.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct SyncContext {
+    /// The Azure DevOps organization and project the rows are pulled from, or
+    /// `null` on a run with no project resolved.
+    pub organization: Option<String>,
+    pub project: Option<String>,
+    /// Seconds between timer pulls, `0` when the timer is off and the sync key
+    /// is the only thing that pulls.
+    pub refresh_seconds: u64,
+    /// Whether a pull is in flight right now.
+    pub in_progress: bool,
+    /// When the last pull that reached Azure DevOps finished, RFC 3339, or
+    /// `null` when none has this run. A pull that found nothing new still
+    /// moves this: it says when the rows were last confirmed, not when they
+    /// last changed.
+    pub last_success_at: Option<String>,
+    /// What the last failed pull said, cleared by the next one that succeeds.
+    pub last_error: Option<String>,
+    /// Whether the run has an Azure DevOps project to pull from at all. An
+    /// offline run browses whatever the database already holds and never
+    /// refreshes it. A run whose worker died later stays `false` and says so
+    /// through `last_error` instead.
+    pub offline: bool,
+}
+
+/// One edit the table is already showing and Azure DevOps has not answered yet.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PendingEditContext {
+    pub id: i64,
+    /// The field as the Edit menu names it, such as `State` or `Tags`.
+    pub field: String,
+    /// The value being written, as a notification spells it; a cleared field
+    /// reads `(none)`.
+    pub value: String,
+    /// When the edit was sent, RFC 3339.
+    pub since: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -149,6 +196,16 @@ mod tests {
         AgentContext {
             database_path,
             me: Some("Jacob Ragsdale".into()),
+            sync: SyncContext {
+                organization: Some("example-org".into()),
+                project: Some("atlas".into()),
+                refresh_seconds: 60,
+                in_progress: false,
+                last_success_at: Some("2026-08-29T12:00:00Z".into()),
+                last_error: None,
+                offline: false,
+            },
+            pending_edits: Vec::new(),
             mode: "browse".into(),
             focus: "tickets".into(),
             screen: "workspace".into(),
@@ -210,5 +267,34 @@ mod tests {
         remove(&path).unwrap();
         remove(&path).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn the_sync_block_and_pending_edits_are_published_under_schema_version_two() {
+        assert_eq!(SCHEMA_VERSION, 2);
+        let directory = tempdir().unwrap();
+        let path = path_for(&directory.path().join("tickets.sqlite3"));
+        let mut context = context("tickets.sqlite3".into());
+        context.pending_edits.push(PendingEditContext {
+            id: 625,
+            field: "State".into(),
+            value: "Doing".into(),
+            since: "2026-08-29T12:00:01Z".into(),
+        });
+        save(&path, &context).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["sync"]["organization"], "example-org");
+        assert_eq!(json["sync"]["project"], "atlas");
+        assert_eq!(json["sync"]["refresh_seconds"], 60);
+        assert_eq!(json["sync"]["in_progress"], false);
+        assert_eq!(json["sync"]["last_success_at"], "2026-08-29T12:00:00Z");
+        assert!(json["sync"]["last_error"].is_null());
+        assert_eq!(json["sync"]["offline"], false);
+        assert_eq!(json["pending_edits"][0]["id"], 625);
+        assert_eq!(json["pending_edits"][0]["field"], "State");
+        assert_eq!(json["pending_edits"][0]["value"], "Doing");
+        assert_eq!(json["pending_edits"][0]["since"], "2026-08-29T12:00:01Z");
     }
 }
