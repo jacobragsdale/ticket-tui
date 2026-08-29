@@ -43,7 +43,6 @@ fn render_complete_form(frame: &mut Frame<'_>, screen: &mut PullRequestsScreen, 
     let options = screen.completion();
     let focused = screen.completion_field();
     let area = centered_rect(frame.area(), 56, 9);
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, " Complete ");
     let row = |index: usize, label: &str, value: String| {
         let marker = if index == focused { "\u{203a}" } else { " " };
@@ -86,7 +85,6 @@ fn render_abandon_confirm(
         return;
     };
     let area = centered_rect(frame.area(), 54, 7);
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, " Abandon ");
     let lines = vec![
         Line::from(format!("Abandon !{}?", row.request.id)),
@@ -114,7 +112,6 @@ fn render_comment_prompt(
     };
     let title = format!(" Comment on !{} ", row.request.id);
     let area = centered_rect(frame.area(), 64, 6);
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, &title);
     render_query_field(
         frame,

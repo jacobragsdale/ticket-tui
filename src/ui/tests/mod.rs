@@ -29,6 +29,8 @@ use crate::model::{
     TicketGraph, TicketKey,
 };
 
+use crate::command::CommandId;
+
 use crate::pointer::PointerTarget;
 
 fn ticket() -> Ticket {
@@ -152,6 +154,34 @@ fn render_text(width: u16, height: u16, app: &mut App) -> String {
         text.push('\n');
     }
     text
+}
+
+/// The rows inside the modal frame on screen, located from the `[\u{d7}]` every
+/// frame paints on its top-right corner. The last interior column is dropped
+/// with them: that one is the overlay's own scrollbar track, which draws the
+/// same `\u{2502}` the panes behind it do.
+fn modal_interior(text: &str) -> Option<Vec<String>> {
+    let rows: Vec<Vec<char>> = text.lines().map(|line| line.chars().collect()).collect();
+    let (top, close) = rows.iter().enumerate().find_map(|(y, row)| {
+        let line: String = row.iter().collect();
+        let byte = line.find("[\u{d7}]")?;
+        Some((y, line[..byte].chars().count()))
+    })?;
+    let left = rows[top][..close]
+        .iter()
+        .rposition(|glyph| *glyph == '\u{250c}')?;
+    let right = close
+        + rows[top][close..]
+            .iter()
+            .position(|glyph| *glyph == '\u{2510}')?;
+    let bottom = (top + 1..rows.len()).find(|y| rows[*y].get(left) == Some(&'\u{2514}'))?;
+    let (from, to) = (left + 1, right.saturating_sub(1));
+    (from < to).then(|| {
+        rows[top + 1..bottom]
+            .iter()
+            .map(|row| row[from..to.min(row.len())].iter().collect())
+            .collect()
+    })
 }
 
 #[test]

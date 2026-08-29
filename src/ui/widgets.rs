@@ -5,6 +5,12 @@ use super::*;
 
 /// Clears `area`, draws the framed and titled box every overlay sits in, and
 /// registers its close button. The inner area is what the overlay paints in.
+///
+/// The clear is what makes an overlay opaque: it is painted into the same
+/// frame as the table underneath it, so without one the border lands over
+/// rows that go on showing through. It belongs here rather than at each call
+/// site, because every overlay wants it and forgetting it is invisible until
+/// somebody opens that one pane.
 pub(super) fn render_modal_frame(
     frame: &mut Frame<'_>,
     layer: PointerLayer,
@@ -12,6 +18,7 @@ pub(super) fn render_modal_frame(
     area: Rect,
     title: &str,
 ) -> Rect {
+    frame.render_widget(Clear, area);
     let block = Block::default()
         .title(title.to_owned())
         .title(Line::from("[×]").right_aligned())

@@ -45,7 +45,6 @@ fn render_approvals(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: 
     let now = Timestamp::now();
     let approvals = screen.approvals().to_vec();
     let area = centered_rect(frame.area(), 72, 16);
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, " Approvals ");
     if approvals.is_empty() {
         frame.render_widget(
@@ -109,7 +108,6 @@ fn render_approvals(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: 
 fn render_approval_comment(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut Shell) {
     let approve = screen.answering_approval().unwrap_or(true);
     let area = centered_rect(frame.area(), 60, 6);
-    frame.render_widget(Clear, area);
     let title = if approve { " Approve " } else { " Reject " };
     let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, title);
     render_query_field(
@@ -136,7 +134,6 @@ fn render_branch_picker(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, she
     let branches = screen.branch_matches();
     let height = u16::try_from(branches.len().clamp(1, 12) + 5).unwrap_or(12);
     let area = centered_rect(frame.area(), 52, height);
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, " Run on branch ");
     let field = Rect::new(inner.x, inner.y, inner.width, 1);
     render_query_field(
@@ -188,7 +185,6 @@ fn render_cancel_confirm(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, sh
         return;
     };
     let area = centered_rect(frame.area(), 52, 7);
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, " Cancel run ");
     let lines = vec![
         Line::from(format!("Cancel {}?", row.run.build_number)),

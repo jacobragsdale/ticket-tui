@@ -171,3 +171,66 @@ fn the_sprint_summary_draws_its_grid_and_a_clicked_row_filters_the_table() {
         "and paints no grid at all:\n{screen}"
     );
 }
+
+/// Every overlay is painted into the frame that already holds the tickets and
+/// details panes, so one that does not clear its own area first leaves them
+/// showing through it. The pane borders are the tell: they run down fixed
+/// columns of every content row, and land inside a modal that forgot.
+#[test]
+fn every_overlay_paints_over_the_panes_behind_it() {
+    let mut app = App::new(vec![
+        ticket_at(10_001, "Alpha", "Issue", "Active", "2026-03-03T00:00:00Z"),
+        ticket_at(10_002, "Beta", "Bug", "Active", "2026-03-02T00:00:00Z"),
+        ticket_at(10_003, "Gamma", "Task", "Active", "2026-03-01T00:00:00Z"),
+    ]);
+    assert!(
+        render_text(130, 30, &mut app).contains('│'),
+        "the panes behind the overlays have to draw borders for one to bleed through"
+    );
+
+    // Three overlays paint nothing until they have something to work on, so
+    // they are opened the way a user opens them and left standing: setting the
+    // mode below is then enough to bring each one back up.
+    app.shell.enable_sync();
+    app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.work_items.mode, WorkItemMode::Prompt);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::NewWorkItem);
+    assert_eq!(app.work_items.mode, WorkItemMode::Form);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::DeleteWorkItem);
+    assert_eq!(app.work_items.mode, WorkItemMode::ConfirmDelete);
+
+    for mode in [
+        WorkItemMode::Sort,
+        WorkItemMode::Help,
+        WorkItemMode::Filter,
+        WorkItemMode::Columns,
+        WorkItemMode::Palette,
+        WorkItemMode::Views,
+        WorkItemMode::Info,
+        WorkItemMode::Sprint,
+        WorkItemMode::Facets,
+        WorkItemMode::Edit,
+        WorkItemMode::StatePicker,
+        WorkItemMode::PriorityPicker,
+        WorkItemMode::Prompt,
+        WorkItemMode::AssigneePicker,
+        WorkItemMode::ParentPicker,
+        WorkItemMode::NodePicker,
+        WorkItemMode::Form,
+        WorkItemMode::TypePicker,
+        WorkItemMode::ConfirmDelete,
+    ] {
+        app.work_items.mode = mode;
+        let text = render_text(130, 30, &mut app);
+        let interior = modal_interior(&text)
+            .unwrap_or_else(|| panic!("{mode:?} drew no modal frame:\n{text}"));
+        assert!(
+            !interior.iter().any(|row| row.contains('│')),
+            "{mode:?} let the panes behind it show through:\n{text}"
+        );
+    }
+}
