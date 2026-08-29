@@ -132,6 +132,22 @@ interval once. The flag wins when both are given, and a value that is not a
 number of seconds is a startup error naming the variable rather than a silent
 fall back to the default.
 
+### `--stale-days` and `TICKET_TUI_STALE_DAYS`
+
+How long a work item may sit untouched before the Changed column flags it:
+
+```console
+cargo run --release -- --stale-days 21
+```
+
+`TICKET_TUI_STALE_DAYS` sets the same threshold, so a shell profile can set it
+once. The flag wins when both are given, a value that is not a number of days
+is a startup error naming the variable, and either one beats whatever the last
+session remembered. **Set stale threshold** in the command palette steps
+through 7, 14, 21, and 30 days, has the last word for the rest of the run, and
+is what gets saved. See [Stale-item
+highlighting](#stale-item-highlighting).
+
 ### `--query`: how much of the project to sync
 
 A project too large to hold whole is narrowed with `--query`, or
@@ -755,8 +771,28 @@ cursor, and `d` deletes one you saved.
 
 Changed dates use compact relative labels, and exact UTC timestamps remain
 available in details. Press `c` to switch between compact and comfortable row
-density. Named views, column layout, bookmarks, the pane split, and the last
-query are saved beside the cache as `*.session.json`.
+density. Named views, column layout, bookmarks, the pane split, the stale
+threshold, and the last query are saved beside the cache as `*.session.json`.
+
+### Stale-item highlighting
+
+Work that nobody has touched for a fortnight, and that the workflow has not
+finished with, is flagged in the Changed column: the age goes warning-coloured,
+and bold where `NO_COLOR` leaves no palette to colour it. The details pane says
+how long, as `Changed: 2026-08-08 12:00:00 UTC (stale 21d)`.
+
+Nothing dims — dim already means finished — and finished work is never flagged
+however long it has sat: nobody is waiting on a work item that is done or
+removed. Whether a state counts as finished is read from its Azure DevOps state
+category, not from its name, so every process template's spelling of Done,
+Closed, Removed, or Cut is understood.
+
+The threshold is exclusive, and it is exactly the `changed:` comparison the
+query language already takes, so a flagged row is precisely a row `changed:>14d
+state:@open` lists — the built-in **Stale** view. An item last touched exactly
+fourteen days ago has not crossed the threshold; one touched a moment before
+that has. Change it with `--stale-days`, `TICKET_TUI_STALE_DAYS`, or **Set
+stale threshold** in the palette, which remembers what it was given.
 
 ## Database reference
 

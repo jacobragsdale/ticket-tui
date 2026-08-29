@@ -25,8 +25,8 @@ These three are global: valid on every subcommand, either side of it.
 | `--org ORG` | Azure DevOps organization, as a slug or a URL; else `TICKET_TUI_ORG`, else `az devops configure` defaults |
 | `--project PROJECT` | Azure DevOps project; else `TICKET_TUI_PROJECT`, else `az devops configure` defaults |
 
-`--query WIQL`, `--refresh SECONDS`, and the deprecated `--sync` are **not**
-global. They must be written before the subcommand, and `ticket-tui sync
+`--query WIQL`, `--refresh SECONDS`, `--stale-days DAYS`, and the deprecated
+`--sync` are **not** global. They must be written before the subcommand, and `ticket-tui sync
 --query …` is rejected as an unexpected argument:
 
 ```console
@@ -40,7 +40,10 @@ subcommand. Two different flags share the name `--query`: this one takes WIQL
 and narrows what a **pull** asks Azure DevOps for, while `list --query` takes
 the filter grammar and narrows what is **printed** from rows already stored.
 
-`--refresh SECONDS` only means anything to a run that opens the TUI. `--sync`
+`--refresh SECONDS` and `--stale-days DAYS` only mean anything to a run that
+opens the TUI; `--stale-days` (or `TICKET_TUI_STALE_DAYS`) sets how long a work
+item may sit untouched before the Changed column flags it, which is the
+`changed:>Nd state:@open` the **Stale** view asks for. `--sync`
 prints a deprecation note and pulls before opening the TUI; `ticket-tui sync` is
 the subcommand that pulls and exits.
 

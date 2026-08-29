@@ -249,6 +249,8 @@ fn run() -> Result<()> {
         eprintln!("note: --sync is deprecated; run `ticket-tui sync` to pull and exit");
     }
     let refresh = resolve_refresh(cli.refresh, std::env::var("TICKET_TUI_REFRESH").ok())?;
+    let stale_days =
+        resolve_stale_days(cli.stale_days, std::env::var("TICKET_TUI_STALE_DAYS").ok())?;
     let database_path = cli.database.clone().unwrap_or_else(default_database_path);
     let mut repository = SqliteTicketRepository::open(&database_path)?;
     let schema_was_rebuilt = repository.schema_was_rebuilt();
@@ -319,6 +321,11 @@ fn run() -> Result<()> {
     match session::load(&session_path) {
         Ok(loaded) => app.restore_session(loaded),
         Err(error) => app.set_error(format!("Could not load session: {error:#}")),
+    }
+    // After the session, so a threshold asked for on this run beats the one
+    // the last run left behind.
+    if let Some(days) = stale_days {
+        app.override_stale_days(days);
     }
 
     let interval = (refresh > 0).then(|| Duration::from_secs(refresh));
@@ -505,6 +512,29 @@ fn resolve_refresh(flag: Option<u64>, env: Option<String>) -> Result<u64> {
     trimmed
         .parse()
         .with_context(|| format!("TICKET_TUI_REFRESH is not a number of seconds: {trimmed}"))
+}
+
+/// How long a work item may sit untouched before the Changed column flags it:
+/// `--stale-days`, then `TICKET_TUI_STALE_DAYS`, and `None` when neither was
+/// given, which leaves whatever the session remembers standing. A variable
+/// that is not a number of days is a startup error naming it, the way
+/// `TICKET_TUI_REFRESH` is: a typo there would otherwise change which rows are
+/// flagged and say nothing about it.
+fn resolve_stale_days(flag: Option<u16>, env: Option<String>) -> Result<Option<u16>> {
+    if let Some(days) = flag {
+        return Ok(Some(days));
+    }
+    let Some(raw) = env else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse()
+        .map(Some)
+        .with_context(|| format!("TICKET_TUI_STALE_DAYS is not a number of days: {trimmed}"))
 }
 
 /// What the database overlay says about where the rows come from: the project,
@@ -1656,6 +1686,36 @@ mod tests {
         assert_eq!(
             output,
             b"\x1b]22;pointer\x1b\\\x1b]22;col-resize\x1b\\\x1b]22;row-resize\x1b\\\x1b]22;\x1b\\"
+        );
+    }
+
+    #[test]
+    fn the_stale_threshold_comes_from_the_flag_before_the_environment() {
+        assert_eq!(
+            resolve_stale_days(None, None).unwrap(),
+            None,
+            "with neither given, whatever the session remembers stands"
+        );
+        assert_eq!(resolve_stale_days(Some(7), None).unwrap(), Some(7));
+        assert_eq!(
+            resolve_stale_days(Some(7), Some("30".into())).unwrap(),
+            Some(7),
+            "the flag wins over TICKET_TUI_STALE_DAYS"
+        );
+        assert_eq!(
+            resolve_stale_days(None, Some(" 30 ".into())).unwrap(),
+            Some(30)
+        );
+        assert_eq!(
+            resolve_stale_days(None, Some("   ".into())).unwrap(),
+            None,
+            "an empty variable is not an answer"
+        );
+
+        let error = resolve_stale_days(None, Some("a fortnight".into())).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("TICKET_TUI_STALE_DAYS is not a number of days"),
+            "{error:#}"
         );
     }
 

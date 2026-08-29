@@ -42,6 +42,7 @@ pub enum CommandId {
     DatabaseInfo,
     Quit,
     ResetPaneSplit,
+    SetStaleThreshold,
 }
 
 /// A single binding: the key code plus the modifiers crossterm reports with it.
@@ -354,6 +355,12 @@ pub const COMMANDS: &[Command] = &[
         title: "Reset pane split",
         keys: &[],
         help: "Restore the 62/56 layout",
+    },
+    Command {
+        id: CommandId::SetStaleThreshold,
+        title: "Set stale threshold",
+        keys: &[],
+        help: "7, 14, 21, or 30 days",
     },
 ];
 
