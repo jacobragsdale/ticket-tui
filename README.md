@@ -115,6 +115,14 @@ Hierarchy links become parent and child relations; related, predecessor,
 successor, and duplicate links are stored as themselves. Other link types, such
 as attachments, are ignored.
 
+`--sync` also reads `/_apis/profile/profiles/me` for the signed-in display name
+and stores it in the cache's `sync_meta` table. The profile host is separate
+from the work-item host, so a failure there is skipped rather than sinking the
+sync. Work items assigned to that name render bold in the accent colour in the
+Assignee column and in the details pane. Set `TICKET_TUI_ME` to override the
+stored name, for anyone whose profile name differs from the name their work
+items are assigned to.
+
 Sync is currently a full pull at startup. Periodic background refresh is planned
 (#608). Comments and revision history are not synced yet: their tables exist and
 the details pane renders them when present, but nothing fills them. `r` reloads
@@ -156,6 +164,10 @@ from SQLite only and never contacts Azure DevOps.
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
 
+The help overlay's Actions section and the palette's key labels are generated
+from the same command table these keys are bound in, so a binding reads the same
+way everywhere.
+
 Mouse input stays captured so the TUI can provide its own pointer controls
 without restoring terminal drag-select. Wheel scrolling moves the hovered
 table, details pane, help, or overlay by three rows or lines and does not
@@ -166,7 +178,11 @@ underlined IDs and URLs, tabs, overlay rows, and close/action buttons. Dragging 
 selects it and copies the plain text on release. Bracketed paste inserts at
 the caret in search, the command palette, and the named-view editor.
 Scrollbar tracks page by a viewport-minus-one step; thumbs can be
-dragged. Right-click, double-click, and horizontal wheel gestures are not
+dragged. Dragging the divider between the Tickets and Details panes resizes
+them, both side by side and stacked; the tickets pane keeps at least 40 columns
+and details at least 30 side by side, and each keeps six rows when stacked.
+`Reset pane split` in the command palette restores the built-in layout.
+Right-click, double-click, and horizontal wheel gestures are not
 used. Terminals supporting OSC 22 show a browser-style pointer over external
 URL targets.
 
@@ -180,13 +196,27 @@ JSON or CSV. Press `i` for cache path, row count, and freshness. Local SQLite
 changes reload automatically; the table title shows `Stale` until the reload
 finishes.
 
-Ticket states and priorities use restrained semantic colors, work-item types
-and tags render as compact badges, and matched search characters are
-underlined in visible results. Changed dates use compact relative labels, and
-exact UTC timestamps remain available in details. Press `c` to switch between
-compact and comfortable row density. Named views, column layout, bookmarks,
-and the last query are saved beside the cache as `*.session.json`. Set the
-standard `NO_COLOR` environment variable to use the monochrome theme.
+States are coloured by category: New, To Do, and Proposed blue; Active, Doing,
+and In Progress yellow; Resolved magenta; Done and Closed green; Removed grey;
+a state outside those groups stays plain. Work-item types carry fixed badge
+colours — Epic yellow, Feature magenta, Issue, User Story, and Product Backlog
+Item blue, Task cyan, Bug and Impediment red, Test Case green — priority 1 is
+red, 2 yellow, 3 and 4 blue, and each tag is hashed onto a stable badge colour
+so one tag reads the same everywhere. Completed and removed rows are dimmed so
+open work stands out, the Area and Iteration table columns show only the last
+path segment while details keeps the full path, family-tree rows carry a
+one-character state glyph (`○ ◐ ● ✓ ✗`), and matched search characters are
+underlined in visible results. A hovered row is tinted with a 256-colour
+background rather than repainted, so its coloured cells keep their own
+foregrounds; hovered controls reverse instead. Setting the standard `NO_COLOR`
+environment variable selects the monochrome theme, where weight carries the same
+distinctions: badges keep their brackets, finished rows dim instead of fading,
+state glyphs and your own work items go bold, and a hovered row reverses.
+
+Changed dates use compact relative labels, and exact UTC timestamps remain
+available in details. Press `c` to switch between compact and comfortable row
+density. Named views, column layout, bookmarks, the pane split, and the last
+query are saved beside the cache as `*.session.json`.
 
 ## Database reference
 
@@ -212,12 +242,18 @@ The `work_items` table stores these columns:
 
 The primary key is `(organization, work_item_id)`. Tags use Azure DevOps-style
 semicolon separation. The `work_item_relations`, `work_item_comments`, and
-`work_item_history` tables hold the graph around each work item.
+`work_item_history` tables hold the graph around each work item. The `sync_meta`
+key/value table describes the sync itself rather than the work items, so a pull
+clears the other tables but leaves it alone; `me_display_name` lives there.
 
-The cache carries `PRAGMA user_version = 5`. Because it is a cache rather than a
+The cache carries `PRAGMA user_version = 6`. Because it is a cache rather than a
 record of truth, there are no migrations: a database at any other version has
-its tables dropped and recreated, and the next `--sync` refills it. Deleting the
-file has the same effect.
+its tables dropped and recreated at startup, and the next `--sync` refills it.
+Deleting the file has the same effect. Background reloads instead open the cache
+without touching its schema and report the version mismatch, ending in
+`restart ticket-tui`, so a running instance can never empty a cache a newer
+build owns. After upgrading the binary, restart
+any running ticket-tui, and re-run `--sync` if the cache was rebuilt.
 
 The TUI displays cached records but never edits them. Parent and child links
 render as an always-expanded family tree in the details pane. Click a family
@@ -243,7 +279,8 @@ The versioned snapshot includes:
   counts;
 - the complete query, fuzzy text, and parsed filters;
 - sort order, named view, mode, focused pane, family cursor, and details scroll;
-- cache path, process ID, and last-change timestamp.
+- cache path, the signed-in display name that marks your own work items,
+  process ID, and last-change timestamp.
 
 The file is replaced after meaningful rendered-state changes and removed on a
 clean exit. A crash or forced termination can leave a stale file, so consumers

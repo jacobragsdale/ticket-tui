@@ -21,6 +21,7 @@ wins.
 | `process_id` | integer | PID of the ticket-tui process that wrote the file |
 | `updated_at` | string | UTC RFC 3339 time of the published state change |
 | `database_path` | string | SQLite cache backing the view |
+| `me` | string or null | Signed-in display name recorded by the last `--sync`, overridden by `TICKET_TUI_ME`; null when neither is set |
 | `mode` | string | `browse`, `search`, or the active overlay name |
 | `focus` | string | `tickets`, `family`, or `details` |
 | `screen` | string | `workspace` or the narrow-layout `details` screen |
