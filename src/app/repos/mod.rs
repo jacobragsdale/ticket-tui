@@ -49,6 +49,9 @@ pub struct ReposScreen {
     pub sort: (RepoColumn, bool),
     pub cursor: ListCursor,
     pub details: ScrollState,
+    /// Which line of the details pane's "Open against it" section `Enter`
+    /// follows, while the focus is on the pane.
+    pub jump_cursor: usize,
     /// What git is doing to a repository right now, by repository id. Held
     /// apart from `local` because a clone has no local entry to hang it on.
     jobs: Vec<(String, GitJob)>,
@@ -69,6 +72,7 @@ impl Default for ReposScreen {
             sort: (RepoColumn::Name, false),
             cursor: ListCursor::default(),
             details: ScrollState::default(),
+            jump_cursor: 0,
             jobs: Vec::new(),
         }
     }
@@ -346,6 +350,40 @@ impl ReposScreen {
         })
     }
 
+    /// The details pane: `j`/`k` walk its references and `Enter` follows the
+    /// one they are on. A repository with nothing open against it has no
+    /// references, so the same keys scroll the pane instead.
+    fn handle_details_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        let jumps = self.jumps(shell);
+        self.jump_cursor = self.jump_cursor.min(jumps.len().saturating_sub(1));
+        match key.code {
+            KeyCode::Tab | KeyCode::Esc => shell.focus = Focus::Tickets,
+            KeyCode::Down | KeyCode::Char('j') => {
+                if jumps.is_empty() {
+                    self.details.scroll_by(1);
+                } else {
+                    self.jump_cursor = (self.jump_cursor + 1).min(jumps.len() - 1);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if jumps.is_empty() {
+                    self.details.scroll_by(-1);
+                } else {
+                    self.jump_cursor = self.jump_cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Home => self.jump_cursor = 0,
+            KeyCode::End => self.jump_cursor = jumps.len().saturating_sub(1),
+            KeyCode::Enter => {
+                if let Some((_, jump)) = jumps.get(self.jump_cursor) {
+                    return AppAction::Follow(jump.clone());
+                }
+            }
+            _ => return self.handle_command_key(shell, key),
+        }
+        AppAction::None
+    }
+
     fn handle_search_key(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
             KeyCode::Enter | KeyCode::Esc => self.mode = RepoMode::Browse,
@@ -422,27 +460,38 @@ impl Screen for ReposScreen {
         if self.mode == RepoMode::Search {
             return self.handle_search_key(key);
         }
+        if shell.focus == Focus::Details {
+            return self.handle_details_key(shell, key);
+        }
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
                 let count = self.visible(shell).len();
                 self.cursor.move_by(1, count);
+                self.jump_cursor = 0;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 let count = self.visible(shell).len();
                 self.cursor.move_by(-1, count);
+                self.jump_cursor = 0;
             }
             KeyCode::PageDown => {
                 let count = self.visible(shell).len();
                 self.cursor.page(1, count);
+                self.jump_cursor = 0;
             }
             KeyCode::PageUp => {
                 let count = self.visible(shell).len();
                 self.cursor.page(-1, count);
+                self.jump_cursor = 0;
             }
-            KeyCode::Home => self.cursor.focus(0),
+            KeyCode::Home => {
+                self.cursor.focus(0);
+                self.jump_cursor = 0;
+            }
             KeyCode::End => {
                 let count = self.visible(shell).len();
                 self.cursor.move_by(isize::MAX, count);
+                self.jump_cursor = 0;
             }
             KeyCode::Tab => shell.focus = Focus::Details,
             KeyCode::Esc if !self.query.is_empty() => {
@@ -491,7 +540,14 @@ impl Screen for ReposScreen {
             PointerTarget::RunCommand(CommandId::PullRepo) => {
                 return self.git_selected(shell, true);
             }
-            PointerTarget::Follow(jump) => return AppAction::Follow(jump),
+            // A click both settles the pane's cursor on the line and follows
+            // it, so `[` back and `Enter` again land where the eye did.
+            PointerTarget::Follow(jump) => {
+                if let Some(index) = self.jumps(shell).iter().position(|(_, held)| *held == jump) {
+                    self.jump_cursor = index;
+                }
+                return AppAction::Follow(jump);
+            }
             // Every URL line copies what it says.
             PointerTarget::CopyText(text) => {
                 return AppAction::Copy {
@@ -534,6 +590,10 @@ impl Screen for ReposScreen {
             ScrollSurface::Details => &mut self.details,
             _ => &mut self.cursor.scroll,
         }
+    }
+
+    fn here(&self, shell: &Shell) -> Option<Jump> {
+        self.selected(shell).map(|row| Jump::Repo(row.repo.name))
     }
 
     fn select(&mut self, shell: &mut Shell, jump: &Jump) -> bool {
@@ -582,7 +642,9 @@ impl Screen for ReposScreen {
     fn footer_hint(&self, _shell: &Shell) -> &str {
         match self.mode {
             RepoMode::Search => "←→ cursor  Ctrl-W delete word  Ctrl-U clear  Enter/Esc finish",
-            RepoMode::Browse => "↑↓/jk move  / search  o open  y copy ssh  Tab details  q quit",
+            RepoMode::Browse => {
+                "↑↓/jk move  C clone  G fetch  P pull  o open  Tab details  Enter follow  q quit"
+            }
         }
     }
 

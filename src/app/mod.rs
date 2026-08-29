@@ -280,6 +280,14 @@ impl App {
     /// screen there settles on it. One nothing holds says so rather than
     /// switching to an empty tab.
     pub fn follow(&mut self, jump: &Jump) -> bool {
+        // Where the walk starts from is what `[` comes back to.
+        let here = {
+            let (shell, screen) = self.screen();
+            screen.here(shell)
+        };
+        if let Some(here) = here {
+            self.shell.record_jump(here);
+        }
         let tab = match jump {
             Jump::WorkItem(_) | Jump::WorkItems(_) => TabId::WorkItems,
             Jump::Repo(_) => TabId::Repos,
@@ -290,7 +298,9 @@ impl App {
         self.select_tab(tab);
         let (shell, screen) = self.screen();
         let found = screen.select(shell, jump);
-        if !found {
+        if found {
+            self.shell.record_jump(jump.clone());
+        } else {
             self.tab = previous;
             self.shell
                 .set_error(format!("{} is not in this database", jump.describe()));

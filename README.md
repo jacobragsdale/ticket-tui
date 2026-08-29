@@ -958,7 +958,9 @@ this machine — `main ✓` clean, `feat/x *` dirty, `main ↑2 ↓1` ahead and 
 The details pane carries the name and project, the default branch and size, the
 three URLs (each copies what it says on click, and `y` copies the ssh one), the
 local copy and where it is, and what is open against the repository: its active
-pull requests and the pipelines that build it, each a jump. `[Clone]`, or
+pull requests and the pipelines that build it, each a jump: `Tab` moves the
+focus to the pane, `j`/`k` walk the references, `Enter` follows the one they are
+on, and a click does both at once. `[` comes back, here as everywhere. `[Clone]`, or
 `[Fetch]` and `[Pull]` where there is a clone, run what they say on a click.
 `o` opens the repository's page, and so does clicking its name.
 

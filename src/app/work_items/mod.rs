@@ -885,6 +885,11 @@ impl Screen for WorkItemsScreen {
         Self::handle_mouse(self, shell, mouse)
     }
 
+    fn here(&self, _shell: &Shell) -> Option<Jump> {
+        self.selected_ticket()
+            .map(|ticket| Jump::WorkItem(ticket.key.clone()))
+    }
+
     fn select(&mut self, shell: &mut Shell, jump: &Jump) -> bool {
         self.select_jump(shell, jump)
     }

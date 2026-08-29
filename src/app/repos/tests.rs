@@ -275,3 +275,136 @@ fn a_repository_git_is_busy_with_is_left_alone() {
     );
     assert!(app.repos.busy(), "which is what makes the glyph turn");
 }
+
+/// The same app with the other two tabs filled in, so a jump has somewhere to
+/// land: three pull requests and two pipelines, all against ticket-tui.
+fn crossed_app() -> App {
+    use crate::app::pipelines::tests::{pipeline, run};
+    use crate::app::pull_requests::tests::pull_request;
+    use crate::model::{PrStatus, RunResult, RunStatus};
+
+    let mut app = repos_app();
+    let requests = vec![
+        pull_request(11, "Split the files", "Avery", PrStatus::Active),
+        pull_request(12, "Tab bar", "Jacob Ragsdale", PrStatus::Active),
+    ];
+    let shell = &app.shell;
+    app.pull_requests.set_pull_requests(requests, shell);
+    let pipelines = vec![pipeline(1, "ticket-tui CI", "\\")];
+    let runs = vec![run(14, 1, RunStatus::Completed, Some(RunResult::Succeeded))];
+    let shell = &app.shell;
+    app.pipelines.set_pipelines(pipelines, runs, shell);
+    app.select_tab(TabId::Repos);
+    app
+}
+
+#[test]
+fn the_details_pane_walks_to_a_pull_request_and_a_pipeline_and_back() {
+    use crate::model::Jump;
+
+    let mut app = crossed_app();
+    focus(&mut app, "ticket-tui");
+    // Tab moves the focus to the pane, where j/k walk the references.
+    app.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Tab,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert_eq!(app.shell.focus, crate::app::Focus::Details);
+
+    let action = app.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert_eq!(action, crate::app::AppAction::None, "the shell follows it");
+    assert_eq!(app.tab, TabId::PullRequests, "the first reference is a PR");
+    assert_eq!(
+        app.pull_requests
+            .selected(&app.shell)
+            .map(|row| row.request.id),
+        Some(11)
+    );
+    assert_eq!(
+        app.shell.history(),
+        [
+            Jump::Repo("ticket-tui".to_owned()),
+            Jump::PullRequest {
+                repo: "ticket-tui".to_owned(),
+                id: 11
+            }
+        ],
+        "both ends of the walk are on the history"
+    );
+
+    app.history_back();
+    assert_eq!(app.tab, TabId::Repos, "and [ comes back");
+    assert_eq!(
+        app.repos.selected(&app.shell).map(|row| row.repo.name),
+        Some("ticket-tui".to_owned())
+    );
+
+    // The last reference is the pipeline that builds it.
+    app.shell.focus = crate::app::Focus::Details;
+    app.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::End,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    app.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert_eq!(app.tab, TabId::Pipelines);
+    assert_eq!(
+        app.pipelines
+            .visible_pipelines(&app.shell)
+            .get(app.pipelines.pipeline_cursor.index)
+            .map(|row| row.pipeline.name.clone()),
+        Some("ticket-tui CI".to_owned())
+    );
+
+    app.history_back();
+    assert_eq!(app.tab, TabId::Repos, "and back again");
+}
+
+#[test]
+fn a_repository_name_on_another_tab_comes_back_here() {
+    use crate::model::Jump;
+
+    let mut app = crossed_app();
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(0);
+    let jumps = app.pull_requests.jumps(&app.shell, &|_| None);
+    let (_, back) = jumps.first().expect("the repository line");
+    assert_eq!(back, &Jump::Repo("ticket-tui".to_owned()));
+
+    assert!(app.follow(back));
+    assert_eq!(app.tab, TabId::Repos);
+    assert_eq!(
+        app.repos.selected(&app.shell).map(|row| row.repo.name),
+        Some("ticket-tui".to_owned())
+    );
+    app.history_back();
+    assert_eq!(
+        app.tab,
+        TabId::PullRequests,
+        "the pull request it came from is where [ goes"
+    );
+}
+
+#[test]
+fn the_count_columns_add_up_what_the_other_tabs_hold() {
+    let app = crossed_app();
+    let rows = app.repos.visible(&app.shell);
+    let ticket_tui = rows
+        .iter()
+        .find(|row| row.repo.name == "ticket-tui")
+        .expect("the repository");
+
+    assert_eq!(ticket_tui.pull_requests, 2);
+    assert_eq!(ticket_tui.pipelines, 1);
+    assert!(
+        rows.iter()
+            .filter(|row| row.repo.name != "ticket-tui")
+            .all(|row| row.pull_requests == 0 && row.pipelines == 0),
+        "and nothing is credited to the others"
+    );
+}

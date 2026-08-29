@@ -824,6 +824,13 @@ impl Screen for PullRequestsScreen {
         }
     }
 
+    fn here(&self, shell: &Shell) -> Option<Jump> {
+        self.selected(shell).map(|row| Jump::PullRequest {
+            repo: row.repo.clone(),
+            id: row.request.id,
+        })
+    }
+
     fn select(&mut self, shell: &mut Shell, jump: &Jump) -> bool {
         let Jump::PullRequest { id, .. } = jump else {
             return false;

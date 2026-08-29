@@ -157,6 +157,13 @@ pub trait Screen {
     /// showing, without the overlay knowing what its columns are.
     fn columns_mut(&mut self) -> &mut dyn ColumnLayout;
 
+    /// Where this screen is standing, as a jump: what `[` comes back to when
+    /// something else is followed from here. `None` for a screen with nothing
+    /// selected, which is not a place to come back to.
+    fn here(&self, _shell: &Shell) -> Option<Jump> {
+        None
+    }
+
     /// Settles on whatever a jump points at, and says whether this screen had
     /// it. A screen that answers `false` is not switched to, and the shell
     /// says the target is not on file.

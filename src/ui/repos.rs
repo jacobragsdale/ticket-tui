@@ -246,12 +246,14 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
             Style::default().fg(theme().muted),
         ));
     }
-    for (label, jump) in &jumps {
+    for (index, (label, jump)) in jumps.iter().enumerate() {
         let what = match jump {
             Jump::PullRequest { .. } => "Pull request",
             _ => "Pipeline",
         };
-        lines.push(Line::from(vec![
+        // The line the pane's cursor is on, which `Enter` follows.
+        let chosen = shell.focus == Focus::Details && index == screen.jump_cursor;
+        let line = Line::from(vec![
             Span::styled(format!("  {what}: "), Style::default().fg(theme().muted)),
             Span::styled(
                 label.clone(),
@@ -259,7 +261,16 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
                     .fg(theme().link)
                     .add_modifier(Modifier::UNDERLINED),
             ),
-        ]));
+        ]);
+        lines.push(if chosen {
+            line.style(
+                Style::default()
+                    .bg(theme().selected_background)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            line
+        });
     }
     lines.push(Line::from(""));
     let controls: Vec<(&str, CommandId)> = if row.local.is_some() {

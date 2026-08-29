@@ -929,6 +929,17 @@ impl Screen for PipelinesScreen {
         }
     }
 
+    /// A run when the tab is showing one, the pipeline itself otherwise.
+    fn here(&self, shell: &Shell) -> Option<Jump> {
+        match self.level {
+            Level::Runs(_) => self.selected_run(shell).map(|row| Jump::Run(row.run.id)),
+            Level::Pipelines => self
+                .visible_pipelines(shell)
+                .get(self.pipeline_cursor.index)
+                .map(|row| Jump::Pipeline(row.pipeline.id)),
+        }
+    }
+
     fn select(&mut self, shell: &mut Shell, jump: &Jump) -> bool {
         match jump {
             Jump::Pipeline(id) => {
