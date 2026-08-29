@@ -45,10 +45,18 @@ struct Cli {
     /// Azure DevOps project; defaults to TICKET_TUI_PROJECT or `az devops configure`
     #[arg(long, value_name = "PROJECT")]
     project: Option<String>,
-    /// Seconds between background pulls from Azure DevOps; 0 turns the timer off
-    #[arg(long, value_name = "SECONDS", default_value_t = 60)]
-    refresh: u64,
+    /// Seconds between background pulls from Azure DevOps, 0 to turn the timer
+    /// off; defaults to TICKET_TUI_REFRESH or 60
+    #[arg(long, value_name = "SECONDS")]
+    refresh: Option<u64>,
+    /// Extra WIQL condition ANDed into every pull, narrowing a large project;
+    /// defaults to TICKET_TUI_QUERY
+    #[arg(long, value_name = "WIQL")]
+    query: Option<String>,
 }
+
+/// How often the background pull runs when nothing says otherwise.
+const DEFAULT_REFRESH_SECONDS: u64 = 60;
 
 /// Everything the event loop needs to keep the database in step with Azure
 /// DevOps: the worker thread, the timer that feeds it, and why there is no
@@ -253,17 +261,23 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let refresh = resolve_refresh(cli.refresh, std::env::var("TICKET_TUI_REFRESH").ok())?;
     let database_path = cli.database.clone().unwrap_or_else(default_database_path);
     let mut repository = SqliteTicketRepository::open(&database_path)?;
     let schema_was_rebuilt = repository.schema_was_rebuilt();
-    let (config, offline_reason) = match AzureConfig::resolve(cli.org.clone(), cli.project.clone())
-    {
-        Ok(config) => (Some(config), None),
-        // `--sync` is an explicit request to reach Azure DevOps, so there an
-        // unresolved organization stays a hard error.
-        Err(error) if cli.sync => return Err(error),
-        Err(error) => (None, Some(format!("{error:#}"))),
-    };
+    // Which project the database already holds, read before this run can write
+    // over it.
+    let stored_project = repository
+        .meta(db::ORGANIZATION_KEY)?
+        .zip(repository.meta(db::PROJECT_KEY)?);
+    let (config, offline_reason) =
+        match AzureConfig::resolve(cli.org.clone(), cli.project.clone(), cli.query.clone()) {
+            Ok(config) => (Some(config), None),
+            // `--sync` is an explicit request to reach Azure DevOps, so there an
+            // unresolved organization stays a hard error.
+            Err(error) if cli.sync => return Err(error),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
 
     // `--sync` still blocks before the TUI opens, but no longer aborts: a
     // failure becomes a notification over whatever the database already holds.
@@ -282,6 +296,19 @@ fn run() -> Result<()> {
     let tickets = repository.load_all()?;
     let graph = repository.load_graph()?;
     let database_is_empty = tickets.is_empty();
+    // A database filled from another project is browsed, never synced into: the
+    // first pull would replace every row in it, and only `--sync` asks for that.
+    let wrong_project = config.as_ref().and_then(|config| {
+        project_mismatch(
+            stored_project
+                .as_ref()
+                .map(|(organization, project)| (organization.as_str(), project.as_str())),
+            config,
+            database_is_empty,
+            cli.sync,
+        )
+    });
+    let offline_reason = wrong_project.clone().or(offline_reason);
     let mut app = App::new(tickets);
     app.set_workspace_graph(graph);
     app.set_state_catalog(repository.load_type_states()?);
@@ -307,7 +334,10 @@ fn run() -> Result<()> {
         Err(error) => app.set_error(format!("Could not load session: {error:#}")),
     }
 
-    let interval = (cli.refresh > 0).then(|| Duration::from_secs(cli.refresh));
+    let interval = (refresh > 0).then(|| Duration::from_secs(refresh));
+    // Where the rows come from, for the database overlay: the project, how
+    // often it is pulled, and whatever narrows it.
+    app.set_sync_source(config.as_ref().map(|config| sync_source(config, refresh)));
     let mut runtime = SyncRuntime {
         worker: None,
         scheduler: SyncScheduler::new(interval),
@@ -315,7 +345,7 @@ fn run() -> Result<()> {
         offline_reason,
         details: DetailsEngine::default(),
     };
-    if let Some(config) = config {
+    if let Some(config) = config.filter(|_| wrong_project.is_none()) {
         runtime.worker = Some(SyncHandle::spawn(
             database_path.clone(),
             Box::new(AzureConnector::new(config)),
@@ -346,6 +376,11 @@ fn run() -> Result<()> {
         }
         None if runtime.worker.is_none() => app.set_status(offline_status(database_is_empty)),
         None => {}
+    }
+    // Said last, because a database held by another project is a more specific
+    // reason to be offline than having no organization at all.
+    if let Some(message) = wrong_project {
+        app.set_error(message);
     }
 
     let mut context_publisher = AgentContextPublisher::new(repository.path());
@@ -386,6 +421,11 @@ fn blocking_sync(repository: &mut SqliteTicketRepository, config: &AzureConfig) 
     if let Some(watermark) = sync::watermark_of(&batch.tickets) {
         repository.set_meta(db::WATERMARK_KEY, &watermark.to_rfc3339())?;
     }
+    // `--sync` is how a database is pointed at another project, so it is also
+    // what re-stamps the one it now holds.
+    repository.set_meta(db::ORGANIZATION_KEY, &config.organization)?;
+    repository.set_meta(db::PROJECT_KEY, &config.project)?;
+    repository.set_meta(db::SYNC_SCOPE_KEY, config.scope.as_deref().unwrap_or(""))?;
     // The state picker reads these from the database, so the pull that fills it
     // fills them too. A type whose states cannot be read is skipped: the picker
     // falls back to the states the rows already carry.
@@ -431,6 +471,63 @@ fn offline_status(database_is_empty: bool) -> &'static str {
     } else {
         "Browsing the database offline; no Azure DevOps organization is configured"
     }
+}
+
+/// Why the resolved project must not sync into this database, if it must not.
+/// A database another project filled would be emptied by the first pull, so a
+/// run that did not ask for that with `--sync` browses it offline instead. A
+/// database with nothing in it, or one from before this was recorded, adopts
+/// whatever the next pull brings.
+fn project_mismatch(
+    stored: Option<(&str, &str)>,
+    config: &AzureConfig,
+    database_is_empty: bool,
+    replacing: bool,
+) -> Option<String> {
+    let (organization, project) = stored?;
+    let matches = organization == config.organization && project == config.project;
+    if matches || database_is_empty || replacing {
+        return None;
+    }
+    Some(format!(
+        "Database holds {organization}/{project}; pass --database for another project or --sync to replace it"
+    ))
+}
+
+/// How often the background pull runs: `--refresh`, then `TICKET_TUI_REFRESH`,
+/// then a minute. A variable that is not a number of seconds is a startup
+/// error rather than a silent fall back to the default, because a typo there
+/// would otherwise change how often the TUI reaches Azure DevOps and say
+/// nothing about it.
+fn resolve_refresh(flag: Option<u64>, env: Option<String>) -> Result<u64> {
+    if let Some(seconds) = flag {
+        return Ok(seconds);
+    }
+    let Some(raw) = env else {
+        return Ok(DEFAULT_REFRESH_SECONDS);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_REFRESH_SECONDS);
+    }
+    trimmed
+        .parse()
+        .with_context(|| format!("TICKET_TUI_REFRESH is not a number of seconds: {trimmed}"))
+}
+
+/// What the database overlay says about where the rows come from: the project,
+/// the timer, and the condition narrowing the project when one is configured.
+fn sync_source(config: &AzureConfig, refresh: u64) -> String {
+    let timer = if refresh > 0 {
+        format!("every {refresh}s")
+    } else {
+        "on request".to_owned()
+    };
+    let mut source = format!("{}/{} {timer}", config.organization, config.project);
+    if let Some(scope) = &config.scope {
+        source.push_str(&format!(" · scope ({scope})"));
+    }
+    source
 }
 
 /// Who "mine" means: the display name the last sync recorded, overridden by
@@ -1208,6 +1305,7 @@ mod tests {
             config: Some(AzureConfig {
                 organization: "example-org".into(),
                 project: "atlas".into(),
+                scope: None,
             }),
             offline_reason: None,
             details: DetailsEngine::default(),
@@ -1389,6 +1487,137 @@ mod tests {
         );
         assert_eq!(resolve_me(None, None), None);
         assert_eq!(resolve_me(Some(String::new()), None), None);
+    }
+
+    #[test]
+    fn the_refresh_interval_comes_from_the_flag_before_the_environment() {
+        assert_eq!(resolve_refresh(None, None).unwrap(), 60);
+        assert_eq!(resolve_refresh(Some(5), None).unwrap(), 5);
+        assert_eq!(
+            resolve_refresh(Some(5), Some("300".into())).unwrap(),
+            5,
+            "the flag wins over TICKET_TUI_REFRESH"
+        );
+        assert_eq!(resolve_refresh(None, Some(" 300 ".into())).unwrap(), 300);
+        assert_eq!(
+            resolve_refresh(None, Some("   ".into())).unwrap(),
+            60,
+            "a blank variable is not a setting"
+        );
+        assert_eq!(
+            resolve_refresh(Some(0), None).unwrap(),
+            0,
+            "the timer can still be turned off"
+        );
+
+        let error = resolve_refresh(None, Some("hourly".into())).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("TICKET_TUI_REFRESH is not a number of seconds"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_database_another_project_filled_is_browsed_rather_than_replaced() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let mut repository = seeded_repository(&path);
+        repository
+            .set_meta(db::ORGANIZATION_KEY, "other-org")
+            .unwrap();
+        repository.set_meta(db::PROJECT_KEY, "borealis").unwrap();
+        let stored = repository
+            .meta(db::ORGANIZATION_KEY)
+            .unwrap()
+            .zip(repository.meta(db::PROJECT_KEY).unwrap())
+            .expect("a pull records the project it ran under");
+        let stored = (stored.0.as_str(), stored.1.as_str());
+        let config = AzureConfig {
+            organization: "example-org".into(),
+            project: "atlas".into(),
+            scope: None,
+        };
+
+        let message = project_mismatch(Some(stored), &config, false, false)
+            .expect("another project's rows are not replaced by accident");
+        assert_eq!(
+            message,
+            "Database holds other-org/borealis; pass --database for another project or --sync to replace it"
+        );
+        assert_eq!(
+            project_mismatch(Some(stored), &config, false, true),
+            None,
+            "--sync is how the replacement is asked for"
+        );
+        assert_eq!(
+            project_mismatch(Some(stored), &config, true, false),
+            None,
+            "a database with nothing in it belongs to nobody"
+        );
+        assert_eq!(
+            project_mismatch(Some(("example-org", "atlas")), &config, false, false),
+            None
+        );
+        assert_eq!(
+            project_mismatch(None, &config, false, false),
+            None,
+            "a database from a build that recorded nothing adopts the project that pulls it"
+        );
+
+        // The run that finds one opens offline: no worker, and the reason both
+        // in the overlay and under the sync key.
+        let mut app = App::new(repository.load_all().unwrap());
+        app.set_offline_reason(Some(message.clone()));
+        app.set_sync_source(Some(sync_source(&config, 60)));
+        let mut runtime = SyncRuntime {
+            worker: None,
+            scheduler: SyncScheduler::new(None),
+            config: Some(config),
+            offline_reason: Some(message.clone()),
+            details: DetailsEngine::default(),
+        };
+
+        handle_action(AppAction::Sync, &mut app, &mut runtime, &FailingOpener);
+
+        assert_eq!(
+            app.notification(),
+            Some((message.as_str(), NotificationLevel::Error))
+        );
+        assert!(!app.sync_pending, "there is no worker to pull with");
+        assert_eq!(
+            app.sync_summary(),
+            format!("example-org/atlas every 60s · offline; {message}"),
+            "the database overlay says where the rows would come from and why they do not"
+        );
+    }
+
+    #[test]
+    fn the_database_overlay_names_the_project_the_timer_and_the_scope() {
+        let mut config = AzureConfig {
+            organization: "example-org".into(),
+            project: "atlas".into(),
+            scope: None,
+        };
+        assert_eq!(sync_source(&config, 60), "example-org/atlas every 60s");
+        assert_eq!(
+            sync_source(&config, 0),
+            "example-org/atlas on request",
+            "--refresh 0 leaves r as the only way to pull"
+        );
+
+        config.scope = Some("[System.ChangedDate] > @today-180".into());
+        assert_eq!(
+            sync_source(&config, 300),
+            "example-org/atlas every 300s · scope ([System.ChangedDate] > @today-180)"
+        );
+
+        let mut app = App::new(vec![ticket(1)]);
+        app.enable_sync();
+        app.set_sync_source(Some(sync_source(&config, 300)));
+        assert_eq!(
+            app.sync_summary(),
+            "example-org/atlas every 300s · scope ([System.ChangedDate] > @today-180) · not yet"
+        );
     }
 
     #[test]
