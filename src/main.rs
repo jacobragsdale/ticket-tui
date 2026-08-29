@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -14,13 +15,15 @@ use crossterm::event::{
     Event, KeyEventKind,
 };
 use crossterm::execute;
+use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use ticket_tui::agent_context::{self, AgentContext};
 use ticket_tui::app::{
     App, AppAction, CopiedContent, DividerOrientation, PointerTarget, PreparedTickets,
 };
 use ticket_tui::azure::{AzureClient, AzureConfig};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
-use ticket_tui::edit::{EditRejection, EditRequest};
+use ticket_tui::edit::{EditRejection, EditRequest, FieldEdit};
+use ticket_tui::markdown;
 use ticket_tui::model::{Ticket, TicketGraph, TicketKey};
 use ticket_tui::session;
 use ticket_tui::sync::{
@@ -552,8 +555,7 @@ fn run_terminal(
     let opener = SystemUrlOpener;
     let mut reloader = ReloadEngine::default();
     let mut mouse_pointer = MousePointerShape::Default;
-    execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)
-        .context("failed to enable terminal input features")?;
+    enable_terminal_input()?;
 
     let mut redraw = true;
     while !app.should_quit {
@@ -613,17 +615,26 @@ fn run_terminal(
         if event_redraw {
             redraw = true;
         }
-        handle_action(action, app, runtime, &opener);
+        if handle_action(action, app, runtime, &opener) {
+            // Something else owned the screen for a while, so nothing ratatui
+            // believes is on it can be trusted, the pointer shape included.
+            terminal.clear()?;
+            mouse_pointer = MousePointerShape::Default;
+            redraw = true;
+        }
     }
     Ok(())
 }
 
+/// Carries out one action, and says whether the screen has to be painted from
+/// scratch afterwards. Only the editor hand-off, which gives the terminal back
+/// for as long as the editor runs, ever asks for that.
 fn handle_action(
     action: AppAction,
     app: &mut App,
     runtime: &mut SyncRuntime,
     opener: &dyn UrlOpener,
-) {
+) -> bool {
     match action {
         AppAction::None => {}
         AppAction::Sync => start_sync(app, runtime),
@@ -631,6 +642,10 @@ fn handle_action(
         AppAction::FetchIdentities => send_identities(runtime),
         AppAction::FetchClassificationNodes => send_classification_nodes(runtime),
         AppAction::Comment { key, text } => start_comment(app, runtime, key, text),
+        AppAction::EditDescription { key, html } => {
+            edit_description(app, runtime, &key, &html);
+            return true;
+        }
         AppAction::OpenUrl(raw_url) => match open_https_url(&raw_url, opener) {
             Ok(()) => app.set_status(format!("Opened {raw_url}")),
             Err(error) => app.set_error(format!("Could not open ticket: {error:#}")),
@@ -644,6 +659,121 @@ fn handle_action(
             Err(error) => app.set_error(format!("Could not export {}: {error:#}", path.display())),
         },
     }
+    false
+}
+
+/// The Edit menu's Description row: the description goes out to the user's
+/// editor as Markdown, and whatever comes back comes back as HTML.
+///
+/// The TUI steps out of the way entirely while the editor runs — the alternate
+/// screen, mouse capture, and bracketed paste all go back the way they were
+/// found — and takes the terminal back afterwards whether the editor saved
+/// something, changed nothing, or never started at all.
+fn edit_description(app: &mut App, runtime: &mut SyncRuntime, key: &TicketKey, html: &str) {
+    let command = editor_command(env::var("VISUAL").ok(), env::var("EDITOR").ok());
+    let outcome = released_terminal(|| {
+        let directory = tempfile::Builder::new()
+            .prefix("ticket-tui-")
+            .tempdir()
+            .context("could not make a directory to edit in")?;
+        run_description_editor(directory.path(), key.id, html, &command)
+    });
+    apply_description_outcome(app, runtime, key, outcome);
+}
+
+/// Files whatever the editor left: a rewritten description goes down the same
+/// path as every other field edit, a file that came back untouched is not a
+/// change at all, and an editor that failed says so and writes nothing.
+fn apply_description_outcome(
+    app: &mut App,
+    runtime: &mut SyncRuntime,
+    key: &TicketKey,
+    outcome: Result<Option<String>>,
+) {
+    match outcome {
+        Ok(Some(html)) => {
+            if let AppAction::Edit(request) = app.edit_ticket(key, FieldEdit::description(&html)) {
+                start_edit(app, runtime, request);
+            }
+        }
+        Ok(None) => app.set_status(format!("#{} description unchanged", key.id)),
+        Err(error) => app.set_error(format!("#{} description not saved: {error:#}", key.id)),
+    }
+}
+
+/// Writes the description out as Markdown, runs the editor on it, and reads
+/// back what was saved.
+///
+/// `Ok(None)` means the file came back as it was written, notice line and all,
+/// so there is nothing to save. Anything else is the HTML the Markdown builds,
+/// which for an emptied file is the empty document that clears the field.
+fn run_description_editor(
+    directory: &Path,
+    id: i64,
+    html: &str,
+    command: &[String],
+) -> Result<Option<String>> {
+    let path = directory.join(format!("ticket-{id}.md"));
+    let document = markdown::description_document(html);
+    fs::write(&path, format!("{document}\n"))
+        .with_context(|| format!("could not write {}", path.display()))?;
+    run_editor(command, &path)?;
+    let edited = fs::read_to_string(&path)
+        .with_context(|| format!("could not read {} back", path.display()))?;
+    let saved = markdown::saved_markdown(&edited);
+    if saved == markdown::saved_markdown(&document) {
+        return Ok(None);
+    }
+    Ok(Some(markdown::markdown_to_html(&saved)))
+}
+
+/// Runs the editor on one file and waits for it. The editor owns the terminal
+/// while it runs, so its own output goes straight to the screen.
+fn run_editor(command: &[String], path: &Path) -> Result<()> {
+    let (program, arguments) = command
+        .split_first()
+        .context("no editor to run; set $EDITOR")?;
+    let status = Command::new(program)
+        .args(arguments)
+        .arg(path)
+        .status()
+        .with_context(|| format!("could not run {program}"))?;
+    if !status.success() {
+        bail!("{program} exited with {status}");
+    }
+    Ok(())
+}
+
+/// The editor to hand a description to: `$VISUAL`, then `$EDITOR`, then `vi`,
+/// which every system has. The variable is split on whitespace so a command
+/// with arguments works — `code --wait` runs `code` with `--wait` and the file
+/// after it — and one that is empty or only whitespace counts as unset.
+fn editor_command(visual: Option<String>, editor: Option<String>) -> Vec<String> {
+    [visual, editor]
+        .into_iter()
+        .flatten()
+        .map(|raw| {
+            raw.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<String>>()
+        })
+        .find(|parts| !parts.is_empty())
+        .unwrap_or_else(|| vec!["vi".to_owned()])
+}
+
+/// Runs `body` with the terminal handed back to the shell, and takes it back
+/// however `body` went. The caller repaints: [`handle_action`] says so on the
+/// way out, because ratatui's idea of what is on screen died with the frame
+/// the editor drew over.
+fn released_terminal<T>(body: impl FnOnce() -> T) -> T {
+    release_terminal();
+    let outcome = body();
+    if let Err(error) = claim_terminal() {
+        // Nothing can be reported through a TUI that is not there, so this
+        // goes where the editor's own output went.
+        eprintln!("ticket-tui could not take the terminal back: {error:#}");
+    }
+    outcome
 }
 
 fn copied_status(content: CopiedContent) -> String {
@@ -1138,10 +1268,33 @@ struct TerminalRestore;
 
 impl Drop for TerminalRestore {
     fn drop(&mut self) {
-        let _ = write_mouse_pointer_shape(&mut io::stdout(), MousePointerShape::Default);
-        let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
-        ratatui::restore();
+        release_terminal();
     }
+}
+
+/// Puts the terminal back the way the TUI found it: the pointer shape, then
+/// the input features, then raw mode and the alternate screen. The end of a
+/// run and the editor hand-off both leave this way, so what the editor gets is
+/// exactly what the shell gets.
+fn release_terminal() {
+    let _ = write_mouse_pointer_shape(&mut io::stdout(), MousePointerShape::Default);
+    let _ = execute!(io::stdout(), DisableBracketedPaste, DisableMouseCapture);
+    ratatui::restore();
+}
+
+/// Takes the terminal back after [`release_terminal`] gave it away, in the
+/// same order `ratatui::init` and the TUI's own startup take it.
+fn claim_terminal() -> Result<()> {
+    enable_raw_mode().context("failed to take raw mode back")?;
+    execute!(io::stdout(), EnterAlternateScreen).context("failed to take the screen back")?;
+    enable_terminal_input()
+}
+
+/// Turns on the input the TUI reads beyond the keyboard. Raw mode and the
+/// alternate screen are already taken by the time this is called.
+fn enable_terminal_input() -> Result<()> {
+    execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste)
+        .context("failed to enable terminal input features")
 }
 
 #[cfg(test)]
@@ -2301,6 +2454,181 @@ mod tests {
                 .unwrap()
                 .len(),
             3
+        );
+    }
+
+    /// A run without a worker: enough for the answers an editor hand-off gives
+    /// before anything is sent anywhere.
+    fn offline_runtime() -> SyncRuntime {
+        SyncRuntime {
+            worker: None,
+            scheduler: SyncScheduler::new(None),
+            config: None,
+            offline_reason: Some("no Azure DevOps organization".into()),
+            details: DetailsEngine::default(),
+        }
+    }
+
+    /// A shell command standing in for an editor, with the file it is told to
+    /// edit as `$0`. Nothing interactive is ever run in a test.
+    fn fake_editor(script: &str) -> Vec<String> {
+        vec!["sh".to_owned(), "-c".to_owned(), script.to_owned()]
+    }
+
+    #[test]
+    fn the_editor_is_visual_then_editor_then_vi_and_keeps_its_arguments() {
+        assert_eq!(
+            editor_command(Some("code --wait".into()), Some("vim".into())),
+            ["code", "--wait"],
+            "$VISUAL wins, and its arguments come with it"
+        );
+        assert_eq!(
+            editor_command(None, Some("  emacs  -nw ".into())),
+            ["emacs", "-nw"]
+        );
+        assert_eq!(editor_command(None, None), ["vi"]);
+        assert_eq!(
+            editor_command(Some("   ".into()), Some(String::new())),
+            ["vi"],
+            "a variable set to nothing is not set"
+        );
+        assert_eq!(
+            editor_command(Some(String::new()), Some("nano".into())),
+            ["nano"],
+            "an empty $VISUAL falls through to $EDITOR"
+        );
+    }
+
+    #[test]
+    fn a_description_saved_in_the_editor_comes_back_as_html() {
+        let directory = tempdir().unwrap();
+        let saved = run_description_editor(
+            directory.path(),
+            613,
+            "<p>Old words.</p>",
+            &fake_editor("printf '# New\\n\\n- one\\n- two\\n' > \"$0\""),
+        )
+        .unwrap();
+
+        assert_eq!(
+            saved.as_deref(),
+            Some("<h1>New</h1><ul><li>one</li><li>two</li></ul>")
+        );
+
+        let named = run_description_editor(
+            directory.path(),
+            613,
+            "<p>Old words.</p>",
+            &fake_editor("basename \"$0\" > \"$0\""),
+        )
+        .unwrap();
+        assert_eq!(
+            named.as_deref(),
+            Some("<p>ticket-613.md</p>"),
+            "the file is named after the work item it holds"
+        );
+
+        let emptied = run_description_editor(
+            directory.path(),
+            613,
+            "<p>Old</p>",
+            &fake_editor(": > \"$0\""),
+        )
+        .unwrap();
+        assert_eq!(
+            emptied.as_deref(),
+            Some(""),
+            "an emptied file clears the description"
+        );
+    }
+
+    #[test]
+    fn an_untouched_file_writes_nothing_and_an_editor_that_fails_says_so() {
+        let directory = tempdir().unwrap();
+        let mut app = App::new(vec![ticket(3)]);
+        app.enable_sync();
+        app.set_table_viewport(3);
+        let key = app.selected_ticket().unwrap().key.clone();
+        let mut runtime = offline_runtime();
+
+        let unchanged = run_description_editor(
+            directory.path(),
+            key.id,
+            "<p>Left <b>alone</b>.</p>",
+            &["true".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(unchanged, None, "a file nobody typed into is not an edit");
+        apply_description_outcome(&mut app, &mut runtime, &key, Ok(unchanged));
+        let (message, level) = app.notification().expect("the run says what it did");
+        assert!(message.contains("description unchanged"), "{message}");
+        assert_eq!(level, NotificationLevel::Info);
+        assert!(!app.edits_pending(), "nothing was sent");
+
+        let failed = run_description_editor(
+            directory.path(),
+            key.id,
+            "<p>Left alone.</p>",
+            &["false".to_owned()],
+        );
+        assert!(
+            failed.is_err(),
+            "an editor that exits non-zero saves nothing"
+        );
+        apply_description_outcome(&mut app, &mut runtime, &key, failed);
+        let (message, level) = app.notification().expect("a failure is reported");
+        assert!(message.contains("description not saved"), "{message}");
+        assert_eq!(level, NotificationLevel::Error);
+        assert!(!app.edits_pending());
+
+        let missing = run_description_editor(
+            directory.path(),
+            key.id,
+            "<p>Left alone.</p>",
+            &["definitely-not-an-editor-xyz".to_owned()],
+        );
+        assert!(
+            missing.is_err(),
+            "an editor that cannot start saves nothing"
+        );
+        apply_description_outcome(&mut app, &mut runtime, &key, missing);
+        assert!(!app.edits_pending());
+        assert_eq!(
+            app.selected_ticket().unwrap().description_html,
+            "",
+            "the row is exactly as it was"
+        );
+    }
+
+    #[test]
+    fn an_edited_description_reaches_azure_devops_and_the_details_pane() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let mut stored = ticket(3);
+        stored.description_html = "<p>Stored copy.</p>".into();
+        stored.description = "Stored copy.".into();
+        stored.revision = 9;
+        let (mut app, mut repository, mut runtime) =
+            synced_app(&path, FakeAzure::storing(stored.clone()));
+        let key = app.selected_ticket().unwrap().key.clone();
+
+        apply_description_outcome(
+            &mut app,
+            &mut runtime,
+            &key,
+            Ok(Some("<p>Rewritten in the editor.</p>".to_owned())),
+        );
+        assert_eq!(
+            app.selected_ticket().unwrap().description,
+            "Rewritten in the editor.",
+            "the details pane reads the new description before the network answers"
+        );
+        await_edit(&mut app, &mut repository, &mut runtime);
+
+        assert_eq!(app.ticket_by_key(&key), Some(&stored));
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Updated #3 · Description → updated")
         );
     }
 }

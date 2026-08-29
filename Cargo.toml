@@ -17,13 +17,13 @@ ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+tempfile = "3.23.0"
 time = { version = "0.3.47", features = ["formatting", "macros", "parsing"] }
 ureq = { version = "3", features = ["json"] }
 url = "2.5.7"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
-tempfile = "3.23.0"
 
 [profile.release]
 lto = "thin"
