@@ -27,7 +27,7 @@ DevOps project.
 2. Point ticket-tui at an organization and project, then pull the work items:
 
    ```console
-   cargo run --release -- --sync --org my-org --project my-project
+   cargo run --release -- sync --org my-org --project my-project
    ```
 
 3. Later runs open the database immediately and pull in the background:
@@ -59,8 +59,8 @@ asks Azure DevOps for; both are under
 
 Without a configured organization the TUI runs offline: it browses the database,
 never contacts the network, and `r` reports the missing organization. An empty
-database then opens to the status line `Database is empty and offline; run with
---sync --org ORG --project PROJECT to pull work items`.
+database then opens to the status line ``Database is empty and offline; run
+`ticket-tui sync --org ORG --project PROJECT` to pull work items``.
 
 To use another database file:
 
@@ -162,10 +162,11 @@ configured, and how the last pull went.
 A sync worker pulls in the background on a timer, every 60 seconds by default,
 and whenever `r` asks it to. The TUI opens from the database straight away and
 the first pull runs behind it, so a state flipped in Azure DevOps appears within
-one interval without a keypress. `--sync` instead runs one pull before the TUI
-opens and blocks until it finishes; that pull failing is a notification over the
-existing database rather than a reason to refuse to start. Only one pull runs at
-a time: `r` during one reports `Sync already in progress`.
+one interval without a keypress. `ticket-tui sync` runs one pull and exits,
+without opening the TUI at all; the deprecated `--sync` flag runs one before the
+TUI opens and blocks until it finishes, and that pull failing is a notification
+over the existing database rather than a reason to refuse to start. Only one
+pull runs at a time: `r` during one reports `Sync already in progress`.
 
 The table title carries the sync state — `Syncing…`, `Synced just now`,
 `Synced 2m ago`, or `Sync failed` until the next success — and `i` shows the
@@ -815,12 +816,76 @@ iteration, and tags; it intentionally excludes descriptions. Structured
 The application uses WAL mode and a busy timeout so external SQLite readers can
 query the cache while the TUI is running.
 
+## Subcommands
+
+A bare `ticket-tui` opens the TUI. Every subcommand does one thing and exits,
+which is what lets an agent — or a script — read and change work items without
+a terminal to drive. `--database`, `--org`, and `--project` apply to all of
+them and may be written either side of the subcommand.
+
+```console
+ticket-tui sync [--full]
+ticket-tui show <id> [--json]
+ticket-tui list [--query '<filter>'] [--json]
+ticket-tui edit <id> [--state S] [--assignee A] [--priority N] [--iteration I] [--area A] [--title T] [--tags a,b] [--description-file F]
+ticket-tui comment <id> "text"
+ticket-tui create --type Issue --title T [--parent ID] [--iteration I] [--assignee A] [--priority N] [--tags a,b]
+```
+
+`sync` pulls and exits, printing what moved — `Synced 3 changes from
+my-org/my-project`. It is incremental by default, starting from the watermark
+the last pull left behind; `--full` replaces every stored work item, which is
+also how a database is pointed at another project. A running TUI notices the
+new rows through the same file watcher it uses for any other writer, within a
+second. Anything that stopped the pull is an error and exits non-zero.
+
+`show` and `list` read the database and never touch the network, so they work
+without an Azure DevOps organization configured at all. `--query` takes the
+TUI's own [filter grammar](#controls): `field:value` pairs narrow,
+`assignee:@me` means whoever the last sync signed in as, and whatever is left
+over is matched fuzzily and orders the rows. Without a fuzzy term the
+rows come back newest change first. `is:bookmarked` matches nothing out here:
+bookmarks live in the TUI's session file, which a one-shot read does not open.
+
+```console
+ticket-tui list --query 'state:doing assignee:@me' --json
+```
+
+`--json` prints one object per work item, with the fields under the names the
+filter grammar uses — `id`, `organization`, `project`, `rev`, `type`, `title`,
+`state`, `assignee`, `priority`, `area`, `iteration`, `tags`, `created`,
+`changed`, `url` — and `show --json` adds `description`. An unset field is
+`null`.
+
+`edit`, `comment`, and `create` write over the same REST API the TUI writes
+over, and store the copy Azure DevOps answers with straight into the database,
+so a running TUI shows the change without a pull. They print the work item and
+its new revision:
+
+```console
+$ ticket-tui edit 613 --state Doing --tags cli,agents
+#613 rev 5: State → Doing, Tags → cli; agents
+```
+
+Every field named in one `edit` travels in one document, led by the revision the
+database holds for that work item, so a work item somebody else moved on is
+refused rather than overwritten — run `ticket-tui sync` and try again.
+`--assignee` takes a display name, a sign-in address, or `@me`, and an empty
+value takes the work item off whoever holds it; `--tags` replaces the tag list;
+`--description-file` reads Markdown and writes the HTML Azure DevOps stores,
+the same conversion the Edit menu's description editor makes.
+
+`create` adds a work item of any type the process template offers, and
+`--parent` links it under an existing one. A refusal prints what Azure DevOps
+said and exits 1.
+
 ## Live agent context
 
 While ticket-tui is running, it atomically publishes a compact JSON snapshot
 beside the cache. For `tickets.sqlite3`, the file is `tickets.context.json`.
 This is the supported interface for an LLM agent to understand the current view
-without scraping terminal cells or causing SQLite reloads.
+without scraping terminal cells or causing SQLite reloads; the
+[subcommands](#subcommands) above are how one acts on what it reads.
 
 The versioned snapshot includes:
 
