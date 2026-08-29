@@ -1756,6 +1756,30 @@ fn family_connector(prefix: &str) -> String {
     }
 }
 
+/// A one-character state marker for the family tree, where there is no room to
+/// spell the state out.
+const fn state_glyph(category: StateCategory) -> &'static str {
+    match category {
+        StateCategory::Proposed => "\u{25cb}",
+        StateCategory::InProgress => "\u{25d0}",
+        StateCategory::Resolved => "\u{25cf}",
+        StateCategory::Completed => "\u{2713}",
+        StateCategory::Removed => "\u{2717}",
+        StateCategory::Unknown => "",
+    }
+}
+
+/// Colour the glyph like the table's State cell; monochrome leans on weight.
+fn state_glyph_style(base: Style, category: StateCategory) -> Style {
+    let color = state_color(category);
+    let style = base.fg(color).remove_modifier(Modifier::UNDERLINED);
+    if color == Color::Reset {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
 fn family_tree_line(
     entry: &FamilyTreeEntry,
     ticket: Option<&Ticket>,
@@ -1766,11 +1790,13 @@ fn family_tree_line(
     let id = entry.key.id.to_string();
     let type_label = ticket.map_or("?", |ticket| ticket.work_item_type.as_str());
     let title = ticket.map_or("missing ticket", |ticket| ticket.title.as_str());
+    let category = ticket.map(|ticket| StateCategory::of(&ticket.state));
     let current_label = if entry.is_current { " current" } else { "" };
     let packed = pack_family_row(
         usize::from(width),
         &format!("{connector}{id}"),
         type_label,
+        category.map_or("", state_glyph),
         title,
         current_label,
     );
@@ -1780,86 +1806,126 @@ fn family_tree_line(
     } else {
         base.fg(theme().link).add_modifier(Modifier::UNDERLINED)
     };
-    let rest_style = if entry.is_current {
-        base
+    // The row you are reading keeps its weight; finished relatives fade.
+    let tone = if entry.is_current {
+        RowTone::Normal
     } else {
-        base.fg(theme().body)
+        ticket.map_or(RowTone::Normal, |ticket| RowTone::of(&ticket.state))
     };
+    let rest_style = tone
+        .apply(if entry.is_current {
+            base
+        } else {
+            base.fg(theme().body)
+        })
+        .remove_modifier(Modifier::UNDERLINED);
     let head_len = connector.chars().count() + id.chars().count();
-    let rest: String = packed.chars().skip(head_len).collect();
-    Line::from(vec![
-        Span::styled(connector, base),
-        Span::styled(id, id_style),
-        Span::styled(rest, rest_style.remove_modifier(Modifier::UNDERLINED)),
-    ])
+    let mut spans = vec![Span::styled(connector, base), Span::styled(id, id_style)];
+    if let Some(at) = packed.glyph_at {
+        let lead: String = packed
+            .text
+            .chars()
+            .skip(head_len)
+            .take(at.saturating_sub(head_len))
+            .collect();
+        let glyph: String = packed.text.chars().skip(at).take(1).collect();
+        let tail: String = packed.text.chars().skip(at + 1).collect();
+        spans.push(Span::styled(lead, rest_style));
+        spans.push(Span::styled(
+            glyph,
+            state_glyph_style(base, category.unwrap_or(StateCategory::Unknown)),
+        ));
+        spans.push(Span::styled(tail, rest_style));
+    } else {
+        let rest: String = packed.text.chars().skip(head_len).collect();
+        spans.push(Span::styled(rest, rest_style));
+    }
+    Line::from(spans)
+}
+
+/// A family row packed to its width, with the char offset of the state glyph
+/// when one survived the fit.
+struct PackedFamilyRow {
+    text: String,
+    glyph_at: Option<usize>,
+}
+
+impl PackedFamilyRow {
+    fn plain(text: String) -> Self {
+        Self {
+            text,
+            glyph_at: None,
+        }
+    }
 }
 
 fn pack_family_row(
     width: usize,
     head: &str,
     type_label: &str,
+    glyph: &str,
     title: &str,
     current_label: &str,
-) -> String {
-    let assemble = |include_type: bool, include_current: bool, title: &str| {
+) -> PackedFamilyRow {
+    let assemble = |include_type: bool, include_glyph: bool, include_current: bool, title: &str| {
         let mut text = head.to_owned();
         if include_type {
             text.push_str("  ");
             text.push_str(type_label);
         }
-        if !title.is_empty() {
+        let mut glyph_at = None;
+        if include_glyph && !glyph.is_empty() {
             text.push_str("  ");
+            glyph_at = Some(text.chars().count());
+            text.push_str(glyph);
+        }
+        if !title.is_empty() {
+            text.push_str(if glyph_at.is_some() { " " } else { "  " });
             text.push_str(title);
         }
         if include_current {
             text.push_str(current_label);
         }
-        text
+        PackedFamilyRow { text, glyph_at }
     };
     let include_current = !current_label.is_empty();
-    let fit = |text: String| (text.chars().count() <= width).then_some(text);
-    if let Some(text) = fit(assemble(true, include_current, title)) {
-        return text;
-    }
-    let truncated = take_chars(
-        title,
+    let fit = |row: PackedFamilyRow| (row.text.chars().count() <= width).then_some(row);
+    let budget = |include_type: bool, include_current: bool| {
         width.saturating_sub(
-            assemble(true, include_current, "")
+            assemble(include_type, false, include_current, "")
+                .text
                 .chars()
                 .count()
                 .saturating_add(2),
-        ),
-    );
-    if let Some(text) = fit(assemble(true, include_current, &truncated)) {
-        return text;
+        )
+    };
+    if let Some(row) = fit(assemble(true, true, include_current, title)) {
+        return row;
     }
-    let truncated = take_chars(
-        title,
-        width.saturating_sub(
-            assemble(false, include_current, "")
-                .chars()
-                .count()
-                .saturating_add(2),
-        ),
-    );
-    if let Some(text) = fit(assemble(false, include_current, &truncated)) {
-        return text;
+    // Shed one thing at a time so the connector and id always survive: the
+    // glyph goes before the title is truncated, then the type, then the
+    // current marker.
+    if let Some(row) = fit(assemble(true, false, include_current, title)) {
+        return row;
     }
-    let truncated = take_chars(
-        title,
-        width.saturating_sub(assemble(false, false, "").chars().count().saturating_add(2)),
-    );
-    if let Some(text) = fit(assemble(false, false, &truncated)) {
-        return text;
+    for (with_type, with_current) in [
+        (true, include_current),
+        (false, include_current),
+        (false, false),
+    ] {
+        let truncated = take_chars(title, budget(with_type, with_current));
+        if let Some(row) = fit(assemble(with_type, false, with_current, &truncated)) {
+            return row;
+        }
     }
-    let without_title = assemble(false, false, "");
-    if without_title.chars().count() <= width {
+    let without_title = assemble(false, false, false, "");
+    if without_title.text.chars().count() <= width {
         return without_title;
     }
     if head.chars().count() <= width {
-        return head.to_owned();
+        return PackedFamilyRow::plain(head.to_owned());
     }
-    take_chars(head, width)
+    PackedFamilyRow::plain(take_chars(head, width))
 }
 
 fn family_breadcrumb_line(app: &App, family: &FamilySnapshot) -> Line<'static> {
@@ -3566,6 +3632,91 @@ mod tests {
                 .modifier
                 .contains(Modifier::REVERSED)
         }));
+    }
+
+    #[test]
+    fn family_rows_show_a_state_glyph_and_fade_finished_work() {
+        let org = |id| TicketKey {
+            organization: "demo".into(),
+            id,
+        };
+        let mut app = App::new(vec![
+            ticket_at(
+                10_001,
+                "Auth epic",
+                "Epic",
+                "Active",
+                "2026-03-03T00:00:00Z",
+            ),
+            ticket_at(
+                10_002,
+                "Login form",
+                "User Story",
+                "Done",
+                "2026-02-01T00:00:00Z",
+            ),
+            ticket_at(
+                10_003,
+                "Logout",
+                "User Story",
+                "To Do",
+                "2026-01-15T00:00:00Z",
+            ),
+        ]);
+        app.set_workspace_graph(TicketGraph {
+            relations: vec![
+                RelationRecord {
+                    from: org(10_002),
+                    to: org(10_001),
+                    kind: RelationKind::Parent,
+                },
+                RelationRecord {
+                    from: org(10_003),
+                    to: org(10_001),
+                    kind: RelationKind::Parent,
+                },
+            ],
+            ..TicketGraph::default()
+        });
+        app.narrow_details = true;
+        assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_of = |needle: &str| {
+            find_buffer_text(buffer, 60, 30, needle)
+                .unwrap_or_else(|| panic!("{needle} should be on screen"))
+        };
+        let done_row = row_of("10002").1;
+        let open_row = row_of("10003").1;
+        let (check_x, check_row) = row_of("\u{2713}");
+        let (_, circle_row) = row_of("\u{25cb}");
+
+        assert_eq!(check_row, done_row, "the done child should show a check");
+        assert_eq!(circle_row, open_row, "the to-do child should show a circle");
+
+        let (glyph_fg, _, glyph_modifier) = painted_cell(&terminal, check_x, check_row);
+        let (title_fg, _, title_modifier) = {
+            let (x, y) = row_of("Login form");
+            painted_cell(&terminal, x, y)
+        };
+        let (open_title_fg, _, open_title_modifier) = {
+            let (x, y) = row_of("Logout");
+            painted_cell(&terminal, x, y)
+        };
+        if theme().muted == Color::Reset {
+            assert!(
+                glyph_modifier.contains(Modifier::BOLD),
+                "the glyph carries weight without colour"
+            );
+            assert!(title_modifier.contains(Modifier::DIM));
+            assert!(!open_title_modifier.contains(Modifier::DIM));
+        } else {
+            assert_eq!(glyph_fg, state_color(StateCategory::Completed));
+            assert_eq!(title_fg, theme().muted, "the done child should fade");
+            assert_ne!(open_title_fg, theme().muted);
+        }
     }
 
     fn auth_family_app_with_long_details() -> App {
