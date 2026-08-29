@@ -222,6 +222,25 @@ schema this build rebuilt, or `ticket-tui --sync`, which is the way to rebuild
 one deliberately. A full pull leaves a watermark behind, so the pulls that
 follow it are incremental again.
 
+Azure DevOps throttles a client that asks too often, and a poller that ignores
+it only makes the throttling worse. A pull refused with `429` or `503` is not a
+failed sync: the wait its `Retry-After` header names — thirty seconds when it
+names none — pushes the next pull out that far, the table title reads
+`Sync paused 2m` instead of `Sync failed`, and nothing is announced. Every
+throttle in a row after the first doubles the refresh interval as well, up to
+ten minutes, and the first pull that gets through puts it back to the configured
+one. `--refresh 0` stays off throughout: a throttle is a reason to pull later,
+never a reason to start pulling. Successful responses are read the same way —
+`X-RateLimit-Remaining` at zero holds the next pull until the
+`X-RateLimit-Reset` the response names, while the work items it carried are
+stored as usual.
+
+Edits, comments, and details fetches are somebody waiting at the keyboard, so
+they are not simply postponed: a throttled one waits out the delay on the sync
+thread, capped at a minute, and goes out once more. A second refusal is reported
+as the rejection it is — `Azure DevOps is throttling requests; try again in 45s`
+— and the row it belongs to is put back.
+
 A pull that `r` asked for reports itself in the status line:
 `Synced 3 changes from <org>/<project>`, `Synced 52 work items from
 <org>/<project>` after a full pull, or `Nothing changed`. A timer pull only

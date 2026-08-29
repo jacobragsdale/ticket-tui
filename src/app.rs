@@ -650,6 +650,10 @@ pub struct App {
     synced_at: Option<Instant>,
     /// The last pull's error, kept so the same timer failure is reported once.
     sync_error: Option<String>,
+    /// When the next pull may go out, for a timer Azure DevOps asked to hold
+    /// off. Not a failure: the title counts it down instead of saying the sync
+    /// broke, and nothing is announced.
+    sync_paused_until: Option<Instant>,
     /// Display name of the signed-in Azure DevOps user, so their own work
     /// items can stand out. `None` until a sync records one.
     me: Option<String>,
@@ -684,6 +688,20 @@ const fn command_for_field(field: EditableField) -> CommandId {
         EditableField::Tags => CommandId::EditTags,
         EditableField::Iteration => CommandId::EditIteration,
         EditableField::Area => CommandId::EditArea,
+    }
+}
+
+/// Compact wording for a wait still to come, coarse on purpose: the exact
+/// second the timer comes back is nobody's business, and a title that ticks
+/// every second is a title that has to be redrawn every second.
+fn remaining_wait(left: Duration) -> String {
+    // Rounded up, so a two minute pause read a millisecond after it started
+    // still says two minutes rather than counting down from one.
+    let seconds = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m", seconds.div_ceil(60))
     }
 }
 
@@ -778,6 +796,7 @@ impl App {
             sync_source: None,
             synced_at: None,
             sync_error: None,
+            sync_paused_until: None,
             me: None,
             identities: Vec::new(),
             identities_requested: false,
@@ -1131,7 +1150,19 @@ impl App {
     pub fn finish_sync(&mut self) {
         self.sync_pending = false;
         self.sync_error = None;
+        self.sync_paused_until = None;
         self.synced_at = Some(Instant::now());
+    }
+
+    /// Azure DevOps asked to be left alone until `until`, and the timer agreed.
+    /// Nothing is wrong and nothing is announced: this is the pause the title
+    /// counts down, and the next success clears it. Deliberately not
+    /// [`Self::fail_sync`] — a throttled pull is the service working as
+    /// designed, and an error toast a minute would only be noise.
+    pub fn pause_sync(&mut self, until: Instant) {
+        self.sync_pending = false;
+        self.sync_error = None;
+        self.sync_paused_until = Some(until);
     }
 
     /// A pull failed. Reports whether the failure is worth a notification: the
@@ -1140,6 +1171,7 @@ impl App {
     /// pull the user asked for.
     pub fn fail_sync(&mut self, error: &str, announce: bool) -> bool {
         self.sync_pending = false;
+        self.sync_paused_until = None;
         let repeated = self.sync_error.as_deref() == Some(error);
         self.sync_error = Some(error.to_owned());
         announce || !repeated
@@ -1153,6 +1185,11 @@ impl App {
         }
         if self.reload_pending {
             return Some("Reloading…".into());
+        }
+        if self.sync_enabled
+            && let Some(left) = self.sync_pause_left()
+        {
+            return Some(format!("Sync paused {}", remaining_wait(left)));
         }
         if self.sync_enabled && self.sync_error.is_some() {
             return Some("Sync failed".into());
@@ -1197,11 +1234,25 @@ impl App {
             .map_or_else(|| "not yet".to_owned(), |at| relative_age(at.elapsed()));
         if self.sync_pending {
             format!("in progress, last {last}")
+        } else if let Some(left) = self.sync_pause_left() {
+            format!(
+                "paused for throttling, next in {}, last {last}",
+                remaining_wait(left)
+            )
         } else if let Some(error) = &self.sync_error {
             format!("failed, last {last}: {error}")
         } else {
             last
         }
+    }
+
+    /// How long the throttling pause still has to run, or `None` once it is
+    /// over and the timer is free again.
+    fn sync_pause_left(&self) -> Option<Duration> {
+        let left = self
+            .sync_paused_until?
+            .saturating_duration_since(Instant::now());
+        (!left.is_zero()).then_some(left)
     }
 
     #[must_use]

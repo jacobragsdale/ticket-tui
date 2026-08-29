@@ -24,6 +24,25 @@ use crate::model::{
 };
 use crate::timestamp::Timestamp;
 
+/// How long the worker will wait out a throttled request the user is waiting
+/// on before trying it again. A longer wait than this is not worth freezing the
+/// queue for: the request is refused, and says when to try again.
+const MAX_THROTTLE_WAIT: Duration = Duration::from_secs(60);
+
+/// How far consecutive throttles may push the timer out. Ten minutes is long
+/// enough to be out of a throttling window and short enough that a project that
+/// came back is picked up while somebody is still looking at it.
+const MAX_BACKOFF: Duration = Duration::from_secs(600);
+
+/// What a request refused twice for throttling says. It names the wait rather
+/// than the status code, because waiting is the only thing to do about it.
+fn throttled_message(delay: Duration) -> String {
+    format!(
+        "Azure DevOps is throttling requests; try again in {}s",
+        delay.as_secs()
+    )
+}
+
 /// What asked for a pull. A timer pull is silent unless it fails; a keypress
 /// reports itself either way.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,6 +83,11 @@ pub enum SyncEvent {
     Finished {
         origin: PullOrigin,
         outcome: SyncOutcome,
+        /// How long Azure DevOps asked to be left alone before the next pull,
+        /// for a pull that still landed its data: the rate-limit budget ran out
+        /// on the way through, or a request inside the pull was turned away
+        /// while the pull as a whole went on. `None` when nothing throttled.
+        pause: Option<Duration>,
     },
     /// One edit landed, or was refused and changes nothing.
     Edited(Box<Result<EditApplied, EditRejection>>),
@@ -131,6 +155,12 @@ pub enum SyncOutcome {
     /// reloaded. The pull still happened, so the last-synced time moves.
     Unchanged,
     Failed(String),
+    /// Azure DevOps turned the pull away to shed load, naming how long to leave
+    /// it. Nothing was written and nothing is wrong: the timer holds off and the
+    /// title says so, rather than an error toast arriving every minute.
+    Throttled {
+        retry_after: Duration,
+    },
 }
 
 /// The greatest `System.ChangedDate` in a batch, which is where the next
@@ -185,6 +215,13 @@ pub trait WorkItemSource {
     fn post_comment(&self, _id: i64, _html: &str) -> Result<CommentRecord> {
         Err(anyhow!("comments are not supported by this source"))
     }
+    /// How long the responses read since this was last asked want to be left
+    /// alone, from the rate-limit budget they reported. Reading it clears it. A
+    /// source that reports no budget — every fake, and every response with room
+    /// to spare — answers with nothing and is asked again at the usual time.
+    fn throttled_for(&self) -> Option<Duration> {
+        None
+    }
 }
 
 impl WorkItemSource for AzureClient {
@@ -226,6 +263,10 @@ impl WorkItemSource for AzureClient {
 
     fn post_comment(&self, id: i64, html: &str) -> Result<CommentRecord> {
         AzureClient::post_comment(self, id, html)
+    }
+
+    fn throttled_for(&self) -> Option<Duration> {
+        AzureClient::throttled_for(self)
     }
 }
 
@@ -344,13 +385,20 @@ fn work(
         repository: None,
         typed_states: HashSet::new(),
         typed_states_seeded: false,
+        throttled: None,
     };
     while let Ok(request) = requests.recv() {
         let event = match request {
-            SyncRequest::Pull(origin) => SyncEvent::Finished {
-                origin,
-                outcome: worker.pull(events),
-            },
+            SyncRequest::Pull(origin) => {
+                let outcome = worker.pull(events);
+                SyncEvent::Finished {
+                    origin,
+                    outcome,
+                    // Read after the pull: a pull that still landed its data is
+                    // exactly the one whose successor has to be pushed out.
+                    pause: worker.throttle_pause(),
+                }
+            }
             SyncRequest::Edit(request) => {
                 SyncEvent::Edited(Box::new(worker.edit(&request, events)))
             }
@@ -382,14 +430,71 @@ struct Worker {
     /// Whether the types the database already knows about have been folded into
     /// `typed_states`, which happens on the first pull of the run.
     typed_states_seeded: bool,
+    /// The longest wait a request the current pull gave up on quietly asked
+    /// for. Taken with the pull's outcome, so a pull that landed anyway still
+    /// tells the timer to hold off.
+    throttled: Option<Duration>,
 }
 
 impl Worker {
+    /// A timer pull turned away for throttling is not retried here: the main
+    /// thread owns the clock, and sleeping on this thread would only hold every
+    /// edit typed in the meantime behind a pull nobody asked for.
     fn pull(&mut self, events: &Sender<SyncEvent>) -> SyncOutcome {
         match self.try_pull(events) {
             Ok(outcome) => outcome,
-            Err(error) => SyncOutcome::Failed(format!("{error:#}")),
+            Err(error) => azure::throttle_delay(&error).map_or_else(
+                || SyncOutcome::Failed(format!("{error:#}")),
+                |retry_after| SyncOutcome::Throttled { retry_after },
+            ),
         }
+    }
+
+    /// How long this pull wants the next one held off: the budget the source's
+    /// responses reported, and any request the pull passed over because it was
+    /// throttled. The longer of the two wins, and reading it clears both.
+    fn throttle_pause(&mut self) -> Option<Duration> {
+        let noted = self.throttled.take();
+        let reported = self
+            .source
+            .as_deref()
+            .and_then(WorkItemSource::throttled_for);
+        match (noted, reported) {
+            (Some(noted), Some(reported)) => Some(noted.max(reported)),
+            (noted, reported) => noted.or(reported),
+        }
+    }
+
+    /// Notes a request this pull gave up on quietly when what stopped it was
+    /// throttling, and says so. The pull still lands; the wait rides out with
+    /// it, so the timer holds off rather than asking for the same refusal a
+    /// minute later.
+    fn note_throttle(&mut self, error: &anyhow::Error) -> bool {
+        let Some(delay) = azure::throttle_delay(error) else {
+            return false;
+        };
+        self.throttled = Some(self.throttled.map_or(delay, |held| held.max(delay)));
+        true
+    }
+
+    /// Runs one request the user is waiting on, waiting out a single throttle.
+    /// Azure DevOps turning an edit away is nothing the person who pressed the
+    /// key can act on, so the worker sleeps out the wait it asked for — capped,
+    /// because nothing else is written while it waits — and tries once more. A
+    /// second refusal is reported as the rejection it is, in words that say
+    /// when to try again rather than quoting a status code.
+    fn awaiting_throttle<T>(&mut self, attempt: impl Fn(&mut Self) -> Result<T>) -> Result<T> {
+        let error = match attempt(self) {
+            Ok(value) => return Ok(value),
+            Err(error) => error,
+        };
+        let Some(delay) = azure::throttle_delay(&error) else {
+            return Err(error);
+        };
+        thread::sleep(delay.min(MAX_THROTTLE_WAIT));
+        attempt(self).map_err(|error| {
+            azure::throttle_delay(&error).map_or(error, |delay| anyhow!(throttled_message(delay)))
+        })
     }
 
     /// Writes one field back to Azure DevOps. A refusal is reported as itself
@@ -400,7 +505,7 @@ impl Worker {
         request: &EditRequest,
         events: &Sender<SyncEvent>,
     ) -> Result<EditApplied, EditRejection> {
-        self.try_edit(request, events)
+        self.awaiting_throttle(|worker| worker.try_edit(request, events))
             .map_err(|error| EditRejection {
                 key: request.key.clone(),
                 label: request.edit.label().to_owned(),
@@ -413,7 +518,7 @@ impl Worker {
     /// against the revision the database currently holds for it. A failure
     /// names the work item rather than the whole sync: nothing else is wrong.
     fn details(&mut self, key: TicketKey, events: &Sender<SyncEvent>) -> DetailsOutcome {
-        match self.try_details(&key, events) {
+        match self.awaiting_throttle(|worker| worker.try_details(&key, events)) {
             Ok(update) => DetailsOutcome::Fetched(update),
             Err(error) => DetailsOutcome::Failed {
                 key,
@@ -455,8 +560,14 @@ impl Worker {
     ) -> Result<Vec<DetailsUpdate>> {
         let mut updates = Vec::with_capacity(tickets.len());
         for ticket in tickets {
-            let Ok(details) = self.source(events)?.fetch_details(ticket.key.id) else {
-                continue;
+            let fetched = self.source(events)?.fetch_details(ticket.key.id);
+            let details = match fetched {
+                Ok(details) => details,
+                // Throttling is about the next request as much as this one, so
+                // the rest of the batch is left for a later pull rather than
+                // worked through collecting refusals.
+                Err(error) if self.note_throttle(&error) => break,
+                Err(_) => continue,
             };
             updates.push(DetailsUpdate {
                 key: ticket.key.clone(),
@@ -512,7 +623,7 @@ impl Worker {
         text: &str,
         events: &Sender<SyncEvent>,
     ) -> Result<CommentRecord, CommentRejection> {
-        self.try_comment(&key, text, events)
+        self.awaiting_throttle(|worker| worker.try_comment(&key, text, events))
             .map_err(|error| CommentRejection {
                 key,
                 message: format!("{error:#}"),
@@ -746,8 +857,11 @@ impl Worker {
     /// states already in the database, and the next pull asks again.
     fn cache_type_states(&mut self, types: &[String], events: &Sender<SyncEvent>) -> Result<()> {
         for work_item_type in types {
-            let Ok(states) = self.source(events)?.work_item_type_states(work_item_type) else {
-                continue;
+            let fetched = self.source(events)?.work_item_type_states(work_item_type);
+            let states = match fetched {
+                Ok(states) => states,
+                Err(error) if self.note_throttle(&error) => break,
+                Err(_) => continue,
             };
             if states.is_empty() {
                 continue;
@@ -795,6 +909,10 @@ pub struct SyncScheduler {
     interval: Option<Duration>,
     next_due: Option<Instant>,
     in_flight: bool,
+    /// How many pulls in a row Azure DevOps has turned away. Every one past the
+    /// first doubles the configured interval, so a project that is throttling
+    /// is asked less and less often until one pull gets through.
+    throttles: u32,
 }
 
 impl SyncScheduler {
@@ -805,6 +923,7 @@ impl SyncScheduler {
             interval,
             next_due: None,
             in_flight: false,
+            throttles: 0,
         }
     }
 
@@ -847,10 +966,42 @@ impl SyncScheduler {
         true
     }
 
-    /// Marks the pull in flight as finished and books the next timer pull.
+    /// Marks the pull in flight as finished and books the next timer pull. Any
+    /// backoff consecutive throttles built up is dropped here: only throttles
+    /// in a row are worth pushing the timer out for.
     pub fn finish(&mut self, now: Instant) {
         self.in_flight = false;
+        self.throttles = 0;
         self.schedule_next(now);
+    }
+
+    /// Azure DevOps asked to be left alone for `retry_after`. The next pull goes
+    /// no earlier than that, and no earlier than the doubled interval a run of
+    /// throttles has reached; answers with when the next attempt is due, which
+    /// is what the title counts down even when the timer is off entirely.
+    pub fn pause(&mut self, now: Instant, retry_after: Duration) -> Instant {
+        self.in_flight = false;
+        self.throttles = self.throttles.saturating_add(1);
+        let delay = retry_after.max(self.backoff());
+        let until = now.checked_add(delay).unwrap_or(now);
+        // `--refresh 0` stays off: a throttle is a reason to pull later, never
+        // a reason to start pulling at all.
+        self.next_due = self.interval.and(Some(until));
+        until
+    }
+
+    /// The floor a run of throttles puts under the next pull. The first one
+    /// honours the wait Azure DevOps named and nothing more; each one after it
+    /// doubles the configured interval, up to [`MAX_BACKOFF`].
+    fn backoff(&self) -> Duration {
+        let Some(interval) = self.interval.filter(|_| self.throttles > 1) else {
+            return Duration::ZERO;
+        };
+        // Shifting is capped well before it could overflow; the cap below is
+        // what actually decides the answer.
+        interval
+            .saturating_mul(1 << (self.throttles - 1).min(16))
+            .min(MAX_BACKOFF)
     }
 
     /// Gives up on the timer entirely, for when the worker is gone.
@@ -858,6 +1009,7 @@ impl SyncScheduler {
         self.interval = None;
         self.next_due = None;
         self.in_flight = false;
+        self.throttles = 0;
     }
 
     /// How long the event loop may sleep before the next pull is due.
@@ -873,7 +1025,7 @@ impl SyncScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::azure::RequestRejected;
+    use crate::azure::{RequestRejected, Throttled};
     use crate::classification::NodeKind;
     use crate::edit::FieldEdit;
     use crate::model::{
@@ -943,8 +1095,15 @@ mod tests {
         asked_types: Arc<Mutex<Vec<String>>>,
         /// The comments and history each work item answers with.
         details: Arc<Mutex<HashMap<i64, WorkItemDetails>>>,
-        /// Every work item whose details were read, in order.
+        /// Every work item whose details were asked for, in order, throttled
+        /// refusals included.
         detailed: Arc<Mutex<Vec<i64>>>,
+        /// The waits this source turns work item reads and writes away with,
+        /// in order. An empty list answers everything it is asked.
+        throttles: Arc<Mutex<Vec<Duration>>>,
+        /// The same, for the comments and history endpoints, so a test can
+        /// throttle what a pull reads on the side without throttling the pull.
+        detail_throttles: Arc<Mutex<Vec<Duration>>>,
         /// The project's team members, or `None` for a source that cannot list
         /// them, which is what the trait's default leaves behind.
         team_members: Option<Vec<Identity>>,
@@ -983,6 +1142,18 @@ mod tests {
                 refusal: Some((status, message.to_owned())),
                 ..Self::with(vec![Ok(SyncBatch::default())])
             }
+        }
+
+        /// Turns the next requests away for throttling, naming one wait each.
+        fn throttling(self, waits: Vec<Duration>) -> Self {
+            *self.throttles.lock().unwrap() = waits;
+            self
+        }
+
+        /// The same for the details endpoints, which a pull reads on the side.
+        fn throttling_details(self, waits: Vec<Duration>) -> Self {
+            *self.detail_throttles.lock().unwrap() = waits;
+            self
         }
 
         fn with_states(self, work_item_type: &str, states: Vec<StateOption>) -> Self {
@@ -1042,6 +1213,9 @@ mod tests {
         /// One query, plus one read per batch of work items it named.
         fn take_next_batch(&self) -> Result<SyncBatch> {
             *self.requests.lock().unwrap() += 1;
+            if let Some(refusal) = throttled(&self.throttles) {
+                return Err(refusal);
+            }
             let batch = match self.results.lock().unwrap().remove(0) {
                 Ok(batch) => batch,
                 Err(message) => return Err(anyhow::anyhow!(message)),
@@ -1089,6 +1263,9 @@ mod tests {
             patch: &[Value],
         ) -> Result<(Ticket, Vec<RelationRecord>)> {
             self.patches.lock().unwrap().push((id, patch.to_vec()));
+            if let Some(refusal) = throttled(&self.throttles) {
+                return Err(refusal);
+            }
             if let Some((status, message)) = &self.refusal {
                 return Err(anyhow::Error::new(RequestRejected::new(
                     *status,
@@ -1138,6 +1315,9 @@ mod tests {
         fn fetch_details(&self, id: i64) -> Result<WorkItemDetails> {
             *self.requests.lock().unwrap() += 2;
             self.detailed.lock().unwrap().push(id);
+            if let Some(refusal) = throttled(&self.detail_throttles) {
+                return Err(refusal);
+            }
             Ok(self
                 .details
                 .lock()
@@ -1156,6 +1336,20 @@ mod tests {
         fn scope(&self) -> Option<SyncScope> {
             self.scope.clone()
         }
+    }
+
+    /// The next refusal a throttling queue has left, shaped like the one Azure
+    /// DevOps answers a spent budget with.
+    fn throttled(waits: &Mutex<Vec<Duration>>) -> Option<anyhow::Error> {
+        let mut waits = waits.lock().unwrap();
+        (!waits.is_empty()).then(|| {
+            anyhow::Error::new(Throttled::new(
+                waits.remove(0),
+                429,
+                "https://dev.azure.com/demo/_apis/wit/wiql",
+                "too many requests",
+            ))
+        })
     }
 
     /// A database holding one ticket, plus the worker reading and writing it.
@@ -1242,6 +1436,17 @@ mod tests {
         }
     }
 
+    /// The next pull's outcome and the wait it asked the timer to hold off for.
+    fn pulled_with_pause(handle: &SyncHandle) -> (SyncOutcome, Option<Duration>) {
+        loop {
+            match next_event(handle) {
+                SyncEvent::Finished { outcome, pause, .. } => return (outcome, pause),
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected a finished pull, got {other:?}"),
+            }
+        }
+    }
+
     /// How the next details request ended, past the display name the first
     /// connect reports.
     fn detailed(handle: &SyncHandle) -> DetailsOutcome {
@@ -1313,7 +1518,9 @@ mod tests {
 
     fn finished(handle: &SyncHandle) -> (PullOrigin, SyncOutcome) {
         match next_event(handle) {
-            SyncEvent::Finished { origin, outcome } => (origin, outcome),
+            SyncEvent::Finished {
+                origin, outcome, ..
+            } => (origin, outcome),
             other => panic!("expected a finished pull, got {other:?}"),
         }
     }
@@ -2260,6 +2467,182 @@ mod tests {
         );
         scheduler.finish(Instant::now());
         assert!(scheduler.request_user_pull());
+    }
+
+    #[test]
+    fn a_throttled_pull_is_a_pause_rather_than_a_failure_and_writes_nothing() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource::with(vec![Ok(SyncBatch::default())])
+            .throttling(vec![Duration::from_secs(45)]);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let (outcome, pause) = pulled_with_pause(&handle);
+        let SyncOutcome::Throttled { retry_after } = outcome else {
+            panic!("expected a throttled pull, got {outcome:?}");
+        };
+        assert_eq!(
+            retry_after,
+            Duration::from_secs(45),
+            "the wait Azure DevOps named is the wait that comes back"
+        );
+        assert_eq!(pause, None, "the refusal carries the wait, not the budget");
+
+        let stored = SqliteTicketRepository::open_existing(&path).unwrap();
+        assert_eq!(stored.load_all().unwrap()[0].title, "Existing");
+    }
+
+    #[test]
+    fn a_pull_whose_details_are_throttled_lands_and_asks_the_timer_to_hold_off() {
+        let directory = tempdir().unwrap();
+        let stale = ts("2026-02-01T00:00:00Z");
+        let path = watermarked_database(
+            &directory,
+            &[ticket(1, "Existing"), ticket(2, "Existing too")],
+            &TicketGraph::default(),
+            &stale.to_rfc3339(),
+        );
+        let moved: Vec<Ticket> = [1, 2]
+            .into_iter()
+            .map(|id| Ticket {
+                changed_at: ts("2026-03-01T00:00:00Z"),
+                ..ticket(id, "Moved")
+            })
+            .collect();
+        let source = FakeSource::with(vec![Ok(SyncBatch {
+            tickets: moved,
+            relations: Vec::new(),
+        })])
+        .throttling_details(vec![Duration::from_secs(45)]);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source.clone())).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let (outcome, pause) = pulled_with_pause(&handle);
+        assert!(
+            matches!(outcome, SyncOutcome::Pulled { count: 2, .. }),
+            "the work items still land: {outcome:?}"
+        );
+        assert_eq!(
+            pause,
+            Some(Duration::from_secs(45)),
+            "the wait rides out with the pull that survived it"
+        );
+        assert_eq!(
+            source.detailed.lock().unwrap().len(),
+            1,
+            "the rest of the batch is left for a later pull rather than asked \
+             for one refusal at a time"
+        );
+    }
+
+    #[test]
+    fn a_throttled_edit_waits_out_the_delay_and_lands_on_the_second_try() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource::storing(ticket(1, "Rewritten"), Vec::new())
+            .throttling(vec![Duration::ZERO]);
+        let handle = SyncHandle::spawn(path, Box::new(source.clone())).unwrap();
+
+        handle
+            .send(SyncRequest::Edit(edit_request(1, "Active", 1)))
+            .unwrap();
+        let applied = edited(&handle).expect("the second try lands");
+        assert_eq!(applied.ticket.title, "Rewritten");
+        assert_eq!(
+            source.patches.lock().unwrap().len(),
+            2,
+            "the write was tried once more after the wait"
+        );
+    }
+
+    #[test]
+    fn an_edit_throttled_twice_is_refused_in_words_that_say_when_to_try_again() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource::storing(ticket(1, "Rewritten"), Vec::new())
+            .throttling(vec![Duration::ZERO, Duration::from_secs(45)]);
+        let handle = SyncHandle::spawn(path, Box::new(source.clone())).unwrap();
+
+        handle
+            .send(SyncRequest::Edit(edit_request(1, "Active", 1)))
+            .unwrap();
+        let rejection = edited(&handle).expect_err("a second throttle is a refusal");
+        assert_eq!(
+            rejection.message,
+            "Azure DevOps is throttling requests; try again in 45s"
+        );
+        assert!(
+            !rejection.conflict,
+            "throttling is not the work item moving on"
+        );
+        assert_eq!(
+            source.patches.lock().unwrap().len(),
+            2,
+            "one retry, not a loop"
+        );
+    }
+
+    #[test]
+    fn consecutive_throttles_push_the_timer_out_and_a_success_puts_it_back() {
+        let start = Instant::now();
+        let mut scheduler = SyncScheduler::new(Some(Duration::from_secs(60)));
+        let wait = Duration::from_secs(45);
+
+        scheduler.start();
+        assert_eq!(
+            scheduler.pause(start, wait),
+            start + wait,
+            "the first throttle honours the wait it was given and nothing more"
+        );
+        assert!(!scheduler.in_flight());
+        assert!(!scheduler.due(start + Duration::from_secs(44)));
+        assert!(scheduler.due(start + wait));
+        assert_eq!(scheduler.time_until_due(start), Some(wait));
+
+        for expected in [120, 240, 480, 600, 600] {
+            scheduler.start();
+            assert_eq!(
+                scheduler.pause(start, wait),
+                start + Duration::from_secs(expected),
+                "each throttle in a row doubles the interval, up to ten minutes"
+            );
+        }
+
+        scheduler.start();
+        scheduler.finish(start);
+        assert!(
+            scheduler.due(start + Duration::from_secs(60)),
+            "a success puts the timer back on its configured interval"
+        );
+        scheduler.start();
+        assert_eq!(
+            scheduler.pause(start, wait),
+            start + wait,
+            "and puts the doubling back to where it started"
+        );
+    }
+
+    #[test]
+    fn a_throttled_pull_books_nothing_when_the_timer_is_off() {
+        let start = Instant::now();
+        let mut scheduler = SyncScheduler::new(None);
+        assert!(scheduler.request_user_pull());
+
+        assert_eq!(
+            scheduler.pause(start, Duration::from_secs(45)),
+            start + Duration::from_secs(45),
+            "the title still has a wait to count down"
+        );
+        assert!(
+            !scheduler.due(start + Duration::from_secs(86_400)),
+            "--refresh 0 stays off; a throttle is no reason to start pulling"
+        );
+        assert_eq!(scheduler.time_until_due(start), None);
+        assert!(
+            scheduler.request_user_pull(),
+            "the sync keypress still works through a pause"
+        );
     }
 
     #[test]
