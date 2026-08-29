@@ -396,6 +396,19 @@ impl EditRejection {
             format!("#{id} {} not saved: {}", self.label, self.message)
         }
     }
+
+    /// The same refusal as one line of a bulk change's summary, where the field
+    /// is already named once for the whole change and several of these have to
+    /// fit in one notification.
+    #[must_use]
+    pub fn failure(&self) -> String {
+        let id = self.key.id;
+        if self.conflict {
+            format!("#{id} failed: it changed in Azure DevOps")
+        } else {
+            format!("#{id} failed: {}", self.message)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -538,6 +551,11 @@ mod tests {
         );
         assert!(message.contains("State not saved"), "{message}");
         assert!(message.contains("syncing the latest copy"), "{message}");
+        assert_eq!(
+            rejection.failure(),
+            "#613 failed: it changed in Azure DevOps",
+            "a bulk summary says it shorter, because several of them share a line"
+        );
 
         let rejection = EditRejection {
             conflict: false,
@@ -547,6 +565,10 @@ mod tests {
         assert_eq!(
             rejection.notification(),
             "#613 State not saved: HTTP 400: field is read only"
+        );
+        assert_eq!(
+            rejection.failure(),
+            "#613 failed: HTTP 400: field is read only"
         );
     }
 

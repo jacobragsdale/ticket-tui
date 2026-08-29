@@ -1778,7 +1778,7 @@ fn render_state_picker(frame: &mut Frame<'_>, app: &mut App) {
     let width = overlay_width(app.overlay_anchor, &rows, 40, frame.area());
     let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
     frame.render_widget(Clear, area);
-    let title = format!(" State \u{b7} #{} ", app.state_picker.id);
+    let title = format!(" State \u{b7} {} ", app.state_picker.scope.label());
     let inner = render_modal_frame(frame, app, area, &title);
     render_list_overlay(
         frame,
@@ -1884,7 +1884,7 @@ fn render_assignee_picker(frame: &mut Frame<'_>, app: &mut App) {
     let width = overlay_width(app.overlay_anchor, &rows, 52, frame.area());
     let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
     frame.render_widget(Clear, area);
-    let title = format!(" Assignee \u{b7} #{} ", app.assignee_picker.id);
+    let title = format!(" Assignee \u{b7} {} ", app.assignee_picker.scope.label());
     let inner = render_modal_frame(frame, app, area, &title);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
     let query_area = chunks[0];
@@ -1972,7 +1972,11 @@ fn render_node_picker(frame: &mut Frame<'_>, app: &mut App) {
     let width = overlay_width(app.overlay_anchor, &rows, 56, frame.area());
     let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
     frame.render_widget(Clear, area);
-    let title = format!(" {} \u{b7} #{} ", kind.label(), app.node_picker.id);
+    let title = format!(
+        " {} \u{b7} {} ",
+        kind.label(),
+        app.node_picker.scope.label()
+    );
     let inner = render_modal_frame(frame, app, area, &title);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
     let query_area = chunks[0];
@@ -5006,11 +5010,11 @@ mod tests {
             .find_target(|target| matches!(target, PointerTarget::AssigneeOption { index: 0 }))
             .map(|region| (region.rect.x, region.rect.y))
             .expect("the person left should be clickable");
-        let crate::app::AppAction::Edit(request) = click(&mut app, x, y) else {
+        let crate::app::AppAction::Edit(requests) = click(&mut app, x, y) else {
             panic!("clicking somebody else should dispatch an edit");
         };
         assert_eq!(app.mode, AppMode::Browse);
-        assert_eq!(request.edit.value_text(), "Priya Nair");
+        assert_eq!(requests[0].edit.value_text(), "Priya Nair");
     }
 
     #[test]
@@ -5088,12 +5092,12 @@ mod tests {
             .find_target(|target| matches!(target, PointerTarget::NodeOption { index: 0 }))
             .map(|region| (region.rect.x, region.rect.y))
             .expect("the node left should be clickable");
-        let crate::app::AppAction::Edit(request) = click(&mut app, x, y) else {
+        let crate::app::AppAction::Edit(requests) = click(&mut app, x, y) else {
             panic!("clicking another node should dispatch an edit");
         };
         assert_eq!(app.mode, AppMode::Browse);
         assert_eq!(
-            request.edit.value_text(),
+            requests[0].edit.value_text(),
             "development\\Q3\\Sprint 7",
             "the write carries the full path even though the row showed the leaf"
         );
@@ -5196,11 +5200,60 @@ mod tests {
         // Clicking another state writes it, the same as Enter would.
         let (x, y) = rows[1];
         let action = click(&mut app, x, y);
-        let crate::app::AppAction::Edit(request) = action else {
+        let crate::app::AppAction::Edit(requests) = action else {
             panic!("clicking a state should dispatch an edit, got {action:?}");
         };
-        assert_eq!(request.edit.summary(), "State \u{2192} Doing");
+        assert_eq!(requests[0].edit.summary(), "State \u{2192} Doing");
         assert_eq!(app.mode, AppMode::Browse);
+    }
+
+    #[test]
+    fn a_picker_over_checked_rows_counts_them_in_its_title() {
+        let mut app = App::new(vec![
+            ticket_at(
+                10_001,
+                "Fix ticket search",
+                "Issue",
+                "To Do",
+                "2026-03-03T00:00:00Z",
+            ),
+            ticket_at(
+                10_002,
+                "Tidy the sprint",
+                "Issue",
+                "To Do",
+                "2026-03-02T00:00:00Z",
+            ),
+        ]);
+        app.enable_sync();
+        let mut catalog = StateCatalog::default();
+        catalog.insert(
+            "Issue",
+            vec![
+                StateOption::new("To Do", StateCategory::Proposed),
+                StateOption::new("Doing", StateCategory::InProgress),
+            ],
+        );
+        app.set_state_catalog(catalog);
+
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        let single = render_text(80, 20, &mut app);
+        assert!(
+            single.contains("State \u{b7} #10001"),
+            "one row is named by its id: {single}"
+        );
+        app.handle_key(key(KeyCode::Esc));
+
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Char(' ')));
+        app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
+        let bulk = render_text(80, 20, &mut app);
+        assert!(
+            bulk.contains("State \u{b7} 2 tickets"),
+            "the scope of a bulk change is unmistakable: {bulk}"
+        );
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {

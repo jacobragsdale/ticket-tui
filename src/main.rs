@@ -643,7 +643,13 @@ fn handle_action(
     match action {
         AppAction::None => {}
         AppAction::Sync => start_sync(app, runtime),
-        AppAction::Edit(request) => start_edit(app, runtime, request),
+        // A bulk change over the checked rows hands over several: the worker
+        // takes them in this order, each with its own revision test.
+        AppAction::Edit(requests) => {
+            for request in requests {
+                start_edit(app, runtime, request);
+            }
+        }
         AppAction::FetchIdentities => send_identities(runtime),
         AppAction::FetchClassificationNodes => send_classification_nodes(runtime),
         AppAction::Comment { key, text } => start_comment(app, runtime, key, text),
@@ -697,8 +703,10 @@ fn apply_description_outcome(
 ) {
     match outcome {
         Ok(Some(html)) => {
-            if let AppAction::Edit(request) = app.edit_ticket(key, FieldEdit::description(&html)) {
-                start_edit(app, runtime, request);
+            if let AppAction::Edit(requests) = app.edit_ticket(key, FieldEdit::description(&html)) {
+                for request in requests {
+                    start_edit(app, runtime, request);
+                }
             }
         }
         Ok(None) => app.set_status(format!("#{} description unchanged", key.id)),
@@ -1307,6 +1315,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use serde_json::Value;
     use tempfile::tempdir;
     use ticket_tui::app::NotificationLevel;
@@ -1327,7 +1336,9 @@ mod tests {
     struct FakeAzure {
         tickets: Vec<Ticket>,
         failure: Option<String>,
-        stored: Option<Ticket>,
+        /// The copies a write is answered with, looked up by work item id, so
+        /// a bulk change can be answered one work item at a time.
+        stored: Vec<Ticket>,
         refusal: Option<(u16, String)>,
         /// Whether a changed-since query comes back empty: the project still
         /// lists every one of `tickets`, but none of them has moved.
@@ -1347,7 +1358,7 @@ mod tests {
             Self {
                 tickets,
                 failure: None,
-                stored: None,
+                stored: Vec::new(),
                 refusal: None,
                 quiet: false,
                 details: None,
@@ -1381,8 +1392,14 @@ mod tests {
 
         /// Accepts the next write and answers with `stored`.
         fn storing(stored: Ticket) -> Self {
+            Self::storing_each(vec![stored])
+        }
+
+        /// Accepts a write of any of these work items and answers with the
+        /// copy it holds for that one.
+        fn storing_each(stored: Vec<Ticket>) -> Self {
             Self {
-                stored: Some(stored),
+                stored,
                 ..Self::returning(Vec::new())
             }
         }
@@ -1463,9 +1480,9 @@ mod tests {
                     message.clone(),
                 )));
             }
-            match self.stored.clone() {
-                Some(ticket) => Ok((ticket, Vec::new())),
-                None => bail!("the fake source was not given a stored copy"),
+            match self.stored.iter().find(|ticket| ticket.key.id == id) {
+                Some(ticket) => Ok((ticket.clone(), Vec::new())),
+                None => bail!("the fake source was not given a stored copy of #{id}"),
             }
         }
 
@@ -2124,6 +2141,65 @@ mod tests {
             "the watcher does not chase the row our own worker just wrote"
         );
         assert!(!runtime.scheduler.in_flight(), "nothing else was asked for");
+    }
+
+    #[test]
+    fn a_bulk_change_writes_every_checked_work_item_and_reports_itself_once() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.sqlite3");
+        let stored: Vec<Ticket> = [2, 3]
+            .into_iter()
+            .map(|id| Ticket {
+                state: "Done".into(),
+                revision: 9,
+                ..ticket(id)
+            })
+            .collect();
+        let (mut app, mut repository, mut runtime) =
+            synced_app(&path, FakeAzure::storing_each(stored.clone()));
+
+        // Space checks the row under the cursor: #3, then #2 below it.
+        for _ in 0..2 {
+            app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        let action = app.edit_checked(FieldEdit::state("Done"));
+        assert!(
+            matches!(&action, AppAction::Edit(requests) if requests.len() == 2),
+            "one request a checked row, got {action:?}"
+        );
+        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        await_edit(&mut app, &mut repository, &mut runtime);
+
+        for copy in &stored {
+            assert_eq!(
+                app.ticket_by_key(&copy.key),
+                Some(copy),
+                "every checked work item carries the copy Azure DevOps stored"
+            );
+        }
+        assert_eq!(
+            app.ticket_by_key(&ticket(1).key)
+                .map(|ticket| ticket.state.clone()),
+            Some("Active".to_owned()),
+            "the row that was never checked is untouched"
+        );
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Updated 2 tickets · State → Done"),
+            "one summary, not one toast a work item"
+        );
+        assert_eq!(
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .load_all()
+                .unwrap()
+                .iter()
+                .filter(|ticket| ticket.state == "Done")
+                .count(),
+            2,
+            "the worker wrote both rows it was told to write"
+        );
     }
 
     #[test]

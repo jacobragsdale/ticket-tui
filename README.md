@@ -369,6 +369,26 @@ on screen over the rows the pull brought. There is no offline queue: without a
 configured organization an edit is refused before anything changes, and an edit
 that cannot be sent is reverted rather than saved for later.
 
+Sprint hygiene means flipping ten work items at once, so the state picker, the
+assignee picker, and the Iteration tree act on every checked row — see `Space`
+below — when two or more are checked, rather than on the row under the cursor.
+The overlay title says which it is: `State · #613` for one work item and
+`State · 5 tickets` for a bulk change, so the scope is unmistakable before
+`Enter` is pressed. Every row changes on screen at once, and one edit goes out
+a work item — no `$batch` endpoint, just sequential writes, each with its own
+revision test — which the worker takes in the order the table holds them. A
+work item already carrying the value chosen is passed over rather than
+rewritten; a change nothing is left to do closes with `Nothing to change · State
+→ Doing`.
+
+A bulk change speaks once, when the last work item has answered:
+`Updated 5 tickets · State → Doing`, or `Updated 5 of 6 · #612 failed: the
+transition is not allowed` when something did not land, naming the first three
+refusals and counting the rest. A refusal reverts only the row it names — the
+others stay changed — and the checked set survives the whole thing, ready for
+the next change. Every other editor stays on the row under the cursor: the same
+title or the same description on ten work items is never what was meant.
+
 Every editor is reachable two ways. Clicking a field's value in the details
 pane opens that field's editor where the value is, as a dropdown anchored under
 it — one click, not two — and `Enter` does the same for the value under the
@@ -384,7 +404,10 @@ directly. The picker lists the states the selected work item's type allows,
 coloured by category and with the state it is in already under the cursor.
 `Enter` writes the state chosen down the path above, `Esc` changes nothing, and
 choosing the state it is already in closes without a write. A transition Azure
-DevOps refuses puts the row back and says why.
+DevOps refuses puts the row back and says why. Opened over checked rows it moves
+all of them; the states it offers are still the selected work item's type's,
+which is the only type it could ask about, and a state another checked work
+item's type does not allow is refused by Azure DevOps and named in the summary.
 
 The picker never waits for the network. It offers the states cached in
 `work_item_type_states` when a pull has fetched them, and otherwise the distinct
@@ -426,10 +449,12 @@ already there closes without a write.
 `Change assignee` in the palette, because assigning work is the edit worth
 reaching for. It opens a filterable list: type to narrow it, `↑`/`↓` to move,
 `Enter` to assign, `Esc` to change nothing. Whoever holds the work item is
-marked and under the cursor, and choosing them closes without a write. The list
-runs `Unassigned` first, then you — marked `(me)` — then everybody the database
-has ever seen a work item assigned to, sorted, and finally the rest of the
-project's teams. Nobody is offered twice, however their name is spelled.
+marked and under the cursor, and choosing them closes without a write — unless
+the picker was opened over checked rows, when it reassigns all of them and
+whoever holds the row under the cursor is a change worth making to the rest.
+The list runs `Unassigned` first, then you — marked `(me)` — then everybody the
+database has ever seen a work item assigned to, sorted, and finally the rest of
+the project's teams. Nobody is offered twice, however their name is spelled.
 
 The write goes out as the person's unique name — their sign-in address — when
 one is known and as their display name when it is not; Azure DevOps resolves
@@ -452,8 +477,11 @@ rows, two spaces a level, each row naming the leaf with the rest of the path
 implied by the indent. The node the work item sits in is marked and under the
 cursor; type to narrow the tree, `↑`/`↓` to move, `Enter` to move the
 work item, `Esc` to change nothing. Choosing the node it is already in closes
-without a write. An iteration row also carries the days it runs between —
-`Aug 25 – Sep 5` — and the one containing today (UTC) is marked `current`.
+without a write. Iteration is the one of the two worth choosing for several
+work items at once — a sprint ends and its leftovers move on together — so it
+moves every checked row; Area stays on the row under the cursor. An iteration
+row also carries the days it runs between — `Aug 25 – Sep 5` — and the one
+containing today (UTC) is marked `current`.
 
 `Enter` writes the full backslash path — `development\Sprint 1`, not
 `Sprint 1` — to `System.IterationPath` or `System.AreaPath`. The Iteration and
@@ -567,13 +595,13 @@ against the server.
 | `p` / `:` | Open the command palette |
 | `V` | Open named views; `n` saves, `Enter` loads, `d` deletes |
 | `e` | Open the Edit menu of field editors; `Enter` opens the one chosen |
-| `S` | Change the selected work item's state; `Enter` applies, `Esc` cancels |
-| `a` | Change who the selected work item is assigned to; type to filter, `Enter` assigns |
+| `S` | Change the selected work item's state, or every checked one; `Enter` applies, `Esc` cancels |
+| `a` | Change who the selected work item is assigned to, or every checked one; type to filter, `Enter` assigns |
 | `e` → Title/Priority/Tags/Iteration/Area | Edit the title, priority, tags, iteration, or area; also `Edit title`, `Edit priority`, `Edit tags`, `Change iteration`, `Change area`, and `Change assignee` in the palette |
 | `e` → Description | Edit the description in `$VISUAL`/`$EDITOR`/`vi` as Markdown; also `Edit description` in the palette |
 | `e` → Add comment | Leave a one-line comment on the selected work item; also `Add comment` in the palette |
 | `m` | Bookmark or unbookmark the selected ticket |
-| `Space` | Toggle ticket multi-select |
+| `Space` | Toggle ticket multi-select; two or more make `S`, `a`, and Iteration bulk edits |
 | `y` | Copy selected (or current) ticket IDs |
 | `[` / `]` | Jump to the previous or next recently viewed ticket |
 | `Tab` | Toggle focus between tickets and details |
