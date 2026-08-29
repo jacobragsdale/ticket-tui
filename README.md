@@ -950,6 +950,18 @@ build that gates it, the Completion settings, and the buttons `[Approve]
 [Suggest] [Wait] [Reject] [Complete] [Abandon]` — drawn muted until #676 and
 #677 wire them.
 
+`C` opens a small form — merge strategy (squash by default, merge commit, or
+rebase), delete the source branch, complete the linked work items — and `Enter`
+merges it. It is refused before the request goes out, naming what is wrong and
+suggesting `o`, when the merge has conflicts or the build policy is failing.
+`X` asks `Abandon !123?` and a second `X` abandons it; reactivating one is a
+job for the browser. `t` toggles auto-complete, taking the same form the first
+time it is turned on, since that is what auto-complete will do when it fires.
+`n` opens a one-line prompt and posts it as a thread of its own; the Discussion
+section lists the first comment of each thread — author, age, status and the
+text — and replies and line comments are `o`. All four are non-optimistic: the
+row changes when Azure DevOps answers.
+
 `a` approves, `A` approves with suggestions, `w` waits for the author and `x`
 rejects; `u` puts the last vote back. The glyph changes at once and a refusal
 reverts it and says why. Voting on a pull request you were not asked to review

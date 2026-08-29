@@ -92,6 +92,18 @@ pub enum AppAction {
         run_id: i64,
         retry: bool,
     },
+    /// Complete, abandon, or set auto-complete on one pull request.
+    PullRequestAction {
+        repo_id: String,
+        id: i64,
+        action: crate::sync::PrAction,
+    },
+    /// Leave one comment on one pull request.
+    CommentOnPullRequest {
+        repo_id: String,
+        id: i64,
+        text: String,
+    },
     /// Record one vote on one pull request, as the signed-in user.
     VotePullRequest {
         repo_id: String,

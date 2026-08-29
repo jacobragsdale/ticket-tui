@@ -10,9 +10,10 @@ use super::{AppAction, Focus, ListCursor, Screen, Shell, TabId};
 use crate::columns::{ColumnLayout, TableLayout};
 use crate::command::{CommandId, command_for_key};
 use crate::filter::{MatchContext, ParsedQuery, parse_query};
-use crate::model::{Jump, PullRequest};
+use crate::model::{CompletionOptions, Jump, MergeStrategy, PullRequest};
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 use crate::session::TabSession;
+use crate::sync::PrAction;
 use crate::text_input::TextInput;
 
 mod columns;
@@ -50,6 +51,12 @@ pub enum PrMode {
     #[default]
     Browse,
     Search,
+    /// The completion form: how it should land.
+    Complete,
+    /// `Abandon !123? · X again`.
+    ConfirmAbandon,
+    /// The one-line comment prompt.
+    Comment,
 }
 
 pub struct PullRequestsScreen {
@@ -74,6 +81,13 @@ pub struct PullRequestsScreen {
     pending_votes: Vec<(i64, i8)>,
     /// Votes that landed, oldest first, for `u`.
     undo_votes: Vec<(i64, i8)>,
+    /// The completion form's state, and which of its three rows is focused.
+    completion: CompletionOptions,
+    completion_field: usize,
+    /// Whether the open completion form is turning auto-complete on rather
+    /// than completing now.
+    auto_completing: bool,
+    comment: TextInput,
 }
 
 impl Default for PullRequestsScreen {
@@ -93,6 +107,10 @@ impl Default for PullRequestsScreen {
             to_review: 0,
             pending_votes: Vec::new(),
             undo_votes: Vec::new(),
+            completion: CompletionOptions::default(),
+            completion_field: 0,
+            auto_completing: false,
+            comment: TextInput::default(),
         }
     }
 }
@@ -234,6 +252,179 @@ impl PullRequestsScreen {
             self.set_query((*query).to_owned());
             self.active_view = Some((*name).to_owned());
         }
+    }
+
+    /// `C`: the completion form, refused here rather than at Azure DevOps
+    /// when the merge cannot happen — with what to do about it.
+    pub fn open_complete(&mut self, shell: &mut Shell) {
+        let Some(row) = self.selected(shell) else {
+            shell.set_error("No pull request to complete");
+            return;
+        };
+        if row.request.status.is_closed() {
+            shell.set_error(format!("!{} is already closed", row.request.id));
+            return;
+        }
+        if row.request.has_conflicts() {
+            shell.set_error(format!(
+                "!{} has merge conflicts — press o to sort them out in the browser",
+                row.request.id
+            ));
+            return;
+        }
+        if row
+            .request
+            .build
+            .as_ref()
+            .is_some_and(|build| build.status.eq_ignore_ascii_case("rejected"))
+        {
+            shell.set_error(format!(
+                "the build on !{} is failing — press o to look at it",
+                row.request.id
+            ));
+            return;
+        }
+        self.completion = CompletionOptions::default();
+        self.completion_field = 0;
+        self.mode = PrMode::Complete;
+    }
+
+    /// The completion options as the form has them.
+    #[must_use]
+    pub const fn completion(&self) -> CompletionOptions {
+        self.completion
+    }
+
+    #[must_use]
+    pub const fn completion_field(&self) -> usize {
+        self.completion_field
+    }
+
+    /// Sends the completion.
+    pub fn complete(&mut self, shell: &mut Shell) -> AppAction {
+        self.mode = PrMode::Browse;
+        let Some(row) = self.selected(shell) else {
+            return AppAction::None;
+        };
+        shell.set_status(format!("Completing !{}\u{2026}", row.request.id));
+        AppAction::PullRequestAction {
+            repo_id: row.request.repo_id.clone(),
+            id: row.request.id,
+            action: PrAction::Complete(self.completion),
+        }
+    }
+
+    /// `X`: the confirmation, then the abandon.
+    pub fn confirm_abandon(&mut self, shell: &mut Shell) {
+        let Some(row) = self.selected(shell) else {
+            shell.set_error("No pull request to abandon");
+            return;
+        };
+        if row.request.status.is_closed() {
+            shell.set_error(format!("!{} is already closed", row.request.id));
+            return;
+        }
+        self.mode = PrMode::ConfirmAbandon;
+    }
+
+    /// `t`: turns auto-complete on or off. Turning it on takes the completion
+    /// form first, since that is what auto-complete will do when it fires.
+    pub fn toggle_auto_complete(&mut self, shell: &mut Shell) -> AppAction {
+        let Some(row) = self.selected(shell) else {
+            shell.set_error("No pull request to set auto-complete on");
+            return AppAction::None;
+        };
+        if row.request.auto_complete_set_by.is_some() {
+            shell.set_status(format!("Turning auto-complete off on !{}", row.request.id));
+            return AppAction::PullRequestAction {
+                repo_id: row.request.repo_id.clone(),
+                id: row.request.id,
+                action: PrAction::AutoComplete(false),
+            };
+        }
+        self.completion = CompletionOptions::default();
+        self.completion_field = 0;
+        self.auto_completing = true;
+        self.mode = PrMode::Complete;
+        AppAction::None
+    }
+
+    /// `n`: the one-line comment prompt.
+    pub fn open_comment(&mut self, shell: &mut Shell) {
+        if self.selected(shell).is_none() {
+            shell.set_error("No pull request to comment on");
+            return;
+        }
+        self.comment = TextInput::default();
+        self.mode = PrMode::Comment;
+    }
+
+    /// What the comment prompt holds.
+    #[must_use]
+    pub fn comment_text(&self) -> &str {
+        self.comment.text()
+    }
+
+    #[must_use]
+    pub fn comment_cursor(&self) -> usize {
+        self.comment.cursor()
+    }
+
+    /// Sends the comment. An empty one is refused here rather than posted.
+    pub fn send_comment(&mut self, shell: &mut Shell) -> AppAction {
+        let text = self.comment.text().trim().to_owned();
+        if text.is_empty() {
+            shell.set_error("A comment needs something in it");
+            return AppAction::None;
+        }
+        let Some(row) = self.selected(shell) else {
+            self.mode = PrMode::Browse;
+            return AppAction::None;
+        };
+        self.mode = PrMode::Browse;
+        shell.set_status(format!("Commenting on !{}\u{2026}", row.request.id));
+        AppAction::CommentOnPullRequest {
+            repo_id: row.request.repo_id.clone(),
+            id: row.request.id,
+            text,
+        }
+    }
+
+    /// What Azure DevOps answered a write with: the pull request as it stands.
+    pub fn apply_pull_request(&mut self, shell: &mut Shell, updated: PullRequest) {
+        let id = updated.id;
+        let status = updated.status;
+        if let Some(held) = self.requests.iter_mut().find(|held| held.id == id) {
+            // The list pages carry things a single read does not, so what was
+            // read per pull request is kept.
+            let mut updated = updated;
+            if updated.threads.is_empty() {
+                updated.threads.clone_from(&held.threads);
+            }
+            if updated.work_items.is_empty() {
+                updated.work_items.clone_from(&held.work_items);
+            }
+            if updated.build.is_none() {
+                updated.build.clone_from(&held.build);
+            }
+            *held = updated;
+        } else {
+            self.requests.push(updated);
+        }
+        self.cursor.clamp(self.visible(shell).len());
+        shell.set_status(match status {
+            crate::model::PrStatus::Completed => format!("!{id} completed"),
+            crate::model::PrStatus::Abandoned => format!("!{id} abandoned"),
+            crate::model::PrStatus::Active => format!("!{id} updated"),
+        });
+    }
+
+    /// A comment Azure DevOps took, which joins the Discussion section.
+    pub fn apply_comment(&mut self, shell: &mut Shell, id: i64, thread: crate::model::PrThread) {
+        if let Some(request) = self.requests.iter_mut().find(|request| request.id == id) {
+            request.threads.push(thread);
+        }
+        shell.set_status(format!("Commented on !{id}"));
     }
 
     /// Records my vote on the pull request under the cursor. Optimistic: the
@@ -403,6 +594,84 @@ impl PullRequestsScreen {
         AppAction::None
     }
 
+    /// The completion form: three rows, `Space` or the arrows change one,
+    /// `Ctrl-S` or `Enter` sends it.
+    fn handle_complete_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = PrMode::Browse;
+                self.auto_completing = false;
+            }
+            KeyCode::Down | KeyCode::Tab => self.completion_field = (self.completion_field + 1) % 3,
+            KeyCode::Up => self.completion_field = (self.completion_field + 2) % 3,
+            KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') => match self.completion_field {
+                0 => {
+                    let index = MergeStrategy::ALL
+                        .iter()
+                        .position(|strategy| *strategy == self.completion.strategy)
+                        .unwrap_or_default();
+                    let next = if key.code == KeyCode::Left {
+                        (index + MergeStrategy::ALL.len() - 1) % MergeStrategy::ALL.len()
+                    } else {
+                        (index + 1) % MergeStrategy::ALL.len()
+                    };
+                    self.completion.strategy = MergeStrategy::ALL[next];
+                }
+                1 => self.completion.delete_source = !self.completion.delete_source,
+                _ => {
+                    self.completion.transition_work_items = !self.completion.transition_work_items;
+                }
+            },
+            KeyCode::Enter => {
+                if self.auto_completing {
+                    self.auto_completing = false;
+                    self.mode = PrMode::Browse;
+                    let Some(row) = self.selected(shell) else {
+                        return AppAction::None;
+                    };
+                    shell.set_status(format!("Turning auto-complete on for !{}", row.request.id));
+                    return AppAction::PullRequestAction {
+                        repo_id: row.request.repo_id.clone(),
+                        id: row.request.id,
+                        action: PrAction::AutoComplete(true),
+                    };
+                }
+                return self.complete(shell);
+            }
+            _ => {}
+        }
+        AppAction::None
+    }
+
+    /// `X` again abandons it; anything else leaves it alone.
+    fn handle_abandon_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        self.mode = PrMode::Browse;
+        if key.code != KeyCode::Char('X') {
+            return AppAction::None;
+        }
+        let Some(row) = self.selected(shell) else {
+            return AppAction::None;
+        };
+        shell.set_status(format!("Abandoning !{}\u{2026}", row.request.id));
+        AppAction::PullRequestAction {
+            repo_id: row.request.repo_id.clone(),
+            id: row.request.id,
+            action: PrAction::Abandon,
+        }
+    }
+
+    /// The one-line comment prompt.
+    fn handle_comment_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => self.mode = PrMode::Browse,
+            KeyCode::Enter => return self.send_comment(shell),
+            _ => {
+                self.comment.handle_key(key);
+            }
+        }
+        AppAction::None
+    }
+
     fn handle_command_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
         match command_for_key(key, TabId::PullRequests) {
             Some(CommandId::Search) => {
@@ -428,8 +697,12 @@ impl PullRequestsScreen {
 
 impl Screen for PullRequestsScreen {
     fn handle_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
-        if self.mode == PrMode::Search {
-            return self.handle_search_key(key);
+        match self.mode {
+            PrMode::Search => return self.handle_search_key(key),
+            PrMode::Complete => return self.handle_complete_key(shell, key),
+            PrMode::ConfirmAbandon => return self.handle_abandon_key(shell, key),
+            PrMode::Comment => return self.handle_comment_key(shell, key),
+            PrMode::Browse => {}
         }
         match key.code {
             KeyCode::Down | KeyCode::Char('j') => {
@@ -459,6 +732,10 @@ impl Screen for PullRequestsScreen {
             KeyCode::Char('w') => return self.vote(shell, -5),
             KeyCode::Char('x') => return self.vote(shell, -10),
             KeyCode::Char('u') => return self.undo_vote(shell),
+            KeyCode::Char('C') => self.open_complete(shell),
+            KeyCode::Char('X') => self.confirm_abandon(shell),
+            KeyCode::Char('t') => return self.toggle_auto_complete(shell),
+            KeyCode::Char('n') => self.open_comment(shell),
             KeyCode::Esc if !self.query.is_empty() => {
                 self.query.clear();
                 self.active_view = None;
@@ -520,7 +797,11 @@ impl Screen for PullRequestsScreen {
     }
 
     fn active_editor(&self) -> Option<TextEditor> {
-        (self.mode == PrMode::Search).then_some(TextEditor::Search)
+        match self.mode {
+            PrMode::Search => Some(TextEditor::Search),
+            PrMode::Comment => Some(TextEditor::Prompt),
+            _ => None,
+        }
     }
 
     fn scroll_state(&self, surface: ScrollSurface) -> ScrollState {
@@ -599,7 +880,12 @@ impl Screen for PullRequestsScreen {
     fn footer_hint(&self, _shell: &Shell) -> &str {
         match self.mode {
             PrMode::Search => "←→ cursor  Ctrl-W delete word  Ctrl-U clear  Enter/Esc finish",
-            PrMode::Browse => "↑↓/jk move  / search  o open  Tab details  ? help  q quit",
+            PrMode::Complete => "↑↓ rows  ←→/Space change  Enter send  Esc cancel",
+            PrMode::ConfirmAbandon => "X abandon it  Esc leave it",
+            PrMode::Comment => "Type a line  Enter post  Esc cancel",
+            PrMode::Browse => {
+                "↑↓/jk move  a/A/w/x vote  n comment  C complete  X abandon  t auto  o open"
+            }
         }
     }
 

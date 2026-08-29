@@ -11,12 +11,12 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use crate::classification::{ClassificationNode, NodeKind};
 use crate::model::{
     CommentRecord, DetailsUpdate, HistoryRecord, Identity, Pipeline, PrBuild, PrReviewer, PrStatus,
-    PullRequest, RelationKind, RelationRecord, Repo, Run, RunResult, RunStatus, StateCatalog,
-    StateCategory, StateOption, Ticket, TicketGraph, TicketKey,
+    PrThread, PullRequest, RelationKind, RelationRecord, Repo, Run, RunResult, RunStatus,
+    StateCatalog, StateCategory, StateOption, Ticket, TicketGraph, TicketKey,
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -77,6 +77,7 @@ DROP TABLE IF EXISTS runs;
 DROP TABLE IF EXISTS pull_requests;
 DROP TABLE IF EXISTS pr_reviewers;
 DROP TABLE IF EXISTS pr_work_items;
+DROP TABLE IF EXISTS pr_threads;
 DROP TABLE IF EXISTS sync_meta;
 CREATE TABLE work_items (
     organization   TEXT NOT NULL,
@@ -226,6 +227,15 @@ CREATE TABLE pr_work_items (
     pull_request_id INTEGER NOT NULL,
     work_item_id    INTEGER NOT NULL,
     PRIMARY KEY (pull_request_id, work_item_id)
+);
+CREATE TABLE pr_threads (
+    pull_request_id INTEGER NOT NULL,
+    thread_id       INTEGER NOT NULL,
+    author          TEXT NOT NULL,
+    text            TEXT NOT NULL,
+    published_at    TEXT,
+    status          TEXT NOT NULL,
+    PRIMARY KEY (pull_request_id, thread_id)
 );
 CREATE TABLE sync_meta (
     key   TEXT PRIMARY KEY,
@@ -686,7 +696,12 @@ impl SqliteTicketRepository {
             return Ok(false);
         }
         let transaction = self.connection.transaction()?;
-        for table in ["pull_requests", "pr_reviewers", "pr_work_items"] {
+        for table in [
+            "pull_requests",
+            "pr_reviewers",
+            "pr_work_items",
+            "pr_threads",
+        ] {
             transaction.execute(&format!("DELETE FROM {table}"), [])?;
         }
         for request in &requests {
@@ -743,6 +758,21 @@ impl SqliteTicketRepository {
                     params![request.id, work_item],
                 )?;
             }
+            for thread in &request.threads {
+                transaction.execute(
+                    "INSERT OR REPLACE INTO pr_threads
+                     (pull_request_id, thread_id, author, text, published_at, status)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        request.id,
+                        thread.id,
+                        thread.author,
+                        thread.text,
+                        thread.published_at.map(|at| at.to_rfc3339()),
+                        thread.status,
+                    ],
+                )?;
+            }
         }
         transaction
             .commit()
@@ -789,12 +819,14 @@ impl SqliteTicketRepository {
                 }),
                 reviewers: Vec::new(),
                 work_items: Vec::new(),
+                threads: Vec::new(),
             })
         })?;
         let mut requests = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         for request in &mut requests {
             request.reviewers = self.load_pr_reviewers(request.id)?;
             request.work_items = self.load_pr_work_items(request.id)?;
+            request.threads = self.load_pr_threads(request.id)?;
         }
         Ok(requests)
     }
@@ -815,6 +847,27 @@ impl SqliteTicketRepository {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to load pull request reviewers")
+    }
+
+    fn load_pr_threads(&self, pull_request: i64) -> Result<Vec<PrThread>> {
+        let mut statement = self.connection.prepare(
+            "SELECT thread_id, author, text, published_at, status
+             FROM pr_threads WHERE pull_request_id = ?1 ORDER BY thread_id",
+        )?;
+        let rows = statement.query_map(params![pull_request], |row| {
+            Ok(PrThread {
+                id: row.get(0)?,
+                author: row.get(1)?,
+                text: row.get(2)?,
+                published_at: row
+                    .get::<_, Option<String>>(3)?
+                    .as_deref()
+                    .and_then(|raw| Timestamp::parse(raw).ok()),
+                status: row.get(4)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load pull request threads")
     }
 
     fn load_pr_work_items(&self, pull_request: i64) -> Result<Vec<i64>> {

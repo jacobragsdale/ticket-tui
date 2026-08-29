@@ -1,3 +1,4 @@
+use crate::app::pull_requests::PrMode;
 use crate::app::{App, AppAction, TabId};
 use crate::model::{Identity, PrBuild, PrReviewer, PrStatus, PullRequest, Repo};
 use crate::timestamp::ts;
@@ -40,6 +41,7 @@ pub(crate) fn pull_request(id: i64, title: &str, author: &str, status: PrStatus)
         reviewers: Vec::new(),
         work_items: Vec::new(),
         build: None,
+        threads: Vec::new(),
     }
 }
 
@@ -290,5 +292,164 @@ fn voting_on_a_pull_request_i_am_not_a_reviewer_of_adds_me() {
         app.pull_requests.my_vote(12, "Jacob Ragsdale"),
         10,
         "which is what the endpoint does"
+    );
+}
+
+fn press(app: &mut App, code: KeyCode) -> AppAction {
+    app.handle_key(crossterm::event::KeyEvent::new(
+        code,
+        crossterm::event::KeyModifiers::NONE,
+    ))
+}
+
+#[test]
+fn the_completion_form_sends_the_options_it_was_left_on() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(2);
+
+    press(&mut app, KeyCode::Char('C'));
+    assert_eq!(app.pull_requests.mode, PrMode::Complete);
+    assert_eq!(
+        app.pull_requests.completion().strategy,
+        crate::model::MergeStrategy::Squash,
+        "squash is the default, as it is in the web UI"
+    );
+
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' '));
+    let action = press(&mut app, KeyCode::Enter);
+
+    assert!(
+        matches!(
+            action,
+            AppAction::PullRequestAction {
+                id: 11,
+                action: crate::sync::PrAction::Complete(options),
+                ..
+            } if options.strategy == crate::model::MergeStrategy::Merge
+                && !options.delete_source
+                && options.transition_work_items
+        ),
+        "got {action:?}"
+    );
+}
+
+#[test]
+fn completing_is_refused_here_when_the_merge_cannot_happen() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    // The one with conflicts.
+    app.pull_requests.cursor.focus(0);
+
+    press(&mut app, KeyCode::Char('C'));
+    assert_eq!(app.pull_requests.mode, PrMode::Browse, "no form opens");
+    assert!(
+        app.shell
+            .notification()
+            .is_some_and(|(message, _)| message.contains("conflicts") && message.contains("o")),
+        "it says what is wrong and what to press"
+    );
+}
+
+#[test]
+fn x_asks_before_abandoning_and_t_toggles_auto_complete() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(2);
+
+    press(&mut app, KeyCode::Char('X'));
+    assert_eq!(app.pull_requests.mode, PrMode::ConfirmAbandon);
+    let action = press(&mut app, KeyCode::Char('X'));
+    assert!(
+        matches!(
+            action,
+            AppAction::PullRequestAction {
+                id: 11,
+                action: crate::sync::PrAction::Abandon,
+                ..
+            }
+        ),
+        "got {action:?}"
+    );
+
+    // Turning auto-complete on asks how it should land first.
+    let action = press(&mut app, KeyCode::Char('t'));
+    assert!(matches!(action, AppAction::None));
+    assert_eq!(app.pull_requests.mode, PrMode::Complete);
+    let action = press(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(
+            action,
+            AppAction::PullRequestAction {
+                action: crate::sync::PrAction::AutoComplete(true),
+                ..
+            }
+        ),
+        "got {action:?}"
+    );
+}
+
+#[test]
+fn n_posts_one_comment_and_it_joins_the_discussion() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(2);
+
+    press(&mut app, KeyCode::Char('n'));
+    let action = press(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(action, AppAction::None),
+        "an empty comment is refused here rather than posted"
+    );
+    for character in "LGTM once CI is green".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    let action = press(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(
+            action,
+            AppAction::CommentOnPullRequest { id: 11, ref text, .. }
+                if text == "LGTM once CI is green"
+        ),
+        "got {action:?}"
+    );
+
+    app.pull_requests.apply_comment(
+        &mut app.shell,
+        11,
+        crate::model::PrThread {
+            id: 3,
+            author: "Jacob Ragsdale".into(),
+            text: "LGTM once CI is green".into(),
+            published_at: Some(ts("2026-08-29T12:00:00Z")),
+            status: "active".into(),
+        },
+    );
+    let row = app.pull_requests.selected(&app.shell).expect("a row");
+    assert_eq!(row.request.threads.len(), 1);
+}
+
+#[test]
+fn a_completed_pull_request_leaves_the_active_view() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.apply_view("Active");
+    assert_eq!(app.pull_requests.visible(&app.shell).len(), 3);
+
+    let mut landed = pull_request(11, "Split the files", "Avery", PrStatus::Completed);
+    landed.closed_at = Some(ts("2026-08-29T12:00:00Z"));
+    app.pull_requests.apply_pull_request(&mut app.shell, landed);
+
+    assert_eq!(
+        app.pull_requests.visible(&app.shell).len(),
+        2,
+        "it is not active any more"
+    );
+    assert!(
+        app.shell
+            .notification()
+            .is_some_and(|(message, _)| message.contains("completed")),
     );
 }

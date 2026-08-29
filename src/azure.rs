@@ -18,7 +18,7 @@ use crate::classification::{self, ClassificationNode};
 use crate::html::html_to_text;
 use crate::model::{
     Approval, CommentRecord, HistoryRecord, Identity, Issue, Pipeline, PrBuild, PrReviewer,
-    PrStatus, PullRequest, RelationKind, RelationRecord, Repo, Run, RunResult, RunStatus,
+    PrStatus, PrThread, PullRequest, RelationKind, RelationRecord, Repo, Run, RunResult, RunStatus,
     StateCategory, StateOption, Ticket, TicketKey, TimelineKind, TimelineRecord, WorkItemDetails,
 };
 use crate::timestamp::Timestamp;
@@ -975,6 +975,77 @@ impl AzureClient {
         Ok(())
     }
 
+    /// The first comment of each thread on one pull request. Replies and line
+    /// comments are what the browser is for.
+    pub fn fetch_pull_request_threads(&self, repo_id: &str, id: i64) -> Result<Vec<PrThread>> {
+        let pull_request = id.to_string();
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "git",
+            "repositories",
+            repo_id,
+            "pullrequests",
+            pull_request.as_str(),
+            "threads",
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&version_query()));
+        Ok(parse_threads(&self.get(url.as_str())?))
+    }
+
+    /// Leaves one comment on a pull request, as a thread of its own.
+    pub fn post_pull_request_comment(
+        &self,
+        repo_id: &str,
+        id: i64,
+        text: &str,
+    ) -> Result<PrThread> {
+        let pull_request = id.to_string();
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "git",
+            "repositories",
+            repo_id,
+            "pullrequests",
+            pull_request.as_str(),
+            "threads",
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&version_query()));
+        let body = serde_json::json!({
+            "comments": [{ "parentCommentId": 0, "content": text, "commentType": "text" }],
+            "status": "active",
+        });
+        let response = self.post(url.as_str(), &body)?;
+        parse_thread(&response)
+            .ok_or_else(|| anyhow!("Azure DevOps answered with a comment that could not be read"))
+    }
+
+    /// Completes, abandons, or turns auto-complete on or off.
+    pub fn patch_pull_request(&self, repo_id: &str, id: i64, body: &Value) -> Result<PullRequest> {
+        let pull_request = id.to_string();
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "git",
+            "repositories",
+            repo_id,
+            "pullrequests",
+            pull_request.as_str(),
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&version_query()));
+        let response = self.patch(url.as_str(), body)?;
+        parse_pull_requests(&serde_json::json!({ "value": [response] }))
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                anyhow!("Azure DevOps answered with a pull request that could not be read")
+            })
+    }
+
     /// The teams hang off `_apis/projects` rather than off the project. `tail`
     /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {
@@ -1314,6 +1385,41 @@ fn parse_approvals(response: &Value) -> Vec<Approval> {
         .collect()
 }
 
+/// The first comment of every thread in a threads response. A thread whose
+/// first comment is one Azure DevOps wrote about itself — a vote, a policy —
+/// is left out: the Discussion section is for what people said.
+fn parse_threads(response: &Value) -> Vec<PrThread> {
+    response["value"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(parse_thread)
+        .collect()
+}
+
+fn parse_thread(entry: &Value) -> Option<PrThread> {
+    let comment = entry["comments"].as_array()?.first()?;
+    if comment["commentType"]
+        .as_str()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("system"))
+    {
+        return None;
+    }
+    Some(PrThread {
+        id: entry["id"].as_i64()?,
+        author: comment["author"]["displayName"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        text: comment["content"].as_str().unwrap_or_default().to_owned(),
+        published_at: comment["publishedDate"]
+            .as_str()
+            .and_then(|raw| Timestamp::parse(raw).ok()),
+        status: entry["status"].as_str().unwrap_or_default().to_owned(),
+    })
+}
+
 /// The pull requests in a list response, with the reviewers each carries.
 fn parse_pull_requests(response: &Value) -> Vec<PullRequest> {
     response["value"]
@@ -1366,6 +1472,7 @@ fn parse_pull_requests(response: &Value) -> Vec<PullRequest> {
                 reviewers: parse_reviewers(&entry["reviewers"]),
                 work_items: Vec::new(),
                 build: None,
+                threads: Vec::new(),
             })
         })
         .collect()

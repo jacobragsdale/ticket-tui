@@ -651,6 +651,26 @@ fn handle_action(
                 app.shell.set_error(refusal);
             }
         }
+        AppAction::PullRequestAction {
+            repo_id,
+            id,
+            action,
+        } => {
+            if let Err(refusal) = runtime.send(SyncRequest::PullRequestAction {
+                repo_id,
+                id,
+                action,
+            }) {
+                app.shell.set_error(refusal);
+            }
+        }
+        AppAction::CommentOnPullRequest { repo_id, id, text } => {
+            if let Err(refusal) =
+                runtime.send(SyncRequest::CommentOnPullRequest { repo_id, id, text })
+            {
+                app.shell.set_error(refusal);
+            }
+        }
         AppAction::VotePullRequest { repo_id, id, vote } => {
             if let Err(refusal) = runtime.send(SyncRequest::VotePullRequest { repo_id, id, vote }) {
                 app.pull_requests
@@ -1140,6 +1160,16 @@ fn poll_sync(
     while let Some(event) = runtime.worker.as_ref().and_then(SyncHandle::try_event) {
         redraw = true;
         match event {
+            SyncEvent::PullRequestUpdated(result) => match result {
+                Ok(updated) => app
+                    .pull_requests
+                    .apply_pull_request(&mut app.shell, *updated),
+                Err(refusal) => app.shell.set_error(refusal),
+            },
+            SyncEvent::PullRequestCommented(result) => match result {
+                Ok((id, thread)) => app.pull_requests.apply_comment(&mut app.shell, id, thread),
+                Err(refusal) => app.shell.set_error(refusal),
+            },
             SyncEvent::Voted(result) => match result {
                 Ok((id, _)) => app.pull_requests.vote_accepted(id),
                 Err((id, refusal)) => {

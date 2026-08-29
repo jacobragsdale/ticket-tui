@@ -18,9 +18,9 @@ use crate::classification::ClassificationNode;
 use crate::db::{self, SqliteTicketRepository};
 use crate::edit::{EditApplied, EditRejection, EditRequest};
 use crate::model::{
-    CommentRecord, DetailsUpdate, Identity, Pipeline, PrBuild, PullRequest, RelationKind,
-    RelationRecord, Repo, Run, StateCatalog, StateOption, Ticket, TicketGraph, TicketKey,
-    WorkItemDetails,
+    CommentRecord, CompletionOptions, DetailsUpdate, Identity, Pipeline, PrBuild, PrThread,
+    PullRequest, RelationKind, RelationRecord, Repo, Run, StateCatalog, StateOption, Ticket,
+    TicketGraph, TicketKey, WorkItemDetails,
 };
 use crate::search::SearchDocuments;
 use crate::timestamp::Timestamp;
@@ -52,6 +52,16 @@ pub enum PullOrigin {
     User,
 }
 
+/// What a write to a pull request is asking for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrAction {
+    /// Merge it, with the options the form named.
+    Complete(CompletionOptions),
+    Abandon,
+    /// Turn auto-complete on or off.
+    AutoComplete(bool),
+}
+
 /// Work for the sync thread, done in the order it arrives: an edit queued
 /// before a pull is written before that pull reads.
 #[derive(Clone, Debug)]
@@ -74,6 +84,18 @@ pub enum SyncRequest {
     TriggerRun { pipeline_id: i64, branch: String },
     /// Stop one run, or retry the jobs that failed in it.
     RunAction { run_id: i64, retry: bool },
+    /// Complete, abandon, or set auto-complete on one pull request.
+    PullRequestAction {
+        repo_id: String,
+        id: i64,
+        action: PrAction,
+    },
+    /// Leave one comment on one pull request, as a thread of its own.
+    CommentOnPullRequest {
+        repo_id: String,
+        id: i64,
+        text: String,
+    },
     /// Record one vote on one pull request, as the signed-in user.
     VotePullRequest { repo_id: String, id: i64, vote: i8 },
     /// Approve or reject one approval, with an optional word about why.
@@ -128,6 +150,11 @@ pub enum SyncEvent {
     RunStarted(Result<Run, String>),
     /// One approval this session answered, or why it could not be.
     ApprovalAnswered(Result<String, String>),
+    /// One pull request this session wrote to, as Azure DevOps answered, or
+    /// why it could not be.
+    PullRequestUpdated(Result<Box<PullRequest>, String>),
+    /// One comment this session left on a pull request.
+    PullRequestCommented(Result<(i64, PrThread), String>),
     /// One vote this session recorded — the pull request and the vote — or the
     /// pull request and why it could not be, so the glyph goes back.
     Voted(Result<(i64, i8), (i64, String)>),
@@ -495,6 +522,24 @@ pub trait WorkItemSource {
     /// The signed-in user's own id, for writes made in their name.
     fn my_id(&self) -> Result<Option<String>> {
         Ok(None)
+    }
+    /// Completes, abandons, or sets auto-complete on one pull request.
+    fn pull_request_action(
+        &self,
+        _repo_id: &str,
+        _id: i64,
+        _action: PrAction,
+        _me: Option<&str>,
+    ) -> Result<PullRequest> {
+        Err(anyhow!("this source cannot write to pull requests"))
+    }
+    /// Leaves one comment on a pull request.
+    fn comment_on_pull_request(&self, _repo_id: &str, _id: i64, _text: &str) -> Result<PrThread> {
+        Err(anyhow!("this source cannot comment on pull requests"))
+    }
+    /// The first comment of each thread on one pull request.
+    fn pull_request_threads(&self, _repo_id: &str, _id: i64) -> Result<Vec<PrThread>> {
+        Ok(Vec::new())
     }
     /// Records one vote on one pull request.
     fn vote_pull_request(
@@ -901,6 +946,22 @@ fn work(
                     .and_then(|source| source.trigger_run(pipeline_id, &branch))
                     .map_err(|error| format!("{error:#}")),
             ),
+            SyncRequest::PullRequestAction {
+                repo_id,
+                id,
+                action,
+            } => SyncEvent::PullRequestUpdated(
+                worker.pull_request_action(&repo_id, id, action, events),
+            ),
+            SyncRequest::CommentOnPullRequest { repo_id, id, text } => {
+                SyncEvent::PullRequestCommented(
+                    worker
+                        .source(events)
+                        .and_then(|source| source.comment_on_pull_request(&repo_id, id, &text))
+                        .map(|thread| (id, thread))
+                        .map_err(|error| format!("{error:#}")),
+                )
+            }
             SyncRequest::VotePullRequest { repo_id, id, vote } => {
                 SyncEvent::Voted(worker.vote(&repo_id, id, vote, events))
             }
@@ -1525,6 +1586,29 @@ impl Worker {
         Ok(stored_pipelines || stored_runs)
     }
 
+    /// Completes, abandons or sets auto-complete on one pull request. The
+    /// completion document carries the head commit the copy on screen was
+    /// read at, so a merge that raced somebody else's push is refused by
+    /// Azure DevOps rather than landing over it.
+    fn pull_request_action(
+        &mut self,
+        repo_id: &str,
+        id: i64,
+        action: PrAction,
+        events: &Sender<SyncEvent>,
+    ) -> Result<Box<PullRequest>, String> {
+        let me = match action {
+            PrAction::AutoComplete(true) => self
+                .my_reviewer_id(events)
+                .map_err(|error| format!("{error:#}"))?,
+            _ => None,
+        };
+        self.source(events)
+            .and_then(|source| source.pull_request_action(repo_id, id, action, me.as_deref()))
+            .map(Box::new)
+            .map_err(|error| format!("{error:#}"))
+    }
+
     /// Records one vote, as whoever is signed in. Their own id is read once
     /// and kept in `sync_meta`: a vote is written under it, and it is not
     /// something the work-item endpoints ever report.
@@ -1591,6 +1675,7 @@ impl Worker {
                 if let Some(held) = held {
                     request.work_items.clone_from(&held.work_items);
                     request.build.clone_from(&held.build);
+                    request.threads.clone_from(&held.threads);
                 }
                 continue;
             }
@@ -1598,6 +1683,7 @@ impl Worker {
                 if let Some(held) = held {
                     request.work_items.clone_from(&held.work_items);
                     request.build.clone_from(&held.build);
+                    request.threads.clone_from(&held.threads);
                 }
                 continue;
             }
@@ -1605,6 +1691,9 @@ impl Worker {
             let source = self.source(events)?;
             if let Ok(work_items) = source.pull_request_work_items(&request.repo_id, request.id) {
                 request.work_items = work_items;
+            }
+            if let Ok(threads) = source.pull_request_threads(&request.repo_id, request.id) {
+                request.threads = threads;
             }
             if let Some(project_id) = project_id.as_deref()
                 && let Ok(build) = source.pull_request_policy(project_id, request.id)
@@ -1961,6 +2050,10 @@ mod tests {
         my_id: Option<String>,
         my_id_reads: Arc<Mutex<usize>>,
         votes: Arc<Mutex<Vec<String>>>,
+        /// The documents sent to the pull request endpoint, and the comments
+        /// left on one.
+        pr_patches: Arc<Mutex<Vec<String>>>,
+        pr_comments: Arc<Mutex<Vec<String>>>,
         /// The repositories this source lists, and the project GUID they carry.
         repos: Arc<Mutex<Vec<Repo>>>,
         /// The pipelines and runs it lists, and how often they were asked for.
@@ -2163,6 +2256,46 @@ mod tests {
                 .unwrap()
                 .push(format!("{repo_id}/{id} {reviewer_id} {vote}"));
             Ok(())
+        }
+
+        fn pull_request_action(
+            &self,
+            _repo_id: &str,
+            id: i64,
+            action: PrAction,
+            me: Option<&str>,
+        ) -> Result<PullRequest> {
+            let body = match action {
+                PrAction::Complete(options) => serde_json::json!({
+                    "status": "completed",
+                    "completionOptions": {
+                        "mergeStrategy": options.strategy.as_api(),
+                        "deleteSourceBranch": options.delete_source,
+                        "transitionWorkItems": options.transition_work_items,
+                    },
+                }),
+                PrAction::Abandon => serde_json::json!({ "status": "abandoned" }),
+                PrAction::AutoComplete(true) => {
+                    serde_json::json!({ "autoCompleteSetBy": { "id": me.unwrap_or_default() } })
+                }
+                PrAction::AutoComplete(false) => serde_json::json!({ "autoCompleteSetBy": null }),
+            };
+            self.pr_patches.lock().unwrap().push(body.to_string());
+            Ok(pull_request(id, "commit-a", PrStatus::Active))
+        }
+
+        fn comment_on_pull_request(&self, _repo_id: &str, id: i64, text: &str) -> Result<PrThread> {
+            self.pr_comments
+                .lock()
+                .unwrap()
+                .push(format!("{id} {text}"));
+            Ok(PrThread {
+                id: 3,
+                author: "Jacob Ragsdale".into(),
+                text: text.to_owned(),
+                published_at: None,
+                status: "active".into(),
+            })
         }
 
         fn pull_requests(&self, status: &str, _top: usize) -> Result<Vec<PullRequest>> {
@@ -2978,6 +3111,7 @@ mod tests {
             }],
             work_items: Vec::new(),
             build: None,
+            threads: Vec::new(),
         }
     }
 
@@ -3120,6 +3254,97 @@ mod tests {
                 event @ SyncEvent::Voted(_) => return event,
                 SyncEvent::DisplayName(_) => continue,
                 other => panic!("expected a vote event, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn completing_abandoning_and_auto_completing_send_the_documents_the_api_takes() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource {
+            my_id: Some("me-guid".into()),
+            pr_patches: Arc::new(Mutex::new(Vec::new())),
+            ..FakeSource::with(vec![])
+        };
+        let patches = Arc::clone(&source.pr_patches);
+        let handle = SyncHandle::spawn(path, Box::new(source)).unwrap();
+
+        for action in [
+            PrAction::Complete(CompletionOptions {
+                strategy: crate::model::MergeStrategy::Merge,
+                delete_source: false,
+                transition_work_items: true,
+            }),
+            PrAction::Abandon,
+            PrAction::AutoComplete(true),
+            PrAction::AutoComplete(false),
+        ] {
+            handle
+                .send(SyncRequest::PullRequestAction {
+                    repo_id: "aaa-111".into(),
+                    id: 11,
+                    action,
+                })
+                .unwrap();
+            let SyncEvent::PullRequestUpdated(result) = next_pr_event(&handle) else {
+                panic!("expected a pull request");
+            };
+            result.expect("the write was taken");
+        }
+
+        let sent = patches.lock().unwrap().clone();
+        assert!(
+            sent[0].contains("\"status\":\"completed\"")
+                && sent[0].contains("noFastForward")
+                && sent[0].contains("\"deleteSourceBranch\":false"),
+            "{}",
+            sent[0]
+        );
+        assert!(sent[1].contains("\"status\":\"abandoned\""), "{}", sent[1]);
+        assert!(sent[2].contains("me-guid"), "{}", sent[2]);
+        assert!(
+            sent[3].contains("\"autoCompleteSetBy\":null"),
+            "turning it off sends a null: {}",
+            sent[3]
+        );
+    }
+
+    #[test]
+    fn a_comment_goes_out_as_a_thread_of_its_own() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource {
+            pr_comments: Arc::new(Mutex::new(Vec::new())),
+            ..FakeSource::with(vec![])
+        };
+        let comments = Arc::clone(&source.pr_comments);
+        let handle = SyncHandle::spawn(path, Box::new(source)).unwrap();
+
+        handle
+            .send(SyncRequest::CommentOnPullRequest {
+                repo_id: "aaa-111".into(),
+                id: 11,
+                text: "LGTM once CI is green".into(),
+            })
+            .unwrap();
+        let SyncEvent::PullRequestCommented(result) = next_pr_event(&handle) else {
+            panic!("expected a comment");
+        };
+        let (id, thread) = result.expect("the comment was taken");
+        assert_eq!(id, 11);
+        assert_eq!(thread.text, "LGTM once CI is green");
+        assert_eq!(*comments.lock().unwrap(), vec!["11 LGTM once CI is green"]);
+    }
+
+    fn next_pr_event(handle: &SyncHandle) -> SyncEvent {
+        loop {
+            match next_event(handle) {
+                event @ (SyncEvent::PullRequestUpdated(_) | SyncEvent::PullRequestCommented(_)) => {
+                    return event;
+                }
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected a pull request event, got {other:?}"),
             }
         }
     }
@@ -3691,6 +3916,8 @@ mod tests {
                 | SyncEvent::RunStarted(_)
                 | SyncEvent::ApprovalAnswered(_)
                 | SyncEvent::Voted(_)
+                | SyncEvent::PullRequestUpdated(_)
+                | SyncEvent::PullRequestCommented(_)
                 | SyncEvent::Details(_)
                 | SyncEvent::Identities(_)
                 | SyncEvent::ClassificationNodes(_)

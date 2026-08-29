@@ -540,6 +540,72 @@ pub struct PrBuild {
     pub run_id: Option<i64>,
 }
 
+/// How a pull request is asked to land.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MergeStrategy {
+    /// One commit on the target, which is the default here as it is in the
+    /// web UI's dropdown.
+    #[default]
+    Squash,
+    /// A merge commit, which the API calls `noFastForward`.
+    Merge,
+    Rebase,
+}
+
+impl MergeStrategy {
+    /// What the completion options call it.
+    #[must_use]
+    pub const fn as_api(self) -> &'static str {
+        match self {
+            Self::Squash => "squash",
+            Self::Merge => "noFastForward",
+            Self::Rebase => "rebase",
+        }
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Squash => "Squash",
+            Self::Merge => "Merge commit",
+            Self::Rebase => "Rebase",
+        }
+    }
+
+    pub const ALL: [Self; 3] = [Self::Squash, Self::Merge, Self::Rebase];
+}
+
+/// What completing a pull request should do besides merging it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompletionOptions {
+    pub strategy: MergeStrategy,
+    pub delete_source: bool,
+    pub transition_work_items: bool,
+}
+
+impl Default for CompletionOptions {
+    fn default() -> Self {
+        Self {
+            strategy: MergeStrategy::default(),
+            delete_source: true,
+            transition_work_items: true,
+        }
+    }
+}
+
+/// One comment thread on a pull request, as the Discussion section lists it:
+/// its first comment, and nothing else. Replies and line comments are `o`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrThread {
+    pub id: i64,
+    pub author: String,
+    pub text: String,
+    pub published_at: Option<Timestamp>,
+    /// `active`, `fixed`, `closed`, as reported, and empty for a thread with
+    /// no status of its own.
+    pub status: String,
+}
+
 /// One pull request, with everything the tab draws about it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PullRequest {
@@ -567,6 +633,8 @@ pub struct PullRequest {
     /// The work items it says it closes.
     pub work_items: Vec<i64>,
     pub build: Option<PrBuild>,
+    /// The first comment of each thread, newest last.
+    pub threads: Vec<PrThread>,
 }
 
 impl PullRequest {

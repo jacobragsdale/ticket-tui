@@ -2,7 +2,7 @@
 //! about the one under the cursor on the right.
 
 use super::*;
-use crate::app::pull_requests::{PrColumn, PrRow, PullRequestsScreen};
+use crate::app::pull_requests::{PrColumn, PrMode, PrRow, PullRequestsScreen};
 use crate::model::{Jump, PrStatus};
 use crate::ui::details::section_line;
 use crate::ui::table::{TableSpec, render_list_table, table_geometry};
@@ -27,6 +27,109 @@ pub(crate) fn render(
     }
     render_content(frame, screen, shell, sections[2]);
     render_footer(frame, screen, shell, sections[3]);
+    match screen.mode {
+        PrMode::Complete => render_complete_form(frame, screen, shell),
+        PrMode::ConfirmAbandon => render_abandon_confirm(frame, screen, shell),
+        PrMode::Comment => render_comment_prompt(frame, screen, shell),
+        _ => {}
+    }
+}
+
+/// How the pull request should land: the strategy, and the two things
+/// completing it also does.
+fn render_complete_form(frame: &mut Frame<'_>, screen: &mut PullRequestsScreen, shell: &mut Shell) {
+    let options = screen.completion();
+    let focused = screen.completion_field();
+    let area = centered_rect(frame.area(), 56, 9);
+    frame.render_widget(Clear, area);
+    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, " Complete ");
+    let row = |index: usize, label: &str, value: String| {
+        let marker = if index == focused { "\u{203a}" } else { " " };
+        Line::from(vec![
+            Span::raw(format!("{marker} {label:<22}")),
+            Span::styled(value, Style::default().fg(theme().accent)),
+        ])
+    };
+    let lines = vec![
+        row(0, "Merge strategy", options.strategy.label().to_owned()),
+        row(1, "Delete source branch", checkbox(options.delete_source)),
+        row(
+            2,
+            "Complete work items",
+            checkbox(options.transition_work_items),
+        ),
+        Line::from(""),
+        Line::styled(
+            "\u{2190}\u{2192} or Space change  \u{00b7}  Enter sends it  \u{00b7}  Esc cancels",
+            Style::default().fg(theme().muted),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn checkbox(on: bool) -> String {
+    if on {
+        "[x] yes".to_owned()
+    } else {
+        "[ ] no".to_owned()
+    }
+}
+
+fn render_abandon_confirm(
+    frame: &mut Frame<'_>,
+    screen: &mut PullRequestsScreen,
+    shell: &mut Shell,
+) {
+    let Some(row) = screen.selected(shell) else {
+        return;
+    };
+    let area = centered_rect(frame.area(), 54, 7);
+    frame.render_widget(Clear, area);
+    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, " Abandon ");
+    let lines = vec![
+        Line::from(format!("Abandon !{}?", row.request.id)),
+        Line::from(""),
+        Line::styled(
+            "Reactivating one is a job for the browser.",
+            Style::default().fg(theme().muted),
+        ),
+        Line::from(""),
+        Line::styled(
+            "X again to abandon it  \u{00b7}  Esc to leave it",
+            Style::default().fg(theme().muted),
+        ),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_comment_prompt(
+    frame: &mut Frame<'_>,
+    screen: &mut PullRequestsScreen,
+    shell: &mut Shell,
+) {
+    let Some(row) = screen.selected(shell) else {
+        return;
+    };
+    let title = format!(" Comment on !{} ", row.request.id);
+    let area = centered_rect(frame.area(), 64, 6);
+    frame.render_widget(Clear, area);
+    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, &title);
+    render_query_field(
+        frame,
+        shell,
+        Rect::new(inner.x, inner.y, inner.width, 1),
+        screen.comment_text(),
+        screen.comment_cursor(),
+        "One line; replies and line comments are o",
+        PointerTarget::PromptInput,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "Enter posts it  \u{00b7}  Esc cancels",
+            Style::default().fg(theme().muted),
+        )),
+        Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1),
+    );
 }
 
 fn render_search(
@@ -309,6 +412,33 @@ fn render_details(
                     .add_modifier(Modifier::UNDERLINED),
             ),
         ]));
+    }
+    if !row.request.threads.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section_line("Discussion"));
+        for thread in &row.request.threads {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {}", thread.author),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "  {}{}",
+                        thread
+                            .published_at
+                            .map_or_else(String::new, |at| relative_age(at, Timestamp::now())),
+                        if thread.status.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" \u{00b7} {}", thread.status)
+                        }
+                    ),
+                    Style::default().fg(theme().muted),
+                ),
+            ]));
+            lines.push(Line::from(format!("  {}", thread.text)));
+        }
     }
     lines.push(Line::from(""));
     lines.push(section_line("Completion"));
