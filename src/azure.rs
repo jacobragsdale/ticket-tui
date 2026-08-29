@@ -12,6 +12,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use url::Url;
 
+use crate::classification::{self, ClassificationNode};
 use crate::html::html_to_text;
 use crate::model::{
     CommentRecord, HistoryRecord, Identity, RelationKind, RelationRecord, StateCategory,
@@ -394,6 +395,32 @@ impl AzureClient {
             collect_team_members(&members, &mut found);
         }
         Ok(found)
+    }
+
+    /// Both classification trees — areas and iterations — in one request, deep
+    /// enough for any hierarchy a project is likely to have. The field path a
+    /// work item carries is not the `path` each node reports, so it is rebuilt
+    /// from the names on the way down; see [`crate::classification`].
+    pub fn fetch_classification_nodes(&self) -> Result<Vec<ClassificationNode>> {
+        let response = self.get(&self.classification_nodes_url()?)?;
+        Ok(classification::parse_classification_nodes(&response))
+    }
+
+    /// A project name is a path segment and may have spaces in it, so this URL
+    /// is assembled rather than formatted, like the teams one below.
+    fn classification_nodes_url(&self) -> Result<String> {
+        let mut url = Url::parse(&self.config.base_url())
+            .with_context(|| format!("invalid Azure DevOps URL {}", self.config.base_url()))?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?
+            .extend([
+                self.config.project.as_str(),
+                "_apis",
+                "wit",
+                "classificationnodes",
+            ]);
+        url.set_query(Some(&format!("$depth=10&api-version={API_VERSION}")));
+        Ok(url.into())
     }
 
     /// A project name is a path segment and may have spaces in it, so the URL is

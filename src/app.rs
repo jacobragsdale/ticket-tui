@@ -11,6 +11,7 @@ use ratatui::widgets::TableState;
 use crate::agent_context::{
     AgentContext, SearchContext, SortContext, TicketContext, TicketReference, TicketsContext,
 };
+use crate::classification::{self, ClassificationNode, NodeKind};
 use crate::columns::TableLayout;
 use crate::command::{Command, CommandId, EDIT_MENU, command_for_key, matching_commands};
 pub use crate::edit::FieldEdit;
@@ -23,7 +24,7 @@ use crate::filter::{
 use crate::model::{
     CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity,
     RelationRecord, SortDirection, SortField, StateCatalog, StateOption, Ticket, TicketGraph,
-    TicketKey, compare_tickets,
+    TicketKey, compare_tickets, path_leaf,
 };
 pub use crate::model::{RowDensity, SearchOrder};
 use crate::pointer::{
@@ -34,6 +35,7 @@ pub use crate::pointer::{HitRegions, PointerTarget};
 use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
 use crate::session::{self, NamedView, Session};
 use crate::text_input::TextInput;
+use crate::timestamp::Timestamp;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AppMode {
@@ -58,6 +60,9 @@ pub enum AppMode {
     Prompt,
     /// The people the selected work item can be assigned to, filtered by typing.
     AssigneePicker,
+    /// The iteration or area tree the selected work item can be moved into,
+    /// filtered by typing. Which of the two is on [`NodePicker::kind`].
+    NodePicker,
 }
 
 /// Percentage of the workspace given to the tickets pane when the panes sit
@@ -107,6 +112,11 @@ pub enum AppAction {
     /// somebody with no work item in the database yet. Asked for once a
     /// session, when that picker first opens; the picker does not wait on it.
     FetchIdentities,
+    /// Read the project's iteration and area trees, so both node pickers can
+    /// offer a sprint no work item sits in yet. Asked for once a session, when
+    /// either picker first opens on a cache that is empty or stale; the picker
+    /// does not wait on it.
+    FetchClassificationNodes,
     OpenUrl(String),
     Copy {
         text: String,
@@ -321,6 +331,87 @@ pub struct AssigneePicker {
     pub id: i64,
 }
 
+/// How long a cached copy of the classification trees is trusted before either
+/// picker asks Azure DevOps for them again. Sprints are added a few times a
+/// year, so an hour is generous and still keeps a long-running session honest.
+const CLASSIFICATION_MAX_AGE_SECONDS: i64 = 3600;
+
+/// One row of an iteration or area picker: a node of the tree, flattened.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NodeRow {
+    /// The full backslash path the field is written with, such as
+    /// `development\Sprint 1`.
+    pub path: String,
+    /// How far the row is indented: zero for the project root, one for its
+    /// children, and so on.
+    pub depth: usize,
+    /// The days an iteration runs between, as the row shows them, such as
+    /// `Aug 25 – Sep 5`. Areas and unscheduled iterations have none.
+    pub dates: Option<String>,
+    /// Whether today falls inside those days, which the row says out loud.
+    pub current_period: bool,
+}
+
+impl NodeRow {
+    /// A row for a path with no node behind it: the fallback list, and the work
+    /// item's own path when the trees no longer name it.
+    #[must_use]
+    pub fn of(path: &str) -> Self {
+        Self {
+            path: path.to_owned(),
+            depth: path.matches('\\').count(),
+            dates: None,
+            current_period: false,
+        }
+    }
+
+    /// The last segment, which is what the row shows and what the table column
+    /// and the filters match on.
+    #[must_use]
+    pub fn leaf(&self) -> &str {
+        path_leaf(&self.path)
+    }
+
+    /// The two spaces per level that draw the tree.
+    #[must_use]
+    pub fn indent(&self) -> String {
+        "  ".repeat(self.depth)
+    }
+}
+
+/// The iteration or area picker: the project's tree flattened to indented rows,
+/// filtered by whatever has been typed. Built when it opens from the cached
+/// nodes, so it never waits for the network.
+#[derive(Clone, Debug)]
+pub struct NodePicker {
+    /// Which tree is open, which is also the field a choice is written to.
+    pub kind: NodeKind,
+    /// Every row, in tree order.
+    pub rows: Vec<NodeRow>,
+    pub query: TextInput,
+    /// The cursor, counted over the rows the query left showing.
+    pub index: usize,
+    pub scroll: ScrollState,
+    /// The path the work item carries now, which `Enter` treats as a no-op.
+    pub current: String,
+    /// The work item the picker was opened for, shown in its title.
+    pub id: i64,
+}
+
+impl Default for NodePicker {
+    fn default() -> Self {
+        Self {
+            kind: NodeKind::Iteration,
+            rows: Vec::new(),
+            query: TextInput::default(),
+            index: 0,
+            scroll: ScrollState::default(),
+            current: String::new(),
+            id: 0,
+        }
+    }
+}
+
 /// Azure DevOps echoes display names back with inconsistent casing and spacing,
 /// so two names are the same person when they are the same after both.
 #[must_use]
@@ -476,6 +567,7 @@ pub struct App {
     pub state_picker: StatePicker,
     pub priority_picker: PriorityPicker,
     pub assignee_picker: AssigneePicker,
+    pub node_picker: NodePicker,
     /// The open single-line field editor, if there is one.
     pub prompt: Option<TextPrompt>,
     bookmarks: HashSet<TicketKey>,
@@ -520,6 +612,16 @@ pub struct App {
     /// Whether the team members have been asked for this session, so opening
     /// the picker a second time costs nothing.
     identities_requested: bool,
+    /// The project's iteration and area trees as the last fetch flattened them,
+    /// read out of the database at startup. Both node pickers are built from
+    /// these, and `current_iteration` reads the sprint out of them.
+    classification_nodes: Vec<ClassificationNode>,
+    /// When those trees were last read from Azure DevOps, so a picker opening
+    /// on a fresh cache asks for nothing at all.
+    classification_fetched_at: Option<Timestamp>,
+    /// Whether the trees have been asked for this session, so opening either
+    /// picker a second time costs nothing.
+    classification_requested: bool,
 }
 
 /// Compact relative wording shared by the freshness and sync labels.
@@ -588,6 +690,7 @@ impl App {
             state_picker: StatePicker::default(),
             priority_picker: PriorityPicker::default(),
             assignee_picker: AssigneePicker::default(),
+            node_picker: NodePicker::default(),
             prompt: None,
             bookmarks: HashSet::new(),
             selected_keys: HashSet::new(),
@@ -611,6 +714,9 @@ impl App {
             me: None,
             identities: Vec::new(),
             identities_requested: false,
+            classification_nodes: Vec::new(),
+            classification_fetched_at: None,
+            classification_requested: false,
         };
         app.show_all(None);
         app
@@ -1313,6 +1419,7 @@ impl App {
                 }
             }
             Some(TextEditor::Assignee) => self.assignee_picker.query.paste(pasted, false),
+            Some(TextEditor::Node) => self.node_picker.query.paste(pasted, false),
             None => {}
         }
     }
@@ -1361,6 +1468,7 @@ impl App {
             AppMode::Views if self.views_overlay.naming.is_some() => Some(TextEditor::ViewName),
             AppMode::Prompt => Some(TextEditor::Prompt),
             AppMode::AssigneePicker => Some(TextEditor::Assignee),
+            AppMode::NodePicker => Some(TextEditor::Node),
             _ => None,
         }
     }
@@ -1390,6 +1498,7 @@ impl App {
             ScrollSurface::StatePicker => self.state_picker.scroll,
             ScrollSurface::PriorityPicker => self.priority_picker.scroll,
             ScrollSurface::AssigneePicker => self.assignee_picker.scroll,
+            ScrollSurface::NodePicker => self.node_picker.scroll,
         }
     }
 
@@ -1411,6 +1520,7 @@ impl App {
             ScrollSurface::StatePicker => &mut self.state_picker.scroll,
             ScrollSurface::PriorityPicker => &mut self.priority_picker.scroll,
             ScrollSurface::AssigneePicker => &mut self.assignee_picker.scroll,
+            ScrollSurface::NodePicker => &mut self.node_picker.scroll,
         }
     }
 
@@ -1514,6 +1624,7 @@ impl App {
             AppMode::PriorityPicker => self.handle_priority_picker_key(key),
             AppMode::Prompt => self.handle_prompt_key(key),
             AppMode::AssigneePicker => self.handle_assignee_picker_key(key),
+            AppMode::NodePicker => self.handle_node_picker_key(key),
         }
     }
 
@@ -1964,6 +2075,13 @@ impl App {
             PointerTarget::AssigneeQuery => {
                 self.place_caret(TextEditor::Assignee, column, row);
             }
+            PointerTarget::NodeOption { index } => {
+                self.node_picker.index = index;
+                return self.choose_node(index);
+            }
+            PointerTarget::NodeQuery => {
+                self.place_caret(TextEditor::Node, column, row);
+            }
             PointerTarget::PromptInput => {
                 self.place_caret(TextEditor::Prompt, column, row);
             }
@@ -2037,7 +2155,8 @@ impl App {
                 TextEditor::Palette
                 | TextEditor::ViewName
                 | TextEditor::Prompt
-                | TextEditor::Assignee => SelectableSurface::Overlay,
+                | TextEditor::Assignee
+                | TextEditor::Node => SelectableSurface::Overlay,
             })
             .and_then(|snapshot| snapshot.pos_at(column, row))
             .or_else(|| {
@@ -2064,6 +2183,7 @@ impl App {
                 }
             }
             TextEditor::Assignee => self.assignee_picker.query.set_cursor(index),
+            TextEditor::Node => self.node_picker.query.set_cursor(index),
         }
     }
 
@@ -2948,6 +3068,232 @@ impl App {
         ))
     }
 
+    /// The project's iteration and area trees as the database holds them.
+    #[must_use]
+    pub fn classification_nodes(&self) -> &[ClassificationNode] {
+        &self.classification_nodes
+    }
+
+    /// The trees read out of the database at startup, with the time they were
+    /// last fetched, so a picker opening on a fresh cache asks for nothing.
+    pub fn set_classification_nodes(
+        &mut self,
+        nodes: Vec<ClassificationNode>,
+        fetched_at: Option<Timestamp>,
+    ) {
+        self.classification_nodes = nodes;
+        self.classification_fetched_at = fetched_at;
+    }
+
+    /// The trees a fetch brought back. An empty answer changes nothing: the
+    /// endpoint could not be read, and the cached nodes are better than none.
+    /// An open picker is rebuilt around them, keeping the row under the cursor.
+    pub fn merge_classification_nodes(&mut self, nodes: Vec<ClassificationNode>) {
+        if nodes.is_empty() {
+            return;
+        }
+        self.classification_nodes = nodes;
+        self.classification_fetched_at = Some(Timestamp::now());
+        if self.mode != AppMode::NodePicker {
+            return;
+        }
+        let focused = self
+            .node_matches()
+            .get(self.node_picker.index)
+            .map(|row| row.path.clone());
+        let kind = self.node_picker.kind;
+        let current = self.node_picker.current.clone();
+        self.node_picker.rows = self.node_rows(kind);
+        let matches = self.node_matches();
+        let index = focused
+            .and_then(|path| matches.iter().position(|row| row.path == path))
+            .or_else(|| matches.iter().position(|row| row.path == current))
+            .unwrap_or(self.node_picker.index)
+            .min(matches.len().saturating_sub(1));
+        self.focus_node(index);
+    }
+
+    /// The sprint the project is in: the deepest iteration whose dates contain
+    /// today in UTC. `None` when no iteration is scheduled around today, which
+    /// includes every project whose trees have never been fetched.
+    #[must_use]
+    pub fn current_iteration(&self) -> Option<String> {
+        classification::current_iteration(&self.classification_nodes, Timestamp::now().date())
+            .map(|node| node.path.clone())
+    }
+
+    /// The rows one picker offers: the cached tree when there is one, and
+    /// otherwise the distinct paths the work items already carry, which is
+    /// enough to move work between the sprints actually in use. Either way the
+    /// work item's own node is among them — a work item always sits somewhere
+    /// in the tree it is planned into — so the cursor has somewhere to start.
+    #[must_use]
+    fn node_rows(&self, kind: NodeKind) -> Vec<NodeRow> {
+        let today = Timestamp::now().date();
+        let rows: Vec<NodeRow> = self
+            .classification_nodes
+            .iter()
+            .filter(|node| node.kind == kind)
+            .map(|node| NodeRow {
+                path: node.path.clone(),
+                depth: node.depth,
+                dates: node.date_range(),
+                current_period: node.contains(today),
+            })
+            .collect();
+        if rows.is_empty() {
+            return self.database_node_rows(kind);
+        }
+        rows
+    }
+
+    /// The fallback, for a project whose trees have never been fetched: every
+    /// distinct path of one kind the database holds, in order, indented by the
+    /// depth read off the path itself.
+    #[must_use]
+    fn database_node_rows(&self, kind: NodeKind) -> Vec<NodeRow> {
+        let mut paths: Vec<&str> = self
+            .tickets
+            .iter()
+            .map(|ticket| match kind {
+                NodeKind::Area => ticket.area_path.as_str(),
+                NodeKind::Iteration => ticket.iteration_path.as_str(),
+            })
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .collect();
+        paths.sort_unstable();
+        paths.dedup();
+        paths.into_iter().map(NodeRow::of).collect()
+    }
+
+    /// The rows whatever has been typed leaves showing, matched on the whole
+    /// path so `q3s7` finds `development\Q3\Sprint 7`.
+    #[must_use]
+    pub fn node_matches(&self) -> Vec<NodeRow> {
+        let query = self.node_picker.query.text().trim().to_owned();
+        self.node_picker
+            .rows
+            .iter()
+            .filter(|row| query.is_empty() || fuzzy_contains(&row.path, &query))
+            .cloned()
+            .collect()
+    }
+
+    /// The Edit menu's Iteration and Area rows: the project's tree, indented,
+    /// with the node the work item sits in already under the cursor. The rows
+    /// come out of what is already in memory, so the picker opens at once; the
+    /// trees are asked for the first time either picker is opened on a cache
+    /// that is empty or over an hour old, and merged in when they arrive.
+    fn open_node_picker(&mut self, kind: NodeKind) -> AppAction {
+        let Some(ticket) = self.selected_ticket() else {
+            self.set_error("No work item is selected");
+            return AppAction::None;
+        };
+        let current = match kind {
+            NodeKind::Area => ticket.area_path.clone(),
+            NodeKind::Iteration => ticket.iteration_path.clone(),
+        };
+        let id = ticket.key.id;
+        let rows = self.node_rows(kind);
+        let index = rows
+            .iter()
+            .position(|row| row.path == current)
+            .unwrap_or_default();
+        self.node_picker = NodePicker {
+            kind,
+            rows,
+            query: TextInput::default(),
+            index,
+            scroll: ScrollState::default(),
+            current,
+            id,
+        };
+        self.node_picker.scroll.ensure_visible(index);
+        self.mode = AppMode::NodePicker;
+        if self.should_fetch_classification_nodes() {
+            self.classification_requested = true;
+            AppAction::FetchClassificationNodes
+        } else {
+            AppAction::None
+        }
+    }
+
+    /// Whether opening a picker should ask Azure DevOps for the trees: once a
+    /// session at most, and not at all while a cache under an hour old is
+    /// loaded, so the second open costs nothing and so does the first one after
+    /// a restart.
+    #[must_use]
+    fn should_fetch_classification_nodes(&self) -> bool {
+        if self.classification_requested {
+            return false;
+        }
+        if self.classification_nodes.is_empty() {
+            return true;
+        }
+        self.classification_fetched_at.is_none_or(|fetched| {
+            fetched.seconds_until(Timestamp::now()) >= CLASSIFICATION_MAX_AGE_SECONDS
+        })
+    }
+
+    fn handle_node_picker_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => self.mode = AppMode::Browse,
+            KeyCode::Up => self.move_node_selection(-1),
+            KeyCode::Down => self.move_node_selection(1),
+            KeyCode::PageUp => self.move_node_selection(-5),
+            KeyCode::PageDown => self.move_node_selection(5),
+            KeyCode::Enter => return self.choose_node(self.node_picker.index),
+            // Everything else is typing, the way it is in the assignee picker.
+            _ => {
+                let before = self.node_picker.query.text().to_owned();
+                self.node_picker.query.handle_key(key);
+                if self.node_picker.query.text() != before {
+                    self.node_picker.index = 0;
+                    self.node_picker.scroll.scroll_to(0);
+                }
+            }
+        }
+        AppAction::None
+    }
+
+    fn move_node_selection(&mut self, delta: isize) {
+        let count = self.node_matches().len();
+        if count == 0 {
+            self.node_picker.index = 0;
+            return;
+        }
+        let index = self
+            .node_picker
+            .index
+            .saturating_add_signed(delta)
+            .min(count - 1);
+        self.focus_node(index);
+    }
+
+    fn focus_node(&mut self, index: usize) {
+        self.node_picker.index = index;
+        self.node_picker.scroll.ensure_visible(index);
+    }
+
+    /// Confirms one node. The node the work item already sits in is a no-op;
+    /// anything else writes the full backslash path to `System.IterationPath`
+    /// or `System.AreaPath`, and the table column goes on showing the leaf.
+    fn choose_node(&mut self, index: usize) -> AppAction {
+        let Some(row) = self.node_matches().get(index).cloned() else {
+            self.mode = AppMode::Browse;
+            return AppAction::None;
+        };
+        self.mode = AppMode::Browse;
+        if row.path == self.node_picker.current {
+            return AppAction::None;
+        }
+        match self.node_picker.kind {
+            NodeKind::Iteration => self.edit_selected(FieldEdit::iteration(&row.path)),
+            NodeKind::Area => self.edit_selected(FieldEdit::area(&row.path)),
+        }
+    }
+
     /// The Edit menu's Title and Tags rows: a single-line field prefilled with
     /// what the work item says now, edited with the same keys as the
     /// named-view editor.
@@ -3214,6 +3560,8 @@ impl App {
                 AppAction::None
             }
             CommandId::EditAssignee => self.open_assignee_picker(),
+            CommandId::EditIteration => self.open_node_picker(NodeKind::Iteration),
+            CommandId::EditArea => self.open_node_picker(NodeKind::Area),
             CommandId::SaveView => {
                 self.open_views();
                 self.views_overlay.naming =
@@ -3579,6 +3927,7 @@ const fn mode_name(mode: AppMode) -> &'static str {
         AppMode::PriorityPicker => "priority-picker",
         AppMode::Prompt => "prompt",
         AppMode::AssigneePicker => "assignee-picker",
+        AppMode::NodePicker => "node-picker",
     }
 }
 
@@ -4518,7 +4867,15 @@ mod tests {
                 .iter()
                 .map(|entry| entry.label)
                 .collect::<Vec<_>>(),
-            ["State", "Title", "Priority", "Tags", "Assignee"],
+            [
+                "State",
+                "Title",
+                "Priority",
+                "Tags",
+                "Assignee",
+                "Iteration",
+                "Area"
+            ],
             "later field editors append their own row"
         );
         assert_eq!(app.edit_menu.index, 0);
@@ -5060,6 +5417,272 @@ mod tests {
                 "path": "/fields/System.AssignedTo",
                 "value": "dana@example.com",
             })]
+        );
+    }
+
+    /// The two trees a project with a nested quarter has, as a fetch flattens
+    /// them. Sprint 1 is the one running today, whenever today is.
+    fn classification_trees() -> Vec<ClassificationNode> {
+        let today = Timestamp::now().calendar_date();
+        let day = || Timestamp::parse(&format!("{today}T00:00:00Z")).ok();
+        vec![
+            ClassificationNode::new(NodeKind::Area, "development", 0),
+            ClassificationNode::new(NodeKind::Area, "development\\Platform", 1),
+            ClassificationNode::new(NodeKind::Iteration, "development", 0),
+            ClassificationNode {
+                start_date: day(),
+                finish_date: day(),
+                ..ClassificationNode::new(NodeKind::Iteration, "development\\Sprint 1", 1)
+            },
+            ClassificationNode::new(NodeKind::Iteration, "development\\Q3", 1),
+            ClassificationNode::new(NodeKind::Iteration, "development\\Q3\\Sprint 7", 2),
+        ]
+    }
+
+    /// An editable app whose selected row is planned into `development\Q3` and
+    /// `development\Platform`, both nodes of the trees above.
+    fn planned_app() -> App {
+        let mut app = edit_app();
+        let planned: Vec<Ticket> = app
+            .tickets()
+            .iter()
+            .map(|ticket| Ticket {
+                iteration_path: "development\\Q3".into(),
+                area_path: "development\\Platform".into(),
+                ..ticket.clone()
+            })
+            .collect();
+        app.replace_prepared_tickets(PreparedTickets::new(planned));
+        app.set_table_viewport(3);
+        app
+    }
+
+    /// The same app with the project's trees already cached.
+    fn node_app() -> App {
+        let mut app = planned_app();
+        app.set_classification_nodes(classification_trees(), None);
+        app
+    }
+
+    /// The rows the open picker is showing, as they are drawn: the indent, the
+    /// leaf, and whether the row is marked as running today.
+    fn node_rows(app: &App) -> Vec<String> {
+        app.node_matches()
+            .into_iter()
+            .map(|row| {
+                let current = if row.current_period { " current" } else { "" };
+                format!("{}{}{current}", row.indent(), row.leaf())
+            })
+            .collect()
+    }
+
+    /// Runs the Edit menu's Iteration or Area row.
+    fn open_nodes(app: &mut App, kind: NodeKind) -> AppAction {
+        app.run_command(match kind {
+            NodeKind::Iteration => CommandId::EditIteration,
+            NodeKind::Area => CommandId::EditArea,
+        })
+    }
+
+    #[test]
+    fn the_iteration_picker_draws_the_tree_indented_and_opens_on_the_current_node() {
+        let mut app = node_app();
+
+        assert_eq!(
+            open_nodes(&mut app, NodeKind::Iteration),
+            AppAction::FetchClassificationNodes,
+            "the first open asks for the project's trees"
+        );
+        assert_eq!(app.mode, AppMode::NodePicker);
+        assert_eq!(
+            node_rows(&app),
+            ["development", "  Sprint 1 current", "  Q3", "    Sprint 7"],
+            "two spaces a level, the leaf named, and the sprint running today marked"
+        );
+        assert!(
+            app.node_matches()[1].dates.is_some(),
+            "a scheduled iteration carries its date range"
+        );
+        assert_eq!(
+            app.node_picker.index, 2,
+            "the picker opens on the node the work item sits in"
+        );
+        assert_eq!(app.node_picker.current, "development\\Q3");
+        assert_eq!(app.node_picker.id, 3, "it names the selected row");
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            open_nodes(&mut app, NodeKind::Iteration),
+            AppAction::None,
+            "the trees are asked for once a session, so the second open is instant"
+        );
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            open_nodes(&mut app, NodeKind::Area),
+            AppAction::None,
+            "and the other picker shares that one fetch"
+        );
+        assert_eq!(
+            node_rows(&app),
+            ["development", "  Platform"],
+            "the area picker draws the other tree, with no dates on it"
+        );
+        assert_eq!(app.node_picker.index, 1);
+    }
+
+    #[test]
+    fn enter_on_another_node_writes_the_full_path_and_the_row_shows_its_leaf() {
+        let mut app = node_app();
+
+        open_nodes(&mut app, NodeKind::Iteration);
+        type_query(&mut app, "sprint 1");
+        assert_eq!(
+            node_rows(&app),
+            ["  Sprint 1 current"],
+            "the filter matches characters in order over the whole path"
+        );
+        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+            panic!("choosing another node should dispatch an edit");
+        };
+
+        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(request.key.id, 3);
+        assert_eq!(
+            request.edit.patch(),
+            vec![serde_json::json!({
+                "op": "add",
+                "path": "/fields/System.IterationPath",
+                "value": "development\\Sprint 1",
+            })],
+            "the write carries the full backslash path, not the leaf"
+        );
+        let moved = app.selected_ticket().expect("a selected row");
+        assert_eq!(moved.iteration_path, "development\\Sprint 1");
+        assert_eq!(
+            path_leaf(&moved.iteration_path),
+            "Sprint 1",
+            "the Iteration column goes on showing the leaf"
+        );
+
+        let mut app = node_app();
+        open_nodes(&mut app, NodeKind::Area);
+        press(&mut app, KeyCode::Up);
+        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+            panic!("choosing another area should dispatch an edit");
+        };
+        assert_eq!(
+            request.edit.patch(),
+            vec![serde_json::json!({
+                "op": "add",
+                "path": "/fields/System.AreaPath",
+                "value": "development",
+            })]
+        );
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.area_path.clone()),
+            Some("development".to_owned())
+        );
+    }
+
+    #[test]
+    fn choosing_the_node_the_work_item_is_already_in_writes_nothing() {
+        let mut app = node_app();
+
+        open_nodes(&mut app, NodeKind::Iteration);
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            AppAction::None,
+            "the node it sits in already is a no-op"
+        );
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(!app.edits_pending());
+        assert_eq!(app.notification(), None, "a no-op closes silently");
+
+        open_nodes(&mut app, NodeKind::Iteration);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(!app.edits_pending());
+    }
+
+    #[test]
+    fn a_picker_with_nothing_cached_lists_the_paths_the_database_holds() {
+        let mut app = planned_app();
+
+        open_nodes(&mut app, NodeKind::Iteration);
+        assert_eq!(
+            node_rows(&app),
+            ["  Q3"],
+            "every work item is in development\\Q3, indented by its own depth"
+        );
+        assert_eq!(app.node_picker.index, 0, "which is where the cursor starts");
+
+        press(&mut app, KeyCode::Esc);
+        open_nodes(&mut app, NodeKind::Area);
+        assert_eq!(node_rows(&app), ["  Platform"]);
+    }
+
+    #[test]
+    fn fetched_trees_land_in_an_open_picker_without_moving_the_cursor() {
+        let mut app = planned_app();
+
+        assert_eq!(
+            open_nodes(&mut app, NodeKind::Iteration),
+            AppAction::FetchClassificationNodes
+        );
+        assert_eq!(node_rows(&app), ["  Q3"]);
+        let focused = app.node_matches()[app.node_picker.index].path.clone();
+
+        app.merge_classification_nodes(classification_trees());
+        assert_eq!(
+            node_rows(&app),
+            ["development", "  Sprint 1 current", "  Q3", "    Sprint 7"],
+            "the fetched tree replaces the fallback in the open picker"
+        );
+        assert_eq!(
+            app.node_matches()[app.node_picker.index].path,
+            focused,
+            "the cursor stays on the node it was on"
+        );
+
+        type_query(&mut app, "q3s7");
+        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+            panic!("a merged-in node should be choosable");
+        };
+        assert_eq!(
+            request.edit.patch(),
+            vec![serde_json::json!({
+                "op": "add",
+                "path": "/fields/System.IterationPath",
+                "value": "development\\Q3\\Sprint 7",
+            })]
+        );
+    }
+
+    #[test]
+    fn the_current_iteration_is_the_scheduled_one_containing_today() {
+        let mut app = planned_app();
+        assert_eq!(
+            app.current_iteration(),
+            None,
+            "a project whose trees were never fetched has no current sprint"
+        );
+
+        app.set_classification_nodes(classification_trees(), None);
+        assert_eq!(
+            app.current_iteration(),
+            Some("development\\Sprint 1".to_owned())
+        );
+
+        let undated: Vec<ClassificationNode> = classification_trees()
+            .into_iter()
+            .map(|node| ClassificationNode::new(node.kind, node.path, node.depth))
+            .collect();
+        app.set_classification_nodes(undated, None);
+        assert_eq!(
+            app.current_iteration(),
+            None,
+            "an iteration nobody scheduled is never the current one"
         );
     }
 

@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::app::PreparedTickets;
 use crate::azure::{self, AzureClient, AzureConfig, SyncBatch};
+use crate::classification::ClassificationNode;
 use crate::db::{self, SqliteTicketRepository};
 use crate::edit::{EditApplied, EditRejection, EditRequest};
 use crate::model::{
@@ -45,6 +46,10 @@ pub enum SyncRequest {
     /// Read the project's team members, for the assignee picker. Asked for once
     /// a session, the first time that picker opens.
     Identities,
+    /// Read the project's iteration and area trees, for the two node pickers.
+    /// Asked for once a session, the first time either one opens on a cache
+    /// that is empty or over an hour old.
+    ClassificationNodes,
 }
 
 /// What the sync thread sends back.
@@ -66,6 +71,10 @@ pub enum SyncEvent {
     /// read, which is not worth reporting: the assignee picker already offers
     /// everybody the database has seen.
     Identities(Vec<Identity>),
+    /// The project's iteration and area trees, flattened and already stored.
+    /// Empty when they could not be read, which is not worth reporting: both
+    /// pickers already offer every path the database has seen.
+    ClassificationNodes(Vec<ClassificationNode>),
     /// The worker thread is gone and no further events will arrive.
     Stopped,
 }
@@ -149,6 +158,12 @@ pub trait WorkItemSource {
     fn team_members(&self) -> Result<Vec<Identity>> {
         Ok(Vec::new())
     }
+    /// The project's iteration and area trees, flattened, which the two node
+    /// pickers offer alongside the paths the work items already carry. A source
+    /// that cannot read them answers with nothing, and the pickers fall back.
+    fn classification_nodes(&self) -> Result<Vec<ClassificationNode>> {
+        Ok(Vec::new())
+    }
 }
 
 impl WorkItemSource for AzureClient {
@@ -182,6 +197,10 @@ impl WorkItemSource for AzureClient {
 
     fn team_members(&self) -> Result<Vec<Identity>> {
         self.fetch_team_members()
+    }
+
+    fn classification_nodes(&self) -> Result<Vec<ClassificationNode>> {
+        self.fetch_classification_nodes()
     }
 }
 
@@ -279,6 +298,9 @@ fn work(
             }
             SyncRequest::Details(key) => SyncEvent::Details(Box::new(worker.details(key, events))),
             SyncRequest::Identities => SyncEvent::Identities(worker.identities(events)),
+            SyncRequest::ClassificationNodes => {
+                SyncEvent::ClassificationNodes(worker.classification_nodes(events))
+            }
         };
         if events.send(event).is_err() {
             break;
@@ -418,6 +440,30 @@ impl Worker {
             drop(repository.replace_identities(&members));
         }
         members
+    }
+
+    /// Reads both classification trees and stores them for the next session,
+    /// answering with what was stored. Like the team members, a failure answers
+    /// with nothing and says nothing: the pickers already offer every iteration
+    /// and area the database has a work item in, which is enough to move work
+    /// between the sprints that are actually in use.
+    fn classification_nodes(&mut self, events: &Sender<SyncEvent>) -> Vec<ClassificationNode> {
+        let nodes = match self.source(events) {
+            Ok(source) => source.classification_nodes().unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        if nodes.is_empty() {
+            return nodes;
+        }
+        if let Ok(repository) = self.repository()
+            && repository.replace_classification_nodes(&nodes).is_ok()
+        {
+            drop(repository.set_meta(
+                db::CLASSIFICATION_FETCHED_KEY,
+                &Timestamp::now().to_rfc3339(),
+            ));
+        }
+        nodes
     }
 
     /// A pull starts from the watermark the last one left behind. Without one —
@@ -677,6 +723,7 @@ impl SyncScheduler {
 mod tests {
     use super::*;
     use crate::azure::RequestRejected;
+    use crate::classification::NodeKind;
     use crate::edit::FieldEdit;
     use crate::model::{
         CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateCategory, Ticket,
@@ -750,6 +797,9 @@ mod tests {
         /// The project's team members, or `None` for a source that cannot list
         /// them, which is what the trait's default leaves behind.
         team_members: Option<Vec<Identity>>,
+        /// The project's classification trees, or `None` for a source that
+        /// cannot read them.
+        classification_nodes: Option<Vec<ClassificationNode>>,
     }
 
     impl FakeSource {
@@ -792,6 +842,13 @@ mod tests {
         fn with_team(self, members: Vec<Identity>) -> Self {
             Self {
                 team_members: Some(members),
+                ..self
+            }
+        }
+
+        fn with_nodes(self, nodes: Vec<ClassificationNode>) -> Self {
+            Self {
+                classification_nodes: Some(nodes),
                 ..self
             }
         }
@@ -868,6 +925,12 @@ mod tests {
             self.team_members
                 .clone()
                 .context("the fake source cannot list teams")
+        }
+
+        fn classification_nodes(&self) -> Result<Vec<ClassificationNode>> {
+            self.classification_nodes
+                .clone()
+                .context("the fake source cannot read classification nodes")
         }
 
         fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>> {
@@ -1615,6 +1678,73 @@ mod tests {
     }
 
     #[test]
+    fn the_classification_trees_a_source_reads_are_stored_and_handed_to_the_pickers() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let trees = vec![
+            ClassificationNode::new(NodeKind::Area, "atlas", 0),
+            ClassificationNode {
+                start_date: Some(ts("2026-08-25T00:00:00Z")),
+                finish_date: Some(ts("2026-09-05T00:00:00Z")),
+                ..ClassificationNode::new(NodeKind::Iteration, "atlas\\Sprint 1", 1)
+            },
+        ];
+        let handle = SyncHandle::spawn(
+            path.clone(),
+            Box::new(FakeSource::with(vec![]).with_nodes(trees.clone())),
+        )
+        .unwrap();
+
+        handle.send(SyncRequest::ClassificationNodes).unwrap();
+        let found = loop {
+            match next_event(&handle) {
+                SyncEvent::ClassificationNodes(nodes) => break nodes,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected the classification trees, got {other:?}"),
+            }
+        };
+        assert_eq!(found, trees, "the worker hands back what it stored");
+
+        let stored = SqliteTicketRepository::open_existing(&path).unwrap();
+        assert_eq!(
+            stored.load_classification_nodes().unwrap(),
+            trees,
+            "the next session's pickers open on them without asking again"
+        );
+        assert!(
+            stored
+                .meta(db::CLASSIFICATION_FETCHED_KEY)
+                .unwrap()
+                .is_some(),
+            "and the fetch is dated, so a fresh cache is left alone"
+        );
+    }
+
+    #[test]
+    fn a_source_that_cannot_read_classification_nodes_stores_nothing() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(FakeSource::with(vec![]))).unwrap();
+
+        handle.send(SyncRequest::ClassificationNodes).unwrap();
+        let found = loop {
+            match next_event(&handle) {
+                SyncEvent::ClassificationNodes(nodes) => break nodes,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected the classification trees, got {other:?}"),
+            }
+        };
+        assert!(found.is_empty(), "a failure is answered with nothing");
+        let stored = SqliteTicketRepository::open_existing(&path).unwrap();
+        assert!(stored.load_classification_nodes().unwrap().is_empty());
+        assert_eq!(
+            stored.meta(db::CLASSIFICATION_FETCHED_KEY).unwrap(),
+            None,
+            "nothing was fetched, so nothing is dated and the next open asks again"
+        );
+    }
+
+    #[test]
     fn an_edit_queued_before_a_pull_is_written_before_that_pull_reads() {
         let directory = tempdir().unwrap();
         let path = seeded_database(&directory);
@@ -1636,9 +1766,10 @@ mod tests {
                     seen.push("edit");
                 }
                 SyncEvent::Finished { .. } => seen.push("pull"),
-                SyncEvent::DisplayName(_) | SyncEvent::Details(_) | SyncEvent::Identities(_) => {
-                    continue;
-                }
+                SyncEvent::DisplayName(_)
+                | SyncEvent::Details(_)
+                | SyncEvent::Identities(_)
+                | SyncEvent::ClassificationNodes(_) => continue,
                 SyncEvent::Stopped => panic!("the worker stopped early"),
             }
         }
