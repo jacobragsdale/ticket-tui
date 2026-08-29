@@ -1300,7 +1300,7 @@ fn parse_timeline(response: &Value) -> Vec<TimelineRecord> {
             ))
         })
         .collect();
-    let mut records: Vec<TimelineRecord> = entries
+    let records: Vec<TimelineRecord> = entries
         .iter()
         .filter_map(|entry| {
             let kind = TimelineKind::parse(entry["type"].as_str()?)?;
