@@ -215,6 +215,13 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
             lines.push(Line::from(format!("  {}", local.path.display())));
             let mut status = vec![Span::raw("  ")];
             status.extend(local_line(&row).spans);
+            // Nothing here is watched, so how old the reading is matters.
+            if let Some(scanned) = screen.scanned_at() {
+                status.push(Span::styled(
+                    format!("  read {}", crate::app::relative_age(scanned.elapsed())),
+                    Style::default().fg(theme().muted),
+                ));
+            }
             lines.push(Line::from(status));
             // A clone claimed by its name rather than its remote says where
             // that remote actually points, because a fetch here goes there.

@@ -43,6 +43,10 @@ fn the_details_pane_carries_the_urls_the_local_copy_and_what_is_open() {
         text.contains("/Users/jacob/Development/ticket-tui"),
         "the path of the clone: {text}"
     );
+    assert!(
+        text.contains("read just now"),
+        "and when the workspace was last read: {text}"
+    );
     assert!(text.contains("Open against it"), "{text}");
     assert!(text.contains("!11  Split the files"), "{text}");
     assert!(text.contains("ticket-tui CI"), "{text}");

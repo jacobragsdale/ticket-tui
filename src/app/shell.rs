@@ -100,7 +100,7 @@ fn remaining_wait(left: Duration) -> String {
 }
 
 /// Compact relative wording shared by the freshness and sync labels.
-fn relative_age(age: Duration) -> String {
+pub(crate) fn relative_age(age: Duration) -> String {
     if age.as_secs() < 45 {
         "just now".into()
     } else if age.as_secs() < 3600 {

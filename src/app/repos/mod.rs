@@ -52,6 +52,8 @@ pub struct ReposScreen {
     /// Which line of the details pane's "Open against it" section `Enter`
     /// follows, while the focus is on the pane.
     pub jump_cursor: usize,
+    /// When the workspace was last read.
+    scanned_at: Option<std::time::Instant>,
     /// What git is doing to a repository right now, by repository id. Held
     /// apart from `local` because a clone has no local entry to hang it on.
     jobs: Vec<(String, GitJob)>,
@@ -73,6 +75,7 @@ impl Default for ReposScreen {
             cursor: ListCursor::default(),
             details: ScrollState::default(),
             jump_cursor: 0,
+            scanned_at: None,
             jobs: Vec::new(),
         }
     }
@@ -127,6 +130,14 @@ impl ReposScreen {
     /// What the local-repos thread found. Keyed by repository id.
     pub fn set_local(&mut self, local: Vec<(String, LocalRepo)>) {
         self.local = local;
+        self.scanned_at = Some(std::time::Instant::now());
+    }
+
+    /// When the workspace was last read, which the details pane says: nothing
+    /// here is watched, so how old the answer is matters.
+    #[must_use]
+    pub fn scanned_at(&self) -> Option<std::time::Instant> {
+        self.scanned_at
     }
 
     /// The same, with whatever git is doing to it folded in. A clone has no

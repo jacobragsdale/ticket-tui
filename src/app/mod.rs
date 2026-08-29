@@ -62,6 +62,7 @@ pub use placeholder::PlaceholderScreen;
 pub use pull_requests::PullRequestsScreen;
 pub use repos::ReposScreen;
 pub use screen::{Screen, TabId};
+pub(crate) use shell::relative_age;
 pub use shell::{
     DEFAULT_PANE_SPLIT_STACKED, DEFAULT_PANE_SPLIT_WIDE, DividerOrientation, Focus,
     NotificationLevel, PointerUpdate, Shell,
