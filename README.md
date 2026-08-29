@@ -432,9 +432,9 @@ pointer while the details pane is focused, with the link line still opening the
 work item. The keyboard opens the same editors centred, and both paths run the
 same command and write the same edit; only the placement differs. The
 description is the exception: it is long-form, so no dropdown could hold it and
-it is reached from the Edit menu or the palette instead.
+it is reached from the Actions menu or the palette instead.
 
-`e` opens the Edit menu, which lists the fields that can be changed; `S`
+`e` opens the Actions menu, which lists the fields that can be changed; `S`
 (capital, because `s` is the sort menu) skips it and opens the state picker
 directly. The picker lists the states the selected work item's type allows,
 coloured by category and with the state it is in already under the cursor.
@@ -451,7 +451,7 @@ states already in the database for that type, ordered by category — Proposed,
 In Progress, Resolved, Completed, Removed — then by name, so it opens instantly
 on a database that has never reached Azure DevOps.
 
-The Edit menu's remaining rows are the edits that would otherwise mean opening a
+The Actions menu's remaining rows are the edits that would otherwise mean opening a
 browser. Title, Priority, Tags, Iteration, Area, Set parent, Remove parent,
 Description, and Add comment have no key of their own; they are reached through
 `e`, or by name in the command palette as `Edit title`, `Edit priority`,
@@ -482,7 +482,7 @@ as `rust; tui`. An empty result clears the tags, which `System.Tags` accepts as
 an empty string rather than a `remove`. A list that normalises to what is
 already there closes without a write.
 
-**Assignee** has a key of its own, `a`, as well as its Edit menu row and
+**Assignee** has a key of its own, `a`, as well as its Actions menu row and
 `Change assignee` in the palette, because assigning work is the edit worth
 reaching for. It opens a filterable list: type to narrow it, `↑`/`↓` to move,
 `Enter` to assign, `Esc` to change nothing. Whoever holds the work item is
@@ -590,7 +590,7 @@ last pull — and that refusal is reported in its own words with the move put
 back.
 
 **Remove parent** takes the work item out of its family and leaves it hanging
-under nothing. It is the one Edit menu row that is not always there: it appears
+under nothing. It is the one Actions menu row that is not always there: it appears
 directly under `Set parent…` when the work item has a parent, and is absent when
 it has none, so the menu never offers a removal there is nothing to remove.
 
@@ -634,7 +634,7 @@ Azure DevOps answers a move with the moved work item alone, so the child link
 the old parent still held is cleared in the same transaction that writes the new
 parent link — no reader ever sees the work item in two families or in none.
 
-**Add comment** is the last Edit menu row, and `Add comment` in the palette. It
+**Add comment** is the last Actions menu row, and `Add comment` in the palette. It
 opens a one-line box — empty, because there is nothing to edit, only something
 to say — titled `Comment on #613` and edited with the same keys as the other
 prompts. `Enter` posts, `Esc` changes nothing, and a comment that is empty or
@@ -690,7 +690,7 @@ first multi-field overlay in the app — over whatever is on screen:
 
 `↑`/`↓` and `Tab`/`Shift-Tab` move between fields, wrapping at both ends. Four
 of them are chosen from a list rather than typed — the `▾` says which — and
-`Enter` on one opens the same picker the Edit menu opens over a work item: the
+`Enter` on one opens the same picker the Actions menu opens over a work item: the
 work item types the project's process offers, the iteration and area trees, and
 the assignee list, each writing its choice back into the field and returning to
 the form. `Enter` on a typed field moves on to the next one; submitting is
@@ -760,7 +760,7 @@ lives in memory for the session only: the session file records how the table is
 arranged, not a half-typed work item, so it is gone at quit.
 
 Breaking an Epic into Issues or an Issue into Tasks is the commonest thing
-anybody files, and none of it is worth retyping, so `N` — or the Edit menu's
+anybody files, and none of it is worth retyping, so `N` — or the Actions menu's
 **New child** row, or `New child` in the palette — opens the same form already
 knowing what it is filing:
 
@@ -800,7 +800,7 @@ Azure DevOps stored comes back carrying the link.
 
 ## Deleting work items
 
-Occasionally a ticket is filed by mistake. The Edit menu's **Delete work item…**
+Occasionally a ticket is filed by mistake. The Actions menu's **Delete work item…**
 row — or `Delete work item…` in the palette — takes it back out again. There is
 no key bound to it: every other editor is a keypress away because the worst it
 can do is a value somebody types over, and this one takes the work item off the
@@ -915,10 +915,26 @@ sprints carry no dates has no current iteration at all, so the overlay falls
 back to the one the selected work item is planned into. With neither — nothing
 scheduled and no row selected — it says so rather than painting an empty grid.
 
+## Tabs
+
+A one-row bar across the top names the four screens the app is growing into:
+
+    1 Work items   2 Repos   3 Pull requests   4 Pipelines
+
+`1`–`4` switch between them from anywhere a digit is not being typed — an
+overlay comes down on the way out — and clicking a tab does the same. Each
+screen keeps its own query, cursor and scroll while another is showing, and a
+tab wears a badge after its name when it has something waiting. Repos, Pull
+requests and Pipelines say which ticket fills them in until it lands.
+
 ## Controls
+
+Everything above the tabs line is global; the work-item keys under it only do
+anything on tab `1`.
 
 | Input | Action |
 |---|---|
+| `1`–`4` | Switch to Work items, Repos, Pull requests, or Pipelines |
 | `↑`/`↓`, `j`/`k` | Move the ticket selection, family row, or focused details pane |
 | `Page Up`/`Page Down` | Move ten tickets or one family page |
 | `Home`/`End` | Select the first/last ticket, family row, or details line |
@@ -931,21 +947,22 @@ scheduled and no row selected — it says so rather than painting an empty grid.
 | Paste | Insert sanitized pasted text into the search query |
 | `Esc` | Leave search, clear the query, or clear a multi-selection |
 | `s` | Open the sort menu; use arrows and `Enter` to apply |
-| `v` | Toggle relevance-first or strict field ordering during search |
-| `c` | Toggle compact or comfortable table rows |
 | `f` | Focus the filter bar; `h`/`l` change field, `j`/`k` values, `Space` toggles |
-| `+` | Open the full filter overlay for extra fields |
-| `w` | Show or hide (`Space`), reorder (`J`/`K`), and resize (`<`/`>`) columns, Progress among them |
+| `F` | Open the full filter overlay for extra fields |
+| `c` | Show or hide (`Space`), reorder (`J`/`K`), and resize (`<`/`>`) columns, Progress among them |
 | `p` / `:` | Open the command palette |
-| `V` | Open views: five built-in ones and your own; `n` saves, `Enter` loads, `d` deletes |
-| `e` | Open the Edit menu of field editors; `Enter` opens the one chosen |
+| `v` | Open views: five built-in ones and your own; `n` saves, `Enter` loads, `d` deletes |
+| `V` | Save the current query, sort and columns as a view |
+| `e` | Open the Actions menu of field editors; `Enter` opens the one chosen |
 | `S` | Change the selected work item's state, or every checked one; `Enter` applies, `Esc` cancels |
 | `a` | Change who the selected work item is assigned to, or every checked one; type to filter, `Enter` assigns |
+| Palette → Toggle row density | Compact or comfortable table rows; no key of its own |
+| Palette → Toggle search order | Relevance-first or strict field ordering during search |
 | `e` → Title/Priority/Tags/Iteration/Area | Edit the title, priority, tags, iteration, or area; also `Edit title`, `Edit priority`, `Edit tags`, `Change iteration`, `Change area`, and `Change assignee` in the palette |
 | `e` → Description | Edit the description in `$VISUAL`/`$EDITOR`/`vi` as Markdown; also `Edit description` in the palette |
 | `e` → Add comment | Leave a one-line comment on the selected work item; also `Add comment` in the palette |
 | `n` | Open the new work item form; `↑`/`↓` or `Tab` moves between fields, `Enter` opens a field's picker, `Ctrl-S` creates, `Esc` keeps the draft |
-| `N` | Open the same form as a child of the selected work item: the type it breaks down into, the parent fixed, the area and iteration inherited; also `New child` in the Edit menu and the palette |
+| `N` | Open the same form as a child of the selected work item: the type it breaks down into, the parent fixed, the area and iteration inherited; also `New child` in the Actions menu and the palette |
 | `e` → Delete work item… | Send the selected work item, or every checked one, to the Azure DevOps recycle bin; `d` confirms, `Esc` cancels. No key of its own; also `Delete work item…` in the palette |
 | `u` | Undo the last edit, putting the value back; a bulk change goes back under one press |
 | `m` | Bookmark or unbookmark the selected ticket |
@@ -961,9 +978,11 @@ scheduled and no row selected — it says so rather than painting an empty grid.
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
 
-The help overlay's Actions section and the palette's key labels are generated
-from the same command table these keys are bound in, so a binding reads the same
-way everywhere.
+The help overlay's key sections and the palette's key labels are generated from
+the same command table these keys are bound in, so a binding reads the same way
+everywhere. Each command carries the scope it belongs to — global, or one tab —
+which is what groups them under headings in the help and keeps another tab's
+keys out of the palette.
 
 The details pane is one scrolling document rather than a pinned heading over a
 scrolling body. Its heading — title, ID / Type / State, the family breadcrumb,
@@ -1289,7 +1308,7 @@ refused rather than overwritten — run `ticket-tui sync` and try again.
 `--assignee` takes a display name, a sign-in address, or `@me`, and an empty
 value takes the work item off whoever holds it; `--tags` replaces the tag list;
 `--description-file` reads Markdown and writes the HTML Azure DevOps stores,
-the same conversion the Edit menu's description editor makes.
+the same conversion the Actions menu's description editor makes.
 
 `create` adds a work item of any type the process template offers, and
 `--parent` links it under an existing one. A refusal prints what Azure DevOps

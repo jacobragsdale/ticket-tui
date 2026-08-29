@@ -41,8 +41,9 @@ fn the_table_thumb_is_painted_where_it_can_be_grabbed_and_reaches_the_bottom() {
     app.work_items.set_show_finished(&mut app.shell, true);
     for offset in [0, 45, 90] {
         app.work_items.table.offset = offset;
-        // 29 rows of terminal leave the table body exactly 20 rows tall.
-        let mut terminal = Terminal::new(TestBackend::new(120, 29)).unwrap();
+        // 30 rows of terminal, one of them the tab bar, leave the table body
+        // exactly 20 rows tall.
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let metrics = app
             .shell

@@ -171,7 +171,7 @@ fn the_comment_prompt_opens_empty_and_names_the_work_item() {
     let row = crate::command::EDIT_MENU
         .iter()
         .position(|entry| entry.command == crate::command::CommandId::AddComment)
-        .expect("the Edit menu offers a comment row");
+        .expect("the Actions menu offers a comment row");
     for _ in 0..row {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
@@ -200,7 +200,7 @@ fn the_delete_confirmation_names_the_work_item_the_children_and_the_recycle_bin(
     let row = crate::command::EDIT_MENU
         .iter()
         .position(|entry| entry.command == crate::command::CommandId::DeleteWorkItem)
-        .expect("the Edit menu offers a delete row");
+        .expect("the Actions menu offers a delete row");
     for _ in 0..row {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
@@ -578,7 +578,7 @@ fn family_rows_show_the_current_and_cursor_styles_and_click_through_to_a_ticket(
     }
 
     app.shell.focus = Focus::Details;
-    render_text(72, 36, &mut app);
+    render_text(72, 37, &mut app);
     let details = details_pane(&app);
     let summary_x = details.x.saturating_add(8);
     let summary_y = details.y.saturating_add(3);
@@ -824,7 +824,7 @@ fn every_details_field_is_clickable_on_its_own_value() {
 #[test]
 fn planning_fields_follow_the_details_scroll_and_a_breadcrumb_shifts_the_rest() {
     let mut app = auth_family_app_with_long_details();
-    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(60, 25)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     // A work item with a family carries a breadcrumb line, so the
     // assignment and tags lines sit one row lower than they otherwise do.
@@ -857,7 +857,7 @@ fn planning_fields_follow_the_details_scroll_and_a_breadcrumb_shifts_the_rest() 
 #[test]
 fn the_heading_scrolls_away_and_its_fields_travel_with_it() {
     let mut app = auth_family_app_with_long_details();
-    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(60, 25)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let before = edit_field_rect(&app, EditableField::Assignee);
     assert_eq!(text_at(&terminal, before), "Avery Chen");

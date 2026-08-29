@@ -365,7 +365,7 @@ fn edit_app() -> App {
     app
 }
 
-/// Opens the Edit menu and runs the row at `index`, the way a hand does.
+/// Opens the Actions menu and runs the row at `index`, the way a hand does.
 fn open_editor(app: &mut App, index: usize) {
     press(app, KeyCode::Char('e'));
     for _ in 0..index {
@@ -374,9 +374,9 @@ fn open_editor(app: &mut App, index: usize) {
     press(app, KeyCode::Enter);
 }
 
-/// The Edit menu row for one command, found by the command itself so a new
+/// The Actions menu row for one command, found by the command itself so a new
 /// field editor above it moves nothing here.
-/// Where a row sits in the Edit menu *as this app draws it*: the menu is
+/// Where a row sits in the Actions menu *as this app draws it*: the menu is
 /// dynamic — `Remove parent` only appears when the selection has one — so a
 /// position taken from the static table walks to the wrong row.
 fn menu_row(app: &App, command: CommandId) -> usize {
@@ -384,7 +384,7 @@ fn menu_row(app: &App, command: CommandId) -> usize {
         .edit_menu_entries()
         .iter()
         .position(|entry| entry.command == command)
-        .expect("the Edit menu offers the row")
+        .expect("the Actions menu offers the row")
 }
 
 fn type_query(app: &mut App, text: &str) {

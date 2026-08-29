@@ -201,7 +201,7 @@ fn command_palette_runs_density_toggle() {
 fn every_bound_key_runs_its_command_from_browse_mode() {
     for command in crate::command::COMMANDS
         .iter()
-        .filter(|command| !command.keys.is_empty())
+        .filter(|command| !command.keys.is_empty() && command.scope.covers(TabId::WorkItems))
     {
         for key in command.keys {
             let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
@@ -229,6 +229,33 @@ fn every_bound_key_runs_its_command_from_browse_mode() {
                     key.label()
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn a_key_belonging_to_another_tab_does_nothing_on_this_one() {
+    for command in crate::command::COMMANDS
+        .iter()
+        .filter(|command| !command.keys.is_empty())
+    {
+        for key in command.keys {
+            let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
+            app.select_tab(TabId::Repos);
+            app.handle_key(KeyEvent::new(key.code, key.modifiers));
+            assert_eq!(
+                app.work_items.mode,
+                WorkItemMode::Browse,
+                "{:?} via {} reached the work items screen from another tab",
+                command.id,
+                key.label()
+            );
+            assert_eq!(
+                app.tab,
+                TabId::Repos,
+                "and the tab stayed put through {}",
+                key.label()
+            );
         }
     }
 }

@@ -322,7 +322,7 @@ impl WorkItemsScreen {
         seen
     }
 
-    /// `S`, and the Edit menu's State row: the states this work item's type
+    /// `S`, and the Actions menu's State row: the states this work item's type
     /// allows, with the one it is in already under the cursor. The list is
     /// whatever is cached or already in the database, so this never waits.
     ///
@@ -407,7 +407,7 @@ impl WorkItemsScreen {
         self.edit_checked(shell, FieldEdit::state(&option.name))
     }
 
-    /// The Edit menu's Priority row: 1 to 4 and a `Clear` row, with the
+    /// The Actions menu's Priority row: 1 to 4 and a `Clear` row, with the
     /// priority the work item already has under the cursor.
     pub(super) fn open_priority_picker(&mut self, shell: &mut Shell) {
         let Some(ticket) = self.selected_ticket() else {
@@ -559,7 +559,7 @@ impl WorkItemsScreen {
             .collect()
     }
 
-    /// `a`, and the Edit menu's Assignee row: everybody worth offering, with
+    /// `a`, and the Actions menu's Assignee row: everybody worth offering, with
     /// whoever holds the work item under the cursor. The list is built from
     /// what is already in memory, so the picker opens at once; the project's
     /// teams are asked for the first time it is opened and merged in when they
@@ -577,7 +577,7 @@ impl WorkItemsScreen {
 
     /// The assignee picker itself, over whoever holds the work item now — or
     /// over the name a form field carries — and whatever it was opened for.
-    /// Both the Edit menu and a form's Assignee field come through here, so
+    /// Both the Actions menu and a form's Assignee field come through here, so
     /// the list, its cursor, and the one fetch a session are the same either
     /// way.
     pub(super) fn show_assignee_picker(
@@ -692,7 +692,7 @@ impl WorkItemsScreen {
     }
 
     /// Whether the work item under the cursor has a parent to take off, which
-    /// is what puts `Remove parent` in the Edit menu.
+    /// is what puts `Remove parent` in the Actions menu.
     #[must_use]
     pub fn selected_has_parent(&self) -> bool {
         self.selected_ticket()
@@ -739,7 +739,7 @@ impl WorkItemsScreen {
             .collect()
     }
 
-    /// The Edit menu's `Set parent…` row: every work item this one could hang
+    /// The Actions menu's `Set parent…` row: every work item this one could hang
     /// under, with the one it hangs under now under the cursor. The list is
     /// built from the rows already loaded, so the picker opens at once.
     pub(super) fn open_parent_picker(&mut self, shell: &mut Shell) {
@@ -931,7 +931,7 @@ impl WorkItemsScreen {
             .collect()
     }
 
-    /// The Edit menu's Iteration and Area rows: the project's tree, indented,
+    /// The Actions menu's Iteration and Area rows: the project's tree, indented,
     /// with the node the work item sits in already under the cursor. The rows
     /// come out of what is already in memory, so the picker opens at once; the
     /// trees are asked for the first time either picker is opened on a cache

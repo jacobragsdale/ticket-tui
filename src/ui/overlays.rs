@@ -105,21 +105,39 @@ pub(super) fn render_help_popup(
         Line::from("  state:active    Structured filters in the query"),
         Line::from("  Paste           Insert sanitized text"),
         Line::from(""),
-        Line::styled("Actions", Style::default().add_modifier(Modifier::BOLD)),
+        Line::styled("Tabs", Style::default().add_modifier(Modifier::BOLD)),
+        Line::from("  1/2/3/4         Work items, Repos, Pull requests, Pipelines"),
+        Line::from(""),
+        Line::styled("Everywhere", Style::default().add_modifier(Modifier::BOLD)),
     ];
-    // The bound commands describe themselves; the palette lists the rest.
+    // The bound commands describe themselves; the palette lists the rest. The
+    // global ones come first, then the ones this tab owns, under its name.
+    let described = |command: &Command| {
+        let detail = if command.help.is_empty() {
+            command.title.to_owned()
+        } else {
+            format!("{} — {}", command.title, command.help)
+        };
+        Line::from(format!("  {:<15} {detail}", command.key_label()))
+    };
     lines.extend(
         COMMANDS
             .iter()
-            .filter(|command| !command.keys.is_empty())
-            .map(|command| {
-                let detail = if command.help.is_empty() {
-                    command.title.to_owned()
-                } else {
-                    format!("{} — {}", command.title, command.help)
-                };
-                Line::from(format!("  {:<15} {detail}", command.key_label()))
-            }),
+            .filter(|command| !command.keys.is_empty() && command.scope == Scope::Global)
+            .map(described),
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        TabId::WorkItems.label(),
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
+    lines.extend(
+        COMMANDS
+            .iter()
+            .filter(|command| {
+                !command.keys.is_empty() && command.scope == Scope::Tab(TabId::WorkItems)
+            })
+            .map(described),
     );
     lines.extend([
         Line::from(""),

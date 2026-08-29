@@ -13,9 +13,9 @@ use time::OffsetDateTime;
 use crate::app::{
     App, ChildProgress, DividerOrientation, Focus, FormOverlay, HitRegions, NotificationLevel,
     PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PromptField, RowDensity, Screen, SearchOrder, Shell,
-    UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
+    TabId, UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
 };
-use crate::command::{COMMANDS, key_label_for};
+use crate::command::{COMMANDS, Command, Scope, key_label_for};
 use crate::filter::{FacetTarget, FilterField, WorkItemSchema};
 use crate::model::{
     FamilySnapshot, FamilyTreeEntry, HistoryRecord, SortDirection, SortField, StateCategory,
@@ -197,15 +197,109 @@ fn theme() -> &'static Theme {
     THEME.get_or_init(|| Theme::new(std::env::var_os("NO_COLOR").is_some()))
 }
 
-/// Paints the frame: the shell hands the active screen the whole area.
+/// Paints the frame: the tab bar, then the active screen under it. Painted
+/// twice when the pointer has moved onto something, because what is under it
+/// is only known once the regions are registered.
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
-    let area = frame.area();
-    let (shell, screen) = app.screen();
-    screen.render(frame, shell, area);
+    paint(frame, app);
+    if app.shell.refresh_hover() {
+        paint(frame, app);
+    }
+    paint_hover(frame, &app.shell);
+    paint_selection(frame, &app.shell);
 }
 
-/// One screen, painted into the area the shell left it, then the hover and
-/// selection paint that go over everything.
+fn paint(frame: &mut Frame<'_>, app: &mut App) {
+    app.shell.hit_regions = HitRegions::default();
+    let area = frame.area();
+    if area.width < 36 || area.height < 11 {
+        frame.render_widget(
+            Paragraph::new("Terminal too small\nResize to at least 36 × 11")
+                .alignment(Alignment::Center)
+                .block(Block::bordered().title("ticket-tui")),
+            area,
+        );
+        return;
+    }
+    let sections = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(area);
+    let tabs = app.tabs();
+    render_tab_bar(frame, &mut app.shell, &tabs, sections[0]);
+    let (shell, screen) = app.screen();
+    screen.render(frame, shell, sections[1]);
+}
+
+/// The one row above everything: which tabs there are, which one is showing,
+/// and what each has waiting.
+pub(crate) fn render_tab_bar(
+    frame: &mut Frame<'_>,
+    shell: &mut Shell,
+    tabs: &[(TabId, bool, Option<String>)],
+    area: Rect,
+) {
+    // Every tab stays on the bar and stays clickable however narrow the
+    // terminal is: the names shorten first, and then go altogether.
+    let written = |tab: TabId, badge: Option<&String>, style: NameStyle| {
+        let name = match style {
+            NameStyle::Full => tab.label(),
+            NameStyle::Short => tab.short_label(),
+            NameStyle::Number => "",
+        };
+        match (name, badge) {
+            ("", None) => format!(" {} ", tab.number()),
+            ("", Some(badge)) => format!(" {} {badge} ", tab.number()),
+            (name, None) => format!(" {} {name} ", tab.number()),
+            (name, Some(badge)) => format!(" {} {name} {badge} ", tab.number()),
+        }
+    };
+    let style = [NameStyle::Full, NameStyle::Short, NameStyle::Number]
+        .into_iter()
+        .find(|style| {
+            let width: usize = tabs
+                .iter()
+                .map(|(tab, _, badge)| written(*tab, badge.as_ref(), *style).chars().count())
+                .sum();
+            width <= usize::from(area.width)
+        })
+        .unwrap_or(NameStyle::Number);
+
+    let mut spans = Vec::new();
+    let mut x = area.x;
+    for (tab, active, badge) in tabs {
+        let (tab, active) = (*tab, *active);
+        let label = written(tab, badge.as_ref(), style);
+        let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+        if x.saturating_add(width) > area.x.saturating_add(area.width) {
+            break;
+        }
+        let style = if active {
+            Style::default()
+                .fg(theme().accent)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default().fg(theme().muted)
+        };
+        spans.push(Span::styled(label, style));
+        shell.hit_regions.push(region(
+            Rect::new(x, area.y, width, 1),
+            PointerTarget::SelectTab { index: tab.index() },
+            PointerLayer::Base,
+            None,
+            None,
+        ));
+        x = x.saturating_add(width);
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// How much of a tab's name the bar has room for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NameStyle {
+    Full,
+    Short,
+    Number,
+}
+
+/// One screen, painted into the area the shell left it.
 pub(crate) fn render_screen(
     frame: &mut Frame<'_>,
     screen: &mut WorkItemsScreen,
@@ -213,25 +307,9 @@ pub(crate) fn render_screen(
     area: Rect,
 ) {
     render_pass(frame, screen, shell, area);
-    if shell.refresh_hover() {
-        render_pass(frame, screen, shell, area);
-    }
-    paint_hover(frame, shell);
-    paint_selection(frame, shell);
 }
 
 fn render_pass(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, shell: &mut Shell, area: Rect) {
-    shell.hit_regions = HitRegions::default();
-    if area.width < 36 || area.height < 10 {
-        frame.render_widget(
-            Paragraph::new("Terminal too small\nResize to at least 36 × 10")
-                .alignment(Alignment::Center)
-                .block(Block::bordered().title("ticket-tui")),
-            area,
-        );
-        return;
-    }
-
     let chip_height =
         u16::from(screen.finished_hidden() || !screen.overflow_filter_tokens().is_empty());
     let sections = Layout::vertical([

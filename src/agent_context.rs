@@ -68,7 +68,7 @@ pub struct SyncContext {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PendingEditContext {
     pub id: i64,
-    /// The field as the Edit menu names it, such as `State` or `Tags`.
+    /// The field as the Actions menu names it, such as `State` or `Tags`.
     pub field: String,
     /// The value being written, as a notification spells it; a cleared field
     /// reads `(none)`.

@@ -890,7 +890,7 @@ fn node_rows(app: &App) -> Vec<String> {
         .collect()
 }
 
-/// Runs the Edit menu's Iteration or Area row.
+/// Runs the Actions menu's Iteration or Area row.
 fn open_nodes(app: &mut App, kind: NodeKind) -> AppAction {
     app.work_items.run_command(
         &mut app.shell,

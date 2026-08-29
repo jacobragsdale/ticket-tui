@@ -10,6 +10,73 @@ use crate::columns::ColumnLayout;
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 use crossterm::event::KeyEvent;
 
+/// The four screens the shell puts behind keys `1`–`4`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TabId {
+    #[default]
+    WorkItems,
+    Repos,
+    PullRequests,
+    Pipelines,
+}
+
+impl TabId {
+    pub const ALL: [Self; 4] = [
+        Self::WorkItems,
+        Self::Repos,
+        Self::PullRequests,
+        Self::Pipelines,
+    ];
+
+    /// What the tab bar calls it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::WorkItems => "Work items",
+            Self::Repos => "Repos",
+            Self::PullRequests => "Pull requests",
+            Self::Pipelines => "Pipelines",
+        }
+    }
+
+    /// What the bar calls it when the full names do not fit.
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::WorkItems => "Items",
+            Self::Repos => "Repos",
+            Self::PullRequests => "PRs",
+            Self::Pipelines => "Runs",
+        }
+    }
+
+    /// The digit that switches to it.
+    #[must_use]
+    pub const fn number(self) -> char {
+        match self {
+            Self::WorkItems => '1',
+            Self::Repos => '2',
+            Self::PullRequests => '3',
+            Self::Pipelines => '4',
+        }
+    }
+
+    /// The tab a digit asks for, if it is one of the four.
+    #[must_use]
+    pub fn from_number(character: char) -> Option<Self> {
+        Self::ALL.into_iter().find(|tab| tab.number() == character)
+    }
+
+    /// Where it sits in the bar, which is what a click carries.
+    #[must_use]
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|tab| *tab == self)
+            .unwrap_or_default()
+    }
+}
+
 pub trait Screen {
     /// One key, in whatever mode the screen is in.
     fn handle_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction;
@@ -47,6 +114,12 @@ pub trait Screen {
     /// The same, to edit: whichever list this screen is
     /// showing, without the overlay knowing what its columns are.
     fn columns_mut(&mut self) -> &mut dyn ColumnLayout;
+
+    /// What the tab bar draws after this tab's name, when the tab has
+    /// something waiting: `3` pull requests to review, `◐2` runs going.
+    fn badge(&self) -> Option<String> {
+        None
+    }
 
     /// What the footer says when there is no notification over it.
     fn footer_hint(&self, shell: &Shell) -> &str;

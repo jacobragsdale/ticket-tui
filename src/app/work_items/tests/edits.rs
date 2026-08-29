@@ -998,13 +998,13 @@ fn an_offline_run_refuses_the_description_before_the_editor_opens() {
     assert!(!app.work_items.edits_pending());
 }
 
-/// The Edit menu row that opens the comment box, found by the command it
+/// The Actions menu row that opens the comment box, found by the command it
 /// runs so adding a field editor above it moves nothing here.
 fn comment_row() -> usize {
     EDIT_MENU
         .iter()
         .position(|entry| entry.command == CommandId::AddComment)
-        .expect("the Edit menu offers a comment row")
+        .expect("the Actions menu offers a comment row")
 }
 
 /// One comment as Azure DevOps hands it back, already carrying the id,

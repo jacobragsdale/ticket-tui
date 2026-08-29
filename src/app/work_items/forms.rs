@@ -31,7 +31,7 @@ pub enum FormFieldId {
     Tags,
 }
 
-/// The picker one form field opens, which is the same picker the Edit menu
+/// The picker one form field opens, which is the same picker the Actions menu
 /// opens over a work item.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FormPicker {
@@ -295,7 +295,7 @@ impl WorkItemsScreen {
         self.open_form(shell, form)
     }
 
-    /// Opens the new child form: `N`, the Edit menu's New child row, or the
+    /// Opens the new child form: `N`, the Actions menu's New child row, or the
     /// palette. Breaking an Epic into Issues or an Issue into Tasks is the
     /// commonest thing anybody files, and none of it is worth retyping, so the
     /// form opens with the parent fixed, the type the parent's own type breaks

@@ -574,7 +574,7 @@ fn tag_list(raw: &str) -> String {
 }
 
 /// A description written as Markdown, read back as the HTML Azure DevOps
-/// stores — the same conversion the Edit menu's description editor makes.
+/// stores — the same conversion the Actions menu's description editor makes.
 fn description_html(path: &Path) -> Result<String> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read the description from {}", path.display()))?;

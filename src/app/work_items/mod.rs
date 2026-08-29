@@ -42,7 +42,7 @@ pub enum WorkItemMode {
     StatePicker,
     /// The priorities the selected work item can be given, `Clear` included.
     PriorityPicker,
-    /// A single-line field editor, for the Title and Tags rows of the Edit menu.
+    /// A single-line field editor, for the Title and Tags rows of the Actions menu.
     Prompt,
     /// The people the selected work item can be assigned to, filtered by typing.
     AssigneePicker,
@@ -334,7 +334,7 @@ pub struct WorkItemsScreen {
 }
 
 /// Which editor a clicked details-pane field opens. Every one of them is a
-/// command already, so a click and the Edit menu reach the same code.
+/// command already, so a click and the Actions menu reach the same code.
 #[must_use]
 const fn command_for_field(field: EditableField) -> CommandId {
     match field {
@@ -533,7 +533,7 @@ impl WorkItemsScreen {
     pub fn handle_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
         // Ctrl-C quits from every mode; other bindings only apply in browse mode.
         if key.modifiers.contains(KeyModifiers::CONTROL)
-            && command_for_key(key) == Some(CommandId::Quit)
+            && command_for_key(key, TabId::WorkItems) == Some(CommandId::Quit)
         {
             return self.run_command(shell, CommandId::Quit);
         }
@@ -632,7 +632,7 @@ impl WorkItemsScreen {
             KeyCode::Esc if !self.query.is_empty() => self.set_query(shell, String::new()),
             KeyCode::Esc if !self.selected_keys.is_empty() => self.selected_keys.clear(),
             _ => {
-                if let Some(id) = command_for_key(key) {
+                if let Some(id) = command_for_key(key, TabId::WorkItems) {
                     return self.run_command(shell, id);
                 }
             }

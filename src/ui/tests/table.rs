@@ -26,10 +26,9 @@ fn table_clicks_open_tickets_sort_columns_and_follow_the_row_density() {
     click(&mut app, id_header.x, id_header.y);
     assert_eq!(app.work_items.sort_field, SortField::Id);
 
-    app.handle_key(crossterm::event::KeyEvent::new(
-        crossterm::event::KeyCode::Char('c'),
-        KeyModifiers::NONE,
-    ));
+    // Row density is a palette command now: `c` is the Columns overlay.
+    app.work_items
+        .run_command(&mut app.shell, crate::command::CommandId::ToggleDensity);
     assert_eq!(app.work_items.row_density, RowDensity::Comfortable);
     let text = render_text(110, 24, &mut app);
     assert!(text.contains("[backend]"), "comfortable rows show tags");

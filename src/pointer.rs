@@ -48,7 +48,7 @@ pub enum TextEditor {
     Search,
     Palette,
     ViewName,
-    /// The single-line field editor the Edit menu opens for a title or a tag
+    /// The single-line field editor the Actions menu opens for a title or a tag
     /// list.
     Prompt,
     /// The assignee picker's filter field.
@@ -62,7 +62,7 @@ pub enum TextEditor {
 }
 
 /// One value on the details pane that can be edited by clicking it. Each names
-/// the editor it opens, which is the same one the Edit menu and the command
+/// the editor it opens, which is the same one the Actions menu and the command
 /// palette reach.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum EditableField {
@@ -110,6 +110,11 @@ pub enum PointerTarget {
     NarrowDetails,
     FocusTickets,
     FocusDetails,
+    /// One tab in the bar, by its place in it. The shell acts on this before
+    /// any screen sees it.
+    SelectTab {
+        index: usize,
+    },
     TableRow {
         index: usize,
     },
@@ -168,7 +173,7 @@ pub enum PointerTarget {
     SummaryRow {
         index: usize,
     },
-    /// One field editor in the Edit menu.
+    /// One field editor in the Actions menu.
     EditMenuRow {
         index: usize,
     },

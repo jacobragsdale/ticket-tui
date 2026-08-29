@@ -3,7 +3,7 @@
 
 use super::*;
 
-/// The Edit menu: one row per field editor, each labelled with the field it
+/// The Actions menu: one row per field editor, each labelled with the field it
 /// changes and the key that opens it directly.
 pub(super) fn render_edit_menu(
     frame: &mut Frame<'_>,
@@ -13,7 +13,7 @@ pub(super) fn render_edit_menu(
     let entries = screen.edit_menu_entries();
     let height = u16::try_from(entries.len().saturating_add(2)).unwrap_or(u16::MAX);
     let area = centered_rect(frame.area(), 40, height.max(3));
-    let inner = render_modal_frame(frame, screen, shell, area, " Edit ");
+    let inner = render_modal_frame(frame, screen, shell, area, " Actions ");
     let selected = screen.edit_menu.index;
     let rows: Vec<Line> = entries
         .iter()

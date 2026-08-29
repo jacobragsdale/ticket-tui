@@ -628,7 +628,7 @@ fn handle_action(
     false
 }
 
-/// The Edit menu's Description row: the description goes out to the user's
+/// The Actions menu's Description row: the description goes out to the user's
 /// editor as Markdown, and whatever comes back comes back as HTML.
 ///
 /// The TUI steps out of the way entirely while the editor runs — the alternate

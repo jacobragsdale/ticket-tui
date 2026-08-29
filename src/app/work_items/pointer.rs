@@ -397,6 +397,9 @@ impl WorkItemsScreen {
                 self.choose_work_item_type(index);
             }
             PointerTarget::EditField { field } => return self.open_field_editor(shell, field),
+            // The tab bar is the shell's: `App::handle_mouse` acts on a tab
+            // before the click reaches a screen.
+            PointerTarget::SelectTab { .. } => {}
             PointerTarget::DismissOverlay => self.close_overlay(shell),
             PointerTarget::PromptInput => {
                 self.place_caret(shell, TextEditor::Prompt, column, row);
@@ -467,7 +470,7 @@ impl WorkItemsScreen {
     }
 
     /// Opens the editor one details-pane field owns, as a dropdown hung under
-    /// the value on screen. It runs the same command the Edit menu and the
+    /// the value on screen. It runs the same command the Actions menu and the
     /// palette run, so both paths open the same picker and write the same
     /// edit; only where the overlay lands differs.
     pub(super) fn open_field_editor(

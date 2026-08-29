@@ -6,7 +6,7 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
 
 ## State of `main`
 
-- The four-tab roadmap is under way: #661 and #662 are Done, #663 is next.
+- The four-tab roadmap is under way: #661–#665 are Done, #666 is next.
   Everything before it is merged. `cargo fmt --check`, `cargo clippy --all-targets
   --all-features -D warnings`, `cargo test --all-targets` (415 tests, and again
   under `NO_COLOR=1`) and `cargo build --release` are clean.
@@ -45,7 +45,22 @@ after the receiver; nothing else reaches across.
         tests/          the same split
 
 Every ui function takes `screen` and `shell` rather than `app`, and
-`ui::render` goes through `App::screen()` and `Screen::render`.
+`ui::render` paints the tab bar itself and then goes through `App::screen()`
+and `Screen::render` for the rest of the frame.
+
+Shared pieces the later tabs are meant to reuse: `columns::ColumnId` and
+`TableLayout<C>` with `ui::table::render_list_table` (#663), `app::ListCursor`
+(#663), `filter::FilterSchema` with `FilterSet<S>` and `parse_query::<S>`
+(#664), and `PlaceholderScreen` (#665), which is what tabs 2–4 show until
+their own tickets land. Pointer targets never name one screen's types:
+`SortHeader` carries a column key, `FacetPill` a field key, `RemoveChip` and
+`SelectTab` an index.
+
+**The key map changed in #665**: `F` more filters (was `+`), `c` columns (was
+`w`), `v` views (was `V`), `V` save view, `e` opens the Actions menu (the Edit
+menu renamed), and row density and search order are palette-only. `1`–`4`
+switch tabs. Commands carry a `Scope` — `Global` or `Tab(TabId)` — which is
+what keeps another tab's keys out of the palette and groups the help.
 
 ## Shipped 2026-08-29
 
@@ -126,8 +141,8 @@ subcommands and context v3.
 
 ## What is left
 
-The roadmap above. #661 and #662 are Done; start at **#663**, then the rest of
-Epic 656 in order, then #668 before anything in Epic 659. Query round-tripping was an
+The roadmap above. #661–#665 are Done; start at **#666**, then #667, then #668
+before anything in Epic 659, then #668 before anything in Epic 659. Query round-tripping was an
 earlier loose end and is fixed: `quote_if_needed` now escapes `\` and `take_quoted`
 unescapes it, so `iteration:"development\Sprint 1"` survives
 `format_query`/`parse_query` (#654), and a backslash typed once inside a quoted

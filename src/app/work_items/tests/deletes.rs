@@ -42,7 +42,7 @@ fn rows_of(app: &App) -> Vec<i64> {
         .collect()
 }
 
-/// Opens the confirmation the way somebody would, through the Edit menu.
+/// Opens the confirmation the way somebody would, through the Actions menu.
 fn open_delete_menu(app: &mut App) {
     press(app, KeyCode::Char('e'));
     for _ in 0..menu_row(app, CommandId::DeleteWorkItem) {
@@ -62,7 +62,7 @@ fn the_delete_confirmation_names_the_work_item_and_the_children_it_leaves_behind
         .work_items
         .delete_confirm
         .clone()
-        .expect("the Edit menu row opens the confirmation");
+        .expect("the Actions menu row opens the confirmation");
     assert_eq!(confirm.keys, vec![family_key(1)]);
     assert_eq!(confirm.question(), "Delete #1 Auth rewrite?");
     assert_eq!(

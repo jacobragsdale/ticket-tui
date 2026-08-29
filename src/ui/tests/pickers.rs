@@ -291,7 +291,7 @@ fn the_parent_picker_renders_the_work_items_that_could_hold_this_one() {
         Some(10_002)
     );
 
-    // The Edit menu's Set parent row, which is the eighth, with Remove
+    // The Actions menu's Set parent row, which is the eighth, with Remove
     // parent under it because this work item has a parent.
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
     let menu = render_text(90, 24, &mut app);
@@ -349,7 +349,7 @@ fn the_iteration_picker_renders_an_indented_tree_with_dates_and_the_current_spri
         None,
     );
 
-    // The Edit menu's Iteration row, which is the sixth.
+    // The Actions menu's Iteration row, which is the sixth.
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
     for _ in 0..5 {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -442,7 +442,7 @@ fn the_edit_menu_and_the_state_picker_render_their_rows_and_state_colours() {
 
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
     let menu = render_text(80, 20, &mut app);
-    assert!(menu.contains("Edit"), "{menu}");
+    assert!(menu.contains("Actions"), "{menu}");
     assert!(menu.contains("State"), "{menu}");
     assert!(menu.contains('S'), "the menu names the key that skips it");
 

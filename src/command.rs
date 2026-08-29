@@ -1,5 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::app::TabId;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandId {
     Search,
@@ -95,13 +97,35 @@ pub const fn ctrl(ch: char) -> Key {
     }
 }
 
-/// One action, defined once: its palette title, its bindings, and its help text.
+/// Where a command applies: everywhere, or on the one tab that owns it. The
+/// palette lists the global commands and the active tab's, and a key bound to
+/// another tab's command does nothing here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Scope {
+    Global,
+    Tab(TabId),
+}
+
+/// One action, defined once: its palette title, its bindings, its help text,
+/// and the tabs it belongs to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Command {
     pub id: CommandId,
     pub title: &'static str,
     pub keys: &'static [Key],
     pub help: &'static str,
+    pub scope: Scope,
+}
+
+impl Scope {
+    /// Whether a command in this scope is offered on `tab`.
+    #[must_use]
+    pub fn covers(self, tab: TabId) -> bool {
+        match self {
+            Self::Global => true,
+            Self::Tab(owner) => owner == tab,
+        }
+    }
 }
 
 impl Command {
@@ -128,114 +152,133 @@ pub const COMMANDS: &[Command] = &[
         title: "Search tickets",
         keys: &[key('/')],
         help: "Core ticket fields",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::Filters,
         title: "Open filter bar",
         keys: &[key('f')],
         help: "Space toggles values",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::MoreFilters,
         title: "More filters",
-        keys: &[key('+')],
+        keys: &[key('F')],
         help: "Priority, project, area…",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::Columns,
         title: "Configure columns",
-        keys: &[key('w')],
+        keys: &[key('c')],
         help: "Show, hide, reorder",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::Views,
         title: "Named views",
-        keys: &[key('V')],
+        keys: &[key('v')],
         help: "Save and restore",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::EditMenu,
-        title: "Edit\u{2026}",
+        title: "Actions\u{2026}",
         keys: &[key('e')],
         help: "Change a field",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::ChangeState,
         title: "Change state",
         keys: &[key('S')],
         help: "Move the work item",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::EditTitle,
         title: "Edit title",
         keys: &[],
         help: "Rename the work item",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::EditPriority,
         title: "Edit priority",
         keys: &[],
         help: "1\u{2013}4, or clear it",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::EditTags,
         title: "Edit tags",
         keys: &[],
         help: "Semicolon separated",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::EditAssignee,
         title: "Change assignee",
         keys: &[key('a')],
         help: "Pick who owns it",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::EditIteration,
         title: "Change iteration",
         keys: &[],
         help: "Move it to a sprint",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::EditArea,
         title: "Change area",
         keys: &[],
         help: "Move it in the area tree",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::SetParent,
         title: "Set parent\u{2026}",
         keys: &[],
         help: "File it under another work item",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::RemoveParent,
         title: "Remove parent",
         keys: &[],
         help: "Detach it from its family",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::EditDescription,
         title: "Edit description",
         keys: &[],
         help: "Opens your $EDITOR",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::AddComment,
         title: "Add comment",
         keys: &[],
         help: "One line on the discussion",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::NewWorkItem,
         title: "New work item",
         keys: &[key('n')],
         help: "Ctrl-S creates it",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::NewChild,
         title: "New child",
         keys: &[key('N')],
         help: "Under the selected one",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     // Deliberately unbound. Every other editor is a keypress away because the
     // worst it can do is a wrong value somebody types over; this one takes the
@@ -245,42 +288,49 @@ pub const COMMANDS: &[Command] = &[
         title: "Delete work item…",
         keys: &[],
         help: "To the recycle bin",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::UndoEdit,
         title: "Undo last edit",
         keys: &[key('u')],
         help: "Put the value back",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::SaveView,
         title: "Save current view",
-        keys: &[],
+        keys: &[key('V')],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::Sort,
         title: "Sort tickets",
         keys: &[key('s')],
         help: "Choose field and direction",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::ToggleDensity,
         title: "Toggle row density",
-        keys: &[key('c')],
+        keys: &[],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::ToggleDetails,
         title: "Toggle details pane",
         keys: &[key('d')],
         help: "Below 70 columns",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::ToggleSearchOrder,
         title: "Toggle search order",
-        keys: &[key('v')],
+        keys: &[],
         help: "Relevance or fields",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::ToggleFinished,
@@ -289,136 +339,158 @@ pub const COMMANDS: &[Command] = &[
         title: "Show finished tickets",
         keys: &[],
         help: "Done and Removed rows",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::Open,
         title: "Open ticket in browser",
         keys: &[key('o')],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::ToggleBookmark,
         title: "Toggle bookmark",
         keys: &[key('m')],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::HistoryBack,
         title: "Back to previous ticket",
         keys: &[key('[')],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::HistoryForward,
         title: "Forward to next ticket",
         keys: &[key(']')],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::CopyId,
         title: "Copy ID",
         keys: &[key('y')],
         help: "Selected or current tickets",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::CopyUrl,
         title: "Copy URL",
         keys: &[],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::CopyTitle,
         title: "Copy title",
         keys: &[],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::CopyMarkdown,
         title: "Copy Markdown link",
         keys: &[],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::CopySummary,
         title: "Copy summary",
         keys: &[],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::ExportJson,
         title: "Export selected as JSON",
         keys: &[],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::ExportCsv,
         title: "Export selected as CSV",
         keys: &[],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::SelectAll,
         title: "Select all visible",
         keys: &[],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::ClearSelection,
         title: "Clear selection",
         keys: &[],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::SprintSummary,
         title: "Sprint summary",
         keys: &[],
         help: "Who has what this iteration",
+        scope: Scope::Tab(TabId::WorkItems),
     },
     Command {
         id: CommandId::DatabaseInfo,
         title: "Database info",
         keys: &[key('i')],
         help: "Path, counts, freshness",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::Sync,
         title: "Sync from Azure DevOps",
         keys: &[key('r')],
         help: "Pull work items now",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::Help,
         title: "Help",
         keys: &[key('?')],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::Palette,
         title: "Command palette",
         keys: &[key('p'), key(':')],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::Quit,
         title: "Quit",
         keys: &[key('q'), ctrl('c')],
         help: "",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::ResetPaneSplit,
         title: "Reset pane split",
         keys: &[],
         help: "Restore the 62/56 layout",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::SetStaleThreshold,
         title: "Set stale threshold",
         keys: &[],
         help: "7, 14, 21, or 30 days",
+        scope: Scope::Tab(TabId::WorkItems),
     },
 ];
 
-/// One row of the Edit menu: what it changes about the work item, and the
+/// One row of the Actions menu: what it changes about the work item, and the
 /// command that does it. Every field editor is one row here, so adding an
 /// editor is adding its command to [`COMMANDS`] and its field to this table;
 /// the rows under the fields act on the work item as a whole rather than on
@@ -430,7 +502,7 @@ pub struct EditMenuEntry {
     pub command: CommandId,
 }
 
-/// The one row the Edit menu does not always offer: taking a work item out of
+/// The one row the Actions menu does not always offer: taking a work item out of
 /// its family only reads as a choice when it is in one, so this follows
 /// `Set parent\u{2026}` when the work item has a parent and is left out when it
 /// has none.
@@ -512,10 +584,11 @@ fn normalized_modifiers(event: KeyEvent) -> KeyModifiers {
 }
 
 #[must_use]
-pub fn command_for_key(event: KeyEvent) -> Option<CommandId> {
+pub fn command_for_key(event: KeyEvent, tab: TabId) -> Option<CommandId> {
     let modifiers = normalized_modifiers(event);
     COMMANDS
         .iter()
+        .filter(|command| command.scope.covers(tab))
         .find(|command| {
             command
                 .keys
@@ -552,11 +625,12 @@ fn worded(command: Command, finished_hidden: bool) -> Command {
 }
 
 #[must_use]
-pub fn matching_commands(query: &str, finished_hidden: bool) -> Vec<Command> {
+pub fn matching_commands(query: &str, finished_hidden: bool, tab: TabId) -> Vec<Command> {
     let query = query.trim().to_ascii_lowercase();
     COMMANDS
         .iter()
         .copied()
+        .filter(|command| command.scope.covers(tab))
         .filter(Command::in_palette)
         .map(|command| worded(command, finished_hidden))
         .filter(|command| {
@@ -577,7 +651,7 @@ mod tests {
 
     #[test]
     fn palette_filters_commands_by_title() {
-        let matches = matching_commands("copy", true);
+        let matches = matching_commands("copy", true, TabId::WorkItems);
         assert!(
             matches
                 .iter()
@@ -585,7 +659,7 @@ mod tests {
         );
         assert!(!matches.iter().any(|command| command.id == CommandId::Sync));
         assert!(
-            !matching_commands("", true)
+            !matching_commands("", true, TabId::WorkItems)
                 .iter()
                 .any(|command| command.id == CommandId::Search),
             "commands that only work from browse mode stay out of the palette"
@@ -594,7 +668,7 @@ mod tests {
 
     #[test]
     fn the_finished_toggle_is_worded_as_the_change_it_would_make() {
-        let hidden = matching_commands("show finished", true);
+        let hidden = matching_commands("show finished", true, TabId::WorkItems);
         assert_eq!(
             hidden.first().map(|command| command.id),
             Some(CommandId::ToggleFinished),
@@ -602,14 +676,14 @@ mod tests {
         );
         assert_eq!(hidden[0].title, "Show finished tickets");
 
-        let shown = matching_commands("hide finished", false);
+        let shown = matching_commands("hide finished", false, TabId::WorkItems);
         assert_eq!(
             shown.first().map(|command| command.id),
             Some(CommandId::ToggleFinished)
         );
         assert_eq!(shown[0].title, "Hide finished tickets");
         assert!(
-            matching_commands("show finished", false).is_empty(),
+            matching_commands("show finished", false, TabId::WorkItems).is_empty(),
             "a command is only found under the words it is showing"
         );
     }
@@ -617,49 +691,92 @@ mod tests {
     #[test]
     fn keys_resolve_to_their_command() {
         assert_eq!(
-            command_for_key(press(KeyCode::Char('s'), KeyModifiers::NONE)),
+            command_for_key(
+                press(KeyCode::Char('s'), KeyModifiers::NONE),
+                TabId::WorkItems
+            ),
             Some(CommandId::Sort)
         );
         assert_eq!(
-            command_for_key(press(KeyCode::Char(':'), KeyModifiers::NONE)),
+            command_for_key(
+                press(KeyCode::Char(':'), KeyModifiers::NONE),
+                TabId::WorkItems
+            ),
             Some(CommandId::Palette)
         );
         assert_eq!(
-            command_for_key(press(KeyCode::Char('p'), KeyModifiers::NONE)),
+            command_for_key(
+                press(KeyCode::Char('p'), KeyModifiers::NONE),
+                TabId::WorkItems
+            ),
             Some(CommandId::Palette)
         );
         assert_eq!(
-            command_for_key(press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            command_for_key(
+                press(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                TabId::WorkItems
+            ),
             Some(CommandId::Quit)
         );
         assert_eq!(
-            command_for_key(press(KeyCode::Char('c'), KeyModifiers::NONE)),
-            Some(CommandId::ToggleDensity)
+            command_for_key(
+                press(KeyCode::Char('c'), KeyModifiers::NONE),
+                TabId::WorkItems
+            ),
+            Some(CommandId::Columns)
         );
         assert_eq!(
-            command_for_key(press(KeyCode::Char('V'), KeyModifiers::SHIFT)),
+            command_for_key(
+                press(KeyCode::Char('v'), KeyModifiers::NONE),
+                TabId::WorkItems
+            ),
             Some(CommandId::Views)
         );
         assert_eq!(
-            command_for_key(press(KeyCode::Char('S'), KeyModifiers::SHIFT)),
+            command_for_key(
+                press(KeyCode::Char('V'), KeyModifiers::SHIFT),
+                TabId::WorkItems
+            ),
+            Some(CommandId::SaveView),
+            "lowercase v opens the views, capital V saves one"
+        );
+        assert_eq!(
+            command_for_key(press(KeyCode::Char('S'), KeyModifiers::SHIFT), TabId::Repos),
+            None,
+            "a work-item key does nothing on another tab"
+        );
+        assert_eq!(
+            command_for_key(
+                press(KeyCode::Char('S'), KeyModifiers::SHIFT),
+                TabId::WorkItems
+            ),
             Some(CommandId::ChangeState),
             "capital S is the state picker; lowercase s stays the sort menu"
         );
         assert_eq!(
-            command_for_key(press(KeyCode::Char('N'), KeyModifiers::SHIFT)),
+            command_for_key(
+                press(KeyCode::Char('N'), KeyModifiers::SHIFT),
+                TabId::WorkItems
+            ),
             Some(CommandId::NewChild),
             "capital N files a child; lowercase n stays the new work item form"
         );
         assert_eq!(
-            command_for_key(press(KeyCode::Char('n'), KeyModifiers::NONE)),
+            command_for_key(
+                press(KeyCode::Char('n'), KeyModifiers::NONE),
+                TabId::WorkItems
+            ),
             Some(CommandId::NewWorkItem)
         );
         assert_eq!(
-            command_for_key(press(KeyCode::Char('e'), KeyModifiers::NONE)),
+            command_for_key(
+                press(KeyCode::Char('e'), KeyModifiers::NONE),
+                TabId::WorkItems
+            ),
             Some(CommandId::EditMenu)
         );
         assert_eq!(
-            command_for_key(press(KeyCode::Tab, KeyModifiers::NONE)),
+            command_for_key(press(KeyCode::Tab, KeyModifiers::NONE), TabId::WorkItems),
             None
         );
     }

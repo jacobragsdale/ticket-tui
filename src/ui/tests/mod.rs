@@ -4,6 +4,7 @@ mod details;
 mod overlays;
 mod pickers;
 mod table;
+mod tabs;
 mod widgets;
 
 use std::thread;

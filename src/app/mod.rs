@@ -46,12 +46,14 @@ use crate::text_input::TextInput;
 use crate::timestamp::Timestamp;
 
 pub mod cursor;
+mod placeholder;
 mod screen;
 pub mod shell;
 pub mod work_items;
 
 pub use cursor::ListCursor;
-pub use screen::Screen;
+pub use placeholder::PlaceholderScreen;
+pub use screen::{Screen, TabId};
 pub use shell::{
     DEFAULT_PANE_SPLIT_STACKED, DEFAULT_PANE_SPLIT_WIDE, DividerOrientation, Focus,
     NotificationLevel, PointerUpdate, Shell,
@@ -162,7 +164,13 @@ impl CopiedContent {
 /// There is one today; #665 puts a tab bar over them.
 pub struct App {
     pub shell: Shell,
+    /// The tab keys `1`–`4` switch between. Every screen keeps its own state
+    /// while another is showing.
+    pub tab: TabId,
     pub work_items: WorkItemsScreen,
+    pub repos: PlaceholderScreen,
+    pub pull_requests: PlaceholderScreen,
+    pub pipelines: PlaceholderScreen,
 }
 
 impl App {
@@ -170,25 +178,96 @@ impl App {
     pub fn new(tickets: Vec<Ticket>) -> Self {
         let mut shell = Shell::default();
         let work_items = WorkItemsScreen::new(&mut shell, tickets);
-        Self { shell, work_items }
+        Self {
+            shell,
+            tab: TabId::WorkItems,
+            work_items,
+            repos: PlaceholderScreen::new(TabId::Repos, "#669"),
+            pull_requests: PlaceholderScreen::new(TabId::PullRequests, "#674"),
+            pipelines: PlaceholderScreen::new(TabId::Pipelines, "#680"),
+        }
+    }
+
+    /// Everything the tab bar draws: each tab, whether it is the one showing,
+    /// and whatever it has waiting.
+    #[must_use]
+    pub fn tabs(&self) -> Vec<(TabId, bool, Option<String>)> {
+        TabId::ALL
+            .into_iter()
+            .map(|tab| (tab, tab == self.tab, self.screen_for(tab).badge()))
+            .collect()
+    }
+
+    #[must_use]
+    fn screen_for(&self, tab: TabId) -> &dyn Screen {
+        match tab {
+            TabId::WorkItems => &self.work_items,
+            TabId::Repos => &self.repos,
+            TabId::PullRequests => &self.pull_requests,
+            TabId::Pipelines => &self.pipelines,
+        }
+    }
+
+    /// Switches tabs, closing whatever the screen being left had open. The
+    /// screen keeps everything else: its query, its cursor, its scroll.
+    pub fn select_tab(&mut self, tab: TabId) {
+        if tab == self.tab {
+            return;
+        }
+        let (shell, screen) = self.screen();
+        screen.close_overlay(shell);
+        self.tab = tab;
     }
 
     /// The shell and the screen the keyboard and the mouse are talking to,
     /// handed back apart so an event can be given one with the other. #665
     /// makes which screen this is a matter of the tab bar.
     pub fn screen(&mut self) -> (&mut Shell, &mut dyn Screen) {
-        (&mut self.shell, &mut self.work_items)
+        let screen: &mut dyn Screen = match self.tab {
+            TabId::WorkItems => &mut self.work_items,
+            TabId::Repos => &mut self.repos,
+            TabId::PullRequests => &mut self.pull_requests,
+            TabId::Pipelines => &mut self.pipelines,
+        };
+        (&mut self.shell, screen)
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
+        // `1`–`4` switch tabs from anywhere the digit is not being typed into
+        // something. An overlay is closed on the way out rather than left open
+        // behind the tab that comes back.
+        if let KeyCode::Char(character) = key.code
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && let Some(tab) = TabId::from_number(character)
+            && self.screen().1.active_editor().is_none()
+        {
+            self.select_tab(tab);
+            return AppAction::None;
+        }
         let (shell, screen) = self.screen();
         screen.handle_key(shell, key)
     }
 
     /// The mouse still goes to the screen's own entry point: the pointer state
-    /// it answers with is the shell's, not something a screen reports.
+    /// it answers with is the shell's, not something a screen reports. A click
+    /// on the tab bar never reaches a screen — the bar is the shell's.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> PointerUpdate {
-        self.work_items.handle_mouse(&mut self.shell, mouse)
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some(region) = self.shell.hit_regions.resolve(mouse.column, mouse.row)
+            && let PointerTarget::SelectTab { index } = region.target
+            && let Some(tab) = TabId::ALL.get(index).copied()
+        {
+            self.shell.pointer.set_position(mouse.column, mouse.row);
+            self.select_tab(tab);
+            return PointerUpdate::none(true);
+        }
+        match self.tab {
+            TabId::WorkItems => self.work_items.handle_mouse(&mut self.shell, mouse),
+            _ => {
+                self.shell.pointer.set_position(mouse.column, mouse.row);
+                PointerUpdate::none(self.shell.refresh_hover())
+            }
+        }
     }
 
     pub fn handle_paste(&mut self, pasted: &str) {

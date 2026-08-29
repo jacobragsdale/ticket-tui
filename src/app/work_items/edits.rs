@@ -3,7 +3,7 @@
 
 use super::*;
 
-/// The Edit menu's cursor. The entries themselves are [`EDIT_MENU`].
+/// The Actions menu's cursor. The entries themselves are [`EDIT_MENU`].
 #[derive(Clone, Debug, Default)]
 pub struct EditMenu {
     pub index: usize,
@@ -98,7 +98,7 @@ impl PromptField {
 }
 
 /// A single-line field editor, prefilled with what the work item says now. The
-/// Title and Tags rows of the Edit menu both open one.
+/// Title and Tags rows of the Actions menu both open one.
 #[derive(Clone, Debug)]
 pub struct TextPrompt {
     pub field: PromptField,
@@ -727,7 +727,7 @@ impl WorkItemsScreen {
         self.edit_menu.scroll.ensure_visible(index);
     }
 
-    /// Runs one Edit menu entry, which is the command it names. Each editor
+    /// Runs one Actions menu entry, which is the command it names. Each editor
     /// opens itself, so nothing here knows what a state or a title is.
     pub(super) fn run_edit_menu_entry(&mut self, shell: &mut Shell, index: usize) -> AppAction {
         let Some(entry) = self.edit_menu_entries().get(index).copied() else {
@@ -738,7 +738,7 @@ impl WorkItemsScreen {
         self.run_command(shell, entry.command)
     }
 
-    /// The Edit menu as it stands for the row under the cursor: [`EDIT_MENU`],
+    /// The Actions menu as it stands for the row under the cursor: [`EDIT_MENU`],
     /// plus `Remove parent` under `Set parent…` when there is a parent to
     /// remove. Every reader of the menu goes through here, so the cursor, the
     /// mouse, and the drawing all count the same rows.
@@ -756,7 +756,7 @@ impl WorkItemsScreen {
         entries
     }
 
-    /// The Edit menu's `Remove parent` row: the work item comes out of its
+    /// The Actions menu's `Remove parent` row: the work item comes out of its
     /// family and hangs under nothing.
     pub(super) fn remove_parent(&mut self, shell: &mut Shell) -> AppAction {
         let Some(child) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
@@ -849,7 +849,7 @@ impl WorkItemsScreen {
         ));
     }
 
-    /// The Edit menu's Title and Tags rows: a single-line field prefilled with
+    /// The Actions menu's Title and Tags rows: a single-line field prefilled with
     /// what the work item says now, edited with the same keys as the
     /// named-view editor.
     pub(super) fn open_prompt(&mut self, shell: &mut Shell, field: PromptField) {
@@ -1018,7 +1018,7 @@ impl WorkItemsScreen {
             )
     }
 
-    /// The Edit menu's **Delete work item…** row, and the same by name in the
+    /// The Actions menu's **Delete work item…** row, and the same by name in the
     /// palette. There is no key bound to it: every other editor is a keypress
     /// away because the worst it can do is a value somebody types over, and
     /// this one takes the work item off the board.

@@ -131,7 +131,11 @@ impl WorkItemsScreen {
 
     #[must_use]
     pub fn palette_commands(&self) -> Vec<Command> {
-        matching_commands(self.palette.query.text(), !self.show_finished)
+        matching_commands(
+            self.palette.query.text(),
+            !self.show_finished,
+            TabId::WorkItems,
+        )
     }
 
     #[must_use]
@@ -688,7 +692,7 @@ impl WorkItemsScreen {
         self.run_command(shell, command.id)
     }
 
-    pub(super) fn run_command(&mut self, shell: &mut Shell, id: CommandId) -> AppAction {
+    pub fn run_command(&mut self, shell: &mut Shell, id: CommandId) -> AppAction {
         // Every command opens its overlay centred; clicking a field sets its
         // anchor afterwards, so a picker never inherits the last one's.
         shell.overlay_anchor = OverlayAnchor::Centered;

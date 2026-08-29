@@ -245,7 +245,8 @@ pub(super) fn capture_selectable(
 pub(super) fn row_like(target: &PointerTarget) -> bool {
     matches!(
         target,
-        PointerTarget::TableRow { .. }
+        PointerTarget::SelectTab { .. }
+            | PointerTarget::TableRow { .. }
             | PointerTarget::OpenInBrowser { .. }
             | PointerTarget::ToggleBookmark { .. }
             | PointerTarget::ToggleRowSelect { .. }
