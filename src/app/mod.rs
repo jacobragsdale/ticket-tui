@@ -92,6 +92,12 @@ pub enum AppAction {
         run_id: i64,
         retry: bool,
     },
+    /// Record one vote on one pull request, as the signed-in user.
+    VotePullRequest {
+        repo_id: String,
+        id: i64,
+        vote: i8,
+    },
     /// Read the pending approvals now rather than at the next poll.
     RefreshApprovals,
     /// Approve or reject one approval, with an optional word about why.

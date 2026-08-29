@@ -25,6 +25,17 @@ pub use columns::PrColumn;
 pub use filters::{PrField, PrSchema};
 pub use rows::PrRow;
 
+/// How a vote reads while it is out.
+const fn vote_verb(vote: i8) -> &'static str {
+    match vote {
+        10 => "Approving",
+        5 => "Approving with suggestions on",
+        -5 => "Waiting for the author on",
+        -10 => "Rejecting",
+        _ => "Clearing my vote on",
+    }
+}
+
 /// The views the tab opens with. `@me` is whoever the last sync signed in as,
 /// so a saved view follows the person rather than the name they had.
 pub const BUILT_IN_VIEWS: &[(&str, &str)] = &[
@@ -58,6 +69,11 @@ pub struct PullRequestsScreen {
     /// How many are waiting on the signed-in user, worked out when the list
     /// is set so the tab bar can ask for it without a shell.
     to_review: usize,
+    /// Votes out on the wire, with what they were before, so a refusal can put
+    /// the glyph back.
+    pending_votes: Vec<(i64, i8)>,
+    /// Votes that landed, oldest first, for `u`.
+    undo_votes: Vec<(i64, i8)>,
 }
 
 impl Default for PullRequestsScreen {
@@ -75,6 +91,8 @@ impl Default for PullRequestsScreen {
             show_closed: false,
             active_view: None,
             to_review: 0,
+            pending_votes: Vec::new(),
+            undo_votes: Vec::new(),
         }
     }
 }
@@ -218,6 +236,121 @@ impl PullRequestsScreen {
         }
     }
 
+    /// Records my vote on the pull request under the cursor. Optimistic: the
+    /// glyph changes at once and a refusal puts it back.
+    pub fn vote(&mut self, shell: &mut Shell, vote: i8) -> AppAction {
+        let Some(row) = self.selected(shell) else {
+            shell.set_error("No pull request to vote on");
+            return AppAction::None;
+        };
+        if row.request.status.is_closed() {
+            shell.set_error(format!("!{} is closed", row.request.id));
+            return AppAction::None;
+        }
+        let Some(me) = shell.me().map(str::to_owned) else {
+            shell.set_error("Nobody is signed in to vote as");
+            return AppAction::None;
+        };
+        let id = row.request.id;
+        let previous = self.my_vote(id, &me);
+        self.apply_vote(id, &me, vote);
+        self.pending_votes.retain(|(held, _)| *held != id);
+        self.pending_votes.push((id, previous));
+        shell.set_status(format!("{} !{id}", vote_verb(vote)));
+        AppAction::VotePullRequest {
+            repo_id: row.request.repo_id.clone(),
+            id,
+            vote,
+        }
+    }
+
+    /// The vote the signed-in user has on one pull request.
+    #[must_use]
+    pub fn my_vote(&self, id: i64, me: &str) -> i8 {
+        self.requests
+            .iter()
+            .find(|request| request.id == id)
+            .and_then(|request| {
+                request
+                    .reviewers
+                    .iter()
+                    .find(|reviewer| crate::model::same_text(&reviewer.display_name, me))
+            })
+            .map_or(0, |reviewer| reviewer.vote)
+    }
+
+    /// Writes a vote into the stored copy, adding the voter as a reviewer when
+    /// they were not one — which is what the endpoint does.
+    fn apply_vote(&mut self, id: i64, me: &str, vote: i8) {
+        let Some(request) = self.requests.iter_mut().find(|request| request.id == id) else {
+            return;
+        };
+        if let Some(reviewer) = request
+            .reviewers
+            .iter_mut()
+            .find(|reviewer| crate::model::same_text(&reviewer.display_name, me))
+        {
+            reviewer.vote = vote;
+        } else {
+            request.reviewers.push(crate::model::PrReviewer {
+                id: String::new(),
+                display_name: me.to_owned(),
+                unique_name: None,
+                vote,
+                is_required: false,
+            });
+        }
+    }
+
+    /// A vote Azure DevOps took: the optimistic copy was right, and what it
+    /// replaced becomes what `u` puts back.
+    pub fn vote_accepted(&mut self, id: i64) {
+        if let Some(position) = self.pending_votes.iter().position(|(held, _)| *held == id) {
+            let entry = self.pending_votes.remove(position);
+            self.undo_votes.push(entry);
+            if self.undo_votes.len() > 20 {
+                self.undo_votes.remove(0);
+            }
+        }
+    }
+
+    /// A vote Azure DevOps refused: the glyph goes back to what it was.
+    pub fn vote_rejected(&mut self, shell: &mut Shell, id: i64, refusal: &str) {
+        if let Some(position) = self.pending_votes.iter().position(|(held, _)| *held == id) {
+            let (_, previous) = self.pending_votes.remove(position);
+            if let Some(me) = shell.me().map(str::to_owned) {
+                self.apply_vote(id, &me, previous);
+            }
+        }
+        shell.set_error(format!("Vote on !{id} refused: {refusal}"));
+    }
+
+    /// `u`: puts the last vote back, which is a vote of its own.
+    pub fn undo_vote(&mut self, shell: &mut Shell) -> AppAction {
+        let Some((id, previous)) = self.undo_votes.pop() else {
+            shell.set_error("Nothing to undo");
+            return AppAction::None;
+        };
+        let Some(request) = self
+            .requests
+            .iter()
+            .find(|request| request.id == id)
+            .cloned()
+        else {
+            return AppAction::None;
+        };
+        let Some(me) = shell.me().map(str::to_owned) else {
+            return AppAction::None;
+        };
+        self.apply_vote(id, &me, previous);
+        shell.set_status(format!("Put my vote on !{id} back"));
+        AppAction::VotePullRequest {
+            repo_id: request.repo_id,
+            id,
+            vote: previous,
+        }
+    }
+
     /// Sorts by one column, turning it around when it is already the one.
     pub fn toggle_sort(&mut self, key: &str) {
         if let Some(column) = <PrColumn as crate::columns::ColumnId>::from_key(key) {
@@ -321,6 +454,11 @@ impl Screen for PullRequestsScreen {
                 self.cursor.move_by(isize::MAX, count);
             }
             KeyCode::Tab => shell.focus = Focus::Details,
+            KeyCode::Char('a') => return self.vote(shell, 10),
+            KeyCode::Char('A') => return self.vote(shell, 5),
+            KeyCode::Char('w') => return self.vote(shell, -5),
+            KeyCode::Char('x') => return self.vote(shell, -10),
+            KeyCode::Char('u') => return self.undo_vote(shell),
             KeyCode::Esc if !self.query.is_empty() => {
                 self.query.clear();
                 self.active_view = None;

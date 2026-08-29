@@ -928,6 +928,53 @@ impl AzureClient {
         Ok(parse_policy_build(&self.get(url.as_str())?))
     }
 
+    /// The signed-in user's own id, which is what a vote is written under.
+    /// The connection-data endpoint hangs off the organization rather than the
+    /// project, so it is built by hand.
+    pub fn fetch_my_id(&self) -> Result<Option<String>> {
+        let mut url = Url::parse(&self.config.base_url())
+            .with_context(|| format!("invalid Azure DevOps URL {}", self.config.base_url()))?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?
+            .extend(["_apis", "connectionData"]);
+        url.set_query(Some(&version_query()));
+        let response = self.get(url.as_str())?;
+        Ok(response["authenticatedUser"]["id"]
+            .as_str()
+            .map(str::to_owned))
+    }
+
+    /// Records one vote on one pull request, as the signed-in user. Voting on
+    /// a pull request you are not a reviewer of adds you, which is what the
+    /// endpoint does.
+    pub fn vote_pull_request(
+        &self,
+        repo_id: &str,
+        id: i64,
+        reviewer_id: &str,
+        vote: i8,
+    ) -> Result<()> {
+        let pull_request = id.to_string();
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "git",
+            "repositories",
+            repo_id,
+            "pullrequests",
+            pull_request.as_str(),
+            "reviewers",
+            reviewer_id,
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&version_query()));
+        self.send(
+            url.as_str(),
+            Request::Put(&serde_json::json!({ "vote": i64::from(vote) })),
+        )?;
+        Ok(())
+    }
+
     /// The teams hang off `_apis/projects` rather than off the project. `tail`
     /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {
@@ -1019,6 +1066,9 @@ impl AzureClient {
             Request::PatchJson(body) => authorized(self.agent.patch(url), &authorization)
                 .send_json(body)
                 .with_context(|| format!("PATCH {url} failed"))?,
+            Request::Put(body) => authorized(self.agent.put(url), &authorization)
+                .send_json(body)
+                .with_context(|| format!("PUT {url} failed"))?,
             Request::PostPatch(document) => authorized(self.agent.post(url), &authorization)
                 .header("Content-Type", "application/json-patch+json")
                 .send_json(document)
@@ -1069,6 +1119,8 @@ enum Request<'a> {
     /// An ordinary JSON body patched rather than posted, which is how a build
     /// is cancelled or retried.
     PatchJson(&'a Value),
+    /// An ordinary JSON body put, which is how a vote is recorded.
+    Put(&'a Value),
     /// The same document posted rather than patched, which is how a work item
     /// is created: there is no work item yet to patch.
     PostPatch(&'a [Value]),

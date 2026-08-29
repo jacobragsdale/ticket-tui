@@ -950,6 +950,13 @@ build that gates it, the Completion settings, and the buttons `[Approve]
 [Suggest] [Wait] [Reject] [Complete] [Abandon]` — drawn muted until #676 and
 #677 wire them.
 
+`a` approves, `A` approves with suggestions, `w` waits for the author and `x`
+rejects; `u` puts the last vote back. The glyph changes at once and a refusal
+reverts it and says why. Voting on a pull request you were not asked to review
+adds you, which is what Azure DevOps does. Your own id — which a vote is
+written under, and which the work-item endpoints never report — is read once
+from `_apis/connectionData` and kept with the sync settings.
+
 Its grammar: `repo:`, `author:` and `reviewer:` (both take `@me`), `vote:`
 (`approved`, `suggestions`, `waiting`, `rejected`, `none`), `status:`,
 `target:`, `source:`, `draft:` and `build:`. Four built-in views open on the

@@ -74,6 +74,8 @@ pub enum SyncRequest {
     TriggerRun { pipeline_id: i64, branch: String },
     /// Stop one run, or retry the jobs that failed in it.
     RunAction { run_id: i64, retry: bool },
+    /// Record one vote on one pull request, as the signed-in user.
+    VotePullRequest { repo_id: String, id: i64, vote: i8 },
     /// Approve or reject one approval, with an optional word about why.
     AnswerApproval {
         id: String,
@@ -126,6 +128,9 @@ pub enum SyncEvent {
     RunStarted(Result<Run, String>),
     /// One approval this session answered, or why it could not be.
     ApprovalAnswered(Result<String, String>),
+    /// One vote this session recorded — the pull request and the vote — or the
+    /// pull request and why it could not be, so the glyph goes back.
+    Voted(Result<(i64, i8), (i64, String)>),
     /// A request finished, successfully or not.
     Finished {
         origin: PullOrigin,
@@ -487,6 +492,20 @@ pub trait WorkItemSource {
     fn answer_approval(&self, _id: &str, _approve: bool, _comment: &str) -> Result<()> {
         Err(anyhow!("this source cannot answer approvals"))
     }
+    /// The signed-in user's own id, for writes made in their name.
+    fn my_id(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+    /// Records one vote on one pull request.
+    fn vote_pull_request(
+        &self,
+        _repo_id: &str,
+        _id: i64,
+        _reviewer_id: &str,
+        _vote: i8,
+    ) -> Result<()> {
+        Err(anyhow!("this source cannot vote on pull requests"))
+    }
     /// The project's build definitions, and the newest window of runs. Two
     /// requests, made on every pull; a source with neither answers with none.
     fn pipelines(&self) -> Result<Vec<Pipeline>> {
@@ -629,6 +648,14 @@ impl WorkItemSource for AzureClient {
 
     fn answer_approval(&self, id: &str, approve: bool, comment: &str) -> Result<()> {
         self.answer_approval(id, approve, comment)
+    }
+
+    fn my_id(&self) -> Result<Option<String>> {
+        self.fetch_my_id()
+    }
+
+    fn vote_pull_request(&self, repo_id: &str, id: i64, reviewer_id: &str, vote: i8) -> Result<()> {
+        self.vote_pull_request(repo_id, id, reviewer_id, vote)
     }
 
     fn pull_changed_since(&self, watermark: Timestamp) -> Result<SyncBatch> {
@@ -874,6 +901,9 @@ fn work(
                     .and_then(|source| source.trigger_run(pipeline_id, &branch))
                     .map_err(|error| format!("{error:#}")),
             ),
+            SyncRequest::VotePullRequest { repo_id, id, vote } => {
+                SyncEvent::Voted(worker.vote(&repo_id, id, vote, events))
+            }
             SyncRequest::AnswerApproval {
                 id,
                 approve,
@@ -1495,6 +1525,41 @@ impl Worker {
         Ok(stored_pipelines || stored_runs)
     }
 
+    /// Records one vote, as whoever is signed in. Their own id is read once
+    /// and kept in `sync_meta`: a vote is written under it, and it is not
+    /// something the work-item endpoints ever report.
+    fn vote(
+        &mut self,
+        repo_id: &str,
+        id: i64,
+        vote: i8,
+        events: &Sender<SyncEvent>,
+    ) -> Result<(i64, i8), (i64, String)> {
+        let reviewer = match self.my_reviewer_id(events) {
+            Ok(Some(reviewer)) => reviewer,
+            Ok(None) => {
+                return Err((id, "Azure DevOps did not say who is signed in".to_owned()));
+            }
+            Err(error) => return Err((id, format!("{error:#}"))),
+        };
+        self.source(events)
+            .and_then(|source| source.vote_pull_request(repo_id, id, &reviewer, vote))
+            .map(|()| (id, vote))
+            .map_err(|error| (id, format!("{error:#}")))
+    }
+
+    /// The signed-in user's own id, read once a database.
+    fn my_reviewer_id(&mut self, events: &Sender<SyncEvent>) -> Result<Option<String>> {
+        if let Some(id) = self.repository()?.meta(db::ME_ID_KEY)? {
+            return Ok(Some(id));
+        }
+        let Some(id) = self.source(events)?.my_id()? else {
+            return Ok(None);
+        };
+        self.repository()?.set_meta(db::ME_ID_KEY, &id)?;
+        Ok(Some(id))
+    }
+
     /// Reads the project's pull requests: every active one, and a window of
     /// those recently closed so one that just landed does not vanish. For the
     /// active ones whose head commit or reviewer set has moved — and at most
@@ -1891,6 +1956,11 @@ mod tests {
         /// read.
         pull_requests: Arc<Mutex<Vec<PullRequest>>>,
         pr_extras: Arc<Mutex<Vec<i64>>>,
+        /// Who this source says is signed in, how often it was asked, and
+        /// every vote it took.
+        my_id: Option<String>,
+        my_id_reads: Arc<Mutex<usize>>,
+        votes: Arc<Mutex<Vec<String>>>,
         /// The repositories this source lists, and the project GUID they carry.
         repos: Arc<Mutex<Vec<Repo>>>,
         /// The pipelines and runs it lists, and how often they were asked for.
@@ -2074,6 +2144,25 @@ mod tests {
                 },
                 None,
             ))
+        }
+
+        fn my_id(&self) -> Result<Option<String>> {
+            *self.my_id_reads.lock().unwrap() += 1;
+            Ok(self.my_id.clone())
+        }
+
+        fn vote_pull_request(
+            &self,
+            repo_id: &str,
+            id: i64,
+            reviewer_id: &str,
+            vote: i8,
+        ) -> Result<()> {
+            self.votes
+                .lock()
+                .unwrap()
+                .push(format!("{repo_id}/{id} {reviewer_id} {vote}"));
+            Ok(())
         }
 
         fn pull_requests(&self, status: &str, _top: usize) -> Result<Vec<PullRequest>> {
@@ -2980,6 +3069,62 @@ mod tests {
     }
 
     #[test]
+    fn a_vote_goes_out_under_the_signed_in_users_own_id_read_once() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource {
+            my_id: Some("me-guid".into()),
+            votes: Arc::new(Mutex::new(Vec::new())),
+            ..FakeSource::with(vec![])
+        };
+        let votes = Arc::clone(&source.votes);
+        let id_reads = Arc::clone(&source.my_id_reads);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        for vote in [10_i8, -10] {
+            handle
+                .send(SyncRequest::VotePullRequest {
+                    repo_id: "aaa-111".into(),
+                    id: 11,
+                    vote,
+                })
+                .unwrap();
+            let SyncEvent::Voted(result) = next_voted(&handle) else {
+                panic!("expected a vote");
+            };
+            assert_eq!(result.expect("the vote was taken"), (11, vote));
+        }
+
+        assert_eq!(
+            *votes.lock().unwrap(),
+            vec![
+                "aaa-111/11 me-guid 10".to_owned(),
+                "aaa-111/11 me-guid -10".to_owned()
+            ]
+        );
+        assert_eq!(
+            *id_reads.lock().unwrap(),
+            1,
+            "who is signed in is read once and kept in sync_meta"
+        );
+        let stored = SqliteTicketRepository::open_existing(&path).unwrap();
+        assert_eq!(
+            stored.meta(db::ME_ID_KEY).unwrap().as_deref(),
+            Some("me-guid")
+        );
+    }
+
+    fn next_voted(handle: &SyncHandle) -> SyncEvent {
+        loop {
+            match next_event(handle) {
+                event @ SyncEvent::Voted(_) => return event,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected a vote event, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn a_failed_pull_reports_the_error_and_leaves_the_rows_alone() {
         let directory = tempdir().unwrap();
         let path = seeded_database(&directory);
@@ -3545,6 +3690,7 @@ mod tests {
                 | SyncEvent::Branches { .. }
                 | SyncEvent::RunStarted(_)
                 | SyncEvent::ApprovalAnswered(_)
+                | SyncEvent::Voted(_)
                 | SyncEvent::Details(_)
                 | SyncEvent::Identities(_)
                 | SyncEvent::ClassificationNodes(_)

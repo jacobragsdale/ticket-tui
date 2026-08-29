@@ -651,6 +651,12 @@ fn handle_action(
                 app.shell.set_error(refusal);
             }
         }
+        AppAction::VotePullRequest { repo_id, id, vote } => {
+            if let Err(refusal) = runtime.send(SyncRequest::VotePullRequest { repo_id, id, vote }) {
+                app.pull_requests
+                    .vote_rejected(&mut app.shell, id, &refusal);
+            }
+        }
         AppAction::RefreshApprovals => {
             if let Some(watcher) = runtime.pipelines.as_ref() {
                 let _ = watcher.send(WatchRequest::RefreshApprovals);
@@ -1134,6 +1140,13 @@ fn poll_sync(
     while let Some(event) = runtime.worker.as_ref().and_then(SyncHandle::try_event) {
         redraw = true;
         match event {
+            SyncEvent::Voted(result) => match result {
+                Ok((id, _)) => app.pull_requests.vote_accepted(id),
+                Err((id, refusal)) => {
+                    app.pull_requests
+                        .vote_rejected(&mut app.shell, id, &refusal);
+                }
+            },
             SyncEvent::ApprovalAnswered(result) => match result {
                 Ok(id) => {
                     app.pipelines.approval_answered(&id);

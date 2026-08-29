@@ -21,6 +21,11 @@ const SCHEMA_VERSION: i64 = 15;
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
 
+/// `sync_meta` key holding the signed-in user's own id, which is what a vote
+/// on a pull request is written under. Read once and kept: the work-item
+/// endpoints never report it.
+pub const ME_ID_KEY: &str = "me_id";
+
 /// `sync_meta` key holding the greatest `System.ChangedDate` the last
 /// successful pull brought back, which is where the next incremental pull
 /// starts asking. It is never a wall clock reading: client clocks skew, Azure

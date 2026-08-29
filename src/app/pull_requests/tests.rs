@@ -1,6 +1,7 @@
-use crate::app::App;
+use crate::app::{App, AppAction, TabId};
 use crate::model::{Identity, PrBuild, PrReviewer, PrStatus, PullRequest, Repo};
 use crate::timestamp::ts;
+use crossterm::event::KeyCode;
 
 pub(crate) fn reviewer(name: &str, vote: i8, required: bool) -> PrReviewer {
     PrReviewer {
@@ -181,5 +182,113 @@ fn the_badge_counts_what_is_waiting_on_my_vote() {
         nobody.pull_requests.to_review(&nobody.shell),
         0,
         "nobody signed in is nobody's review queue"
+    );
+}
+
+#[test]
+fn every_vote_key_writes_its_value_and_changes_the_glyph_at_once() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    // The one waiting on me.
+    app.pull_requests.cursor.focus(2);
+
+    for (key, vote) in [
+        (KeyCode::Char('a'), 10),
+        (KeyCode::Char('A'), 5),
+        (KeyCode::Char('w'), -5),
+        (KeyCode::Char('x'), -10),
+    ] {
+        let action = app.handle_key(crossterm::event::KeyEvent::new(
+            key,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(
+            matches!(
+                action,
+                AppAction::VotePullRequest { id: 11, vote: sent, .. } if sent == vote
+            ),
+            "{key:?} writes {vote}, got {action:?}"
+        );
+        assert_eq!(
+            app.pull_requests.my_vote(11, "Jacob Ragsdale"),
+            vote,
+            "and the glyph changes at once"
+        );
+        app.pull_requests.vote_accepted(11);
+    }
+}
+
+#[test]
+fn a_refused_vote_puts_the_glyph_back_and_says_why() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(2);
+
+    app.handle_key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('a'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert_eq!(app.pull_requests.my_vote(11, "Jacob Ragsdale"), 10);
+
+    app.pull_requests
+        .vote_rejected(&mut app.shell, 11, "you are not a reviewer");
+    assert_eq!(
+        app.pull_requests.my_vote(11, "Jacob Ragsdale"),
+        0,
+        "the vote that was there comes back"
+    );
+    assert!(
+        app.shell
+            .notification()
+            .is_some_and(|(message, _)| message.contains("not a reviewer")),
+    );
+}
+
+#[test]
+fn u_puts_the_last_vote_back() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(2);
+
+    app.handle_key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('a'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    app.pull_requests.vote_accepted(11);
+    assert_eq!(app.pull_requests.my_vote(11, "Jacob Ragsdale"), 10);
+
+    let action = app.handle_key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('u'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert!(
+        matches!(
+            action,
+            AppAction::VotePullRequest {
+                id: 11,
+                vote: 0,
+                ..
+            }
+        ),
+        "undo writes the vote that was there before, got {action:?}"
+    );
+    assert_eq!(app.pull_requests.my_vote(11, "Jacob Ragsdale"), 0);
+}
+
+#[test]
+fn voting_on_a_pull_request_i_am_not_a_reviewer_of_adds_me() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    // The draft, which nobody has asked me to review.
+    app.pull_requests.cursor.focus(1);
+
+    app.handle_key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('a'),
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert_eq!(
+        app.pull_requests.my_vote(12, "Jacob Ragsdale"),
+        10,
+        "which is what the endpoint does"
     );
 }
