@@ -134,9 +134,10 @@ def validate_context(data: dict[str, object]) -> None:
     integer(data.get("process_id"), "process_id")
     for name in ("updated_at", "database_path", "mode", "focus", "screen"):
         text(data.get(name), name)
-    active_view = data.get("active_view")
-    if active_view is not None:
-        text(active_view, "active_view")
+    for name in ("me", "active_view"):
+        value = data.get(name)
+        if value is not None:
+            text(value, name)
 
     validate_sync(data.get("sync"))
     pending_edits = object_list(data.get("pending_edits"))
@@ -211,7 +212,9 @@ def print_summary(context_path: Path, data: dict[str, object]) -> None:
     status = "live" if live else "stale process"
     print(f"ticket-tui context: {status}")
     print(f"Context: {context_path}")
+    print(f"Database: {data.get('database_path', 'unknown')}")
     print(f"Updated: {data.get('updated_at', 'unknown')}")
+    print(f"Signed in as: {data.get('me') or '(unknown; @me will not resolve)'}")
     print(
         "View: "
         f"mode={data.get('mode', '?')} "
@@ -368,7 +371,11 @@ def main() -> int:
         data = object_mapping(raw)
     except FileNotFoundError:
         print(f"No live ticket-tui context at {context_path}", file=sys.stderr)
-        print("If --database is in use, pass that database path.", file=sys.stderr)
+        print(
+            "No ticket-tui is running, or it was started with --database: pass "
+            "the same path here. Read the backlog with `ticket-tui list` instead.",
+            file=sys.stderr,
+        )
         return 2
     except (OSError, json.JSONDecodeError, TypeError) as error:
         print(f"Could not read {context_path}: {error}", file=sys.stderr)
