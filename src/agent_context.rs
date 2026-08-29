@@ -246,7 +246,13 @@ mod tests {
         let directory = tempdir().unwrap();
         let path = path_for(&directory.path().join("tickets.sqlite3"));
         assert_eq!(path, directory.path().join("tickets.context.json"));
-        let first = context("first.sqlite3".into());
+        let mut first = context("first.sqlite3".into());
+        first.pending_edits.push(PendingEditContext {
+            id: 625,
+            field: "State".into(),
+            value: "Doing".into(),
+            since: "2026-08-29T12:00:01Z".into(),
+        });
         save(&path, &first).unwrap();
         let first_json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
@@ -258,6 +264,23 @@ mod tests {
         assert_eq!(first_json["sort"]["direction"], "desc");
         assert_eq!(first_json["sort"]["row_density"], "compact");
         assert_eq!(first_json["tickets"]["finished_hidden"], true);
+        assert_eq!(first_json["sync"]["organization"], "example-org");
+        assert_eq!(first_json["sync"]["project"], "atlas");
+        assert_eq!(first_json["sync"]["refresh_seconds"], 60);
+        assert_eq!(first_json["sync"]["in_progress"], false);
+        assert_eq!(
+            first_json["sync"]["last_success_at"],
+            "2026-08-29T12:00:00Z"
+        );
+        assert!(first_json["sync"]["last_error"].is_null());
+        assert_eq!(first_json["sync"]["offline"], false);
+        assert_eq!(first_json["pending_edits"][0]["id"], 625);
+        assert_eq!(first_json["pending_edits"][0]["field"], "State");
+        assert_eq!(first_json["pending_edits"][0]["value"], "Doing");
+        assert_eq!(
+            first_json["pending_edits"][0]["since"],
+            "2026-08-29T12:00:01Z"
+        );
         assert!(first_json["process_id"].as_u64().is_some());
         assert!(first_json["updated_at"].as_str().is_some());
 
@@ -268,39 +291,11 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(second_json["database_path"], "second.sqlite3");
         assert!(second_json["me"].is_null());
+        assert!(second_json["pending_edits"].as_array().unwrap().is_empty());
         assert!(!temporary_path(&path).exists());
 
         remove(&path).unwrap();
         remove(&path).unwrap();
         assert!(!path.exists());
-    }
-
-    #[test]
-    fn the_sync_block_and_pending_edits_are_published_under_schema_version_two() {
-        assert_eq!(SCHEMA_VERSION, 2);
-        let directory = tempdir().unwrap();
-        let path = path_for(&directory.path().join("tickets.sqlite3"));
-        let mut context = context("tickets.sqlite3".into());
-        context.pending_edits.push(PendingEditContext {
-            id: 625,
-            field: "State".into(),
-            value: "Doing".into(),
-            since: "2026-08-29T12:00:01Z".into(),
-        });
-        save(&path, &context).unwrap();
-        let json: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(json["schema_version"], 2);
-        assert_eq!(json["sync"]["organization"], "example-org");
-        assert_eq!(json["sync"]["project"], "atlas");
-        assert_eq!(json["sync"]["refresh_seconds"], 60);
-        assert_eq!(json["sync"]["in_progress"], false);
-        assert_eq!(json["sync"]["last_success_at"], "2026-08-29T12:00:00Z");
-        assert!(json["sync"]["last_error"].is_null());
-        assert_eq!(json["sync"]["offline"], false);
-        assert_eq!(json["pending_edits"][0]["id"], 625);
-        assert_eq!(json["pending_edits"][0]["field"], "State");
-        assert_eq!(json["pending_edits"][0]["value"], "Doing");
-        assert_eq!(json["pending_edits"][0]["since"], "2026-08-29T12:00:01Z");
     }
 }

@@ -48,8 +48,10 @@ pub const SYNC_SCOPE_KEY: &str = "sync_scope";
 /// closely never touches the network for them at all.
 pub const CLASSIFICATION_FETCHED_KEY: &str = "classification_nodes_fetched_at";
 
-/// SQLite is a disposable cache of Azure DevOps, so any database that is not at
-/// the current schema version is dropped and recreated instead of migrated.
+/// Azure DevOps is the source of truth and a full pull rebuilds every row, so a
+/// database at another schema version is dropped and recreated rather than
+/// migrated; the pull that follows refills it. The `sync_meta` settings go
+/// with it, which is what makes that pull a full one.
 const RESET_SCHEMA: &str = r"
 DROP TABLE IF EXISTS work_items;
 DROP TABLE IF EXISTS work_item_relations;
@@ -160,24 +162,16 @@ pub struct SqliteTicketRepository {
 }
 
 impl SqliteTicketRepository {
+    /// Opens the database, creating it — directory and all — when it is not
+    /// there, and rebuilding its schema when it is at another version.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
-
-        let connection = Connection::open(&path)
-            .with_context(|| format!("failed to open database at {}", path.display()))?;
-        connection
-            .busy_timeout(StdDuration::from_secs(3))
-            .context("failed to configure SQLite busy timeout")?;
-        connection
-            .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
-            .context("failed to configure SQLite")?;
-
+        let connection = connect(&path)?;
         let schema_rebuilt = ensure_current_schema(&connection)?;
-
         Ok(Self {
             connection,
             path,
@@ -185,16 +179,13 @@ impl SqliteTicketRepository {
         })
     }
 
-    /// Open an existing cache without touching its schema. Background reloads use
-    /// this so an older running instance can never rebuild (and empty) a cache
-    /// that a newer build owns; a version mismatch is an error instead.
+    /// Opens an existing database without touching its schema. Background
+    /// reloads, the sync worker, and the subcommands use this so an older
+    /// running instance can never rebuild (and empty) a database that a newer
+    /// build owns; a version mismatch is an error instead.
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let connection = Connection::open(&path)
-            .with_context(|| format!("failed to open database at {}", path.display()))?;
-        connection
-            .busy_timeout(StdDuration::from_secs(3))
-            .context("failed to configure SQLite busy timeout")?;
+        let connection = connect(&path)?;
         let version = schema_version(&connection)?;
         if version != SCHEMA_VERSION {
             bail!(
@@ -487,16 +478,7 @@ impl SqliteTicketRepository {
             insert_ticket(&transaction, ticket)?;
         }
         for relation in &graph.relations {
-            transaction.execute(
-                "INSERT OR REPLACE INTO work_item_relations (organization, from_id, to_id, kind)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    relation.from.organization,
-                    relation.from.id,
-                    relation.to.id,
-                    relation.kind.as_str()
-                ],
-            )?;
+            insert_relation(&transaction, relation)?;
         }
         for comment in &graph.comments {
             insert_comment(&transaction, comment)?;
@@ -812,6 +794,21 @@ pub fn default_database_path() -> PathBuf {
         || PathBuf::from("tickets.sqlite3"),
         |dirs| dirs.data_dir().join("tickets.sqlite3"),
     )
+}
+
+/// One connection to the file, configured the way every reader and writer
+/// wants it: a short wait on a lock rather than an immediate refusal, and the
+/// write-ahead log so a reload never blocks a pull.
+fn connect(path: &Path) -> Result<Connection> {
+    let connection = Connection::open(path)
+        .with_context(|| format!("failed to open database at {}", path.display()))?;
+    connection
+        .busy_timeout(StdDuration::from_secs(3))
+        .context("failed to configure SQLite busy timeout")?;
+    connection
+        .execute_batch("PRAGMA journal_mode = WAL;")
+        .context("failed to configure SQLite")?;
+    Ok(connection)
 }
 
 fn schema_version(connection: &Connection) -> Result<i64> {

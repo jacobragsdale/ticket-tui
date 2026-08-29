@@ -50,13 +50,6 @@ pub fn html_to_markdown(html: &str) -> String {
     render(html).0
 }
 
-/// Whether a description carries formatting [`html_to_markdown`] cannot write
-/// down: a table, an image, or a tag carrying its own styling.
-#[must_use]
-pub fn has_rich_formatting(html: &str) -> bool {
-    render(html).1
-}
-
 /// What an edited file says, with the notice line and whatever an editor did
 /// to the end of it taken off, so a file that was opened and closed again
 /// compares equal to the one that was written.
@@ -706,6 +699,12 @@ mod tests {
     use super::*;
     use crate::html::html_to_text;
     use pretty_assertions::assert_eq;
+
+    /// Whether a description carries formatting the Markdown cannot write
+    /// down, which is what earns the file its notice line.
+    fn has_rich_formatting(html: &str) -> bool {
+        render(html).1
+    }
 
     /// One description of each shape the pair round-trips.
     fn fixtures() -> [&'static str; 3] {

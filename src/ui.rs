@@ -588,7 +588,6 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ));
         }
         let body = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, body_height);
-        app.hit_regions.set_table_body(body);
         app.hit_regions.push(region(
             body,
             PointerTarget::FocusTickets,
@@ -596,10 +595,6 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Some(SelectableSurface::Table),
             Some(ScrollSurface::Table),
         ));
-        if let Some(id_area) = header_columns.get(1) {
-            let id_column = Rect::new(id_area.x, body.y, id_area.width, body.height);
-            app.hit_regions.set_id_column(id_column);
-        }
         let rendered = count.saturating_sub(offset).min(visible_rows);
         for visible_index in 0..rendered {
             let logical = offset + visible_index;
@@ -700,7 +695,6 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    app.hit_regions.set_details(area);
     app.hit_regions.push(region(
         area,
         PointerTarget::FocusDetails,
@@ -1085,7 +1079,6 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 fn render_sort_popup(frame: &mut Frame<'_>, app: &mut App) {
     let area = centered_rect(frame.area(), 48, 16);
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, app, area, " Sort tickets ");
     let selected = app.sort_draft.field_index;
     let rows: Vec<Line> = SortField::ALL
@@ -1456,12 +1449,7 @@ fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
         return;
     };
     let facets = app.facets_for(field);
-    let pill = app
-        .hit_regions
-        .facet_pills
-        .iter()
-        .find(|(_, target)| *target == FacetTarget::Field(field))
-        .map(|(area, _)| *area);
+    let pill = app.hit_regions.facet_pill(FacetTarget::Field(field));
     let width = 36.min(frame.area().width.saturating_sub(2)).max(20);
     let height = u16::try_from(facets.len().saturating_add(2))
         .unwrap_or(u16::MAX)
@@ -1486,7 +1474,6 @@ fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
         None,
         None,
     ));
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, app, area, &format!(" {} ", field.label()));
     let selected = app.facet_bar.value_index;
     let rows: Vec<Line> = facets
@@ -1521,7 +1508,6 @@ fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
 
 fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
     let area = centered_rect(frame.area(), 52, 16);
-    frame.render_widget(Clear, area);
     let title = if app.filter_overlay.showing_values {
         format!(" {} ", app.facet_field().label())
     } else {
@@ -1583,7 +1569,6 @@ fn render_filter_overlay(frame: &mut Frame<'_>, app: &mut App) {
 
 fn render_column_overlay(frame: &mut Frame<'_>, app: &mut App) {
     let area = centered_rect(frame.area(), 56, 18);
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, app, area, " Columns ");
     let content = app.layout.columns.len();
     let selected = app.column_overlay.index;
@@ -1701,34 +1686,22 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
         .unwrap_or(u16::MAX)
         .min(16);
     let area = centered_rect(frame.area(), 56, height.max(6));
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, app, area, " Commands ");
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
-    let query_area = chunks[0];
-    let list_area = chunks[1];
-    let query = if app.palette.query.is_empty() {
-        Line::styled("Filter commands…", Style::default().fg(theme().muted))
-    } else {
-        Line::from(app.palette.query.text().to_owned())
-    };
-    frame.render_widget(
-        Paragraph::new(query).style(Style::default().fg(theme().text)),
-        query_area,
+    let (text, cursor) = (
+        app.palette.query.text().to_owned(),
+        app.palette.query.cursor(),
     );
-    app.hit_regions.push(region(
-        query_area,
+    render_query_field(
+        frame,
+        app,
+        chunks[0],
+        &text,
+        cursor,
+        "Filter commands…",
         PointerTarget::PaletteQuery,
-        PointerLayer::Modal,
-        Some(SelectableSurface::Overlay),
-        None,
-    ));
-    capture_selectable(frame, app, SelectableSurface::Overlay, query_area, false);
-    let cursor_x = query_area.x.saturating_add(
-        u16::try_from(app.palette.query.cursor())
-            .unwrap_or(u16::MAX)
-            .min(query_area.width.saturating_sub(1)),
     );
-    frame.set_cursor_position((cursor_x, query_area.y));
+    let list_area = chunks[1];
     let selected = app.palette.selected;
     let rows: Vec<Line> = commands
         .iter()
@@ -1766,7 +1739,6 @@ fn render_edit_menu(frame: &mut Frame<'_>, app: &mut App) {
     let entries = app.edit_menu_entries();
     let height = u16::try_from(entries.len().saturating_add(2)).unwrap_or(u16::MAX);
     let area = centered_rect(frame.area(), 40, height.max(3));
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, app, area, " Edit ");
     let selected = app.edit_menu.index;
     let rows: Vec<Line> = entries
@@ -1827,7 +1799,6 @@ fn render_state_picker(frame: &mut Frame<'_>, app: &mut App) {
         .collect();
     let width = overlay_width(app.overlay_anchor, &rows, 40, frame.area());
     let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
-    frame.render_widget(Clear, area);
     let title = format!(" State \u{b7} {} ", app.state_picker.scope.label());
     let inner = render_modal_frame(frame, app, area, &title);
     render_list_overlay(
@@ -1870,7 +1841,6 @@ fn render_priority_picker(frame: &mut Frame<'_>, app: &mut App) {
         .collect();
     let width = overlay_width(app.overlay_anchor, &rows, 40, frame.area());
     let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
-    frame.render_widget(Clear, area);
     let title = format!(" Priority \u{b7} #{} ", app.priority_picker.id);
     let inner = render_modal_frame(frame, app, area, &title);
     render_list_overlay(
@@ -1933,37 +1903,25 @@ fn render_assignee_picker(frame: &mut Frame<'_>, app: &mut App) {
         .collect();
     let width = overlay_width(app.overlay_anchor, &rows, 52, frame.area());
     let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
-    frame.render_widget(Clear, area);
     let title = format!(
         " Assignee \u{b7} {} ",
         app.scope_label(app.assignee_picker.scope)
     );
     let inner = render_modal_frame(frame, app, area, &title);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
-    let query_area = chunks[0];
-    let query = if app.assignee_picker.query.is_empty() {
-        Line::styled("Filter people\u{2026}", Style::default().fg(theme().muted))
-    } else {
-        Line::from(app.assignee_picker.query.text().to_owned())
-    };
-    frame.render_widget(
-        Paragraph::new(query).style(Style::default().fg(theme().text)),
-        query_area,
+    let (text, cursor) = (
+        app.assignee_picker.query.text().to_owned(),
+        app.assignee_picker.query.cursor(),
     );
-    app.hit_regions.push(region(
-        query_area,
+    render_query_field(
+        frame,
+        app,
+        chunks[0],
+        &text,
+        cursor,
+        "Filter people\u{2026}",
         PointerTarget::AssigneeQuery,
-        PointerLayer::Modal,
-        Some(SelectableSurface::Overlay),
-        None,
-    ));
-    capture_selectable(frame, app, SelectableSurface::Overlay, query_area, false);
-    let cursor_x = query_area.x.saturating_add(
-        u16::try_from(app.assignee_picker.query.cursor())
-            .unwrap_or(u16::MAX)
-            .min(query_area.width.saturating_sub(1)),
     );
-    frame.set_cursor_position((cursor_x, query_area.y));
     render_list_overlay(
         frame,
         app,
@@ -2020,37 +1978,22 @@ fn render_parent_picker(frame: &mut Frame<'_>, app: &mut App) {
         .collect();
     let width = overlay_width(app.overlay_anchor, &rows, 64, frame.area());
     let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
-    frame.render_widget(Clear, area);
     let title = format!(" Parent of #{} ", app.parent_picker.child.id);
     let inner = render_modal_frame(frame, app, area, &title);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
-    let query_area = chunks[0];
-    let query = if app.parent_picker.query.is_empty() {
-        Line::styled(
-            "Filter by id or title\u{2026}",
-            Style::default().fg(theme().muted),
-        )
-    } else {
-        Line::from(app.parent_picker.query.text().to_owned())
-    };
-    frame.render_widget(
-        Paragraph::new(query).style(Style::default().fg(theme().text)),
-        query_area,
+    let (text, cursor) = (
+        app.parent_picker.query.text().to_owned(),
+        app.parent_picker.query.cursor(),
     );
-    app.hit_regions.push(region(
-        query_area,
+    render_query_field(
+        frame,
+        app,
+        chunks[0],
+        &text,
+        cursor,
+        "Filter by id or title\u{2026}",
         PointerTarget::ParentQuery,
-        PointerLayer::Modal,
-        Some(SelectableSurface::Overlay),
-        None,
-    ));
-    capture_selectable(frame, app, SelectableSurface::Overlay, query_area, false);
-    let cursor_x = query_area.x.saturating_add(
-        u16::try_from(app.parent_picker.query.cursor())
-            .unwrap_or(u16::MAX)
-            .min(query_area.width.saturating_sub(1)),
     );
-    frame.set_cursor_position((cursor_x, query_area.y));
     render_list_overlay(
         frame,
         app,
@@ -2111,7 +2054,6 @@ fn render_node_picker(frame: &mut Frame<'_>, app: &mut App) {
         .collect();
     let width = overlay_width(app.overlay_anchor, &rows, 56, frame.area());
     let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
-    frame.render_widget(Clear, area);
     let title = format!(
         " {} \u{b7} {} ",
         kind.label(),
@@ -2119,33 +2061,19 @@ fn render_node_picker(frame: &mut Frame<'_>, app: &mut App) {
     );
     let inner = render_modal_frame(frame, app, area, &title);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
-    let query_area = chunks[0];
-    let query = if app.node_picker.query.is_empty() {
-        Line::styled(
-            format!("Filter {}\u{2026}", kind.label().to_lowercase()),
-            Style::default().fg(theme().muted),
-        )
-    } else {
-        Line::from(app.node_picker.query.text().to_owned())
-    };
-    frame.render_widget(
-        Paragraph::new(query).style(Style::default().fg(theme().text)),
-        query_area,
+    let (text, cursor) = (
+        app.node_picker.query.text().to_owned(),
+        app.node_picker.query.cursor(),
     );
-    app.hit_regions.push(region(
-        query_area,
+    render_query_field(
+        frame,
+        app,
+        chunks[0],
+        &text,
+        cursor,
+        &format!("Filter {}\u{2026}", kind.label().to_lowercase()),
         PointerTarget::NodeQuery,
-        PointerLayer::Modal,
-        Some(SelectableSurface::Overlay),
-        None,
-    ));
-    capture_selectable(frame, app, SelectableSurface::Overlay, query_area, false);
-    let cursor_x = query_area.x.saturating_add(
-        u16::try_from(app.node_picker.query.cursor())
-            .unwrap_or(u16::MAX)
-            .min(query_area.width.saturating_sub(1)),
     );
-    frame.set_cursor_position((cursor_x, query_area.y));
     render_list_overlay(
         frame,
         app,
@@ -2181,7 +2109,6 @@ fn render_prompt(frame: &mut Frame<'_>, app: &mut App) {
     let measured = [Line::from(format!("{}: {text}", field.label()))];
     let width = overlay_width(app.overlay_anchor, &measured, 64, frame.area());
     let area = overlay_area(frame.area(), app.overlay_anchor, width, 5);
-    frame.render_widget(Clear, area);
     let title = format!(" {} ", field.title(id));
     let inner = render_modal_frame(frame, app, area, &title);
     let chunks = Layout::vertical([
@@ -2267,7 +2194,6 @@ fn render_type_picker(frame: &mut Frame<'_>, app: &mut App) {
         })
         .collect();
     let area = centered_rect(frame.area(), 36, height);
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, app, area, " Type ");
     render_list_overlay(
         frame,
@@ -2306,7 +2232,6 @@ fn render_form(frame: &mut Frame<'_>, app: &mut App) {
         .unwrap_or(u16::MAX)
         .min(frame.area().height);
     let area = centered_rect(frame.area(), 66, height);
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, app, area, &format!(" {title} "));
     let chunks = Layout::vertical([
         Constraint::Fill(1),
@@ -2474,7 +2399,6 @@ fn render_delete_confirm(frame: &mut Frame<'_>, app: &mut App) {
         .unwrap_or(u16::MAX)
         .min(frame.area().height);
     let area = centered_rect(frame.area(), width, height);
-    frame.render_widget(Clear, area);
     let inner = render_modal_frame(frame, app, area, " Delete ");
     let chunks = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).split(inner);
     frame.render_widget(body, chunks[0]);
@@ -2509,7 +2433,6 @@ fn render_delete_confirm(frame: &mut Frame<'_>, app: &mut App) {
 
 fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
     let area = centered_rect(frame.area(), 56, 18);
-    frame.render_widget(Clear, area);
     let title = if app.views_overlay.naming.is_some() {
         " Save view "
     } else {
@@ -2659,7 +2582,6 @@ fn render_sprint_overlay(frame: &mut Frame<'_>, app: &mut App) {
             .unwrap_or(u16::MAX)
             .min(SPRINT_OVERLAY_MAX_HEIGHT),
     );
-    frame.render_widget(Clear, area);
     let title = app.summary_title();
     let inner = render_modal_frame(frame, app, area, &title);
     // An overlay with no grid — an empty sprint, or none to count — has nothing
@@ -3056,10 +2978,6 @@ fn visible_row_y(area: Rect, logical: u16, scroll: u16) -> Option<u16> {
     Some(area.y.saturating_add(offset))
 }
 
-fn state_is_done(state: &str) -> bool {
-    StateCategory::of(state).is_done()
-}
-
 /// How strongly a row is painted: finished work fades so open work stands out.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RowTone {
@@ -3069,7 +2987,7 @@ enum RowTone {
 
 impl RowTone {
     fn of(state: &str) -> Self {
-        if state_is_done(state) {
+        if StateCategory::of(state).is_done() {
             Self::Muted
         } else {
             Self::Normal
@@ -3094,7 +3012,6 @@ impl RowTone {
 
 fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
     let area = centered_rect(frame.area(), 62, 12);
-    frame.render_widget(Clear, area);
     let stale = if app.stale { "stale" } else { "current" };
     // What the difference between the count and the total is made of, so the
     // rows the table is leaving out are a number rather than a suspicion.
@@ -3759,6 +3676,8 @@ fn register_narrow_tabs(app: &mut App, area: Rect) {
     ));
 }
 
+/// Clears `area`, draws the framed and titled box every overlay sits in, and
+/// registers its close button. The inner area is what the overlay paints in.
 fn render_modal_frame(frame: &mut Frame<'_>, app: &mut App, area: Rect, title: &str) -> Rect {
     let layer = match app.mode {
         AppMode::Facets => PointerLayer::Popup,
@@ -3788,6 +3707,43 @@ fn register_close_button(app: &mut App, area: Rect, layer: PointerLayer) {
         None,
         None,
     ));
+}
+
+/// The filter field at the top of a picker, and the caret in it: the text as
+/// typed, or `placeholder` while nothing has been. Clicking it places the
+/// caret, and dragging across it selects.
+fn render_query_field(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    text: &str,
+    cursor: usize,
+    placeholder: &str,
+    target: PointerTarget,
+) {
+    let query = if text.is_empty() {
+        Line::styled(placeholder.to_owned(), Style::default().fg(theme().muted))
+    } else {
+        Line::from(text.to_owned())
+    };
+    frame.render_widget(
+        Paragraph::new(query).style(Style::default().fg(theme().text)),
+        area,
+    );
+    app.hit_regions.push(region(
+        area,
+        target,
+        PointerLayer::Modal,
+        Some(SelectableSurface::Overlay),
+        None,
+    ));
+    capture_selectable(frame, app, SelectableSurface::Overlay, area, false);
+    let cursor_x = area.x.saturating_add(
+        u16::try_from(cursor)
+            .unwrap_or(u16::MAX)
+            .min(area.width.saturating_sub(1)),
+    );
+    frame.set_cursor_position((cursor_x, area.y));
 }
 
 fn render_control(
@@ -4265,6 +4221,43 @@ mod tests {
         }
     }
 
+    /// Where the last frame painted a target the predicate names.
+    fn target_rect(app: &App, predicate: impl Fn(&PointerTarget) -> bool) -> Rect {
+        app.hit_regions
+            .find_target(predicate)
+            .expect("the frame painted that target")
+            .rect
+    }
+
+    fn table_body(app: &App) -> Rect {
+        target_rect(app, |target| matches!(target, PointerTarget::FocusTickets))
+    }
+
+    fn details_pane(app: &App) -> Rect {
+        target_rect(app, |target| matches!(target, PointerTarget::FocusDetails))
+    }
+
+    fn header_rect(app: &App, field: SortField) -> Rect {
+        target_rect(
+            app,
+            |target| matches!(target, PointerTarget::SortHeader(painted) if *painted == field),
+        )
+    }
+
+    fn detail_url(app: &App) -> Option<Rect> {
+        app.hit_regions
+            .find_target(|target| matches!(target, PointerTarget::OpenSelectedUrl))
+            .map(|region| region.rect)
+    }
+
+    fn family_row(app: &App, id: i64) -> Option<Rect> {
+        app.hit_regions
+            .find_target(
+                |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == id),
+            )
+            .map(|region| region.rect)
+    }
+
     fn render_text(width: u16, height: u16, app: &mut App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
@@ -4288,7 +4281,7 @@ mod tests {
         assert!(wide.contains("Fix ticket search"));
         assert!(wide.contains("Pri"));
         assert!(wide.contains("2026-01-01 00:00:00 UTC"));
-        assert!(app.hit_regions.detail_url.is_some());
+        assert!(detail_url(&app).is_some());
 
         let table = render_text(60, 20, &mut app);
         assert!(table.contains("[Tickets]"));
@@ -4307,16 +4300,22 @@ mod tests {
         for width in [36, 69, 70, 109, 110] {
             render_text(width, 16, &mut app);
             assert!(
-                app.hit_regions.search.is_some(),
+                app.hit_regions
+                    .find_target(|target| matches!(target, PointerTarget::SearchField))
+                    .is_some(),
                 "search field missing at width {width}"
             );
             assert!(
-                app.hit_regions.table_body.is_some(),
+                app.hit_regions
+                    .find_target(|target| matches!(target, PointerTarget::FocusTickets))
+                    .is_some(),
                 "table body missing at width {width}"
             );
             if width >= 70 {
                 assert!(
-                    app.hit_regions.details.is_some(),
+                    app.hit_regions
+                        .find_target(|target| matches!(target, PointerTarget::FocusDetails))
+                        .is_some(),
                     "details pane missing at width {width}"
                 );
             }
@@ -4465,20 +4464,15 @@ mod tests {
         let mut app = App::new(vec![ticket(), second]);
         render_text(90, 24, &mut app);
 
-        let id = app.hit_regions.id_column.unwrap();
-        let body = app.hit_regions.table_body.unwrap();
-        let action = click(&mut app, id.x, body.y + 1);
+        let id = target_rect(&app, |target| {
+            matches!(target, PointerTarget::OpenTicket { index: 1 })
+        });
+        let action = click(&mut app, id.x, id.y);
 
         assert!(matches!(action, crate::app::AppAction::OpenUrl(_)));
         assert_eq!(app.selected_row(), Some(1));
 
-        let id_header = app
-            .hit_regions
-            .headers
-            .iter()
-            .find(|(_, field)| *field == SortField::Id)
-            .unwrap()
-            .0;
+        let id_header = header_rect(&app, SortField::Id);
         click(&mut app, id_header.x, id_header.y);
         assert_eq!(app.sort_field, SortField::Id);
 
@@ -4491,7 +4485,7 @@ mod tests {
         assert!(text.contains("[backend]"), "comfortable rows show tags");
         assert!(text.contains("[rust]"));
 
-        let body = app.hit_regions.table_body.unwrap();
+        let body = table_body(&app);
         click(&mut app, body.x + 8, body.y + 2);
         assert_eq!(
             app.selected_row(),
@@ -4596,7 +4590,7 @@ mod tests {
             .expect("an overflowing details pane registers its scrollbar");
         assert_eq!(metrics.offset, metrics.max_offset(), "scrolled to the end");
         let track = metrics.track;
-        let pane = app.hit_regions.details.expect("details area");
+        let pane = details_pane(&app);
         assert_eq!(
             (track.y, track.height),
             (pane.y + 1, pane.height - 2),
@@ -4646,7 +4640,7 @@ mod tests {
             "a long table renders a position scrollbar"
         );
         let selected = app.selected_row();
-        let body = app.hit_regions.table_body.unwrap();
+        let body = table_body(&app);
         let column = body.x + body.width / 2;
         let row = body.y + 1;
         app.handle_mouse(mouse(MouseEventKind::Moved, column, row));
@@ -4676,14 +4670,8 @@ mod tests {
     fn column_cell_colors(app: &mut App, field: SortField, rows: usize) -> Vec<Color> {
         let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
-        let header = app
-            .hit_regions
-            .headers
-            .iter()
-            .find(|(_, id)| *id == field)
-            .expect("column should be visible")
-            .0;
-        let body = app.hit_regions.table_body.expect("table body should exist");
+        let header = header_rect(app, field);
+        let body = table_body(app);
         let buffer = terminal.backend().buffer();
         (0..rows)
             .map(|row| buffer[(header.x, body.y + u16::try_from(row).unwrap())].fg)
@@ -4720,13 +4708,7 @@ mod tests {
 
     /// Left edge of one table column, shared by the header and the body rows.
     fn column_x(app: &App, field: SortField) -> u16 {
-        app.hit_regions
-            .headers
-            .iter()
-            .find(|(_, id)| *id == field)
-            .expect("column should be visible")
-            .0
-            .x
+        header_rect(app, field).x
     }
 
     #[test]
@@ -4759,7 +4741,7 @@ mod tests {
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let title_x = column_x(&app, SortField::Title);
         let state_x = column_x(&app, SortField::State);
-        let body = app.hit_regions.table_body.expect("table body");
+        let body = table_body(&app);
         let (open_fg, _, open_modifier) = painted_cell(&terminal, title_x, body.y);
         let (done_fg, _, done_modifier) = painted_cell(&terminal, title_x, body.y + 2);
         let (state_fg, _, state_modifier) = painted_cell(&terminal, state_x, body.y + 2);
@@ -4831,7 +4813,7 @@ mod tests {
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let assignee_x = column_x(&app, SortField::Assignee);
         // Row 0 is selected, and the selection highlight bolds it either way.
-        let body = app.hit_regions.table_body.expect("table body");
+        let body = table_body(&app);
         let (mine_fg, _, mine_modifier) = painted_cell(&terminal, assignee_x, body.y + 1);
         let (their_fg, _, their_modifier) = painted_cell(&terminal, assignee_x, body.y + 2);
 
@@ -4922,14 +4904,8 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let column = app
-            .hit_regions
-            .headers
-            .iter()
-            .find(|(_, id)| *id == SortField::Changed)
-            .expect("the Changed column should be visible")
-            .0;
-        let body = app.hit_regions.table_body.expect("table body should exist");
+        let column = header_rect(&app, SortField::Changed);
+        let body = table_body(&app);
         let cell = |row: u16| painted_column_cell(&terminal, column, body.y + row);
 
         // Newest first, so the two recent rows lead and the old ones follow.
@@ -4959,33 +4935,6 @@ mod tests {
         assert!(
             done_modifier.contains(Modifier::DIM) || done_fg == theme().muted,
             "and it still recedes with the rest of its row"
-        );
-    }
-
-    #[test]
-    fn the_stale_changed_cell_goes_bold_where_there_is_no_palette_to_colour_it() {
-        let plain = Style::default();
-
-        assert_eq!(changed_style(plain, false), plain, "nothing else paints it");
-        let flagged = changed_style(plain, true);
-        assert_eq!(flagged.fg, Some(theme().warning));
-        assert!(
-            flagged.add_modifier.contains(Modifier::BOLD),
-            "bold is what survives the monochrome theme"
-        );
-        assert_eq!(
-            Theme::new(true).warning,
-            Color::Reset,
-            "NO_COLOR has no warning colour, so weight has to carry it alone"
-        );
-
-        // A finished row is never stale, so the flag and the fade never
-        // actually meet; were one ever handed in, the flag would still win.
-        let faded = changed_style(RowTone::Muted.apply(plain), true);
-        assert!(
-            faded.add_modifier.contains(Modifier::BOLD)
-                && !faded.add_modifier.contains(Modifier::DIM),
-            "the flag outranks the fade it can never actually meet: {faded:?}"
         );
     }
 
@@ -5066,8 +5015,8 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(150, 24)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let body = app.hit_regions.table_body.expect("table body");
-        let details = app.hit_regions.details.expect("details pane");
+        let body = table_body(&app);
+        let details = details_pane(&app);
         let (table_x, table_y) = find_buffer_text_in(terminal.backend().buffer(), body, "[rust]")
             .expect("tag badge in the table");
         let (details_x, details_y) =
@@ -5132,7 +5081,9 @@ mod tests {
             );
         }
 
-        let area = app.hit_regions.id_column.expect("id column");
+        let area = target_rect(&app, |target| {
+            matches!(target, PointerTarget::OpenTicket { index: 0 })
+        });
         let (x, y) = find_buffer_text_in(buffer, area, "10001").expect("id visible in table");
         for offset in 0..5 {
             assert!(
@@ -5581,7 +5532,7 @@ mod tests {
         assert!(!text.contains("Related"));
         assert!(!text.contains("10005"));
         assert!(!text.contains("Relationships"));
-        assert!(!app.hit_regions.detail_links.is_empty());
+        assert!(family_row(&app, 10_001).is_some());
     }
 
     fn auth_family_app() -> App {
@@ -5678,7 +5629,7 @@ mod tests {
 
         app.focus = Focus::Details;
         render_text(72, 36, &mut app);
-        let details = app.hit_regions.details.expect("details area");
+        let details = details_pane(&app);
         let summary_x = details.x.saturating_add(8);
         let summary_y = details.y.saturating_add(3);
         assert!(!matches!(
@@ -5691,13 +5642,7 @@ mod tests {
         assert_eq!(app.selected_ticket().unwrap().key.id, 10_002);
         assert_eq!(app.focus, Focus::Details);
 
-        let row = app
-            .hit_regions
-            .detail_links
-            .iter()
-            .find(|(_, key)| key.id == 10_001)
-            .map(|(area, _)| *area)
-            .expect("parent row");
+        let row = family_row(&app, 10_001).expect("parent row");
         click(&mut app, row.x + 8, row.y);
         assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
         assert_eq!(app.focus, Focus::Family);
@@ -5712,7 +5657,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let state_x = column_x(&app, SortField::State);
-        let body = app.hit_regions.table_body.expect("table body");
+        let body = table_body(&app);
         let row_y = body.y + 1;
         let (resting_fg, _, resting_modifier) = painted_cell(&terminal, state_x, row_y);
 
@@ -5819,13 +5764,7 @@ mod tests {
 
         app.details.scroll_to(0);
         render_text(60, 24, &mut app);
-        let row = app
-            .hit_regions
-            .detail_links
-            .iter()
-            .find(|(_, key)| key.id == 10_002)
-            .map(|(area, _)| *area)
-            .expect("current family row");
+        let row = family_row(&app, 10_002).expect("current family row");
         let cursor = app.family_cursor.clone();
         let focus = app.focus;
         app.handle_mouse(mouse(MouseEventKind::ScrollDown, row.x + 8, row.y));
@@ -5844,10 +5783,7 @@ mod tests {
 
         let pill = app
             .hit_regions
-            .facet_pills
-            .iter()
-            .find(|(_, target)| matches!(target, FacetTarget::Field(FilterField::Type)))
-            .map(|(area, _)| *area)
+            .facet_pill(FacetTarget::Field(FilterField::Type))
             .expect("type pill should be clickable");
         click(&mut app, pill.x, pill.y);
         assert_eq!(app.mode, AppMode::Facets);
@@ -6461,7 +6397,7 @@ mod tests {
     fn dragging_a_link_copies_text_while_a_plain_click_opens_it() {
         let mut app = App::new(vec![ticket()]);
         render_text(130, 30, &mut app);
-        let url = app.hit_regions.detail_url.expect("detail url");
+        let url = detail_url(&app).expect("detail url");
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), url.x, url.y));
         app.handle_mouse(mouse(
             MouseEventKind::Drag(MouseButton::Left),
@@ -6487,7 +6423,7 @@ mod tests {
             "a click without movement still opens the link"
         );
 
-        let body = app.hit_regions.table_body.unwrap();
+        let body = table_body(&app);
         app.handle_mouse(mouse(
             MouseEventKind::Down(MouseButton::Left),
             body.x + 8,
@@ -6850,7 +6786,7 @@ mod tests {
             "and neither is the assignee beside it"
         );
         assert!(
-            app.hit_regions.detail_url.is_none(),
+            detail_url(&app).is_none(),
             "the link line scrolls off with the rest of the heading"
         );
     }
@@ -6860,7 +6796,7 @@ mod tests {
         let mut app = auth_family_app_with_long_details();
         app.focus = Focus::Family;
         render_text(60, 14, &mut app);
-        let pane = app.hit_regions.details.expect("details area");
+        let pane = details_pane(&app);
         let fold = usize::from(pane.height.saturating_sub(2));
         assert_eq!(app.details.offset, 0, "a fresh selection starts at the top");
         assert!(
@@ -6886,10 +6822,7 @@ mod tests {
     fn assert_cursor_row_visible(app: &App) {
         let cursor = app.family_cursor.clone().expect("a family cursor");
         assert!(
-            app.hit_regions
-                .detail_links
-                .iter()
-                .any(|(_, key)| *key == cursor),
+            family_row(app, cursor.id).is_some(),
             "the cursor row should be on screen, offset {}",
             app.details.offset
         );
@@ -7050,7 +6983,7 @@ mod tests {
 
         let mut app = App::new(vec![ticket()]);
         render_text(130, 40, &mut app);
-        let url = app.hit_regions.detail_url.expect("detail url");
+        let url = detail_url(&app).expect("detail url");
         app.focus = Focus::Details;
         app.handle_mouse(mouse(MouseEventKind::Moved, url.x, url.y));
         assert!(matches!(

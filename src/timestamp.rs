@@ -28,10 +28,6 @@ pub struct TimestampError {
 }
 
 impl Timestamp {
-    pub const UNIX_EPOCH: Self = Self {
-        instant: OffsetDateTime::UNIX_EPOCH,
-    };
-
     /// The current instant, in UTC.
     #[must_use]
     pub fn now() -> Self {

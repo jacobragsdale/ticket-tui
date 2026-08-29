@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::model::{StateCategory, Ticket};
+use crate::model::{StateCategory, Ticket, path_leaf, same_text};
 use crate::timestamp::Timestamp;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -265,7 +265,7 @@ impl Sentinel {
                 .current_iteration
                 .as_deref()
                 .is_some_and(|iteration| same_text(&ticket.iteration_path, iteration)),
-            Self::Open => !is_finished(&ticket.state),
+            Self::Open => !StateCategory::of(&ticket.state).is_done(),
         }
     }
 }
@@ -353,7 +353,7 @@ pub fn stale_query(days: u16) -> String {
 /// exactly `days` ago has not yet crossed it.
 #[must_use]
 pub fn is_stale(ticket: &Ticket, days: u16, now: Timestamp) -> bool {
-    !is_finished(&ticket.state)
+    !StateCategory::of(&ticket.state).is_done()
         && DatePredicate::parse(&stale_bound(days))
             .is_some_and(|predicate| predicate.matches(ticket.changed_at, now))
 }
@@ -364,21 +364,6 @@ pub fn is_stale(ticket: &Ticket, days: u16, now: Timestamp) -> bool {
 #[must_use]
 pub fn days_untouched(ticket: &Ticket, now: Timestamp) -> i64 {
     ticket.changed_at.seconds_until(now) / (24 * 60 * 60)
-}
-
-/// Whether a state means the work is over. Completed and removed both are:
-/// neither is waiting on anybody.
-fn is_finished(state: &str) -> bool {
-    matches!(
-        StateCategory::of(state),
-        StateCategory::Completed | StateCategory::Removed
-    )
-}
-
-/// Azure DevOps echoes names and paths back with inconsistent casing and
-/// spacing, so two of them are the same when they are the same after both.
-fn same_text(left: &str, right: &str) -> bool {
-    left.trim().eq_ignore_ascii_case(right.trim())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -487,13 +472,6 @@ impl FilterSet {
     #[must_use]
     pub fn matches(&self, ticket: &Ticket, is_bookmarked: bool) -> bool {
         self.matches_in(ticket, is_bookmarked, &MatchContext::now())
-    }
-
-    /// `matches` against a given instant, which is how `changed:<7d` is tested
-    /// without reaching for the wall clock.
-    #[must_use]
-    pub fn matches_at(&self, ticket: &Ticket, is_bookmarked: bool, now: Timestamp) -> bool {
-        self.matches_in(ticket, is_bookmarked, &MatchContext::at(now))
     }
 
     /// `matches` with everything a sentinel needs to stand for something: the
@@ -704,7 +682,7 @@ fn date_value(field: FilterField, ticket: &Ticket) -> Option<Timestamp> {
 }
 
 fn path_segment_matches(value: &str, needle: &str) -> bool {
-    crate::model::path_leaf(value).eq_ignore_ascii_case(needle)
+    path_leaf(value).eq_ignore_ascii_case(needle)
 }
 
 fn field_values(field: FilterField, ticket: &Ticket) -> Vec<String> {
@@ -733,14 +711,11 @@ fn field_values(field: FilterField, ticket: &Ticket) -> Vec<String> {
 }
 
 fn take_special_filter<'a>(input: &'a str, filters: &mut FilterSet) -> Option<&'a str> {
-    let ident_len = ident_len(input);
-    if ident_len == 0 || input.get(ident_len..ident_len + 1) != Some(":") {
+    let (key, after_colon) = take_key(input)?;
+    if !key.eq_ignore_ascii_case("is") {
         return None;
     }
-    if !input[..ident_len].eq_ignore_ascii_case("is") {
-        return None;
-    }
-    let (value, rest) = take_value(&input[ident_len + 1..])?;
+    let (value, rest) = take_value(after_colon)?;
     if value.eq_ignore_ascii_case("bookmarked") || value.eq_ignore_ascii_case("bookmark") {
         filters.bookmarked = true;
         Some(rest)
@@ -750,12 +725,9 @@ fn take_special_filter<'a>(input: &'a str, filters: &mut FilterSet) -> Option<&'
 }
 
 fn take_field_filter(input: &str) -> Option<(FilterField, String, &str)> {
-    let ident_len = ident_len(input);
-    if ident_len == 0 || input.get(ident_len..ident_len + 1) != Some(":") {
-        return None;
-    }
-    let field = FilterField::parse(&input[..ident_len])?;
-    let (value, rest) = take_value(&input[ident_len + 1..])?;
+    let (key, after_colon) = take_key(input)?;
+    let field = FilterField::parse(key)?;
+    let (value, rest) = take_value(after_colon)?;
     if value.is_empty() {
         return None;
     }
@@ -765,40 +737,37 @@ fn take_field_filter(input: &str) -> Option<(FilterField, String, &str)> {
     Some((field, value, rest))
 }
 
-fn ident_len(input: &str) -> usize {
-    input
+/// The `key:` a `field:value` pair opens with, and the input after the colon.
+/// `None` when the input does not start with a word and a colon.
+fn take_key(input: &str) -> Option<(&str, &str)> {
+    let len = input
         .chars()
         .take_while(|character| character.is_ascii_alphabetic())
-        .count()
+        .count();
+    if len == 0 {
+        return None;
+    }
+    let (key, rest) = input.split_at(len);
+    rest.strip_prefix(':').map(|after_colon| (key, after_colon))
 }
 
+/// One value: quoted, or bare up to the next space. `None` for an empty one.
 fn take_value(input: &str) -> Option<(String, &str)> {
-    take_quoted(input).or_else(|| {
+    let (value, rest) = take_term(input);
+    (!value.is_empty()).then_some((value, rest))
+}
+
+/// One term: quoted, or bare up to the next space, which for an input that
+/// opens with a space is the empty term.
+fn take_term(input: &str) -> (String, &str) {
+    take_quoted(input).unwrap_or_else(|| {
         let len = input
             .chars()
             .take_while(|character| !character.is_whitespace())
             .map(char::len_utf8)
             .sum();
-        if len == 0 {
-            None
-        } else {
-            Some((input[..len].to_owned(), &input[len..]))
-        }
+        (input[..len].to_owned(), &input[len..])
     })
-}
-
-fn take_term(input: &str) -> (String, &str) {
-    take_quoted(input).map_or_else(
-        || {
-            let len = input
-                .chars()
-                .take_while(|character| !character.is_whitespace())
-                .map(char::len_utf8)
-                .sum();
-            (input[..len].to_owned(), &input[len..])
-        },
-        |(term, rest)| (term, rest),
-    )
 }
 
 /// One quoted value, with the quotes taken off and the escapes undone, and the
@@ -1015,11 +984,11 @@ mod tests {
         let reread = parse_query(&format_query(&filters, "")).filters;
 
         assert!(
-            reread.matches_at(&here, false, now),
+            reread.matches_in(&here, false, &MatchContext::at(now)),
             "the row the facet was built from is still selected"
         );
         assert!(
-            !reread.matches_at(&elsewhere, false, now),
+            !reread.matches_in(&elsewhere, false, &MatchContext::at(now)),
             "a sibling sprint is not"
         );
     }
@@ -1118,12 +1087,12 @@ mod tests {
         let july = dated("2026-07-30T00:00:00Z", "2026-08-29T00:00:00Z");
 
         let after = parse_query("created:>2026-08-01").filters;
-        assert!(after.matches_at(&august, false, now));
-        assert!(!after.matches_at(&july, false, now));
+        assert!(after.matches_in(&august, false, &MatchContext::at(now)));
+        assert!(!after.matches_in(&july, false, &MatchContext::at(now)));
 
         let before = parse_query("created:<2026-08-01").filters;
-        assert!(!before.matches_at(&august, false, now));
-        assert!(before.matches_at(&july, false, now));
+        assert!(!before.matches_in(&august, false, &MatchContext::at(now)));
+        assert!(before.matches_in(&july, false, &MatchContext::at(now)));
     }
 
     #[test]
@@ -1133,15 +1102,15 @@ mod tests {
         let ticket = dated("2026-01-01T00:00:00Z", "2026-08-29T09:00:00Z");
 
         let same_day = ts("2026-08-29T12:00:00Z");
-        assert!(today.matches_at(&ticket, false, same_day));
-        assert!(!stale.matches_at(&ticket, false, same_day));
+        assert!(today.matches_in(&ticket, false, &MatchContext::at(same_day)));
+        assert!(!stale.matches_in(&ticket, false, &MatchContext::at(same_day)));
 
         let three_weeks_on = ts("2026-09-19T12:00:00Z");
         assert!(
-            !today.matches_at(&ticket, false, three_weeks_on),
+            !today.matches_in(&ticket, false, &MatchContext::at(three_weeks_on)),
             "a saved query reads against the clock, not the day it was written"
         );
-        assert!(stale.matches_at(&ticket, false, three_weeks_on));
+        assert!(stale.matches_in(&ticket, false, &MatchContext::at(three_weeks_on)));
     }
 
     #[test]
@@ -1195,12 +1164,12 @@ mod tests {
         for item in &items {
             assert_eq!(
                 is_stale(item, 14, now),
-                age_only.matches_at(item, false, now),
+                age_only.matches_in(item, false, &MatchContext::at(now)),
                 "the highlight is the changed:>14d comparison for open work: {item:?}"
             );
             assert_eq!(
                 is_stale(item, 14, now),
-                whole.matches_at(item, false, now),
+                whole.matches_in(item, false, &MatchContext::at(now)),
                 "and the whole query for it is what the palette reports: {item:?}"
             );
         }
@@ -1210,10 +1179,11 @@ mod tests {
             ..dated("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")
         };
         assert!(
-            age_only.matches_at(&finished, false, now) && !is_stale(&finished, 14, now),
+            age_only.matches_in(&finished, false, &MatchContext::at(now))
+                && !is_stale(&finished, 14, now),
             "the age halves agree; only state:@open holds the finished item back"
         );
-        assert!(!whole.matches_at(&finished, false, now));
+        assert!(!whole.matches_in(&finished, false, &MatchContext::at(now)));
     }
 
     #[test]
@@ -1253,9 +1223,9 @@ mod tests {
         let stale = dated("2026-01-01T00:00:00Z", "2026-08-01T00:00:00Z");
         let middling = dated("2026-01-01T00:00:00Z", "2026-08-25T00:00:00Z");
 
-        assert!(filters.matches_at(&fresh, false, now));
-        assert!(filters.matches_at(&stale, false, now));
-        assert!(!filters.matches_at(&middling, false, now));
+        assert!(filters.matches_in(&fresh, false, &MatchContext::at(now)));
+        assert!(filters.matches_in(&stale, false, &MatchContext::at(now)));
+        assert!(!filters.matches_in(&middling, false, &MatchContext::at(now)));
     }
 
     #[test]

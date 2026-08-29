@@ -96,15 +96,6 @@ impl OverlayAnchor {
     pub const fn is_anchored(self) -> bool {
         !matches!(self, Self::Centered)
     }
-
-    /// The field the dropdown hangs off, if it hangs off one.
-    #[must_use]
-    pub const fn field(self) -> Option<Rect> {
-        match self {
-            Self::Centered => None,
-            Self::Below(rect) | Self::Above(rect) => Some(rect),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -327,54 +318,19 @@ pub struct ThumbGeometry {
     pub max_offset: usize,
 }
 
+/// Everything the last frame painted that the pointer can land on: the click
+/// targets in paint order, the text each selectable surface showed, and the
+/// scrollbar geometry of each surface that overflowed. Rebuilt every frame.
 #[derive(Clone, Debug, Default)]
 pub struct HitRegions {
     regions: Vec<PointerRegion>,
     selectable: Vec<SelectableSnapshot>,
     scroll: Vec<(ScrollSurface, ScrollMetrics)>,
-    pub search: Option<Rect>,
-    pub table_body: Option<Rect>,
-    pub id_column: Option<Rect>,
-    pub details: Option<Rect>,
-    pub detail_url: Option<Rect>,
-    pub headers: Vec<(Rect, SortField)>,
-    pub detail_links: Vec<(Rect, TicketKey)>,
-    /// Where each editable details-pane value was drawn this frame, which is
-    /// what an editor opened by clicking one is anchored to.
-    pub edit_fields: Vec<(Rect, EditableField)>,
-    pub facet_pills: Vec<(Rect, FacetTarget)>,
 }
 
 impl HitRegions {
     pub fn push(&mut self, region: PointerRegion) {
-        match &region.target {
-            PointerTarget::SearchField => self.search = Some(region.rect),
-            PointerTarget::FocusTickets => self.table_body = Some(region.rect),
-            PointerTarget::FocusDetails => self.details = Some(region.rect),
-            PointerTarget::OpenSelectedUrl => self.detail_url = Some(region.rect),
-            PointerTarget::SortHeader(field) => self.headers.push((region.rect, *field)),
-            PointerTarget::JumpToTicket(key) => self.detail_links.push((region.rect, key.clone())),
-            PointerTarget::EditField { field } => self.edit_fields.push((region.rect, *field)),
-            PointerTarget::FacetPill(target) => self.facet_pills.push((region.rect, *target)),
-            _ => {}
-        }
         self.regions.push(region);
-    }
-
-    pub fn set_id_column(&mut self, rect: Rect) {
-        self.id_column = Some(rect);
-    }
-
-    pub fn set_details(&mut self, rect: Rect) {
-        self.details = Some(rect);
-    }
-
-    pub fn set_table_body(&mut self, rect: Rect) {
-        self.table_body = Some(rect);
-    }
-
-    pub fn set_search(&mut self, rect: Rect) {
-        self.search = Some(rect);
     }
 
     pub fn set_scroll(&mut self, surface: ScrollSurface, metrics: ScrollMetrics) {
@@ -405,13 +361,24 @@ impl HitRegions {
             .find(|snapshot| snapshot.surface == surface)
     }
 
-    /// Where one editable value was drawn, if it was drawn at all.
+    /// Where one editable details-pane value was drawn, if it was drawn at
+    /// all, which is what an editor opened by clicking it is anchored to.
     #[must_use]
     pub fn edit_field(&self, field: EditableField) -> Option<Rect> {
-        self.edit_fields
-            .iter()
-            .find(|(_, entry)| *entry == field)
-            .map(|(rect, _)| *rect)
+        self.find_target(
+            |target| matches!(target, PointerTarget::EditField { field: drawn } if *drawn == field),
+        )
+        .map(|region| region.rect)
+    }
+
+    /// Where one facet pill was drawn, if it was drawn at all, which is what
+    /// its dropdown hangs under.
+    #[must_use]
+    pub fn facet_pill(&self, wanted: FacetTarget) -> Option<Rect> {
+        self.find_target(
+            |target| matches!(target, PointerTarget::FacetPill(pill) if *pill == wanted),
+        )
+        .map(|region| region.rect)
     }
 
     #[must_use]
@@ -444,11 +411,8 @@ impl HitRegions {
             .and_then(|(_, region)| region.selectable)
     }
 
-    #[must_use]
-    pub fn regions(&self) -> &[PointerRegion] {
-        &self.regions
-    }
-
+    /// The last region painted for a target the predicate names, which is the
+    /// one on top wherever two overlap.
     #[must_use]
     pub fn find_target(
         &self,
@@ -527,11 +491,6 @@ impl PointerState {
 
     pub fn clear_selection(&mut self) {
         self.selection = None;
-    }
-
-    pub fn reset_interaction(&mut self) {
-        self.clear_press();
-        self.clear_selection();
     }
 
     #[must_use]

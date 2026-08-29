@@ -56,7 +56,7 @@ pub fn revision_test(expected_revision: i64) -> Value {
 /// taken off the work item rather than set to an empty value, which is the only
 /// way a number such as the priority goes back to unset.
 #[derive(Clone, Debug, PartialEq)]
-pub enum FieldValue {
+enum FieldValue {
     Set(Value),
     Clear,
 }
@@ -64,16 +64,14 @@ pub enum FieldValue {
 impl FieldValue {
     /// The value as text, for the fields the TUI models as strings. A cleared
     /// field reads as the empty string, which is what removing it leaves.
-    #[must_use]
-    pub fn as_str(&self) -> Option<&str> {
+    fn as_str(&self) -> Option<&str> {
         match self {
             Self::Set(value) => value.as_str(),
             Self::Clear => Some(""),
         }
     }
 
-    #[must_use]
-    pub const fn is_clear(&self) -> bool {
+    const fn is_clear(&self) -> bool {
         matches!(self, Self::Clear)
     }
 }
@@ -248,11 +246,6 @@ impl FieldEdit {
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
-    }
-
-    #[must_use]
-    pub const fn value(&self) -> &FieldValue {
-        &self.value
     }
 
     /// The text the row and the notification read, which is the value sent
@@ -609,7 +602,6 @@ mod tests {
     #[test]
     fn a_cleared_field_is_removed_rather_than_emptied() {
         let edit = FieldEdit::clear_priority();
-        assert_eq!(edit.value(), &FieldValue::Clear);
         assert_eq!(
             edit.patch(),
             vec![json!({"op": "remove", "path": "/fields/Microsoft.VSTS.Common.Priority"})]
@@ -748,7 +740,6 @@ mod tests {
         let undo = FieldEdit::priority(1)
             .undoing(&unset)
             .expect("a priority can be put back");
-        assert_eq!(undo.value(), &FieldValue::Clear);
         assert_eq!(
             undo.patch(),
             vec![json!({"op": "remove", "path": "/fields/Microsoft.VSTS.Common.Priority"})],

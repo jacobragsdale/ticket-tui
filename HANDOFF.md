@@ -8,7 +8,7 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
 
 - Every implementable ticket in the roadmap is merged and Done. `cargo fmt
   --check`, `cargo clippy --all-targets --all-features -D warnings`, `cargo test
-  --all-targets` (413 tests, and again under `NO_COLOR=1`) and `cargo build
+  --all-targets` (415 tests, and again under `NO_COLOR=1`) and `cargo build
   --release` are clean.
 - Database schema is `PRAGMA user_version = 12`. The first launch of this build
   rebuilds any older database and does one full pull automatically.
@@ -48,9 +48,42 @@ TUI uses, and refuses one it cannot resolve rather than returning an empty list.
 `ticket-tui sync` caches the classification trees, which only opening a picker
 used to do.
 
+## Code review pass, 2026-08-29
+
+A cleanup slice ahead of the Repos and Pipelines tabs, with no behaviour change
+except one: the deprecated `--sync` flag is gone (`ticket-tui sync --full` is
+the replacement, and the wrong-project notification now names it). What went:
+the `blocking_sync` path that duplicated the worker's full pull; `SessionKey`
+(`TicketKey` derives serde and the file shape is unchanged); the shortcut
+fields on `HitRegions` (`table_body`, `headers`, `detail_links`… — every reader
+now goes through `find_target`); `FamilySnapshot::tree_entries`/`jump_keys`
+and the `other_links` half of the snapshot, which nothing drew; the `UrlOpener`
+trait (a `Fn(&Url)`); and a dozen accessors with no callers. What was folded:
+`model::same_text` replaces four case-insensitive comparisons, `App::write_refusal`
+the six copies of the offline check, `SyncRuntime::send` the five copies of
+"hand it to the worker or explain", `stamp_database` the nine
+`configure_database` calls, `AzureClient::wit_url` the five hand-built URLs,
+`ui::render_query_field` the four picker filter fields, and
+`sync::pull_summary` the wording the TUI and the CLI both had.
+
+## Next: make `App` tab-ready before the first new tab
+
+`App` (src/app.rs, 12.5k lines) is the app shell and the work-items screen in
+one struct, and `AppMode`, `ScrollSurface`, `PointerTarget`, `TextEditor`, the
+footer hints, `mode_name`, and `ui::render_pass` each enumerate every overlay.
+A Repos tab added as-is would grow all of them. The proposed slice, to discuss
+before starting: extract the work-items screen (tickets, search, filters,
+sort, pickers, forms, edits, family cursor) into its own module with its own
+mode enum, leaving `App` as the shell (tab, focus, pointer, notifications,
+session, sync flags) that dispatches keys, mouse, and rendering to the active
+tab. Split `app.rs` into a directory module at the same time. The six
+near-identical picker cursors (`focus_*`/`move_*_selection`) would collapse
+into one list-cursor type on the way through.
+
 ## What is left
 
-Nothing. The backlog has no open work items. Query round-tripping was the last
+Nothing on the backlog. The tab-ready split above is the next slice, once its
+shape is agreed. Query round-tripping was the last
 loose end and is fixed: `quote_if_needed` now escapes `\` and `take_quoted`
 unescapes it, so `iteration:"development\Sprint 1"` survives
 `format_query`/`parse_query` (#654), and a backslash typed once inside a quoted

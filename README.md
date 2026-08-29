@@ -104,8 +104,9 @@ Both values are resolved in this order:
 
 `--org` accepts a bare slug, `https://dev.azure.com/<slug>`, or
 `https://<slug>.visualstudio.com`; all three reduce to the slug. Without both
-values the TUI browses the database offline and never syncs; with `--sync` an
-unresolved value fails with the missing flag, variable, and command spelled out.
+values the TUI browses the database offline and never syncs; `ticket-tui sync`
+with an unresolved value fails with the missing flag, variable, and command
+spelled out.
 
 ### The database remembers which project it holds
 
@@ -116,12 +117,12 @@ opens offline over the rows that are there, and the notification — and the `i`
 overlay's sync line — says
 
 ```text
-Database holds other-org/borealis; pass --database for another project or --sync to replace it
+Database holds other-org/borealis; pass --database for another project or run `ticket-tui sync --full` to replace it
 ```
 
 so a typo in `--project`, or a `TICKET_TUI_ORG` left over from yesterday, cannot
-quietly replace a database. `--sync` is how the replacement is asked for: it
-pulls the new project in full and re-stamps the database with it. A database
+quietly replace a database. `ticket-tui sync --full` is how the replacement is
+asked for: it pulls the new project in full and re-stamps the database with it. A database
 with nothing in it, or one written before this was recorded, adopts whatever the
 next pull brings.
 
@@ -179,9 +180,7 @@ A sync worker pulls in the background on a timer, every 60 seconds by default,
 and whenever `r` asks it to. The TUI opens from the database straight away and
 the first pull runs behind it, so a state flipped in Azure DevOps appears within
 one interval without a keypress. `ticket-tui sync` runs one pull and exits,
-without opening the TUI at all; the deprecated `--sync` flag runs one before the
-TUI opens and blocks until it finishes, and that pull failing is a notification
-over the existing database rather than a reason to refuse to start. Only one
+without opening the TUI at all. Only one
 pull runs at a time: `r` during one reports `Sync already in progress`.
 
 The table title carries the sync state — `Syncing…`, `Synced just now`,
@@ -235,8 +234,8 @@ move, and no other ticket-tui or agent reading the file reloads for nothing.
 
 A pull runs in full — every work item, replacing the stored rows wholesale —
 when there is no watermark to start from: a fresh database, a database whose
-schema this build rebuilt, or `ticket-tui --sync`, which is the way to rebuild
-one deliberately. A full pull leaves a watermark behind, so the pulls that
+schema this build rebuilt, or `ticket-tui sync --full`, which is the way to
+rebuild one deliberately. A full pull leaves a watermark behind, so the pulls that
 follow it are incremental again.
 
 Azure DevOps throttles a client that asks too often, and a poller that ignores

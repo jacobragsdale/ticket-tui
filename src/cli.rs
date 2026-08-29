@@ -33,9 +33,6 @@ pub struct Cli {
     /// SQLite database to open instead of the platform data-directory default
     #[arg(long, global = true, value_name = "PATH", value_hint = ValueHint::FilePath)]
     pub database: Option<PathBuf>,
-    /// Deprecated alias for `ticket-tui sync`, which pulls and then opens the TUI
-    #[arg(long)]
-    pub sync: bool,
     /// Azure DevOps organization (slug or URL); defaults to TICKET_TUI_ORG or `az devops configure`
     #[arg(long, global = true, value_name = "ORG")]
     pub org: Option<String>,
@@ -233,26 +230,19 @@ fn guard_stored_project(
 /// nothing is not a failure and does not read like one; anything that stopped
 /// it is an error, so the exit status says so too.
 fn sync_report(outcome: &SyncOutcome, config: &AzureConfig) -> Result<String> {
-    let project = format!("{}/{}", config.organization, config.project);
-    Ok(match outcome {
-        SyncOutcome::Pulled {
-            mode: SyncMode::Full,
-            count,
-            ..
-        } => format!("Synced {count} work items from {project}"),
-        SyncOutcome::Pulled {
-            mode: SyncMode::Incremental,
-            count,
-            ..
-        } if *count == 1 => format!("Synced 1 change from {project}"),
-        SyncOutcome::Pulled { count, .. } => format!("Synced {count} changes from {project}"),
-        SyncOutcome::Unchanged => format!("Synced 0 changes from {project}"),
+    let summary = match outcome {
+        SyncOutcome::Pulled { mode, count, .. } => sync::pull_summary(*mode, *count),
+        SyncOutcome::Unchanged => sync::pull_summary(SyncMode::Incremental, 0),
         SyncOutcome::Failed(message) => bail!("{message}"),
         SyncOutcome::Throttled { retry_after } => bail!(
             "Azure DevOps is throttling requests; try again in {}s",
             retry_after.as_secs()
         ),
-    })
+    };
+    Ok(format!(
+        "{summary} from {}/{}",
+        config.organization, config.project
+    ))
 }
 
 fn run_show(database: &Path, id: i64, json: bool) -> Result<()> {
@@ -1059,14 +1049,10 @@ mod tests {
     fn a_bare_invocation_opens_the_tui_and_the_flags_around_it_reach_every_subcommand() {
         let bare = Cli::parse_from(["ticket-tui"]);
         assert!(bare.command.is_none(), "a bare run still opens the TUI");
-        assert!(!bare.sync);
 
-        let deprecated = Cli::parse_from(["ticket-tui", "--sync", "--refresh", "300"]);
-        assert!(
-            deprecated.sync && deprecated.command.is_none(),
-            "--sync stays a run that pulls and then opens the TUI"
-        );
-        assert_eq!(deprecated.refresh, Some(300));
+        let flagged = Cli::parse_from(["ticket-tui", "--refresh", "300"]);
+        assert!(flagged.command.is_none());
+        assert_eq!(flagged.refresh, Some(300));
 
         let before = Cli::parse_from([
             "ticket-tui",

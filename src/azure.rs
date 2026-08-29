@@ -350,9 +350,20 @@ impl AzureClient {
         parent: Option<i64>,
     ) -> Result<(Ticket, Vec<RelationRecord>)> {
         let document = create_document(fields, parent, &self.config);
-        let url = create_work_item_url(work_item_type, &self.config)?;
+        let url = self.create_work_item_url(work_item_type)?;
         let item = self.send(&url, Request::PostPatch(&document))?;
         parse_work_item(&item, &self.config)
+    }
+
+    /// Where a new work item is posted: the type is a path segment with a
+    /// literal `$` in front of it. Without `$expand=relations` the answer
+    /// carries no links at all, so a work item created under a parent would
+    /// be stored without one.
+    fn create_work_item_url(&self, work_item_type: &str) -> Result<String> {
+        self.wit_url(
+            &["workitems", &format!("${work_item_type}")],
+            &format!("$expand=relations&api-version={API_VERSION}"),
+        )
     }
 
     /// Move one work item to the project's recycle bin.
@@ -377,7 +388,10 @@ impl AzureClient {
     /// the category Azure DevOps assigned it rather than one guessed from its
     /// name, so a custom state is still coloured correctly.
     pub fn fetch_work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>> {
-        let url = self.work_item_type_url(&["workitemtypes", work_item_type, "states"])?;
+        let url = self.wit_url(
+            &["workitemtypes", work_item_type, "states"],
+            &version_query(),
+        )?;
         let response = self.get(&url)?;
         let states = response
             .get("value")
@@ -407,7 +421,7 @@ impl AzureClient {
     /// cannot be read excludes nothing rather than sinking the fetch, because
     /// a list with a few oddities in it is better than no list at all.
     pub fn fetch_work_item_types(&self) -> Result<Vec<String>> {
-        let url = self.work_item_type_url(&["workitemtypes"])?;
+        let url = self.wit_url(&["workitemtypes"], &version_query())?;
         let response = self.get(&url)?;
         let hidden = self.hidden_work_item_types().unwrap_or_default();
         work_item_type_names(&response, &hidden)
@@ -416,8 +430,10 @@ impl AzureClient {
     /// The types the process template keeps out of the way, which is a category
     /// of its own rather than a flag on each type.
     fn hidden_work_item_types(&self) -> Result<Vec<String>> {
-        let url =
-            self.work_item_type_url(&["workitemtypecategories", "Microsoft.HiddenCategory"])?;
+        let url = self.wit_url(
+            &["workitemtypecategories", "Microsoft.HiddenCategory"],
+            &version_query(),
+        )?;
         Ok(hidden_type_names(&self.get(&url)?))
     }
 
@@ -523,7 +539,7 @@ impl AzureClient {
     }
 
     /// A URL under the organization with every path segment escaped, because a
-    /// project name can carry spaces.
+    /// project name or a work item type can carry spaces.
     fn api_url(&self, segments: &[&str]) -> Result<Url> {
         let mut url = Url::parse(&self.config.base_url())
             .with_context(|| format!("invalid Azure DevOps URL {}", self.config.base_url()))?;
@@ -531,6 +547,17 @@ impl AzureClient {
             .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?
             .extend(segments);
         Ok(url)
+    }
+
+    /// A `{project}/_apis/wit/...` URL with `query` after it as written, so
+    /// the `$` in `$expand` and `$depth` survives the way the endpoints spell
+    /// their options.
+    fn wit_url(&self, tail: &[&str], query: &str) -> Result<String> {
+        let mut segments = vec![self.config.project.as_str(), "_apis", "wit"];
+        segments.extend_from_slice(tail);
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(query));
+        Ok(url.into())
     }
 
     /// Everybody on the project's teams, so the assignee picker can offer
@@ -559,57 +586,21 @@ impl AzureClient {
     /// work item carries is not the `path` each node reports, so it is rebuilt
     /// from the names on the way down; see [`crate::classification`].
     pub fn fetch_classification_nodes(&self) -> Result<Vec<ClassificationNode>> {
-        let response = self.get(&self.classification_nodes_url()?)?;
+        let url = self.wit_url(
+            &["classificationnodes"],
+            &format!("$depth=10&api-version={API_VERSION}"),
+        )?;
+        let response = self.get(&url)?;
         Ok(classification::parse_classification_nodes(&response))
     }
 
-    /// A project name is a path segment and may have spaces in it, so this URL
-    /// is assembled rather than formatted, like the teams one below.
-    fn classification_nodes_url(&self) -> Result<String> {
-        let mut url = Url::parse(&self.config.base_url())
-            .with_context(|| format!("invalid Azure DevOps URL {}", self.config.base_url()))?;
-        url.path_segments_mut()
-            .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?
-            .extend([
-                self.config.project.as_str(),
-                "_apis",
-                "wit",
-                "classificationnodes",
-            ]);
-        url.set_query(Some(&format!("$depth=10&api-version={API_VERSION}")));
-        Ok(url.into())
-    }
-
-    /// A project name is a path segment and may have spaces in it, so the URL is
-    /// assembled rather than formatted. `tail` is whatever follows `teams`.
+    /// The teams hang off `_apis/projects` rather than off the project. `tail`
+    /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {
-        let mut url = Url::parse(&self.config.base_url())
-            .with_context(|| format!("invalid Azure DevOps URL {}", self.config.base_url()))?;
-        {
-            let mut segments = url
-                .path_segments_mut()
-                .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?;
-            segments.extend(["_apis", "projects", self.config.project.as_str(), "teams"]);
-            segments.extend(tail);
-        }
-        url.set_query(Some(&format!("api-version={API_VERSION}")));
-        Ok(url.into())
-    }
-
-    /// A `{project}/_apis/wit/...` URL. The segments are assembled rather than
-    /// formatted because a work item type is one of them and its name has
-    /// spaces in it — `User Story`, `Product Backlog Item`.
-    fn work_item_type_url(&self, tail: &[&str]) -> Result<String> {
-        let mut url = Url::parse(&self.config.base_url())
-            .with_context(|| format!("invalid Azure DevOps URL {}", self.config.base_url()))?;
-        {
-            let mut segments = url
-                .path_segments_mut()
-                .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?;
-            segments.extend([self.config.project.as_str(), "_apis", "wit"]);
-            segments.extend(tail);
-        }
-        url.set_query(Some(&format!("api-version={API_VERSION}")));
+        let mut segments = vec!["_apis", "projects", self.config.project.as_str(), "teams"];
+        segments.extend_from_slice(tail);
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&version_query()));
         Ok(url.into())
     }
 
@@ -742,6 +733,11 @@ enum Request<'a> {
     Delete,
 }
 
+/// The query every plain endpoint takes: the API version and nothing else.
+fn version_query() -> String {
+    format!("api-version={API_VERSION}")
+}
+
 /// The headers every Azure DevOps request carries, whatever its method.
 fn authorized<Body>(
     builder: ureq::RequestBuilder<Body>,
@@ -788,16 +784,6 @@ impl RequestRejected {
             url: url.into(),
             message: message.into(),
         }
-    }
-
-    #[must_use]
-    pub const fn status(&self) -> u16 {
-        self.status
-    }
-
-    #[must_use]
-    pub fn message(&self) -> &str {
-        &self.message
     }
 
     /// Whether the refusal means the work item changed after it was read: an
@@ -1071,55 +1057,35 @@ fn base64(bytes: &[u8]) -> String {
     output
 }
 
-/// Where a new work item is posted. The type is a path segment with a literal
-/// `$` in front of it, and both it and the project name can carry spaces —
-/// `User Story`, `Product Backlog Item` — so the URL is assembled rather than
-/// formatted.
-fn create_work_item_url(work_item_type: &str, config: &AzureConfig) -> Result<String> {
-    let mut url = Url::parse(&config.base_url())
-        .with_context(|| format!("invalid Azure DevOps URL {}", config.base_url()))?;
-    url.path_segments_mut()
-        .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?
-        .extend([
-            config.project.as_str(),
-            "_apis",
-            "wit",
-            "workitems",
-            &format!("${work_item_type}"),
-        ]);
-    // Without `$expand=relations` the answer carries no links at all, so a work
-    // item created under a parent would be stored without one.
-    url.set_query(Some(&format!(
-        "$expand=relations&api-version={API_VERSION}"
-    )));
-    Ok(url.into())
+/// The link type a parent is held under, on the child's side of it.
+const PARENT_REL: &str = "System.LinkTypes.Hierarchy-Reverse";
+
+/// The JSON Patch operation that files a work item under `parent`. A parent is
+/// not a field, so it cannot be written like one: it is a relation appended to
+/// the work item's own list, naming the link type and the parent's API URL.
+/// The URL hangs off the organization rather than the project, which is the
+/// form [`parse_work_item`] reads back.
+fn parent_link(parent: i64, config: &AzureConfig) -> Value {
+    json!({
+        "op": "add",
+        "path": "/relations/-",
+        "value": {
+            "rel": PARENT_REL,
+            "url": format!("{}/_apis/wit/workItems/{parent}", config.base_url()),
+        },
+    })
 }
 
 /// The JSON Patch document that creates a work item: the operations setting
 /// its fields, then the link to its parent when it has one.
-///
-/// A parent is not a field, so it cannot be written like one: it is a relation
-/// appended to the work item's own list, naming the link type and the parent's
-/// API URL. The URL hangs off the organization rather than the project, which
-/// is the form [`parse_work_item`] reads back.
 #[must_use]
 pub fn create_document(fields: &[Value], parent: Option<i64>, config: &AzureConfig) -> Vec<Value> {
     let mut document = fields.to_vec();
     if let Some(parent) = parent {
-        document.push(json!({
-            "op": "add",
-            "path": "/relations/-",
-            "value": {
-                "rel": "System.LinkTypes.Hierarchy-Reverse",
-                "url": format!("{}/_apis/wit/workItems/{parent}", config.base_url()),
-            },
-        }));
+        document.push(parent_link(parent, config));
     }
     document
 }
-
-/// The link type a parent is held under, on the child's side of it.
-const PARENT_REL: &str = "System.LinkTypes.Hierarchy-Reverse";
 
 /// The JSON Patch document that moves one work item between parents, built
 /// against `item` — the copy of the work item just read, links and all.
@@ -1172,14 +1138,7 @@ fn reparent_document(
         document.push(json!({"op": "remove", "path": format!("/relations/{index}")}));
     }
     if let Some(parent) = new_parent {
-        document.push(json!({
-            "op": "add",
-            "path": "/relations/-",
-            "value": {
-                "rel": PARENT_REL,
-                "url": format!("{}/_apis/wit/workItems/{parent}", config.base_url()),
-            },
-        }));
+        document.push(parent_link(parent, config));
     }
     Ok(document)
 }
@@ -1517,6 +1476,16 @@ mod tests {
         }
     }
 
+    /// A client that never reaches the network, for the URLs it builds.
+    fn client(config: AzureConfig) -> AzureClient {
+        AzureClient {
+            agent: ureq::Agent::new_with_defaults(),
+            config,
+            authorization: RefCell::new("Bearer test".into()),
+            throttled_until: Cell::new(None),
+        }
+    }
+
     #[test]
     fn the_offerable_work_item_types_leave_out_the_disabled_and_the_hidden_ones() {
         let response = json!({
@@ -1844,17 +1813,10 @@ mod tests {
 
     #[test]
     fn detail_urls_escape_the_project_and_the_continuation_token() {
-        let client_config = AzureConfig {
-            organization: "demo".into(),
+        let client = client(AzureConfig {
             project: "my project".into(),
-            scope: None,
-        };
-        let client = AzureClient {
-            agent: ureq::Agent::new_with_defaults(),
-            config: client_config,
-            authorization: RefCell::new("Bearer test".into()),
-            throttled_until: Cell::new(None),
-        };
+            ..config()
+        });
 
         assert_eq!(
             client.comments_url(613, None).unwrap(),
@@ -2320,16 +2282,16 @@ mod tests {
     #[test]
     fn the_create_url_keeps_the_dollar_before_an_escaped_work_item_type() {
         assert_eq!(
-            create_work_item_url("Issue", &config()).unwrap(),
+            client(config()).create_work_item_url("Issue").unwrap(),
             "https://dev.azure.com/demo/development/_apis/wit/workitems/$Issue\
              ?$expand=relations&api-version=7.1"
         );
-        let spaced = AzureConfig {
+        let spaced = client(AzureConfig {
             project: "Fabrikam Fiber".into(),
             ..config()
-        };
+        });
         assert_eq!(
-            create_work_item_url("User Story", &spaced).unwrap(),
+            spaced.create_work_item_url("User Story").unwrap(),
             "https://dev.azure.com/demo/Fabrikam%20Fiber/_apis/wit/workitems/$User%20Story\
              ?$expand=relations&api-version=7.1",
             "a space is escaped either side of the type; the dollar is not"

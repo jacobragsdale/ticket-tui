@@ -23,9 +23,9 @@ pub struct Session {
     #[serde(default)]
     pub auto_hide: Option<bool>,
     #[serde(default)]
-    pub bookmarks: Vec<SessionKey>,
+    pub bookmarks: Vec<TicketKey>,
     #[serde(default)]
-    pub recent: Vec<SessionKey>,
+    pub recent: Vec<TicketKey>,
     #[serde(default)]
     pub views: Vec<NamedView>,
     #[serde(default)]
@@ -36,7 +36,7 @@ pub struct Session {
     #[serde(default)]
     pub show_finished: bool,
     #[serde(default)]
-    pub selected: Option<SessionKey>,
+    pub selected: Option<TicketKey>,
     #[serde(default = "wide_split")]
     pub pane_split_wide: u16,
     #[serde(default = "stacked_split")]
@@ -93,12 +93,6 @@ pub struct SessionColumn {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SessionKey {
-    pub organization: String,
-    pub id: i64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NamedView {
     pub name: String,
     pub query: String,
@@ -126,24 +120,6 @@ where
         .into_iter()
         .filter_map(|column| serde_json::from_value(column).ok())
         .collect())
-}
-
-impl From<&TicketKey> for SessionKey {
-    fn from(key: &TicketKey) -> Self {
-        Self {
-            organization: key.organization.clone(),
-            id: key.id,
-        }
-    }
-}
-
-impl From<&SessionKey> for TicketKey {
-    fn from(key: &SessionKey) -> Self {
-        Self {
-            organization: key.organization.clone(),
-            id: key.id,
-        }
-    }
 }
 
 #[must_use]
@@ -230,7 +206,7 @@ mod tests {
             stale_days: 21,
             ..Session::default()
         };
-        session.bookmarks.push(SessionKey {
+        session.bookmarks.push(TicketKey {
             organization: "demo".into(),
             id: 7,
         });

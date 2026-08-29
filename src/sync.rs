@@ -218,11 +218,23 @@ pub struct CommentRejection {
 pub enum SyncMode {
     /// Every work item, replacing the stored rows wholesale. Used when there is
     /// no watermark to start from: a fresh file, a rebuilt schema, or
-    /// `ticket-tui --sync`.
+    /// `ticket-tui sync --full`.
     Full,
     /// Only the work items edited since the stored watermark, plus whatever the
     /// project no longer lists.
     Incremental,
+}
+
+/// What a pull that landed says for itself. A full pull counts the work items
+/// it stored; an incremental one counts what actually moved, which on a quiet
+/// project is usually a handful or none.
+#[must_use]
+pub fn pull_summary(mode: SyncMode, count: usize) -> String {
+    match mode {
+        SyncMode::Full => format!("Synced {count} work items"),
+        SyncMode::Incremental if count == 1 => "Synced 1 change".to_owned(),
+        SyncMode::Incremental => format!("Synced {count} changes"),
+    }
 }
 
 /// How one request ended.
@@ -2146,14 +2158,7 @@ mod tests {
         .unwrap();
 
         handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
-        let outcome = loop {
-            match next_event(&handle) {
-                SyncEvent::Finished { outcome, .. } => break outcome,
-                SyncEvent::DisplayName(_) => continue,
-                other => panic!("expected a finished pull, got {other:?}"),
-            }
-        };
-        let SyncOutcome::Failed(error) = outcome else {
+        let SyncOutcome::Failed(error) = pulled(&handle) else {
             panic!("expected a failed pull");
         };
         assert!(error.contains("network unreachable"), "{error}");

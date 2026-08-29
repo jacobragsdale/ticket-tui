@@ -30,7 +30,7 @@ use crate::filter::{
 use crate::model::{
     CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity,
     RelationKind, RelationRecord, SortDirection, SortField, StateCatalog, StateCategory,
-    StateOption, Ticket, TicketGraph, TicketKey, compare_tickets, path_leaf,
+    StateOption, Ticket, TicketGraph, TicketKey, compare_tickets, path_leaf, same_text,
 };
 pub use crate::model::{RowDensity, SearchOrder};
 use crate::pointer::{
@@ -39,7 +39,7 @@ use crate::pointer::{
 };
 pub use crate::pointer::{EditableField, HitRegions, OverlayAnchor, PointerTarget};
 use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
-use crate::session::{self, NamedView, Session};
+use crate::session::{NamedView, Session};
 use crate::sprint::{self, SprintSummary, SummaryRow, SummaryRowKind};
 use crate::sync::{ReparentApplied, ReparentRejection};
 use crate::text_input::TextInput;
@@ -444,7 +444,7 @@ impl AssigneeCandidate {
     #[must_use]
     pub fn is_current(&self, current: Option<&str>) -> bool {
         match current {
-            Some(name) => !self.unassigned && same_name(&self.display, name),
+            Some(name) => !self.unassigned && same_text(&self.display, name),
             None => self.unassigned,
         }
     }
@@ -899,20 +899,13 @@ fn form_number(form: &FormOverlay, id: FormFieldId) -> Result<Option<i64>, Strin
         .map_err(|_| format!("{} must be a whole number, not \"{text}\"", field.label))
 }
 
-/// Azure DevOps echoes display names back with inconsistent casing and spacing,
-/// so two names are the same person when they are the same after both.
-#[must_use]
-fn same_name(left: &str, right: &str) -> bool {
-    left.trim().to_lowercase() == right.trim().to_lowercase()
-}
-
 /// Whether one of the people already gathered is this one, so nobody is
 /// offered twice under a different spelling.
 #[must_use]
 fn names_someone_listed(candidates: &[AssigneeCandidate], name: &str) -> bool {
     candidates
         .iter()
-        .any(|candidate| !candidate.unassigned && same_name(&candidate.display, name))
+        .any(|candidate| !candidate.unassigned && same_text(&candidate.display, name))
 }
 
 /// Whether every character typed appears in `haystack` in that order, ignoring
@@ -2176,16 +2169,11 @@ impl App {
         self.me.as_deref()
     }
 
-    /// Whether a work item is assigned to the signed-in user. Azure DevOps
-    /// echoes display names back with inconsistent casing, so compare loosely.
+    /// Whether a work item is assigned to the signed-in user.
     #[must_use]
     pub fn is_mine(&self, ticket: &Ticket) -> bool {
         match (self.me.as_deref(), ticket.assigned_to.as_deref()) {
-            (Some(me), Some(assignee)) => me
-                .trim()
-                .chars()
-                .flat_map(char::to_lowercase)
-                .eq(assignee.trim().chars().flat_map(char::to_lowercase)),
+            (Some(me), Some(assignee)) => same_text(me, assignee),
             _ => false,
         }
     }
@@ -2202,13 +2190,6 @@ impl App {
             Some(days) => days,
             None => self.stale_days,
         }
-    }
-
-    /// The threshold the session file carries, which is not the one in force
-    /// while a flag or a variable overrides it.
-    #[must_use]
-    pub const fn remembered_stale_days(&self) -> u16 {
-        self.stale_days
     }
 
     /// The threshold `--stale-days` or `TICKET_TUI_STALE_DAYS` asked for. It
@@ -2280,7 +2261,7 @@ impl App {
             match self
                 .identities
                 .iter_mut()
-                .find(|known| same_name(&known.display_name, &identity.display_name))
+                .find(|known| same_text(&known.display_name, &identity.display_name))
             {
                 Some(known) if known.unique_name.is_none() => {
                     known.unique_name = identity.unique_name;
@@ -2424,7 +2405,7 @@ impl App {
         seen
     }
 
-    pub fn set_workspace_graph(&mut self, graph: crate::model::TicketGraph) {
+    pub fn set_workspace_graph(&mut self, graph: TicketGraph) {
         self.graph = graph;
         self.refresh_child_progress();
         self.sync_family_state();
@@ -2570,11 +2551,6 @@ impl App {
     #[must_use]
     pub fn ticket_by_key(&self, key: &TicketKey) -> Option<&Ticket> {
         self.tickets.iter().find(|ticket| ticket.key == *key)
-    }
-
-    #[must_use]
-    pub fn ticket_title(&self, key: &TicketKey) -> Option<&str> {
-        self.ticket_by_key(key).map(|ticket| ticket.title.as_str())
     }
 
     #[must_use]
@@ -2737,12 +2713,9 @@ impl App {
         edit: FieldEdit,
         undo: UndoRole,
     ) -> Result<EditRequest, String> {
-        if !self.sync_enabled {
+        if let Some(reason) = self.write_refusal() {
             // Nothing to write to, so the row is left exactly as it is.
-            return Err(self
-                .offline_reason
-                .clone()
-                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned()));
+            return Err(reason);
         }
         if self.pending_edits.contains_key(key) {
             // The revision a second edit would test with is already stale, so
@@ -2969,6 +2942,16 @@ impl App {
     /// Why the TUI cannot write anything, told to whoever tries to.
     pub fn set_offline_reason(&mut self, reason: Option<String>) {
         self.offline_reason = reason;
+    }
+
+    /// Why nothing can be written right now, and `None` while Azure DevOps is
+    /// configured. Every editor asks this before it changes anything.
+    fn write_refusal(&self) -> Option<String> {
+        (!self.sync_enabled).then(|| {
+            self.offline_reason
+                .clone()
+                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned())
+        })
     }
 
     fn index_of(&self, key: &TicketKey) -> Option<usize> {
@@ -4795,7 +4778,7 @@ impl App {
             unique: self
                 .identities
                 .iter()
-                .find(|identity| same_name(&identity.display_name, display))
+                .find(|identity| same_text(&identity.display_name, display))
                 .and_then(|identity| identity.unique_name.clone()),
             unassigned: false,
             me,
@@ -5118,11 +5101,7 @@ impl App {
     /// back. The child progress of the parent it left and the parent it joined
     /// are both rebuilt here, so neither ratio is stale for a frame.
     fn begin_reparent(&mut self, child: &TicketKey, new_parent: Option<TicketKey>) -> AppAction {
-        if !self.sync_enabled {
-            let reason = self
-                .offline_reason
-                .clone()
-                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned());
+        if let Some(reason) = self.write_refusal() {
             self.set_error(format!("#{} not moved: {reason}", child.id));
             return AppAction::None;
         }
@@ -5536,11 +5515,7 @@ impl App {
         };
         let key = ticket.key.clone();
         let html = ticket.description_html.clone();
-        if !self.sync_enabled {
-            let reason = self
-                .offline_reason
-                .clone()
-                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned());
+        if let Some(reason) = self.write_refusal() {
             self.set_error(format!("#{} description not saved: {reason}", key.id));
             return AppAction::None;
         }
@@ -5556,19 +5531,13 @@ impl App {
             self.set_error("No work item is selected");
             return AppAction::None;
         };
-        let refusal = |reason: &str| format!("#{} comment not posted: {reason}", key.id);
-        if !self.sync_enabled {
-            let reason = self
-                .offline_reason
-                .clone()
-                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned());
-            let message = refusal(&reason);
-            self.set_error(message);
-            return AppAction::None;
-        }
-        if self.pending_comments.contains(&key) {
-            let message = refusal("an earlier comment is still in flight");
-            self.set_error(message);
+        let refusal = self.write_refusal().or_else(|| {
+            self.pending_comments
+                .contains(&key)
+                .then(|| "an earlier comment is still in flight".to_owned())
+        });
+        if let Some(reason) = refusal {
+            self.set_error(format!("#{} comment not posted: {reason}", key.id));
             return AppAction::None;
         }
         self.pending_comments.insert(key.clone());
@@ -6001,11 +5970,7 @@ impl App {
         if !tags.is_empty() {
             edits.push(FieldEdit::tags(&tags));
         }
-        if !self.sync_enabled {
-            let reason = self
-                .offline_reason
-                .clone()
-                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned());
+        if let Some(reason) = self.write_refusal() {
             self.set_error(format!("Work item not created: {reason}"));
             return AppAction::None;
         }
@@ -6040,11 +6005,11 @@ impl App {
         self.identities
             .iter()
             .find(|identity| {
-                same_name(&identity.display_name, name)
+                same_text(&identity.display_name, name)
                     || identity
                         .unique_name
                         .as_deref()
-                        .is_some_and(|unique| same_name(unique, name))
+                        .is_some_and(|unique| same_text(unique, name))
             })
             .map_or_else(
                 || FieldEdit::assignee(name, None),
@@ -6124,11 +6089,7 @@ impl App {
     /// checked, and over the row under the cursor otherwise — the rule the
     /// bulk editors already follow.
     fn open_delete_confirm(&mut self) {
-        if !self.sync_enabled {
-            let reason = self
-                .offline_reason
-                .clone()
-                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned());
+        if let Some(reason) = self.write_refusal() {
             self.set_error(reason);
             return;
         }
@@ -7183,18 +7144,12 @@ impl App {
             row_density: self.row_density,
             columns: self.layout.to_session_columns(),
             auto_hide: Some(self.layout.auto_hide),
-            bookmarks: self
-                .bookmarks
-                .iter()
-                .map(session::SessionKey::from)
-                .collect(),
-            recent: self.recent.iter().map(session::SessionKey::from).collect(),
+            bookmarks: self.bookmarks.iter().cloned().collect(),
+            recent: self.recent.clone(),
             views: self.views.clone(),
             active_view: self.active_view.clone(),
             show_finished: self.show_finished,
-            selected: self
-                .selected_ticket()
-                .map(|ticket| session::SessionKey::from(&ticket.key)),
+            selected: self.selected_ticket().map(|ticket| ticket.key.clone()),
             pane_split_wide: self.pane_split_wide,
             pane_split_stacked: self.pane_split_stacked,
             stale_days: self.stale_days,
@@ -7214,8 +7169,8 @@ impl App {
             .pane_split_stacked
             .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
         self.stale_days = clamp_stale_days(session.stale_days);
-        self.bookmarks = session.bookmarks.iter().map(TicketKey::from).collect();
-        self.recent = session.recent.iter().map(TicketKey::from).collect();
+        self.bookmarks = session.bookmarks.into_iter().collect();
+        self.recent = session.recent;
         self.views = session
             .views
             .into_iter()
@@ -7225,7 +7180,7 @@ impl App {
         // Set before the rows are worked out, so the first pass over them
         // already knows whether finished work belongs on the table.
         self.show_finished = session.show_finished;
-        let selected = session.selected.as_ref().map(TicketKey::from);
+        let selected = session.selected;
         if session.query.is_empty() {
             self.show_all(selected.as_ref());
         } else {
@@ -7330,6 +7285,7 @@ mod tests {
 
     use super::*;
     use crate::model::StateCategory;
+    use crate::session;
 
     fn ticket(id: i64, title: &str, changed_at: &str) -> Ticket {
         Ticket {
@@ -7840,15 +7796,11 @@ mod tests {
             "and the child knows its parent"
         );
         assert_eq!(
-            family_ids(&app.family_of(&parent)),
+            family_ids(&app, &parent),
             [10, 42],
             "the parent's tree shows the child under it"
         );
-        assert_eq!(
-            family_ids(&app.family_of(&key)),
-            [10, 42],
-            "and so does the child's"
-        );
+        assert_eq!(family_ids(&app, &key), [10, 42], "and so does the child's");
     }
 
     #[test]
@@ -7867,9 +7819,9 @@ mod tests {
     }
 
     /// The work items one family tree draws, in the order it draws them.
-    fn family_ids(family: &FamilySnapshot) -> Vec<i64> {
-        family
-            .tree_entries()
+    fn family_ids(app: &App, key: &TicketKey) -> Vec<i64> {
+        app.graph
+            .visible_family_tree(key)
             .iter()
             .map(|entry| entry.key.id)
             .collect()

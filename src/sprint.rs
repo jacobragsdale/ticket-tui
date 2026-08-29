@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 
 use crate::filter::is_stale;
-use crate::model::{StateCategory, Ticket};
+use crate::model::{StateCategory, Ticket, same_text};
 use crate::timestamp::Timestamp;
 
 /// What the summary calls work nobody owns. It is also the value the
@@ -334,16 +334,6 @@ fn fit(text: &str, width: usize) -> String {
     format!("{kept}\u{2026}")
 }
 
-/// Whether a work item is planned into `iteration`. Azure DevOps echoes paths
-/// back with inconsistent casing, so the comparison ignores it, the same way
-/// the `iteration:` filter does.
-fn in_iteration(ticket: &Ticket, iteration: &str) -> bool {
-    ticket
-        .iteration_path
-        .trim()
-        .eq_ignore_ascii_case(iteration.trim())
-}
-
 /// Counts one iteration out of `tickets`.
 ///
 /// `tickets` is deliberately the whole set rather than the rows the table is
@@ -368,7 +358,7 @@ pub fn summarize(
     let mut stale = 0;
     for ticket in tickets
         .iter()
-        .filter(|ticket| in_iteration(ticket, iteration))
+        .filter(|ticket| same_text(&ticket.iteration_path, iteration))
     {
         let column = SummaryColumn::of(StateCategory::of(&ticket.state)).index();
         let name = ticket
@@ -547,7 +537,7 @@ mod tests {
 
         let expected = tickets
             .iter()
-            .filter(|ticket| in_iteration(ticket, "development\\Sprint 1"))
+            .filter(|ticket| same_text(&ticket.iteration_path, "development\\Sprint 1"))
             .filter(|ticket| is_stale(ticket, 14, now()))
             .count();
         assert_eq!(summary.stale, expected);

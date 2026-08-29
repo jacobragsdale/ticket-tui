@@ -67,11 +67,6 @@ pub struct SearchEngine {
 
 impl SearchEngine {
     #[must_use]
-    pub fn new(tickets: &[Ticket]) -> Self {
-        Self::from_documents(SearchDocuments::prepare(tickets))
-    }
-
-    #[must_use]
     pub fn from_documents(documents: SearchDocuments) -> Self {
         let (command_sender, command_receiver) = mpsc::channel();
         let (result_sender, result_receiver) = mpsc::channel();
@@ -197,11 +192,6 @@ impl QueryHighlighter {
     }
 }
 
-#[must_use]
-pub fn match_char_indices(query: &str, haystack: &str) -> Vec<u32> {
-    QueryHighlighter::new(query).indices(haystack)
-}
-
 fn search_worker(receiver: Receiver<Command>, sender: Sender<SearchResult>) {
     let mut matcher = Matcher::new(Config::DEFAULT);
     while let Ok(command) = receiver.recv() {
@@ -323,7 +313,7 @@ mod tests {
             ticket(2, "Update deployment", "ticket search only appears here"),
             ticket(3, "Search indexing", "nothing special"),
         ];
-        let mut engine = SearchEngine::new(&tickets);
+        let mut engine = SearchEngine::from_documents(SearchDocuments::prepare(&tickets));
 
         let generation = engine.submit("ticket search");
         let result = await_result(&engine, generation);
@@ -340,6 +330,10 @@ mod tests {
         );
     }
 
+    fn match_char_indices(query: &str, haystack: &str) -> Vec<u32> {
+        QueryHighlighter::new(query).indices(haystack)
+    }
+
     fn matched_chars(query: &str, haystack: &str) -> String {
         let chars: Vec<char> = haystack.chars().collect();
         match_char_indices(query, haystack)
@@ -349,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn match_char_indices_highlights_one_atom_of_a_multi_word_query() {
+    fn the_highlighter_marks_one_atom_of_a_multi_word_query() {
         assert_eq!(
             matched_chars("search", "Fix ticket search").to_ascii_lowercase(),
             "search"

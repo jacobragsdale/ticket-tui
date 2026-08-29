@@ -21,12 +21,12 @@ use ticket_tui::agent_context::{self, AgentContext};
 use ticket_tui::app::{
     App, AppAction, CopiedContent, DividerOrientation, PointerTarget, PreparedTickets, SyncTarget,
 };
-use ticket_tui::azure::{AzureClient, AzureConfig};
+use ticket_tui::azure::AzureConfig;
 use ticket_tui::cli::{self, Cli, resolve_me};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
 use ticket_tui::edit::{EditRejection, EditRequest, FieldEdit};
 use ticket_tui::markdown;
-use ticket_tui::model::{Ticket, TicketGraph, TicketKey};
+use ticket_tui::model::{Ticket, TicketKey};
 use ticket_tui::session;
 use ticket_tui::sync::{
     self, AzureConnector, DetailsOutcome, PullOrigin, ReparentRejection, SyncEvent, SyncHandle,
@@ -136,19 +136,29 @@ impl DetailsEngine {
 }
 
 impl SyncRuntime {
-    /// What a pull the user asked for reports. A full pull counts the work
-    /// items it stored; an incremental one counts what actually moved, which
-    /// on a quiet project is usually a handful or none.
+    /// What a pull the user asked for reports, and where it pulled from.
     fn status_for(&self, mode: SyncMode, count: usize) -> String {
-        let synced = match mode {
-            SyncMode::Full => format!("Synced {count} work items"),
-            SyncMode::Incremental if count == 1 => "Synced 1 change".to_owned(),
-            SyncMode::Incremental => format!("Synced {count} changes"),
-        };
+        let synced = sync::pull_summary(mode, count);
         self.config.as_ref().map_or_else(
             || synced.clone(),
             |config| format!("{synced} from {}/{}", config.organization, config.project),
         )
+    }
+
+    /// Why nothing can be sent, for a run with no worker.
+    fn offline_message(&self) -> String {
+        self.offline_reason
+            .clone()
+            .unwrap_or_else(|| "Azure DevOps is not configured".to_owned())
+    }
+
+    /// Hands one request to the worker, or says why it could not: there is no
+    /// worker, or the one there was has stopped.
+    fn send(&self, request: SyncRequest) -> Result<(), String> {
+        match &self.worker {
+            Some(worker) => worker.send(request).map_err(|error| format!("{error:#}")),
+            None => Err(self.offline_message()),
+        }
     }
 
     /// Gives up on syncing for the rest of the run, which only happens when the
@@ -246,9 +256,6 @@ fn run() -> Result<()> {
     if let Some(command) = &cli.command {
         return cli::run(&cli, command);
     }
-    if cli.sync {
-        eprintln!("note: --sync is deprecated; run `ticket-tui sync` to pull and exit");
-    }
     let refresh = resolve_refresh(cli.refresh, std::env::var("TICKET_TUI_REFRESH").ok())?;
     let stale_days =
         resolve_stale_days(cli.stale_days, std::env::var("TICKET_TUI_STALE_DAYS").ok())?;
@@ -260,34 +267,20 @@ fn run() -> Result<()> {
     let stored_project = repository
         .meta(db::ORGANIZATION_KEY)?
         .zip(repository.meta(db::PROJECT_KEY)?);
+    // An unresolved organization is not a reason to refuse to start: the TUI
+    // browses the database offline and says why it cannot sync.
     let (config, offline_reason) =
         match AzureConfig::resolve(cli.org.clone(), cli.project.clone(), cli.query.clone()) {
             Ok(config) => (Some(config), None),
-            // `--sync` is an explicit request to reach Azure DevOps, so there an
-            // unresolved organization stays a hard error.
-            Err(error) if cli.sync => return Err(error),
             Err(error) => (None, Some(format!("{error:#}"))),
         };
-
-    // `--sync` still blocks before the TUI opens, but no longer aborts: a
-    // failure becomes a notification over whatever the database already holds.
-    let startup_sync = match (cli.sync, config.as_ref()) {
-        (true, Some(config)) => {
-            eprintln!(
-                "syncing work items from {}/{}…",
-                config.base_url(),
-                config.project
-            );
-            Some(blocking_sync(&mut repository, config))
-        }
-        _ => None,
-    };
 
     let tickets = repository.load_all()?;
     let graph = repository.load_graph()?;
     let database_is_empty = tickets.is_empty();
     // A database filled from another project is browsed, never synced into: the
-    // first pull would replace every row in it, and only `--sync` asks for that.
+    // first pull would replace every row in it, and only `ticket-tui sync
+    // --full` asks for that.
     let wrong_project = config.as_ref().and_then(|config| {
         project_mismatch(
             stored_project
@@ -295,7 +288,6 @@ fn run() -> Result<()> {
                 .map(|(organization, project)| (organization.as_str(), project.as_str())),
             config,
             database_is_empty,
-            cli.sync,
         )
     });
     let offline_reason = wrong_project.clone().or(offline_reason);
@@ -314,10 +306,7 @@ fn run() -> Result<()> {
         repository.meta(db::ME_DISPLAY_NAME_KEY)?,
         std::env::var("TICKET_TUI_ME").ok(),
     ));
-    app.configure_database(
-        repository.path().to_path_buf(),
-        db::data_signature(repository.path()),
-    );
+    stamp_database(&mut app, &repository);
     app.set_offline_reason(offline_reason.clone());
     let session_path = session::path_for(repository.path());
     match session::load(&session_path) {
@@ -352,31 +341,17 @@ fn run() -> Result<()> {
             Box::new(AzureConnector::new(config)),
         )?);
         app.enable_sync();
+        // The TUI opens from the database and the first pull runs behind it
+        // straight away — even with the timer off, when the database was just
+        // rebuilt or holds nothing to browse.
         let now = Instant::now();
-        if pull_at_startup(
-            startup_sync.is_some(),
-            interval.is_some(),
-            schema_was_rebuilt,
-            database_is_empty,
-        ) {
+        if interval.is_some() || schema_was_rebuilt || database_is_empty {
             runtime.scheduler.schedule_now(now);
         } else {
             runtime.scheduler.schedule_next(now);
         }
-    }
-
-    match startup_sync {
-        Some(Ok(status)) => {
-            app.finish_sync();
-            app.set_status(status);
-        }
-        Some(Err(error)) => {
-            let error = format!("{error:#}");
-            app.fail_sync(&error, true);
-            app.set_error(format!("Sync failed: {error}"));
-        }
-        None if runtime.worker.is_none() => app.set_status(offline_status(database_is_empty)),
-        None => {}
+    } else {
+        app.set_status(offline_status(database_is_empty));
     }
     // Said last, because a database held by another project is a more specific
     // reason to be offline than having no organization at all.
@@ -404,65 +379,13 @@ fn run() -> Result<()> {
     result
 }
 
-/// The `--sync` pull, run before the TUI opens. Always a full pull: asking for
-/// one explicitly is how a database is rebuilt from scratch. Reports the status
-/// line to show, leaving the error to the caller: an unreachable Azure DevOps
-/// is a notification over the existing database, not a reason to refuse to
-/// start.
-fn blocking_sync(repository: &mut SqliteTicketRepository, config: &AzureConfig) -> Result<String> {
-    let client = AzureClient::connect(config.clone())?;
-    let batch = client.fetch_all_work_items()?;
-    let graph = TicketGraph {
-        relations: batch.relations,
-        ..TicketGraph::default()
-    };
-    let count = repository.replace_all(&batch.tickets, &graph)?;
-    // Leaving the watermark behind is what lets the pulls that follow ask only
-    // for what changed.
-    if let Some(watermark) = sync::watermark_of(&batch.tickets) {
-        repository.set_meta(db::WATERMARK_KEY, &watermark.to_rfc3339())?;
-    }
-    // `--sync` is how a database is pointed at another project, so it is also
-    // what re-stamps the one it now holds.
-    repository.set_meta(db::ORGANIZATION_KEY, &config.organization)?;
-    repository.set_meta(db::PROJECT_KEY, &config.project)?;
-    repository.set_meta(db::SYNC_SCOPE_KEY, config.scope.as_deref().unwrap_or(""))?;
-    // The state picker reads these from the database, so the pull that fills it
-    // fills them too. A type whose states cannot be read is skipped: the picker
-    // falls back to the states the rows already carry.
-    let mut types: Vec<&str> = Vec::new();
-    for ticket in &batch.tickets {
-        if !types.contains(&ticket.work_item_type.as_str()) {
-            types.push(&ticket.work_item_type);
-        }
-    }
-    for work_item_type in types {
-        if let Ok(states) = client.fetch_work_item_type_states(work_item_type)
-            && !states.is_empty()
-        {
-            repository.replace_type_states(work_item_type, &states)?;
-        }
-    }
-    if let Some(display_name) = client.current_user_display_name()? {
-        repository.set_meta(db::ME_DISPLAY_NAME_KEY, &display_name)?;
-    }
-    Ok(format!(
-        "Synced {count} work items from {}/{}",
-        config.organization, config.project
-    ))
-}
-
-/// Whether the first background pull goes out as the TUI opens. `--sync`
-/// already pulled, so the timer takes over one interval later; otherwise the
-/// TUI opens from the database and pulls straight away — even with the timer
-/// off, when the database was just rebuilt or holds nothing to browse.
-const fn pull_at_startup(
-    synced_at_startup: bool,
-    timer_enabled: bool,
-    schema_was_rebuilt: bool,
-    database_is_empty: bool,
-) -> bool {
-    !synced_at_startup && (timer_enabled || schema_was_rebuilt || database_is_empty)
+/// Records the database as it stands, so the watcher does not reload a file
+/// our own worker just wrote.
+fn stamp_database(app: &mut App, repository: &SqliteTicketRepository) {
+    app.configure_database(
+        repository.path().to_path_buf(),
+        db::data_signature(repository.path()),
+    );
 }
 
 /// What a run without a configured organization opens with.
@@ -475,23 +398,22 @@ fn offline_status(database_is_empty: bool) -> &'static str {
 }
 
 /// Why the resolved project must not sync into this database, if it must not.
-/// A database another project filled would be emptied by the first pull, so a
-/// run that did not ask for that with `--sync` browses it offline instead. A
-/// database with nothing in it, or one from before this was recorded, adopts
-/// whatever the next pull brings.
+/// A database another project filled would be emptied by the first pull, so
+/// the run browses it offline instead; `ticket-tui sync --full` is how a
+/// database is deliberately pointed at another project. A database with
+/// nothing in it, or one from before this was recorded, adopts whatever the
+/// next pull brings.
 fn project_mismatch(
     stored: Option<(&str, &str)>,
     config: &AzureConfig,
     database_is_empty: bool,
-    replacing: bool,
 ) -> Option<String> {
     let (organization, project) = stored?;
-    let matches = organization == config.organization && project == config.project;
-    if matches || database_is_empty || replacing {
+    if database_is_empty || (organization == config.organization && project == config.project) {
         return None;
     }
     Some(format!(
-        "Database holds {organization}/{project}; pass --database for another project or --sync to replace it"
+        "Database holds {organization}/{project}; pass --database for another project or run `ticket-tui sync --full` to replace it"
     ))
 }
 
@@ -562,7 +484,6 @@ fn run_terminal(
 ) -> Result<()> {
     let mut terminal = ratatui::init();
     let _restore = TerminalRestore;
-    let opener = SystemUrlOpener;
     let mut reloader = ReloadEngine::default();
     let mut mouse_pointer = MousePointerShape::Default;
     enable_terminal_input()?;
@@ -625,7 +546,7 @@ fn run_terminal(
         if event_redraw {
             redraw = true;
         }
-        if handle_action(action, app, runtime, &opener) {
+        if handle_action(action, app, runtime, &open_in_browser) {
             // Something else owned the screen for a while, so nothing ratatui
             // believes is on it can be trusted, the pointer shape included.
             terminal.clear()?;
@@ -643,7 +564,7 @@ fn handle_action(
     action: AppAction,
     app: &mut App,
     runtime: &mut SyncRuntime,
-    opener: &dyn UrlOpener,
+    opener: &dyn Fn(&Url) -> Result<()>,
 ) -> bool {
     match action {
         AppAction::None => {}
@@ -662,9 +583,13 @@ fn handle_action(
                 start_delete(app, runtime, key);
             }
         }
-        AppAction::FetchIdentities => send_identities(runtime),
-        AppAction::FetchClassificationNodes => send_classification_nodes(runtime),
-        AppAction::FetchWorkItemTypes => send_work_item_types(runtime),
+        // The pickers and the form are already open over what the database
+        // holds, so a worker that is gone changes nothing and says nothing.
+        AppAction::FetchIdentities => drop(runtime.send(SyncRequest::Identities)),
+        AppAction::FetchClassificationNodes => {
+            drop(runtime.send(SyncRequest::ClassificationNodes));
+        }
+        AppAction::FetchWorkItemTypes => drop(runtime.send(SyncRequest::WorkItemTypes)),
         AppAction::Comment { key, text } => start_comment(app, runtime, key, text),
         AppAction::Reparent { key, new_parent } => start_reparent(app, runtime, key, new_parent),
         AppAction::Create {
@@ -851,14 +776,9 @@ fn dispatch_due_details(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     let Some(key) = runtime.details.due(app.selected_ticket(), Instant::now()) else {
         return false;
     };
-    let sent = runtime
-        .worker
-        .as_ref()
-        .map(|worker| worker.send(SyncRequest::Details(key.clone())));
-    match sent {
-        Some(Ok(())) => app.details_pending = Some(key),
-        Some(Err(error)) => runtime.stop(app, &format!("{error:#}")),
-        None => return false,
+    match runtime.send(SyncRequest::Details(key.clone())) {
+        Ok(()) => app.details_pending = Some(key),
+        Err(error) => runtime.stop(app, &error),
     }
     true
 }
@@ -866,11 +786,7 @@ fn dispatch_due_details(app: &mut App, runtime: &mut SyncRuntime) -> bool {
 /// `r`: pull now, whatever the timer is doing.
 fn start_sync(app: &mut App, runtime: &mut SyncRuntime) {
     if runtime.worker.is_none() {
-        let reason = runtime
-            .offline_reason
-            .clone()
-            .unwrap_or_else(|| "Azure DevOps is not configured".to_owned());
-        app.set_error(reason);
+        app.set_error(runtime.offline_message());
         return;
     }
     if !runtime.scheduler.request_user_pull() {
@@ -887,93 +803,36 @@ fn start_sync(app: &mut App, runtime: &mut SyncRuntime) {
 fn start_edit(app: &mut App, runtime: &mut SyncRuntime, request: EditRequest) {
     let key = request.key.clone();
     let label = request.edit.label().to_owned();
-    let sent = runtime
-        .worker
-        .as_ref()
-        .map(|worker| worker.send(SyncRequest::Edit(request)));
-    let error = match sent {
-        Some(Ok(())) => return,
-        Some(Err(error)) => format!("{error:#}"),
-        None => runtime
-            .offline_reason
-            .clone()
-            .unwrap_or_else(|| "Azure DevOps is not configured".to_owned()),
-    };
-    app.reject_edit(&EditRejection {
-        key,
-        label,
-        conflict: false,
-        message: error,
-    });
+    if let Err(message) = runtime.send(SyncRequest::Edit(request)) {
+        app.reject_edit(&EditRejection {
+            key,
+            label,
+            conflict: false,
+            message,
+        });
+    }
 }
 
 /// Hands one comment to the sync worker. Nothing is shown on the work item
 /// until Azure DevOps has stored it, so a worker that is gone only has to say
 /// the comment was not posted.
 fn start_comment(app: &mut App, runtime: &mut SyncRuntime, key: TicketKey, text: String) {
-    let sent = runtime.worker.as_ref().map(|worker| {
-        worker.send(SyncRequest::Comment {
-            key: key.clone(),
-            text,
-        })
-    });
-    let error = match sent {
-        Some(Ok(())) => {
-            app.set_status(format!("Posting comment on #{}\u{2026}", key.id));
-            return;
-        }
-        Some(Err(error)) => format!("{error:#}"),
-        None => runtime
-            .offline_reason
-            .clone()
-            .unwrap_or_else(|| "Azure DevOps is not configured".to_owned()),
+    let request = SyncRequest::Comment {
+        key: key.clone(),
+        text,
     };
-    app.reject_comment(&key, &error);
+    match runtime.send(request) {
+        Ok(()) => app.set_status(format!("Posting comment on #{}\u{2026}", key.id)),
+        Err(message) => app.reject_comment(&key, &message),
+    }
 }
 
 /// Hands one delete to the sync worker. Nothing has left the table yet — a row
 /// is dropped when Azure DevOps says the work item is gone — so a worker that
 /// is gone only has to say the work item is still there.
 fn start_delete(app: &mut App, runtime: &mut SyncRuntime, key: TicketKey) {
-    let sent = runtime
-        .worker
-        .as_ref()
-        .map(|worker| worker.send(SyncRequest::Delete(key.clone())));
-    let error = match sent {
-        Some(Ok(())) => return,
-        Some(Err(error)) => format!("{error:#}"),
-        None => runtime
-            .offline_reason
-            .clone()
-            .unwrap_or_else(|| "Azure DevOps is not configured".to_owned()),
-    };
-    app.reject_delete(&key, &error);
-}
-
-/// Asks the worker for the project's team members, for the assignee picker. A
-/// worker that is gone changes nothing and says nothing: the picker already
-/// offers everybody the database has seen.
-fn send_identities(runtime: &SyncRuntime) {
-    if let Some(worker) = runtime.worker.as_ref() {
-        drop(worker.send(SyncRequest::Identities));
-    }
-}
-
-/// Asks the worker for the project's iteration and area trees. Like the team
-/// members, the pickers are already open over what the database holds, so a
-/// worker that is gone is not worth a word.
-fn send_classification_nodes(runtime: &SyncRuntime) {
-    if let Some(worker) = runtime.worker.as_ref() {
-        drop(worker.send(SyncRequest::ClassificationNodes));
-    }
-}
-
-/// Asks the worker for the project's work item types. The form is already open
-/// over the types the database holds, so a worker that is gone changes nothing
-/// and says nothing.
-fn send_work_item_types(runtime: &SyncRuntime) {
-    if let Some(worker) = runtime.worker.as_ref() {
-        drop(worker.send(SyncRequest::WorkItemTypes));
+    if let Err(message) = runtime.send(SyncRequest::Delete(key.clone())) {
+        app.reject_delete(&key, &message);
     }
 }
 
@@ -988,22 +847,14 @@ fn start_create(
     patch: Vec<Value>,
     parent: Option<i64>,
 ) {
-    let sent = runtime.worker.as_ref().map(|worker| {
-        worker.send(SyncRequest::Create {
-            work_item_type,
-            patch,
-            parent,
-        })
-    });
-    let error = match sent {
-        Some(Ok(())) => return,
-        Some(Err(error)) => format!("{error:#}"),
-        None => runtime
-            .offline_reason
-            .clone()
-            .unwrap_or_else(|| "Azure DevOps is not configured".to_owned()),
+    let request = SyncRequest::Create {
+        work_item_type,
+        patch,
+        parent,
     };
-    app.reject_create(&error);
+    if let Err(message) = runtime.send(request) {
+        app.reject_create(&message);
+    }
 }
 
 /// Hands one move to the sync worker. The graph already shows it, so a worker
@@ -1015,34 +866,24 @@ fn start_reparent(
     key: TicketKey,
     new_parent: Option<i64>,
 ) {
-    let sent = runtime.worker.as_ref().map(|worker| {
-        worker.send(SyncRequest::Reparent {
-            key: key.clone(),
-            new_parent,
-        })
-    });
-    let error = match sent {
-        Some(Ok(())) => return,
-        Some(Err(error)) => format!("{error:#}"),
-        None => runtime
-            .offline_reason
-            .clone()
-            .unwrap_or_else(|| "Azure DevOps is not configured".to_owned()),
+    let request = SyncRequest::Reparent {
+        key: key.clone(),
+        new_parent,
     };
-    app.reject_reparent(&ReparentRejection {
-        key,
-        conflict: false,
-        message: error,
-    });
+    if let Err(message) = runtime.send(request) {
+        app.reject_reparent(&ReparentRejection {
+            key,
+            conflict: false,
+            message,
+        });
+    }
 }
 
+/// Asks the worker for a pull. Only ever called with a worker to ask, so a
+/// refusal means the worker is gone.
 fn send_pull(app: &mut App, runtime: &mut SyncRuntime, origin: PullOrigin) {
-    let sent = runtime
-        .worker
-        .as_ref()
-        .map(|worker| worker.send(SyncRequest::Pull(origin)));
-    if let Some(Err(error)) = sent {
-        runtime.stop(app, &format!("{error:#}"));
+    if let Err(error) = runtime.send(SyncRequest::Pull(origin)) {
+        runtime.stop(app, &error);
     }
 }
 
@@ -1088,10 +929,7 @@ fn poll_sync(
                     } => {
                         app.replace_prepared_tickets(prepared);
                         app.finish_sync();
-                        app.configure_database(
-                            repository.path().to_path_buf(),
-                            db::data_signature(repository.path()),
-                        );
+                        stamp_database(app, repository);
                         if origin == PullOrigin::User {
                             app.set_status(runtime.status_for(mode, count));
                         }
@@ -1131,10 +969,7 @@ fn poll_sync(
                     app.apply_edit(applied);
                     // The worker wrote that row itself, so the watcher below is
                     // told about it rather than reloading behind us.
-                    app.configure_database(
-                        repository.path().to_path_buf(),
-                        db::data_signature(repository.path()),
-                    );
+                    stamp_database(app, repository);
                 }
                 Err(rejection) => {
                     // A stale copy is worth a pull: the refused field is about
@@ -1155,10 +990,7 @@ fn poll_sync(
                     DetailsOutcome::Fetched(update) => {
                         runtime.details.finish();
                         app.apply_details(update);
-                        app.configure_database(
-                            repository.path().to_path_buf(),
-                            db::data_signature(repository.path()),
-                        );
+                        stamp_database(app, repository);
                     }
                     DetailsOutcome::Failed { key, message } => {
                         if runtime.details.fail(key) {
@@ -1177,10 +1009,7 @@ fn poll_sync(
             SyncEvent::Commented(result) => match *result {
                 Ok(comment) => {
                     app.apply_comment(comment);
-                    app.configure_database(
-                        repository.path().to_path_buf(),
-                        db::data_signature(repository.path()),
-                    );
+                    stamp_database(app, repository);
                 }
                 Err(rejection) => app.reject_comment(&rejection.key, &rejection.message),
             },
@@ -1191,10 +1020,7 @@ fn poll_sync(
             SyncEvent::Created(result) => match *result {
                 Ok(created) => {
                     app.apply_created(created.ticket, created.relations);
-                    app.configure_database(
-                        repository.path().to_path_buf(),
-                        db::data_signature(repository.path()),
-                    );
+                    stamp_database(app, repository);
                 }
                 Err(rejection) => app.reject_create(&rejection.message),
             },
@@ -1204,10 +1030,7 @@ fn poll_sync(
             SyncEvent::Reparented(result) => match *result {
                 Ok(applied) => {
                     app.apply_reparent(applied);
-                    app.configure_database(
-                        repository.path().to_path_buf(),
-                        db::data_signature(repository.path()),
-                    );
+                    stamp_database(app, repository);
                 }
                 Err(rejection) => {
                     // A stale copy is worth a pull for the same reason an edit
@@ -1223,10 +1046,7 @@ fn poll_sync(
             SyncEvent::Deleted(result) => match *result {
                 Ok(key) => {
                     app.apply_deleted(&key);
-                    app.configure_database(
-                        repository.path().to_path_buf(),
-                        db::data_signature(repository.path()),
-                    );
+                    stamp_database(app, repository);
                 }
                 Err(rejection) => app.reject_delete(&rejection.key, &rejection.message),
             },
@@ -1401,10 +1221,7 @@ fn poll_reload(
         Ok(prepared) => {
             let count = prepared.ticket_count();
             app.replace_prepared_tickets(prepared);
-            app.configure_database(
-                repository.path().to_path_buf(),
-                db::data_signature(repository.path()),
-            );
+            stamp_database(app, repository);
             app.set_status(format!("Reloaded {count} tickets"));
         }
         Err(error) => app.set_error(format!("Reload failed: {error}")),
@@ -1412,24 +1229,19 @@ fn poll_reload(
     true
 }
 
-fn open_https_url(raw_url: &str, opener: &dyn UrlOpener) -> Result<()> {
+/// Hands one work item's URL to `opener`, which is the system launcher outside
+/// the tests. Only HTTPS goes out: a stored URL is data, and a `file:` or
+/// `javascript:` one is not a ticket.
+fn open_https_url(raw_url: &str, opener: &dyn Fn(&Url) -> Result<()>) -> Result<()> {
     let url = Url::parse(raw_url).context("ticket URL is invalid")?;
     if url.scheme() != "https" {
         bail!("only HTTPS ticket URLs can be opened");
     }
-    opener.open(&url).context("system URL launcher failed")
+    opener(&url).context("system URL launcher failed")
 }
 
-trait UrlOpener {
-    fn open(&self, url: &Url) -> Result<()>;
-}
-
-struct SystemUrlOpener;
-
-impl UrlOpener for SystemUrlOpener {
-    fn open(&self, url: &Url) -> Result<()> {
-        open::that(url.as_str()).map_err(Into::into)
-    }
+fn open_in_browser(url: &Url) -> Result<()> {
+    open::that(url.as_str()).map_err(Into::into)
 }
 
 struct TerminalRestore;
@@ -1483,7 +1295,11 @@ mod tests {
     use ticket_tui::sync::{SourceConnector, WorkItemSource};
     use ticket_tui::timestamp::Timestamp;
 
-    struct FailingOpener;
+    /// A launcher that never opens anything, for the tests that only need
+    /// the refusal.
+    fn failing_opener(_: &Url) -> Result<()> {
+        bail!("launcher unavailable")
+    }
 
     /// Azure DevOps stood in for: every pull returns the same tickets, or the
     /// same failure, and a write answers with a stored copy or a refusal.
@@ -1814,19 +1630,13 @@ mod tests {
         repository
     }
 
-    impl UrlOpener for FailingOpener {
-        fn open(&self, _url: &Url) -> Result<()> {
-            bail!("launcher unavailable")
-        }
-    }
-
     #[test]
     fn only_well_formed_https_urls_reach_the_launcher() {
-        let error = open_https_url("file:///tmp/not-a-ticket", &FailingOpener).unwrap_err();
+        let error = open_https_url("file:///tmp/not-a-ticket", &failing_opener).unwrap_err();
         assert!(error.to_string().contains("only HTTPS"), "{error}");
-        let error = open_https_url("not a url", &FailingOpener).unwrap_err();
+        let error = open_https_url("not a url", &failing_opener).unwrap_err();
         assert!(error.to_string().contains("invalid"), "{error}");
-        let error = open_https_url("https://dev.azure.com/demo", &FailingOpener).unwrap_err();
+        let error = open_https_url("https://dev.azure.com/demo", &failing_opener).unwrap_err();
         assert!(
             error.to_string().contains("system URL launcher failed"),
             "{error}"
@@ -1968,28 +1778,23 @@ mod tests {
             scope: None,
         };
 
-        let message = project_mismatch(Some(stored), &config, false, false)
+        let message = project_mismatch(Some(stored), &config, false)
             .expect("another project's rows are not replaced by accident");
         assert_eq!(
             message,
-            "Database holds other-org/borealis; pass --database for another project or --sync to replace it"
+            "Database holds other-org/borealis; pass --database for another project or run `ticket-tui sync --full` to replace it"
         );
         assert_eq!(
-            project_mismatch(Some(stored), &config, false, true),
-            None,
-            "--sync is how the replacement is asked for"
-        );
-        assert_eq!(
-            project_mismatch(Some(stored), &config, true, false),
+            project_mismatch(Some(stored), &config, true),
             None,
             "a database with nothing in it belongs to nobody"
         );
         assert_eq!(
-            project_mismatch(Some(("example-org", "atlas")), &config, false, false),
+            project_mismatch(Some(("example-org", "atlas")), &config, false),
             None
         );
         assert_eq!(
-            project_mismatch(None, &config, false, false),
+            project_mismatch(None, &config, false),
             None,
             "a database from a build that recorded nothing adopts the project that pulls it"
         );
@@ -2007,7 +1812,7 @@ mod tests {
             details: DetailsEngine::default(),
         };
 
-        handle_action(AppAction::Sync, &mut app, &mut runtime, &FailingOpener);
+        handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
 
         assert_eq!(
             app.notification(),
@@ -2233,7 +2038,7 @@ mod tests {
             details: DetailsEngine::default(),
         };
 
-        handle_action(AppAction::Sync, &mut app, &mut runtime, &FailingOpener);
+        handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
 
         let (message, level) = app.notification().expect("the sync key answers offline");
         assert!(message.contains("--org"), "{message}");
@@ -2276,7 +2081,7 @@ mod tests {
         let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert!(matches!(action, AppAction::Create { .. }));
 
-        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        handle_action(action, &mut app, &mut runtime, &failing_opener);
         assert_eq!(
             app.notification().map(|(message, _)| message),
             Some("Creating Issue\u{2026}")
@@ -2315,7 +2120,7 @@ mod tests {
             .expect("the form is open")
             .set_value(FormFieldId::Title, "Honour Retry-After");
         let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        handle_action(action, &mut app, &mut runtime, &failing_opener);
         await_create(&mut app, &mut repository, &mut runtime);
 
         assert_eq!(
@@ -2354,7 +2159,7 @@ mod tests {
 
         let action = app.comment_selected("Merged into main".into());
         assert!(matches!(action, AppAction::Comment { .. }));
-        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        handle_action(action, &mut app, &mut runtime, &failing_opener);
         assert_eq!(
             app.notification().map(|(message, _)| message),
             Some("Posting comment on #3\u{2026}")
@@ -2379,7 +2184,7 @@ mod tests {
         let (mut app, mut repository, mut runtime) =
             synced_app(&path, FakeAzure::returning(Vec::new()));
         let action = app.comment_selected("Merged into main".into());
-        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        handle_action(action, &mut app, &mut runtime, &failing_opener);
         await_comment(&mut app, &mut repository, &mut runtime);
 
         let (message, level) = app.notification().expect("a refusal is reported");
@@ -2414,7 +2219,7 @@ mod tests {
             "Done",
             "the row changes before the worker is even asked"
         );
-        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        handle_action(action, &mut app, &mut runtime, &failing_opener);
         await_edit(&mut app, &mut repository, &mut runtime);
 
         assert_eq!(app.ticket_by_key(&selected), Some(&stored));
@@ -2458,7 +2263,7 @@ mod tests {
         assert_eq!(visible_ids(&app), vec![3, 2, 1]);
 
         let action = app.edit_selected(FieldEdit::state("Done"));
-        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        handle_action(action, &mut app, &mut runtime, &failing_opener);
         assert_eq!(
             visible_ids(&app),
             vec![3, 2, 1],
@@ -2509,7 +2314,7 @@ mod tests {
             matches!(&action, AppAction::Edit(requests) if requests.len() == 2),
             "one request a checked row, got {action:?}"
         );
-        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        handle_action(action, &mut app, &mut runtime, &failing_opener);
         await_edit(&mut app, &mut repository, &mut runtime);
 
         for copy in &stored {
@@ -2554,7 +2359,7 @@ mod tests {
         let selected = app.selected_ticket().unwrap().key.clone();
 
         let action = app.edit_selected(FieldEdit::state("Done"));
-        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        handle_action(action, &mut app, &mut runtime, &failing_opener);
         await_edit(&mut app, &mut repository, &mut runtime);
 
         assert_eq!(
@@ -2590,7 +2395,7 @@ mod tests {
         runtime.worker = None;
         runtime.offline_reason = Some("no Azure DevOps organization; pass --org".into());
 
-        handle_action(action, &mut app, &mut runtime, &FailingOpener);
+        handle_action(action, &mut app, &mut runtime, &failing_opener);
 
         assert_eq!(
             app.selected_ticket().map(|ticket| ticket.state.clone()),
@@ -2817,31 +2622,6 @@ mod tests {
             !dispatch_due_details(&mut app, &mut runtime),
             "the details are current, so nothing is asked for again"
         );
-    }
-
-    #[test]
-    fn the_first_pull_goes_out_at_startup_unless_sync_already_pulled() {
-        assert!(
-            pull_at_startup(false, true, false, false),
-            "the timer pulls as soon as the TUI opens"
-        );
-        assert!(
-            !pull_at_startup(true, true, false, false),
-            "--sync already pulled, so the timer waits an interval"
-        );
-        assert!(
-            pull_at_startup(false, false, true, false),
-            "a rebuilt schema is filled even with --refresh 0"
-        );
-        assert!(
-            pull_at_startup(false, false, false, true),
-            "an empty database is filled even with --refresh 0"
-        );
-        assert!(
-            !pull_at_startup(false, false, false, false),
-            "--refresh 0 over a populated database waits for the sync key"
-        );
-        assert!(!pull_at_startup(true, false, true, true));
     }
 
     #[test]
