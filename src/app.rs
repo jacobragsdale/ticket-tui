@@ -106,8 +106,11 @@ impl Focus {
 pub enum AppAction {
     None,
     Sync,
-    /// Write one field of one work item back to Azure DevOps.
-    Edit(EditRequest),
+    /// Write one field back to Azure DevOps, one request per work item. An
+    /// ordinary edit carries a single request; a bulk change over the checked
+    /// rows carries one for each of them, and the worker takes them in the
+    /// order they are listed.
+    Edit(Vec<EditRequest>),
     /// Read the project's team members, so the assignee picker can offer
     /// somebody with no work item in the database yet. Asked for once a
     /// session, when that picker first opens; the picker does not wait on it.
@@ -246,6 +249,46 @@ pub struct EditMenu {
     pub scroll: ScrollState,
 }
 
+/// What an editor is about to change: the one work item under the cursor, or
+/// every checked row at once. Two or more checked rows make a bulk change of
+/// the state picker, the assignee picker, and the iteration tree — the edits
+/// sprint hygiene means making ten at a time. Every other editor stays on the
+/// row under the cursor, because the same title or the same description on ten
+/// work items is never what was meant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditScope {
+    /// One work item, named by its id.
+    Ticket(i64),
+    /// Every checked row, counted.
+    Checked(usize),
+}
+
+impl Default for EditScope {
+    fn default() -> Self {
+        Self::Ticket(0)
+    }
+}
+
+impl EditScope {
+    /// What an overlay title calls the scope, so a bulk change is never made
+    /// by accident: `#613`, or `5 tickets`.
+    #[must_use]
+    pub fn label(self) -> String {
+        match self {
+            Self::Ticket(id) => format!("#{id}"),
+            Self::Checked(count) => format!("{count} tickets"),
+        }
+    }
+
+    /// Whether the editor acts on the checked rows rather than on the one
+    /// under the cursor. The value the row under the cursor already carries is
+    /// only a no-op for the second: the others may well be somewhere else.
+    #[must_use]
+    pub const fn is_bulk(self) -> bool {
+        matches!(self, Self::Checked(_))
+    }
+}
+
 /// The state picker, built when it opens so it never reads the network.
 #[derive(Clone, Debug, Default)]
 pub struct StatePicker {
@@ -255,8 +298,8 @@ pub struct StatePicker {
     pub scroll: ScrollState,
     /// The state the work item is already in, which `Enter` treats as a no-op.
     pub current: String,
-    /// The work item the picker was opened for, shown in its title.
-    pub id: i64,
+    /// What the picker was opened over, shown in its title.
+    pub scope: EditScope,
 }
 
 /// The priorities the picker offers, in the order it lists them. `None` is the
@@ -358,8 +401,8 @@ pub struct AssigneePicker {
     pub scroll: ScrollState,
     /// Who holds the work item now, which `Enter` treats as a no-op.
     pub current: Option<String>,
-    /// The work item the picker was opened for, shown in its title.
-    pub id: i64,
+    /// What the picker was opened over, shown in its title.
+    pub scope: EditScope,
 }
 
 /// How long a cached copy of the classification trees is trusted before either
@@ -425,8 +468,8 @@ pub struct NodePicker {
     pub scroll: ScrollState,
     /// The path the work item carries now, which `Enter` treats as a no-op.
     pub current: String,
-    /// The work item the picker was opened for, shown in its title.
-    pub id: i64,
+    /// What the picker was opened over, shown in its title.
+    pub scope: EditScope,
 }
 
 impl Default for NodePicker {
@@ -438,7 +481,7 @@ impl Default for NodePicker {
             index: 0,
             scroll: ScrollState::default(),
             current: String::new(),
-            id: 0,
+            scope: EditScope::default(),
         }
     }
 }
@@ -504,6 +547,70 @@ impl PendingEdit {
         let mut ticket = self.original.clone();
         self.edit.apply(&mut ticket);
         ticket
+    }
+}
+
+/// How many refused work items a bulk change names before it counts the rest.
+/// Three is enough to act on and short enough to read in one notification.
+const NAMED_BULK_FAILURES: usize = 3;
+
+/// One change asked of several work items at once, and what has come back of
+/// it. Each edit is its own request with its own revision test, so they land
+/// one at a time; this counts the answers so the change speaks once, when the
+/// last of them is in, rather than once a row.
+#[derive(Clone, Debug)]
+struct BulkEdit {
+    /// The change as a notification says it, such as `State → Doing`.
+    summary: String,
+    /// How many work items it was asked of, answered or not.
+    total: usize,
+    /// How many of them Azure DevOps accepted.
+    updated: usize,
+    /// What went wrong, one line a work item, in the order they answered.
+    failures: Vec<String>,
+    /// The work items still waiting on an answer.
+    outstanding: HashSet<TicketKey>,
+}
+
+impl BulkEdit {
+    /// Files one answer, and says whether that was the last one outstanding.
+    fn record(&mut self, key: &TicketKey, failure: Option<String>) -> bool {
+        self.outstanding.remove(key);
+        match failure {
+            Some(failure) => self.failures.push(failure),
+            None => self.updated += 1,
+        }
+        self.outstanding.is_empty()
+    }
+
+    /// Whether anything did not land, which is what makes the summary an error
+    /// rather than a status.
+    fn failed(&self) -> bool {
+        !self.failures.is_empty()
+    }
+
+    /// The one notification the whole change leaves behind: how many landed,
+    /// and which work items did not.
+    fn notification(&self) -> String {
+        if self.failures.is_empty() {
+            return format!("Updated {} tickets · {}", self.updated, self.summary);
+        }
+        let mut named: Vec<String> = self
+            .failures
+            .iter()
+            .take(NAMED_BULK_FAILURES)
+            .cloned()
+            .collect();
+        let unnamed = self.failures.len() - named.len();
+        if unnamed > 0 {
+            named.push(format!("+{unnamed} more"));
+        }
+        format!(
+            "Updated {} of {} · {}",
+            self.updated,
+            self.total,
+            named.join(" · ")
+        )
     }
 }
 
@@ -631,6 +738,10 @@ pub struct App {
     pub details_pending: Option<TicketKey>,
     /// Edits sent to Azure DevOps and not answered yet, keyed by work item.
     pending_edits: HashMap<TicketKey, PendingEdit>,
+    /// Bulk changes with answers still to come, newest last. There is normally
+    /// at most one, but a second started before the first has finished is
+    /// counted on its own rather than taking the first one's place.
+    bulk_edits: Vec<BulkEdit>,
     /// Work items with a comment posted and not answered yet. A comment is not
     /// optimistic, so this is only what stops a second one being typed on top
     /// of the first.
@@ -790,6 +901,7 @@ impl App {
             sync_pending: false,
             details_pending: None,
             pending_edits: HashMap::new(),
+            bulk_edits: Vec::new(),
             pending_comments: HashSet::new(),
             offline_reason: None,
             sync_enabled: false,
@@ -1355,28 +1467,80 @@ impl App {
 
     /// [`Self::edit_selected`] for a work item that is not the selected row.
     pub fn edit_ticket(&mut self, key: &TicketKey, edit: FieldEdit) -> AppAction {
-        let refusal = |reason: &str| format!("#{} {} not saved: {reason}", key.id, edit.label());
+        let label = edit.label().to_owned();
+        match self.begin_edit(key, edit) {
+            Ok(request) => AppAction::Edit(vec![request]),
+            Err(reason) => {
+                self.set_error(format!("#{} {label} not saved: {reason}", key.id));
+                AppAction::None
+            }
+        }
+    }
+
+    /// [`Self::edit_selected`] for every checked row, which is what the state
+    /// picker, the assignee picker, and the iteration tree do when two or more
+    /// rows are checked. Each work item gets its own request, its own revision
+    /// test, and its own optimistic row; a refusal reverts only the row it
+    /// names, and the answers are gathered into one summary rather than a
+    /// notification apiece. Anything less than two checked rows is not a bulk
+    /// change at all and goes the ordinary way.
+    pub fn edit_checked(&mut self, edit: FieldEdit) -> AppAction {
+        let targets = self.checked_keys();
+        if targets.len() < 2 {
+            return self.edit_selected(edit);
+        }
+        let mut requests = Vec::new();
+        let mut failures = Vec::new();
+        for key in targets {
+            // The picker's no-op rule, applied a row at a time: a work item
+            // already carrying the value is left alone rather than written to.
+            if !self.would_change(&key, &edit) {
+                continue;
+            }
+            match self.begin_edit(&key, edit.clone()) {
+                Ok(request) => requests.push(request),
+                Err(reason) => failures.push(format!("#{} failed: {reason}", key.id)),
+            }
+        }
+        let total = requests.len() + failures.len();
+        if total == 0 {
+            self.set_status(format!("Nothing to change · {}", edit.summary()));
+            return AppAction::None;
+        }
+        let bulk = BulkEdit {
+            summary: edit.summary(),
+            total,
+            updated: 0,
+            failures,
+            outstanding: requests.iter().map(|request| request.key.clone()).collect(),
+        };
+        if bulk.outstanding.is_empty() {
+            // Nothing could even be asked, so the whole change is already told.
+            self.set_error(bulk.notification());
+            return AppAction::None;
+        }
+        self.bulk_edits.push(bulk);
+        AppAction::Edit(requests)
+    }
+
+    /// Starts one edit: the row takes the change at once, the copy it had is
+    /// kept for a refusal, and the request to send comes back. `Err` is why
+    /// the work item cannot be written, phrased to follow `not saved:`.
+    fn begin_edit(&mut self, key: &TicketKey, edit: FieldEdit) -> Result<EditRequest, String> {
         if !self.sync_enabled {
             // Nothing to write to, so the row is left exactly as it is.
-            let reason = self
+            return Err(self
                 .offline_reason
                 .clone()
-                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned());
-            let message = refusal(&reason);
-            self.set_error(message);
-            return AppAction::None;
+                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned()));
         }
         if self.pending_edits.contains_key(key) {
             // The revision a second edit would test with is already stale, so
             // it could only earn a conflict.
-            let message = refusal("an earlier edit is still in flight");
-            self.set_error(message);
-            return AppAction::None;
+            return Err("an earlier edit is still in flight".to_owned());
         }
         let Some(index) = self.index_of(key) else {
-            let message = refusal("it is not in this database");
-            self.set_error(message);
-            return AppAction::None;
+            return Err("it is not in this database".to_owned());
         };
         let pending = PendingEdit {
             original: self.tickets[index].clone(),
@@ -1389,7 +1553,43 @@ impl App {
         };
         self.set_ticket(index, pending.optimistic());
         self.pending_edits.insert(key.clone(), pending);
-        AppAction::Edit(request)
+        Ok(request)
+    }
+
+    /// The checked rows, in the order the table holds them, so a bulk change
+    /// goes out the way it reads on screen.
+    fn checked_keys(&self) -> Vec<TicketKey> {
+        if self.selected_keys.is_empty() {
+            return Vec::new();
+        }
+        self.tickets
+            .iter()
+            .filter(|ticket| self.selected_keys.contains(&ticket.key))
+            .map(|ticket| ticket.key.clone())
+            .collect()
+    }
+
+    /// Whether an edit would leave a work item any different from how it reads
+    /// now, which is how a bulk change knows what it has nothing to do to.
+    fn would_change(&self, key: &TicketKey, edit: &FieldEdit) -> bool {
+        self.index_of(key).is_some_and(|index| {
+            let mut changed = self.tickets[index].clone();
+            edit.apply(&mut changed);
+            changed != self.tickets[index]
+        })
+    }
+
+    /// What an editor that can act on several rows is about to change, which
+    /// is what its title says: every checked row when two or more are checked,
+    /// and the row under the cursor otherwise.
+    #[must_use]
+    fn edit_scope(&self) -> EditScope {
+        let checked = self.checked_keys().len();
+        if checked >= 2 {
+            EditScope::Checked(checked)
+        } else {
+            EditScope::Ticket(self.selected_ticket().map_or(0, |ticket| ticket.key.id))
+        }
     }
 
     /// Whether an edit is waiting on Azure DevOps. The database watcher stands
@@ -1409,18 +1609,49 @@ impl App {
             self.set_ticket(index, applied.ticket);
             self.resettle_rows();
         }
-        self.set_status(format!("Updated #{} · {}", key.id, applied.edit.summary()));
+        if !self.record_bulk_outcome(&key, None) {
+            self.set_status(format!("Updated #{} · {}", key.id, applied.edit.summary()));
+        }
     }
 
     /// Puts a refused edit back the way it was and says which field did not
-    /// save, so a change is never dropped quietly.
+    /// save, so a change is never dropped quietly. Only the work item named is
+    /// reverted: the others a bulk change touched are left as they are.
     pub fn reject_edit(&mut self, rejection: &EditRejection) {
         if let Some(pending) = self.pending_edits.remove(&rejection.key)
             && let Some(index) = self.index_of(&rejection.key)
         {
             self.set_ticket(index, pending.original);
         }
-        self.set_error(rejection.notification());
+        if !self.record_bulk_outcome(&rejection.key, Some(rejection.failure())) {
+            self.set_error(rejection.notification());
+        }
+    }
+
+    /// Files one answer against the bulk change that asked for it, and says
+    /// whether one did. A work item edited on its own belongs to no bulk
+    /// change and speaks for itself; one that belongs to a bulk change stays
+    /// quiet until the last of its work items has answered, and then the whole
+    /// tally goes up at once.
+    fn record_bulk_outcome(&mut self, key: &TicketKey, failure: Option<String>) -> bool {
+        let Some(index) = self
+            .bulk_edits
+            .iter()
+            .position(|bulk| bulk.outstanding.contains(key))
+        else {
+            return false;
+        };
+        if !self.bulk_edits[index].record(key, failure) {
+            return true;
+        }
+        let bulk = self.bulk_edits.remove(index);
+        let message = bulk.notification();
+        if bulk.failed() {
+            self.set_error(message);
+        } else {
+            self.set_status(message);
+        }
+        true
     }
 
     /// Why the TUI cannot write anything, told to whoever tries to.
@@ -2930,14 +3161,20 @@ impl App {
     /// `S`, and the Edit menu's State row: the states this work item's type
     /// allows, with the one it is in already under the cursor. The list is
     /// whatever is cached or already in the database, so this never waits.
+    ///
+    /// With two or more rows checked the picker moves all of them, and says so
+    /// in its title. The states it offers are still the selected row's type's,
+    /// which is the only type it could ask about; a state another checked work
+    /// item's type does not allow is refused by Azure DevOps and named in the
+    /// summary.
     fn open_state_picker(&mut self) {
+        let scope = self.edit_scope();
         let Some(ticket) = self.selected_ticket() else {
             self.set_error("No work item is selected");
             return;
         };
         let current = ticket.state.clone();
         let work_item_type = ticket.work_item_type.clone();
-        let id = ticket.key.id;
         let options = self.states_for(&work_item_type);
         if options.is_empty() {
             self.set_error(format!("No states are known for {work_item_type}"));
@@ -2952,7 +3189,7 @@ impl App {
             index,
             scroll: ScrollState::default(),
             current,
-            id,
+            scope,
         };
         self.state_picker.scroll.ensure_visible(index);
         self.mode = AppMode::StatePicker;
@@ -2986,17 +3223,19 @@ impl App {
     /// Confirms one state. Choosing the state the work item is already in
     /// closes the picker and writes nothing; anything else takes the ordinary
     /// write-through path, so the row changes at once and reverts if Azure
-    /// DevOps refuses the transition.
+    /// DevOps refuses the transition. A picker opened over the checked rows
+    /// moves every one of them, so the state the row under the cursor is in is
+    /// a change to make there rather than a no-op.
     fn choose_state(&mut self, index: usize) -> AppAction {
         let Some(option) = self.state_picker.options.get(index).cloned() else {
             self.mode = AppMode::Browse;
             return AppAction::None;
         };
         self.mode = AppMode::Browse;
-        if option.name == self.state_picker.current {
+        if !self.state_picker.scope.is_bulk() && option.name == self.state_picker.current {
             return AppAction::None;
         }
-        self.edit_selected(FieldEdit::state(&option.name))
+        self.edit_checked(FieldEdit::state(&option.name))
     }
 
     /// The Edit menu's Priority row: 1 to 4 and a `Clear` row, with the
@@ -3148,14 +3387,15 @@ impl App {
     /// whoever holds the work item under the cursor. The list is built from
     /// what is already in memory, so the picker opens at once; the project's
     /// teams are asked for the first time it is opened and merged in when they
-    /// arrive.
+    /// arrive. With two or more rows checked it reassigns all of them, and
+    /// says so in its title.
     fn open_assignee_picker(&mut self) -> AppAction {
+        let scope = self.edit_scope();
         let Some(ticket) = self.selected_ticket() else {
             self.set_error("No work item is selected");
             return AppAction::None;
         };
         let current = ticket.assigned_to.clone();
-        let id = ticket.key.id;
         let candidates = self.assignee_candidates();
         let index = candidates
             .iter()
@@ -3167,7 +3407,7 @@ impl App {
             index,
             scroll: ScrollState::default(),
             current,
-            id,
+            scope,
         };
         self.assignee_picker.scroll.ensure_visible(index);
         self.mode = AppMode::AssigneePicker;
@@ -3222,20 +3462,24 @@ impl App {
 
     /// Confirms one candidate. Whoever holds the work item already is a no-op,
     /// and `Unassigned` takes the field off it rather than writing an empty
-    /// identity, so the Assignee cell empties.
+    /// identity, so the Assignee cell empties. A picker opened over the checked
+    /// rows reassigns every one of them, so whoever holds the row under the
+    /// cursor is a change to make to the rest rather than a no-op.
     fn choose_assignee(&mut self, index: usize) -> AppAction {
         let Some(candidate) = self.assignee_matches().get(index).cloned() else {
             self.mode = AppMode::Browse;
             return AppAction::None;
         };
         self.mode = AppMode::Browse;
-        if candidate.is_current(self.assignee_picker.current.as_deref()) {
+        if !self.assignee_picker.scope.is_bulk()
+            && candidate.is_current(self.assignee_picker.current.as_deref())
+        {
             return AppAction::None;
         }
         if candidate.unassigned {
-            return self.edit_selected(FieldEdit::unassign());
+            return self.edit_checked(FieldEdit::unassign());
         }
-        self.edit_selected(FieldEdit::assignee(
+        self.edit_checked(FieldEdit::assignee(
             &candidate.display,
             candidate.unique.as_deref(),
         ))
@@ -3358,7 +3602,18 @@ impl App {
     /// come out of what is already in memory, so the picker opens at once; the
     /// trees are asked for the first time either picker is opened on a cache
     /// that is empty or over an hour old, and merged in when they arrive.
+    ///
+    /// Iteration is the one of the two worth making in bulk — a sprint ends
+    /// and its leftovers move on together — so with two or more rows checked
+    /// it moves all of them and says so in its title. Area stays on the row
+    /// under the cursor.
     fn open_node_picker(&mut self, kind: NodeKind) -> AppAction {
+        let scope = match kind {
+            NodeKind::Iteration => self.edit_scope(),
+            NodeKind::Area => {
+                EditScope::Ticket(self.selected_ticket().map_or(0, |ticket| ticket.key.id))
+            }
+        };
         let Some(ticket) = self.selected_ticket() else {
             self.set_error("No work item is selected");
             return AppAction::None;
@@ -3367,7 +3622,6 @@ impl App {
             NodeKind::Area => ticket.area_path.clone(),
             NodeKind::Iteration => ticket.iteration_path.clone(),
         };
-        let id = ticket.key.id;
         let rows = self.node_rows(kind);
         let index = rows
             .iter()
@@ -3380,7 +3634,7 @@ impl App {
             index,
             scroll: ScrollState::default(),
             current,
-            id,
+            scope,
         };
         self.node_picker.scroll.ensure_visible(index);
         self.mode = AppMode::NodePicker;
@@ -3451,18 +3705,21 @@ impl App {
 
     /// Confirms one node. The node the work item already sits in is a no-op;
     /// anything else writes the full backslash path to `System.IterationPath`
-    /// or `System.AreaPath`, and the table column goes on showing the leaf.
+    /// or `System.AreaPath`, and the table column goes on showing the leaf. An
+    /// iteration picker opened over the checked rows moves every one of them,
+    /// so the sprint the row under the cursor is in is a change to make to the
+    /// rest rather than a no-op.
     fn choose_node(&mut self, index: usize) -> AppAction {
         let Some(row) = self.node_matches().get(index).cloned() else {
             self.mode = AppMode::Browse;
             return AppAction::None;
         };
         self.mode = AppMode::Browse;
-        if row.path == self.node_picker.current {
+        if !self.node_picker.scope.is_bulk() && row.path == self.node_picker.current {
             return AppAction::None;
         }
         match self.node_picker.kind {
-            NodeKind::Iteration => self.edit_selected(FieldEdit::iteration(&row.path)),
+            NodeKind::Iteration => self.edit_checked(FieldEdit::iteration(&row.path)),
             NodeKind::Area => self.edit_selected(FieldEdit::area(&row.path)),
         }
     }
@@ -4826,8 +5083,27 @@ mod tests {
 
     fn edit_request(app: &mut App, edit: FieldEdit) -> EditRequest {
         match app.edit_selected(edit) {
-            AppAction::Edit(request) => request,
+            AppAction::Edit(requests) => only(requests),
             other => panic!("expected an edit to be dispatched, got {other:?}"),
+        }
+    }
+
+    /// The one request an edit of a single work item dispatches.
+    fn only(requests: Vec<EditRequest>) -> EditRequest {
+        assert_eq!(requests.len(), 1, "one work item, one request");
+        requests.into_iter().next().expect("the request is there")
+    }
+
+    /// Checks every row the app holds, which is what turns the pickers into
+    /// bulk changes.
+    fn check_all(app: &mut App) {
+        for key in app
+            .tickets()
+            .iter()
+            .map(|ticket| ticket.key.clone())
+            .collect::<Vec<_>>()
+        {
+            app.selected_keys.insert(key);
         }
     }
 
@@ -5072,12 +5348,17 @@ mod tests {
             app.state_picker.index, 0,
             "the state the work item is in starts under the cursor"
         );
-        assert_eq!(app.state_picker.id, 3, "the picker names the selected row");
+        assert_eq!(
+            app.state_picker.scope,
+            EditScope::Ticket(3),
+            "the picker names the selected row"
+        );
 
         press(&mut app, KeyCode::Down);
-        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
             panic!("choosing another state should dispatch an edit");
         };
+        let request = only(requests);
 
         assert_eq!(app.mode, AppMode::Browse);
         assert_eq!(request.key.id, 3);
@@ -5121,6 +5402,237 @@ mod tests {
             app.selected_ticket().map(|ticket| ticket.state.as_str()),
             Some("To Do"),
             "cancelling leaves the row exactly as it was"
+        );
+    }
+
+    /// The states every row is showing, in the order the table holds them.
+    fn states_of(app: &App) -> Vec<&str> {
+        app.tickets()
+            .iter()
+            .map(|ticket| ticket.state.as_str())
+            .collect()
+    }
+
+    /// The work item as Azure DevOps hands it back after a bulk change: the
+    /// state written, on the revision it settled on.
+    fn accept(app: &mut App, request: &EditRequest) {
+        let ticket = stored_copy(app, &request.key, request.edit.value_text().as_str());
+        app.apply_edit(EditApplied {
+            ticket,
+            relations: Vec::new(),
+            edit: request.edit.clone(),
+        });
+    }
+
+    /// Checks all three rows and moves them to `Doing`, which is the bulk
+    /// change the other tests here take apart.
+    fn bulk_state_change(app: &mut App) -> Vec<EditRequest> {
+        check_all(app);
+        shift(app, 'S');
+        press(app, KeyCode::Down);
+        match press(app, KeyCode::Enter) {
+            AppAction::Edit(requests) => requests,
+            other => panic!("a checked picker should dispatch a bulk edit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_picker_over_checked_rows_dispatches_one_request_for_each_of_them() {
+        let mut app = picker_app();
+        check_all(&mut app);
+
+        shift(&mut app, 'S');
+        assert_eq!(
+            app.state_picker.scope,
+            EditScope::Checked(3),
+            "the picker says how many work items it is about to move"
+        );
+        assert_eq!(
+            app.state_picker.scope.label(),
+            "3 tickets",
+            "which is what its title reads"
+        );
+
+        press(&mut app, KeyCode::Down);
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+            panic!("choosing a state should dispatch an edit for every checked row");
+        };
+
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.key.id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3],
+            "one request a work item, in the order the table holds them"
+        );
+        for request in &requests {
+            assert_eq!(
+                request.document(),
+                vec![
+                    serde_json::json!({"op": "test", "path": "/rev", "value": 1}),
+                    serde_json::json!({
+                        "op": "add",
+                        "path": "/fields/System.State",
+                        "value": "Doing",
+                    }),
+                ],
+                "each carries its own revision test",
+            );
+        }
+        assert_eq!(
+            states_of(&app),
+            ["Doing", "Doing", "Doing"],
+            "every row shows the new state without waiting for Azure DevOps"
+        );
+        assert!(app.edits_pending());
+        assert_eq!(
+            app.notification(),
+            None,
+            "nothing is said until they answer"
+        );
+    }
+
+    #[test]
+    fn a_bulk_change_reports_itself_once_the_last_work_item_has_answered() {
+        let mut app = picker_app();
+        let requests = bulk_state_change(&mut app);
+
+        accept(&mut app, &requests[0]);
+        assert_eq!(
+            app.notification(),
+            None,
+            "a bulk change speaks once, not once a row"
+        );
+        accept(&mut app, &requests[1]);
+        assert_eq!(app.notification(), None);
+
+        accept(&mut app, &requests[2]);
+        let (message, level) = app.notification().expect("the tally goes up at the end");
+        assert_eq!(message, "Updated 3 tickets \u{b7} State \u{2192} Doing");
+        assert_eq!(level, NotificationLevel::Info);
+        assert!(!app.edits_pending());
+        assert_eq!(
+            states_of(&app),
+            ["Doing", "Doing", "Doing"],
+            "the copies Azure DevOps stored replace the optimistic rows"
+        );
+        assert_eq!(
+            app.tickets()
+                .iter()
+                .filter(|ticket| app.is_row_selected(&ticket.key))
+                .count(),
+            3,
+            "the checked set survives the change, ready for the next one"
+        );
+    }
+
+    #[test]
+    fn one_refusal_in_a_bulk_change_reverts_only_its_own_row_and_is_named() {
+        let mut app = picker_app();
+        let requests = bulk_state_change(&mut app);
+
+        accept(&mut app, &requests[0]);
+        accept(&mut app, &requests[1]);
+        app.reject_edit(&EditRejection {
+            key: requests[2].key.clone(),
+            label: "State".into(),
+            conflict: false,
+            message: "the transition is not allowed".into(),
+        });
+
+        let (message, level) = app.notification().expect("a refusal is never dropped");
+        assert_eq!(
+            message,
+            "Updated 2 of 3 \u{b7} #3 failed: the transition is not allowed"
+        );
+        assert_eq!(level, NotificationLevel::Error);
+        assert_eq!(
+            states_of(&app),
+            ["Doing", "Doing", "To Do"],
+            "only the work item that was refused goes back"
+        );
+        assert!(!app.edits_pending());
+        assert!(
+            app.is_row_selected(&requests[2].key),
+            "a refused row stays checked, so it can be tried again"
+        );
+    }
+
+    #[test]
+    fn a_bulk_change_passes_over_the_work_items_already_carrying_the_value() {
+        let mut app = picker_app();
+        let key = app.tickets()[1].key.clone();
+        let AppAction::Edit(first) = app.edit_ticket(&key, FieldEdit::state("Doing")) else {
+            panic!("one work item moves on its own");
+        };
+        let first = only(first);
+        accept(&mut app, &first);
+
+        check_all(&mut app);
+        shift(&mut app, 'S');
+        press(&mut app, KeyCode::Down);
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+            panic!("the rows that are not there yet should still be moved");
+        };
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.key.id)
+                .collect::<Vec<_>>(),
+            [1, 3],
+            "the work item already in the state is left alone rather than rewritten"
+        );
+
+        accept(&mut app, &requests[0]);
+        accept(&mut app, &requests[1]);
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Updated 2 tickets \u{b7} State \u{2192} Doing")
+        );
+    }
+
+    #[test]
+    fn a_bulk_change_with_nothing_left_to_do_says_so_and_writes_nothing() {
+        let mut app = picker_app();
+        check_all(&mut app);
+
+        shift(&mut app, 'S');
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            AppAction::None,
+            "the state they are all already in is a no-op"
+        );
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Nothing to change \u{b7} State \u{2192} To Do")
+        );
+        assert!(!app.edits_pending());
+        assert_eq!(states_of(&app), ["To Do", "To Do", "To Do"]);
+    }
+
+    #[test]
+    fn the_editors_that_are_not_worth_making_in_bulk_stay_on_the_row_under_the_cursor() {
+        let mut app = picker_app();
+        check_all(&mut app);
+
+        app.run_command(CommandId::EditTitle);
+        type_query(&mut app, "!");
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+            panic!("the title prompt should still write one work item");
+        };
+        assert_eq!(
+            only(requests).key.id,
+            3,
+            "the same title on three work items is never what was meant"
+        );
+        assert_eq!(
+            app.tickets()
+                .iter()
+                .filter(|ticket| ticket.title.ends_with('!'))
+                .count(),
+            1,
+            "and only that row is renamed"
         );
     }
 
@@ -5215,9 +5727,10 @@ mod tests {
         assert_eq!(prompt_text(&app), "Gamma", "the prompt opens prefilled");
 
         type_over(&mut app, "  Renamed gamma  ");
-        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
             panic!("a new title should dispatch an edit");
         };
+        let request = only(requests);
 
         assert_eq!(app.mode, AppMode::Browse);
         assert!(app.prompt.is_none());
@@ -5301,9 +5814,10 @@ mod tests {
 
         open_editor(&mut app, 2);
         press(&mut app, KeyCode::Down);
-        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
             panic!("another priority should dispatch an edit");
         };
+        let request = only(requests);
         assert_eq!(
             request.document(),
             vec![
@@ -5328,9 +5842,10 @@ mod tests {
 
         open_editor(&mut app, 2);
         press(&mut app, KeyCode::End);
-        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
             panic!("Clear should dispatch an edit");
         };
+        let request = only(requests);
         assert_eq!(
             request.document(),
             vec![
@@ -5361,9 +5876,10 @@ mod tests {
         );
 
         type_over(&mut app, "rust; Rust ;; tui");
-        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
             panic!("a new tag list should dispatch an edit");
         };
+        let request = only(requests);
         assert_eq!(
             request.document(),
             vec![
@@ -5723,7 +6239,11 @@ mod tests {
             app.assignee_picker.index, 2,
             "the picker opens on whoever holds the work item"
         );
-        assert_eq!(app.assignee_picker.id, 3, "it names the selected row");
+        assert_eq!(
+            app.assignee_picker.scope,
+            EditScope::Ticket(3),
+            "it names the selected row"
+        );
 
         press(&mut app, KeyCode::Esc);
         assert_eq!(app.mode, AppMode::Browse);
@@ -5731,6 +6251,57 @@ mod tests {
             press(&mut app, KeyCode::Char('a')),
             AppAction::None,
             "the teams are asked for once a session"
+        );
+    }
+
+    #[test]
+    fn checking_several_rows_hands_all_of_them_to_whoever_the_picker_names() {
+        let mut app = assignee_app();
+        check_all(&mut app);
+
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(
+            app.assignee_picker.scope,
+            EditScope::Checked(3),
+            "reassigning a departing engineer's work is one change, not three"
+        );
+        press(&mut app, KeyCode::Up);
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+            panic!("choosing somebody should reassign every checked row");
+        };
+
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.key.id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        for request in &requests {
+            assert_eq!(request.edit.summary(), "Assignee \u{2192} Jacob Ragsdale");
+        }
+        assert!(
+            app.tickets()
+                .iter()
+                .all(|ticket| ticket.assigned_to.as_deref() == Some("Jacob Ragsdale")),
+            "every row shows its new owner at once"
+        );
+
+        // Whoever holds the row under the cursor is a change worth making to
+        // the others, so it is no longer the no-op it is for a single row.
+        let mut app = assignee_app();
+        check_all(&mut app);
+        press(&mut app, KeyCode::Char('a'));
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+            panic!("the other checked rows are held by somebody else");
+        };
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.key.id)
+                .collect::<Vec<_>>(),
+            [1, 2],
+            "#3 already holds it, so it is passed over rather than rewritten"
         );
     }
 
@@ -5754,9 +6325,10 @@ mod tests {
             "typing moves to the first hit"
         );
 
-        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
             panic!("choosing somebody else should dispatch an edit");
         };
+        let request = only(requests);
         assert_eq!(app.mode, AppMode::Browse);
         assert_eq!(request.key.id, 3);
         assert_eq!(
@@ -5786,9 +6358,10 @@ mod tests {
 
         press(&mut app, KeyCode::Char('a'));
         type_query(&mut app, "priya");
-        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
             panic!("choosing somebody else should dispatch an edit");
         };
+        let request = only(requests);
         assert_eq!(
             request.edit.patch(),
             vec![serde_json::json!({
@@ -5803,9 +6376,10 @@ mod tests {
         press(&mut app, KeyCode::Char('a'));
         press(&mut app, KeyCode::Up);
         press(&mut app, KeyCode::Up);
-        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
             panic!("Unassigned should dispatch an edit");
         };
+        let request = only(requests);
         assert_eq!(
             request.edit.patch(),
             vec![serde_json::json!({"op": "remove", "path": "/fields/System.AssignedTo"})],
@@ -5892,9 +6466,10 @@ mod tests {
         );
 
         type_query(&mut app, "dana");
-        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
             panic!("a merged-in team member should be choosable");
         };
+        let request = only(requests);
         assert_eq!(
             request.edit.patch(),
             vec![serde_json::json!({
@@ -5993,7 +6568,11 @@ mod tests {
             "the picker opens on the node the work item sits in"
         );
         assert_eq!(app.node_picker.current, "development\\Q3");
-        assert_eq!(app.node_picker.id, 3, "it names the selected row");
+        assert_eq!(
+            app.node_picker.scope,
+            EditScope::Ticket(3),
+            "it names the selected row"
+        );
 
         press(&mut app, KeyCode::Esc);
         assert_eq!(
@@ -6026,9 +6605,10 @@ mod tests {
             ["  Sprint 1 current"],
             "the filter matches characters in order over the whole path"
         );
-        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
             panic!("choosing another node should dispatch an edit");
         };
+        let request = only(requests);
 
         assert_eq!(app.mode, AppMode::Browse);
         assert_eq!(request.key.id, 3);
@@ -6052,9 +6632,10 @@ mod tests {
         let mut app = node_app();
         open_nodes(&mut app, NodeKind::Area);
         press(&mut app, KeyCode::Up);
-        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
             panic!("choosing another area should dispatch an edit");
         };
+        let request = only(requests);
         assert_eq!(
             request.edit.patch(),
             vec![serde_json::json!({
@@ -6088,6 +6669,50 @@ mod tests {
         assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
         assert_eq!(app.mode, AppMode::Browse);
         assert!(!app.edits_pending());
+    }
+
+    #[test]
+    fn checking_several_rows_moves_them_all_to_the_sprint_chosen_but_not_to_an_area() {
+        let mut app = node_app();
+        check_all(&mut app);
+
+        open_nodes(&mut app, NodeKind::Iteration);
+        assert_eq!(
+            app.node_picker.scope,
+            EditScope::Checked(3),
+            "a sprint's leftovers move on together"
+        );
+        press(&mut app, KeyCode::Up);
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+            panic!("choosing a sprint should move every checked row");
+        };
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.key.id)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert!(
+            app.tickets()
+                .iter()
+                .all(|ticket| ticket.iteration_path == "development\\Sprint 1"),
+            "every row carries the full path at once"
+        );
+
+        let mut app = node_app();
+        check_all(&mut app);
+        open_nodes(&mut app, NodeKind::Area);
+        assert_eq!(
+            app.node_picker.scope,
+            EditScope::Ticket(3),
+            "the area tree stays on the row under the cursor"
+        );
+        press(&mut app, KeyCode::Up);
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+            panic!("choosing another area should dispatch an edit");
+        };
+        assert_eq!(only(requests).key.id, 3);
     }
 
     #[test]
@@ -6131,9 +6756,10 @@ mod tests {
         );
 
         type_query(&mut app, "q3s7");
-        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+        let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
             panic!("a merged-in node should be choosable");
         };
+        let request = only(requests);
         assert_eq!(
             request.edit.patch(),
             vec![serde_json::json!({
