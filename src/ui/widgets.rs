@@ -117,7 +117,7 @@ pub(super) fn render_control(
 /// track at the maximum offset while the draggable one reached it.
 pub(super) fn render_scrollbar(
     frame: &mut Frame<'_>,
-    screen: &mut WorkItemsScreen,
+    layer: PointerLayer,
     shell: &mut Shell,
     area: Rect,
     surface: ScrollSurface,
@@ -155,7 +155,7 @@ pub(super) fn render_scrollbar(
                     surface,
                     page_down: false,
                 },
-                current_layer(screen),
+                layer,
                 None,
                 Some(surface),
             ));
@@ -163,7 +163,7 @@ pub(super) fn render_scrollbar(
         shell.hit_regions.push(region(
             thumb_rect,
             PointerTarget::ScrollbarThumb { surface },
-            current_layer(screen),
+            layer,
             None,
             Some(surface),
         ));
@@ -174,7 +174,7 @@ pub(super) fn render_scrollbar(
                     surface,
                     page_down: true,
                 },
-                current_layer(screen),
+                layer,
                 None,
                 Some(surface),
             ));

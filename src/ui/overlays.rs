@@ -165,7 +165,7 @@ pub(super) fn render_help_popup(
     if overflow {
         render_scrollbar(
             frame,
-            screen,
+            current_layer(screen),
             shell,
             inner,
             ScrollSurface::Help,
@@ -401,7 +401,7 @@ pub(super) fn render_list_overlay(
     if overflow {
         render_scrollbar(
             frame,
-            screen,
+            current_layer(screen),
             shell,
             area,
             surface,

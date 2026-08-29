@@ -1,5 +1,6 @@
 use super::*;
-use crate::columns::ColumnLayout;
+use crate::columns::{ColumnId, ColumnLayout, TableLayout};
+use crate::pointer::SelectableSurface;
 use crate::ui::details::ticket_assignment_line;
 use crate::ui::table::tag_color;
 
@@ -378,5 +379,150 @@ fn underlines_mark_search_matches_and_stop_after_the_id_digits() {
     assert!(
         !buffer[(x + 5, y)].modifier.contains(Modifier::UNDERLINED),
         "padding after the id must not stay underlined"
+    );
+}
+
+/// A column set that is not the work items', to prove the list table is not
+/// theirs either. It is the shape #668's repositories tab will bring.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RepoColumn {
+    Name,
+    Branch,
+    Behind,
+}
+
+impl ColumnId for RepoColumn {
+    fn all() -> &'static [Self] {
+        &[Self::Name, Self::Branch, Self::Behind]
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|column| column.key() == key)
+    }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Branch => "branch",
+            Self::Behind => "behind",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Repository",
+            Self::Branch => "Branch",
+            Self::Behind => "Behind",
+        }
+    }
+
+    fn default_width(self) -> u16 {
+        match self {
+            Self::Name => 0,
+            Self::Branch => 16,
+            Self::Behind => 7,
+        }
+    }
+
+    fn default_visible(self) -> bool {
+        true
+    }
+
+    fn right_aligned(self) -> bool {
+        matches!(self, Self::Behind)
+    }
+
+    fn pinned(self) -> bool {
+        matches!(self, Self::Name)
+    }
+
+    fn flexible(self) -> bool {
+        matches!(self, Self::Name)
+    }
+}
+
+#[test]
+fn the_list_table_draws_another_screens_columns_and_sorts_by_their_keys() {
+    let repositories = [
+        ["ticket-tui", "main", "0"],
+        ["skillbook", "main", "3"],
+        ["home-server", "develop", "12"],
+    ];
+    let layout = TableLayout::<RepoColumn>::default();
+    let mut shell = Shell::default();
+    let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+    terminal
+        .draw(|frame| {
+            let mut cell = |row: usize, column: RepoColumn| {
+                let index = match column {
+                    RepoColumn::Name => 0,
+                    RepoColumn::Branch => 1,
+                    RepoColumn::Behind => 2,
+                };
+                Cell::from(repositories[row][index])
+            };
+            let mut spec = crate::ui::table::TableSpec {
+                title: " Repos 3/3 ".to_owned(),
+                focused: true,
+                layout: &layout,
+                sorted: Some((RepoColumn::Behind, "↓")),
+                count: repositories.len(),
+                offset: 0,
+                selected: Some(1),
+                row_height: 1,
+                layer: crate::pointer::PointerLayer::Base,
+                scroll: ScrollSurface::Table,
+                selectable: SelectableSurface::Table,
+                marker: None,
+                cell: &mut cell,
+            };
+            crate::ui::table::render_list_table(frame, &mut shell, frame.area(), &mut spec);
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let mut text = String::new();
+    for y in 0..10 {
+        for x in 0..60 {
+            text.push_str(buffer[(x, y)].symbol());
+        }
+        text.push('\n');
+    }
+    assert!(text.contains("Repos 3/3"), "{text}");
+    assert!(
+        text.contains("Repository"),
+        "the header is this screen's: {text}"
+    );
+    assert!(
+        text.contains("Behind↓"),
+        "with the arrow on the sorted one: {text}"
+    );
+    assert!(text.contains("home-server"), "{text}");
+    assert!(
+        text.contains("› skillbook"),
+        "the selected row is marked: {text}"
+    );
+
+    let header = shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::SortHeader("branch")))
+        .expect("the branch header sorts");
+    assert!(header.rect.y < 3, "the header is above the rows");
+    assert!(
+        shell
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::TableRow { index: 2 }))
+            .is_some(),
+        "every row on screen can be clicked"
+    );
+    assert!(
+        shell
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::ToggleRowSelect { .. }))
+            .is_none(),
+        "a screen without markers gets no gutter targets"
     );
 }

@@ -300,7 +300,7 @@ pub(super) fn render_details(
     if overflow {
         render_scrollbar(
             frame,
-            screen,
+            current_layer(screen),
             shell,
             inner,
             ScrollSurface::Details,

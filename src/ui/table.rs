@@ -1,7 +1,235 @@
 //! The work item table: its rows, its cells and the colours they carry.
 
 use super::*;
-use crate::columns::ColumnId;
+use crate::columns::{ColumnId, TableLayout};
+/// Where a list table's parts land inside its area. A screen works this out
+/// before it draws, because how many rows fit is what its viewport is.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TableGeometry {
+    /// Inside the border.
+    pub inner: Rect,
+    /// The rows, below the header and its blank line.
+    pub body: Rect,
+    pub visible_rows: usize,
+}
+
+#[must_use]
+pub(crate) fn table_geometry(area: Rect, row_height: u16) -> TableGeometry {
+    let inner = Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
+    let body_height = inner.height.saturating_sub(2);
+    let visible_rows = usize::from(body_height / row_height.max(1)).max(1);
+    TableGeometry {
+        inner,
+        body: Rect::new(inner.x, inner.y.saturating_add(2), inner.width, body_height),
+        visible_rows,
+    }
+}
+
+/// One list, drawn as a table. Every tab's list goes through here: the header
+/// comes from the screen's own columns, each cell from its `cell` closure, and
+/// the hit regions are the same on all of them, so a row is selected, opened
+/// and sorted the same way whatever it holds.
+pub(crate) struct TableSpec<'a, C: ColumnId> {
+    pub title: String,
+    pub focused: bool,
+    pub layout: &'a TableLayout<C>,
+    /// The column the list is ordered by and the arrow that says which way, if
+    /// the list is ordered by a column at all.
+    pub sorted: Option<(C, &'static str)>,
+    /// How many rows the list has, which is not how many are on screen.
+    pub count: usize,
+    pub offset: usize,
+    pub selected: Option<usize>,
+    pub row_height: u16,
+    pub layer: PointerLayer,
+    pub scroll: ScrollSurface,
+    pub selectable: SelectableSurface,
+    /// The gutter cell a row opens with — the check and bookmark markers on
+    /// work items. A screen that passes none gets neither the column nor the
+    /// two targets that go with it.
+    pub marker: Option<&'a dyn Fn(usize) -> Line<'static>>,
+    /// One cell, by row and column. Called only for the rows on screen.
+    pub cell: &'a mut dyn FnMut(usize, C) -> Cell<'static>,
+}
+
+pub(crate) fn render_list_table<C: ColumnId>(
+    frame: &mut Frame<'_>,
+    shell: &mut Shell,
+    area: Rect,
+    spec: &mut TableSpec<'_, C>,
+) {
+    let block = focused_block(spec.title.clone(), spec.focused);
+    let inner = block.inner(area);
+    let columns = spec.layout.visible_columns(inner.width.saturating_sub(5));
+    let mut constraints = Vec::new();
+    if spec.marker.is_some() {
+        constraints.push(Constraint::Length(4));
+    }
+    constraints.extend(columns.iter().copied().map(TableLayout::constraint));
+
+    let mut header_cells = Vec::new();
+    if spec.marker.is_some() {
+        header_cells.push(Cell::from(""));
+    }
+    header_cells.extend(columns.iter().map(|column| {
+        let direction = spec
+            .sorted
+            .filter(|(sorted, _)| *sorted == column.id)
+            .map_or("", |(_, symbol)| symbol);
+        let line = Line::from(format!("{}{direction}", column.id.label()));
+        Cell::from(if column.id.right_aligned() {
+            line.right_aligned()
+        } else {
+            line
+        })
+    }));
+    let header = Row::new(header_cells)
+        .style(
+            Style::default()
+                .fg(theme().accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .height(1)
+        .bottom_margin(1);
+
+    let geometry = table_geometry(area, spec.row_height);
+    let visible_rows = geometry.visible_rows;
+    let rows = (spec.offset..spec.count.min(spec.offset + visible_rows)).map(|index| {
+        let mut cells = Vec::new();
+        if let Some(marker) = spec.marker {
+            cells.push(Cell::from(marker(index)));
+        }
+        cells.extend(columns.iter().map(|column| (spec.cell)(index, column.id)));
+        Row::new(cells).height(spec.row_height)
+    });
+    let table = Table::new(rows, constraints.clone())
+        .header(header)
+        .block(block)
+        .column_spacing(1)
+        .row_highlight_style(
+            Style::default()
+                .bg(theme().selected_background)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("\u{203a} ")
+        .highlight_spacing(HighlightSpacing::Always);
+    let mut local_state = ratatui::widgets::TableState::default();
+    if let Some(selected) = spec
+        .selected
+        .and_then(|row| row.checked_sub(spec.offset))
+        .filter(|selected| *selected < visible_rows)
+    {
+        local_state.select(Some(selected));
+    }
+    frame.render_stateful_widget(table, area, &mut local_state);
+
+    if inner.height < 2 {
+        return;
+    }
+    let header_area = Rect::new(
+        inner.x.saturating_add(2),
+        inner.y,
+        inner.width.saturating_sub(2),
+        1,
+    );
+    let header_columns = Layout::horizontal(constraints)
+        .spacing(1)
+        .split(header_area);
+    let column_areas: Vec<Rect> = header_columns
+        .iter()
+        .copied()
+        .skip(usize::from(spec.marker.is_some()))
+        .collect();
+    for (header_rect, column) in column_areas.iter().zip(columns.iter()) {
+        shell.hit_regions.push(region(
+            *header_rect,
+            PointerTarget::SortHeader(column.id.key()),
+            spec.layer,
+            None,
+            None,
+        ));
+    }
+    let body = geometry.body;
+    shell.hit_regions.push(region(
+        body,
+        PointerTarget::FocusTickets,
+        spec.layer,
+        Some(spec.selectable),
+        Some(spec.scroll),
+    ));
+    let rendered = spec.count.saturating_sub(spec.offset).min(visible_rows);
+    for visible_index in 0..rendered {
+        let logical = spec.offset + visible_index;
+        let y = body
+            .y
+            .saturating_add(u16::try_from(visible_index).unwrap_or(u16::MAX) * spec.row_height);
+        if y >= body.y.saturating_add(body.height) {
+            break;
+        }
+        let row_rect = Rect::new(
+            body.x,
+            y,
+            body.width.saturating_sub(1),
+            spec.row_height
+                .min(body.y.saturating_add(body.height).saturating_sub(y)),
+        );
+        shell.hit_regions.push(region(
+            row_rect,
+            PointerTarget::TableRow { index: logical },
+            spec.layer,
+            Some(spec.selectable),
+            Some(spec.scroll),
+        ));
+        if spec.marker.is_some()
+            && let Some(gutter) = header_columns.first()
+        {
+            shell.hit_regions.push(region(
+                Rect::new(gutter.x, y, 3, 1),
+                PointerTarget::ToggleRowSelect { index: logical },
+                spec.layer,
+                None,
+                None,
+            ));
+            shell.hit_regions.push(region(
+                Rect::new(gutter.x.saturating_add(3), y, 1, 1),
+                PointerTarget::ToggleBookmark { index: logical },
+                spec.layer,
+                None,
+                None,
+            ));
+        }
+        if let Some(first) = column_areas.first() {
+            shell.hit_regions.push(region(
+                Rect::new(first.x, y, first.width, 1),
+                PointerTarget::OpenInBrowser { index: logical },
+                spec.layer,
+                None,
+                None,
+            ));
+        }
+    }
+    let overflow = spec.count > visible_rows;
+    if overflow {
+        render_scrollbar(
+            frame,
+            spec.layer,
+            shell,
+            body,
+            spec.scroll,
+            ScrollState {
+                offset: spec.offset,
+                content: spec.count,
+                viewport: visible_rows,
+            },
+        );
+    }
+    capture_selectable(frame, shell, spec.selectable, body, overflow);
+}
 
 pub(super) fn render_table(
     frame: &mut Frame<'_>,
@@ -36,44 +264,6 @@ pub(super) fn render_table(
     } else {
         format!(" Tickets {count}/{total} · {ordering}{activity} ")
     };
-    let block = focused_block(title, shell.focus == Focus::Tickets);
-    let inner = block.inner(area);
-    let columns = screen.layout.visible_columns(inner.width.saturating_sub(5));
-    let mut constraints = vec![Constraint::Length(4)];
-    constraints.extend(
-        columns
-            .iter()
-            .copied()
-            .map(crate::columns::TableLayout::constraint),
-    );
-
-    let mut header_cells = vec![Cell::from("")];
-    header_cells.extend(columns.iter().map(|column| {
-        let direction = if column.id == screen.sort_field {
-            screen.sort_direction.symbol()
-        } else {
-            ""
-        };
-        let label = match column.id {
-            SortField::Priority => "Pri",
-            SortField::Organization => "Org",
-            _ => column.id.label(),
-        };
-        let line = Line::from(format!("{label}{direction}"));
-        Cell::from(if column.id.is_numeric() {
-            line.right_aligned()
-        } else {
-            line
-        })
-    }));
-    let header = Row::new(header_cells)
-        .style(
-            Style::default()
-                .fg(theme().accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .height(1)
-        .bottom_margin(1);
 
     let now = OffsetDateTime::now_utc();
     // The same instant the relative labels read against, so a row's age and
@@ -81,152 +271,76 @@ pub(super) fn render_table(
     let table_now = Timestamp::from_offset_date_time(now);
     let density = screen.row_density;
     let row_height = density.row_height();
-    let body_height = inner.height.saturating_sub(2);
-    let visible_rows = usize::from(body_height / row_height).max(1);
-    screen.set_table_viewport(visible_rows);
+    let geometry = table_geometry(area, row_height);
+    screen.set_table_viewport(geometry.visible_rows);
     let offset = screen.table.offset;
-    let selected = screen.selected_row();
+    let layer = current_layer(screen);
     let fuzzy = screen.fuzzy_query();
+
+    // Everything the rows on screen need, read before the table takes the
+    // shell: what a row says about itself is the screen's business, and the
+    // list table only asks for cells.
+    let rows: Vec<PaintedRow<'_>> = screen
+        .visible_tickets()
+        .skip(offset)
+        .take(geometry.visible_rows)
+        .map(|ticket| PaintedRow {
+            ticket,
+            checked: screen.is_row_selected(&ticket.key),
+            bookmarked: screen.is_bookmarked(&ticket.key),
+            context: RowContext {
+                tone: RowTone::of(&ticket.state),
+                mine: shell.is_mine(ticket),
+                progress: screen.child_progress(&ticket.key),
+                stale: screen.stale_age_days_at(ticket, table_now).is_some(),
+            },
+        })
+        .collect();
+
     let mut highlighter = QueryHighlighter::new(&fuzzy);
-    let tickets: Vec<&Ticket> = screen.visible_tickets().collect();
-    let slice = tickets
-        .get(offset..)
-        .unwrap_or(&[])
-        .iter()
-        .copied()
-        .take(visible_rows);
-    let rows = slice.map(|ticket| {
-        let bookmarked = screen.is_bookmarked(&ticket.key);
-        let checked = screen.is_row_selected(&ticket.key);
-        let mut cells = vec![Cell::from(row_marker_line(checked, bookmarked))];
-        let row = RowContext {
-            tone: RowTone::of(&ticket.state),
-            mine: shell.is_mine(ticket),
-            progress: screen.child_progress(&ticket.key),
-            stale: screen.stale_age_days_at(ticket, table_now).is_some(),
-        };
-        cells.extend(
-            columns
-                .iter()
-                .map(|column| table_cell(ticket, column.id, now, density, row, &mut highlighter)),
-        );
-        Row::new(cells).height(row_height)
-    });
-    let table = Table::new(rows, constraints.clone())
-        .header(header)
-        .block(block)
-        .column_spacing(1)
-        .row_highlight_style(
-            Style::default()
-                .bg(theme().selected_background)
-                .add_modifier(Modifier::BOLD),
+    let marker = |index: usize| {
+        rows.get(index.saturating_sub(offset))
+            .map_or_else(Line::default, |row| {
+                row_marker_line(row.checked, row.bookmarked)
+            })
+    };
+    let mut cell = |index: usize, column: SortField| {
+        rows.get(index.saturating_sub(offset)).map_or_else(
+            || Cell::from(""),
+            |row| {
+                table_cell(
+                    row.ticket,
+                    column,
+                    now,
+                    density,
+                    row.context,
+                    &mut highlighter,
+                )
+            },
         )
-        .highlight_symbol("› ")
-        .highlight_spacing(HighlightSpacing::Always);
-    let mut local_state = ratatui::widgets::TableState::default();
-    if let Some(selected) = selected.and_then(|row| row.checked_sub(offset))
-        && selected < visible_rows
-    {
-        local_state.select(Some(selected));
-    }
-    frame.render_stateful_widget(table, area, &mut local_state);
+    };
+    let mut spec = TableSpec {
+        title,
+        focused: shell.focus == Focus::Tickets,
+        layout: &screen.layout,
+        sorted: Some((screen.sort_field, screen.sort_direction.symbol())),
+        count,
+        offset,
+        selected: screen.selected_row(),
+        row_height,
+        layer,
+        scroll: ScrollSurface::Table,
+        selectable: SelectableSurface::Table,
+        marker: Some(&marker),
+        cell: &mut cell,
+    };
+    render_list_table(frame, shell, area, &mut spec);
 
     if area.width < NARROW_BREAKPOINT {
         register_narrow_tabs(shell, area);
     }
-    if inner.height >= 2 {
-        let header_area = Rect::new(
-            inner.x.saturating_add(2),
-            inner.y,
-            inner.width.saturating_sub(2),
-            1,
-        );
-        let header_columns = Layout::horizontal(constraints)
-            .spacing(1)
-            .split(header_area);
-        for (header_rect, column) in header_columns.iter().skip(1).zip(columns.iter()) {
-            shell.hit_regions.push(region(
-                *header_rect,
-                PointerTarget::SortHeader(column.id.key()),
-                PointerLayer::Base,
-                None,
-                None,
-            ));
-        }
-        let body = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, body_height);
-        shell.hit_regions.push(region(
-            body,
-            PointerTarget::FocusTickets,
-            PointerLayer::Base,
-            Some(SelectableSurface::Table),
-            Some(ScrollSurface::Table),
-        ));
-        let rendered = count.saturating_sub(offset).min(visible_rows);
-        for visible_index in 0..rendered {
-            let logical = offset + visible_index;
-            let y = body
-                .y
-                .saturating_add(u16::try_from(visible_index).unwrap_or(u16::MAX) * row_height);
-            if y >= body.y.saturating_add(body.height) {
-                break;
-            }
-            let row_rect = Rect::new(
-                body.x,
-                y,
-                body.width.saturating_sub(1),
-                row_height.min(body.y.saturating_add(body.height).saturating_sub(y)),
-            );
-            shell.hit_regions.push(region(
-                row_rect,
-                PointerTarget::TableRow { index: logical },
-                PointerLayer::Base,
-                Some(SelectableSurface::Table),
-                Some(ScrollSurface::Table),
-            ));
-            if let Some(marker) = header_columns.first() {
-                shell.hit_regions.push(region(
-                    Rect::new(marker.x, y, 3, 1),
-                    PointerTarget::ToggleRowSelect { index: logical },
-                    PointerLayer::Base,
-                    None,
-                    None,
-                ));
-                shell.hit_regions.push(region(
-                    Rect::new(marker.x.saturating_add(3), y, 1, 1),
-                    PointerTarget::ToggleBookmark { index: logical },
-                    PointerLayer::Base,
-                    None,
-                    None,
-                ));
-            }
-            if let Some(id_area) = header_columns.get(1) {
-                shell.hit_regions.push(region(
-                    Rect::new(id_area.x, y, id_area.width, 1),
-                    PointerTarget::OpenInBrowser { index: logical },
-                    PointerLayer::Base,
-                    None,
-                    None,
-                ));
-            }
-        }
-        let overflow = count > visible_rows;
-        if overflow {
-            render_scrollbar(
-                frame,
-                screen,
-                shell,
-                body,
-                ScrollSurface::Table,
-                ScrollState {
-                    offset,
-                    content: count,
-                    viewport: visible_rows,
-                },
-            );
-        }
-        capture_selectable(frame, shell, SelectableSurface::Table, body, overflow);
-    }
 
+    let inner = geometry.inner;
     if count == 0 && inner.height > 2 {
         let message = if shell.sync_pending {
             "Syncing with Azure DevOps…"
@@ -251,6 +365,14 @@ pub(super) fn render_table(
             ),
         );
     }
+}
+
+/// One row of the work item table, as the list table asks for it.
+struct PaintedRow<'a> {
+    ticket: &'a Ticket,
+    checked: bool,
+    bookmarked: bool,
+    context: RowContext,
 }
 
 /// How strongly a row is painted: finished work fades so open work stands out.

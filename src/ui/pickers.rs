@@ -625,7 +625,7 @@ pub(super) fn render_form(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, s
     if fields.len() > viewport {
         render_scrollbar(
             frame,
-            screen,
+            current_layer(screen),
             shell,
             rows,
             ScrollSurface::Form,
