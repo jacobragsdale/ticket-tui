@@ -116,7 +116,6 @@ def validate_context(data: dict[str, object]) -> None:
     integer(data.get("process_id"), "process_id")
     for name in ("updated_at", "database_path", "mode", "focus", "screen"):
         text(data.get(name), name)
-    boolean(data.get("read_only"), "read_only")
     active_view = data.get("active_view")
     if active_view is not None:
         text(active_view, "active_view")

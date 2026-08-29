@@ -20,8 +20,7 @@ wins.
 | `schema_version` | integer | Context contract version; currently `1` |
 | `process_id` | integer | PID of the ticket-tui process that wrote the file |
 | `updated_at` | string | UTC RFC 3339 time of the published state change |
-| `database_path` | string | SQLite database backing the view |
-| `read_only` | boolean | Whether ticket-tui opened SQLite with `--read-only` |
+| `database_path` | string | SQLite cache backing the view |
 | `mode` | string | `browse`, `search`, or the active overlay name |
 | `focus` | string | `tickets`, `family`, or `details` |
 | `screen` | string | `workspace` or the narrow-layout `details` screen |
@@ -57,10 +56,13 @@ and `id`.
 
 ## SQLite relationship
 
-The JSON file is the live UI-state interface. SQLite remains the durable ticket
-data source. Join a ticket identity to `work_items` on `(organization,
-work_item_id)` when full fields are needed. Related records use
+The JSON file is the live UI-state interface. SQLite holds the full ticket
+fields behind that view. Join a ticket identity to `work_items` on
+`(organization, work_item_id)` when full fields are needed. Related records use
 `work_item_relations`, `work_item_comments`, and `work_item_history`.
 
-The context publisher never requires a writable SQLite connection, so it also
-works when ticket-tui runs with `--read-only`.
+SQLite is a cache of an Azure DevOps project, not a record of truth. It is
+refilled by running ticket-tui with `--sync`, so it can lag the server and a
+work item changed in Azure DevOps since the last sync will still read as its
+cached values. Never write to it; ticket-tui replaces its contents wholesale on
+the next sync.
