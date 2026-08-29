@@ -18,7 +18,8 @@ use crate::azure::{self, AzureClient, AzureConfig, SyncBatch};
 use crate::db::{self, SqliteTicketRepository};
 use crate::edit::{EditApplied, EditRejection, EditRequest};
 use crate::model::{
-    DetailsUpdate, RelationRecord, StateOption, Ticket, TicketGraph, TicketKey, WorkItemDetails,
+    DetailsUpdate, Identity, RelationRecord, StateOption, Ticket, TicketGraph, TicketKey,
+    WorkItemDetails,
 };
 use crate::timestamp::Timestamp;
 
@@ -41,6 +42,9 @@ pub enum SyncRequest {
     /// Read one work item's comments and revision history, for a work item
     /// whose stored details are behind the revision on screen.
     Details(TicketKey),
+    /// Read the project's team members, for the assignee picker. Asked for once
+    /// a session, the first time that picker opens.
+    Identities,
 }
 
 /// What the sync thread sends back.
@@ -58,6 +62,10 @@ pub enum SyncEvent {
     /// One work item's comments and revision history were read, or could not
     /// be.
     Details(Box<DetailsOutcome>),
+    /// The project's team members, already stored. Empty when they could not be
+    /// read, which is not worth reporting: the assignee picker already offers
+    /// everybody the database has seen.
+    Identities(Vec<Identity>),
     /// The worker thread is gone and no further events will arrive.
     Stopped,
 }
@@ -135,6 +143,12 @@ pub trait WorkItemSource {
     fn fetch_details(&self, _id: i64) -> Result<WorkItemDetails> {
         Ok(WorkItemDetails::default())
     }
+    /// Everybody on the project's teams, which the assignee picker offers
+    /// alongside the people already assigned work. A source that cannot list
+    /// them answers with nobody, and the picker is none the worse for it.
+    fn team_members(&self) -> Result<Vec<Identity>> {
+        Ok(Vec::new())
+    }
 }
 
 impl WorkItemSource for AzureClient {
@@ -164,6 +178,10 @@ impl WorkItemSource for AzureClient {
 
     fn fetch_details(&self, id: i64) -> Result<WorkItemDetails> {
         self.fetch_work_item_details(id)
+    }
+
+    fn team_members(&self) -> Result<Vec<Identity>> {
+        self.fetch_team_members()
     }
 }
 
@@ -260,6 +278,7 @@ fn work(
                 SyncEvent::Edited(Box::new(worker.edit(&request, events)))
             }
             SyncRequest::Details(key) => SyncEvent::Details(Box::new(worker.details(key, events))),
+            SyncRequest::Identities => SyncEvent::Identities(worker.identities(events)),
         };
         if events.send(event).is_err() {
             break;
@@ -379,6 +398,26 @@ impl Worker {
             relations,
             edit: request.edit.clone(),
         })
+    }
+
+    /// Reads the project's team members and stores them for the next session,
+    /// answering with what was stored. A failure answers with nobody and says
+    /// nothing: the assignee picker already offers everybody the database has
+    /// ever seen a work item assigned to, which is the whole team in a small
+    /// project, and a toast about an endpoint nobody asked for would only be
+    /// noise.
+    fn identities(&mut self, events: &Sender<SyncEvent>) -> Vec<Identity> {
+        let members = match self.source(events) {
+            Ok(source) => source.team_members().unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        if members.is_empty() {
+            return members;
+        }
+        if let Ok(repository) = self.repository() {
+            drop(repository.replace_identities(&members));
+        }
+        members
     }
 
     /// A pull starts from the watermark the last one left behind. Without one —
@@ -707,6 +746,9 @@ mod tests {
         details: Arc<Mutex<HashMap<i64, WorkItemDetails>>>,
         /// Every work item whose details were read, in order.
         detailed: Arc<Mutex<Vec<i64>>>,
+        /// The project's team members, or `None` for a source that cannot list
+        /// them, which is what the trait's default leaves behind.
+        team_members: Option<Vec<Identity>>,
     }
 
     impl FakeSource {
@@ -744,6 +786,13 @@ mod tests {
         fn with_details(self, id: i64, details: WorkItemDetails) -> Self {
             self.details.lock().unwrap().insert(id, details);
             self
+        }
+
+        fn with_team(self, members: Vec<Identity>) -> Self {
+            Self {
+                team_members: Some(members),
+                ..self
+            }
         }
 
         /// The ids the project still lists, whatever the pulls returned.
@@ -812,6 +861,12 @@ mod tests {
             self.stored
                 .clone()
                 .context("the fake source was not given a stored copy")
+        }
+
+        fn team_members(&self) -> Result<Vec<Identity>> {
+            self.team_members
+                .clone()
+                .context("the fake source cannot list teams")
         }
 
         fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>> {
@@ -1502,6 +1557,63 @@ mod tests {
     }
 
     #[test]
+    fn the_team_members_a_source_lists_are_stored_and_handed_to_the_picker() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let team = vec![
+            Identity::new("Avery Chen", Some("avery@example.com".into())),
+            Identity::new("Dana Okafor", None),
+        ];
+        let handle = SyncHandle::spawn(
+            path.clone(),
+            Box::new(FakeSource::with(vec![]).with_team(team.clone())),
+        )
+        .unwrap();
+
+        handle.send(SyncRequest::Identities).unwrap();
+        let found = loop {
+            match next_event(&handle) {
+                SyncEvent::Identities(identities) => break identities,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected the team members, got {other:?}"),
+            }
+        };
+        assert_eq!(found, team, "the worker hands back what it stored");
+        assert_eq!(
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .load_identities()
+                .unwrap(),
+            team,
+            "the next session's picker is complete without asking again"
+        );
+    }
+
+    #[test]
+    fn a_source_that_cannot_list_teams_says_nothing_and_stores_nothing() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(FakeSource::with(vec![]))).unwrap();
+
+        handle.send(SyncRequest::Identities).unwrap();
+        let found = loop {
+            match next_event(&handle) {
+                SyncEvent::Identities(identities) => break identities,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected the team members, got {other:?}"),
+            }
+        };
+        assert!(found.is_empty(), "a failure is answered with nobody");
+        assert!(
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .load_identities()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn an_edit_queued_before_a_pull_is_written_before_that_pull_reads() {
         let directory = tempdir().unwrap();
         let path = seeded_database(&directory);
@@ -1523,7 +1635,9 @@ mod tests {
                     seen.push("edit");
                 }
                 SyncEvent::Finished { .. } => seen.push("pull"),
-                SyncEvent::DisplayName(_) | SyncEvent::Details(_) => continue,
+                SyncEvent::DisplayName(_) | SyncEvent::Details(_) | SyncEvent::Identities(_) => {
+                    continue;
+                }
                 SyncEvent::Stopped => panic!("the worker stopped early"),
             }
         }

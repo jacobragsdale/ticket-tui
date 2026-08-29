@@ -285,10 +285,10 @@ states already in the database for that type, ordered by category — Proposed,
 In Progress, Resolved, Completed, Removed — then by name, so it opens instantly
 on a database that has never reached Azure DevOps.
 
-The Edit menu's other three rows are the small text edits that would otherwise
-mean opening a browser. None of them has a key of its own; they are reached
+The Edit menu's remaining rows are the edits that would otherwise mean opening a
+browser. Title, Priority, and Tags have no key of their own; they are reached
 through `e`, or by name in the command palette as `Edit title`, `Edit priority`,
-and `Edit tags`.
+and `Edit tags`. Assignee is reached the same way, and also directly with `a`.
 
 **Title** opens a one-line field prefilled with the title, edited with the same
 keys as the named-view editor — `←`/`→`, `Home`/`End`, `Ctrl-W`, `Ctrl-U`, and
@@ -312,6 +312,31 @@ kept — then rejoined with `; ` for `System.Tags`. So `rust; Rust ;; tui` saves
 as `rust; tui`. An empty result clears the tags, which `System.Tags` accepts as
 an empty string rather than a `remove`. A list that normalises to what is
 already there closes without a write.
+
+**Assignee** has a key of its own, `a`, as well as its Edit menu row and
+`Change assignee` in the palette, because assigning work is the edit worth
+reaching for. It opens a filterable list: type to narrow it, `↑`/`↓` to move,
+`Enter` to assign, `Esc` to change nothing. Whoever holds the work item is
+marked and under the cursor, and choosing them closes without a write. The list
+runs `Unassigned` first, then you — marked `(me)` — then everybody the database
+has ever seen a work item assigned to, sorted, and finally the rest of the
+project's teams. Nobody is offered twice, however their name is spelled.
+
+The write goes out as the person's unique name — their sign-in address — when
+one is known and as their display name when it is not; Azure DevOps resolves
+either. The Assignee cell reads as the display name straight away whichever was
+sent, and the copy that comes back from the write settles the spelling.
+`Unassigned` sends a JSON Patch `remove` for `System.AssignedTo`, because a work
+item goes back to nobody by having the field taken off it, and the cell empties.
+
+The picker never waits for the network. The people it lists come out of the
+database, which on a small project is already the whole team. The project's
+teams — `GET /_apis/projects/<project>/teams`, then the members of each — are
+read once a run, the first time the picker is opened, and merged into the open
+list where it stands. They are cached in the `identities` table, so from the
+next run the picker is complete the moment it opens. Teams that cannot be read
+are passed over in silence: nothing is logged and nothing is said, because the
+list the database gave is enough on its own.
 
 ## Controls
 
@@ -338,7 +363,8 @@ already there closes without a write.
 | `V` | Open named views; `n` saves, `Enter` loads, `d` deletes |
 | `e` | Open the Edit menu of field editors; `Enter` opens the one chosen |
 | `S` | Change the selected work item's state; `Enter` applies, `Esc` cancels |
-| `e` → Title/Priority/Tags | Edit the title, priority, or tags; also `Edit title`, `Edit priority`, and `Edit tags` in the palette |
+| `a` | Change who the selected work item is assigned to; type to filter, `Enter` assigns |
+| `e` → Title/Priority/Tags | Edit the title, priority, or tags; also `Edit title`, `Edit priority`, `Edit tags`, and `Change assignee` in the palette |
 | `m` | Bookmark or unbookmark the selected ticket |
 | `Space` | Toggle ticket multi-select |
 | `y` | Copy selected (or current) ticket IDs |
@@ -445,6 +471,14 @@ successful pull saw, as an RFC 3339 UTC timestamp. That watermark is where the
 next incremental pull starts asking; a database without one is pulled in full
 and left with one.
 
+The `identities` table holds what the assignee picker offers beyond the people
+the rows already name: `display_name`, the primary key, and `unique_name`, the
+sign-in address a write is addressed to when one is known. It is filled from the
+project's teams the first time that picker is opened in a run, and read back at
+startup so the next run's picker is complete before any network call. Like
+`sync_meta` it describes the project rather than its work items, so a pull
+leaves it alone; it is rewritten whole when the teams are read.
+
 The `work_item_type_states` table holds what the state picker offers:
 `work_item_type`, `name`, `category` (`Proposed`, `InProgress`, `Resolved`,
 `Completed`, or `Removed`), and `position`, the order the process template lists
@@ -453,7 +487,7 @@ the project's process rather than its work items, so a pull leaves it alone; a
 type is rewritten whole when its states are fetched, so a retired state stops
 being offered.
 
-The database carries `PRAGMA user_version = 7`. Because Azure DevOps is the
+The database carries `PRAGMA user_version = 9`. Because Azure DevOps is the
 record of truth, there are no migrations: a database at any other version has
 its tables dropped and recreated at startup, and a pull runs immediately to
 refill it, whatever `--refresh` says. Deleting the file has the same effect. The

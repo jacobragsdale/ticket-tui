@@ -159,6 +159,27 @@ impl StateOption {
     }
 }
 
+/// One person Azure DevOps can assign work to: the name a work item shows, and
+/// the sign-in address behind it. Both resolve on a write, so the unique name
+/// is used when it is known and the display name stands in when it is not.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Identity {
+    pub display_name: String,
+    /// `None` for somebody only ever seen in an `assigned_to` cell, which
+    /// carries no address.
+    pub unique_name: Option<String>,
+}
+
+impl Identity {
+    #[must_use]
+    pub fn new(display_name: impl Into<String>, unique_name: Option<String>) -> Self {
+        Self {
+            display_name: display_name.into(),
+            unique_name,
+        }
+    }
+}
+
 /// The states each work item type allows, as Azure DevOps lists them. Empty
 /// until a sync has fetched them, which is why the picker also has a fallback.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

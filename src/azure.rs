@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::model::{
-    CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateCategory, StateOption, Ticket,
-    TicketKey, WorkItemDetails,
+    CommentRecord, HistoryRecord, Identity, RelationKind, RelationRecord, StateCategory,
+    StateOption, Ticket, TicketKey, WorkItemDetails,
 };
 use crate::timestamp::Timestamp;
 
@@ -372,6 +372,43 @@ impl AzureClient {
             .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?
             .extend(segments);
         Ok(url)
+    }
+
+    /// Everybody on the project's teams, so the assignee picker can offer
+    /// somebody who has no work item in the database yet. Azure DevOps lists the
+    /// teams first and the members of each separately, so this is one request
+    /// per team plus one. Somebody on two teams is listed once.
+    pub fn fetch_team_members(&self) -> Result<Vec<Identity>> {
+        let teams = self.get(&self.teams_url(&[])?)?;
+        let teams = teams
+            .get("value")
+            .and_then(Value::as_array)
+            .context("teams response has no value array")?;
+        let mut found: Vec<Identity> = Vec::new();
+        for team in teams {
+            let Some(id) = team.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let members = self.get(&self.teams_url(&[id, "members"])?)?;
+            collect_team_members(&members, &mut found);
+        }
+        Ok(found)
+    }
+
+    /// A project name is a path segment and may have spaces in it, so the URL is
+    /// assembled rather than formatted. `tail` is whatever follows `teams`.
+    fn teams_url(&self, tail: &[&str]) -> Result<String> {
+        let mut url = Url::parse(&self.config.base_url())
+            .with_context(|| format!("invalid Azure DevOps URL {}", self.config.base_url()))?;
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?;
+            segments.extend(["_apis", "projects", self.config.project.as_str(), "teams"]);
+            segments.extend(tail);
+        }
+        url.set_query(Some(&format!("api-version={API_VERSION}")));
+        Ok(url.into())
     }
 
     /// A work item type is a path segment and its name has spaces in it — `User
@@ -915,6 +952,40 @@ fn identity_name(value: &Value) -> Option<String> {
     }
 }
 
+/// Adds one team's members to `found`, skipping anybody already listed: a
+/// project's teams overlap, and the picker offers each person once. Each member
+/// nests the person under `identity`; a member without a display name is no use
+/// to a picker, so it is dropped.
+fn collect_team_members(members: &Value, found: &mut Vec<Identity>) {
+    let Some(list) = members.get("value").and_then(Value::as_array) else {
+        return;
+    };
+    for member in list {
+        let identity = member.get("identity").unwrap_or(member);
+        let Some(display_name) = trimmed(identity, "displayName") else {
+            continue;
+        };
+        if found
+            .iter()
+            .any(|known| known.display_name.eq_ignore_ascii_case(&display_name))
+        {
+            continue;
+        }
+        found.push(Identity::new(display_name, trimmed(identity, "uniqueName")));
+    }
+}
+
+/// One string field of an identity, with the surrounding space gone and an
+/// empty value read as absent.
+fn trimmed(identity: &Value, field: &str) -> Option<String> {
+    identity
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 fn relation_kind(rel: &str) -> Option<RelationKind> {
     Some(match rel {
         "System.LinkTypes.Hierarchy-Reverse" => RelationKind::Parent,
@@ -1265,6 +1336,47 @@ mod tests {
         assert_eq!(profile_display_name(&json!({"displayName": "  "})), None);
         assert_eq!(profile_display_name(&json!({"id": "abc"})), None);
         assert_eq!(profile_display_name(&json!("Jacob")), None);
+    }
+
+    #[test]
+    fn team_member_documents_yield_names_and_addresses_once_each() {
+        let mut found = Vec::new();
+        collect_team_members(
+            &json!({"value": [
+                {"identity": {"displayName": "Avery Chen", "uniqueName": "avery@example.com"}},
+                {"identity": {"displayName": "Dana Okafor"}},
+                {"identity": {"displayName": "  ", "uniqueName": "blank@example.com"}},
+                {"identity": {"uniqueName": "nameless@example.com"}},
+            ]}),
+            &mut found,
+        );
+        assert_eq!(
+            found,
+            vec![
+                Identity::new("Avery Chen", Some("avery@example.com".into())),
+                Identity::new("Dana Okafor", None),
+            ],
+            "somebody without a display name is no use to a picker"
+        );
+
+        // The second team the project has, with one person on both.
+        collect_team_members(
+            &json!({"value": [
+                {"identity": {"displayName": "avery chen", "uniqueName": "other@example.com"}},
+                {"identity": {"displayName": "Priya Nair", "uniqueName": "priya@example.com"}},
+            ]}),
+            &mut found,
+        );
+        assert_eq!(
+            found.len(),
+            3,
+            "somebody on two teams is listed once, however it is spelled"
+        );
+        assert_eq!(found[2].display_name, "Priya Nair");
+
+        let mut none = Vec::new();
+        collect_team_members(&json!({"count": 0}), &mut none);
+        assert!(none.is_empty(), "a response without members adds nobody");
     }
 
     fn response(status: u16, body: &str) -> ureq::http::Response<ureq::Body> {

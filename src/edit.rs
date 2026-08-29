@@ -82,6 +82,11 @@ pub struct FieldEdit {
     field: String,
     label: String,
     value: FieldValue,
+    /// What the row and the notification read while the write is in flight,
+    /// when that is not the value sent. An assignee is written by unique name —
+    /// the sign-in address Azure DevOps resolves — but the cell says the
+    /// display name, which is what the server copy comes back carrying.
+    shown: Option<String>,
 }
 
 impl FieldEdit {
@@ -96,6 +101,7 @@ impl FieldEdit {
             field: field.into(),
             label: label.into(),
             value: FieldValue::Set(value.into()),
+            shown: None,
         }
     }
 
@@ -106,6 +112,7 @@ impl FieldEdit {
             field: field.into(),
             label: label.into(),
             value: FieldValue::Clear,
+            shown: None,
         }
     }
 
@@ -143,6 +150,29 @@ impl FieldEdit {
         Self::new(TAGS_FIELD, "Tags", tags)
     }
 
+    /// Assign a work item to somebody. Azure DevOps resolves either spelling of
+    /// a person, so the write goes out as the unique name when the picker knows
+    /// one and as the display name when it does not; the cell reads as the
+    /// display name whichever was sent.
+    #[must_use]
+    pub fn assignee(display_name: &str, unique_name: Option<&str>) -> Self {
+        Self {
+            shown: Some(display_name.to_owned()),
+            ..Self::new(
+                ASSIGNED_TO_FIELD,
+                "Assignee",
+                unique_name.unwrap_or(display_name),
+            )
+        }
+    }
+
+    /// Take a work item off whoever holds it. `System.AssignedTo` goes back to
+    /// nobody by being removed, not by being set to an empty identity.
+    #[must_use]
+    pub fn unassign() -> Self {
+        Self::clearing(ASSIGNED_TO_FIELD, "Assignee")
+    }
+
     #[must_use]
     pub fn field(&self) -> &str {
         &self.field
@@ -158,9 +188,22 @@ impl FieldEdit {
         &self.value
     }
 
+    /// The text the row and the notification read, which is the value sent
+    /// unless the edit carries a friendlier spelling of it.
+    fn shown_text(&self) -> Option<&str> {
+        self.shown.as_deref().or_else(|| self.value.as_str())
+    }
+
     /// The value as a notification shows it.
     #[must_use]
     pub fn value_text(&self) -> String {
+        if let Some(shown) = self.shown.as_deref() {
+            return if shown.trim().is_empty() {
+                "(none)".to_owned()
+            } else {
+                shown.to_owned()
+            };
+        }
         match &self.value {
             FieldValue::Clear | FieldValue::Set(Value::Null) => "(none)".to_owned(),
             FieldValue::Set(Value::String(text)) if text.trim().is_empty() => "(none)".to_owned(),
@@ -188,7 +231,7 @@ impl FieldEdit {
     /// before Azure DevOps answers. A field outside the list below is left to
     /// the copy the server sends back once the write lands.
     pub fn apply(&self, ticket: &mut Ticket) {
-        let text = self.value.as_str().map(str::trim);
+        let text = self.shown_text().map(str::trim);
         match self.field.as_str() {
             // A state or a title is never cleared, so a clear leaves it alone.
             STATE_FIELD if !self.value.is_clear() => ticket.state = self.value_string(),
@@ -461,6 +504,53 @@ mod tests {
             vec![json!({"op": "add", "path": "/fields/System.Tags", "value": ""})],
             "System.Tags takes an empty string rather than a remove"
         );
+    }
+
+    #[test]
+    fn an_assignee_is_written_by_address_and_read_back_by_name() {
+        let edit = FieldEdit::assignee("Jacob Ragsdale", Some("jacob@example.com"));
+        assert_eq!(
+            edit.patch(),
+            vec![json!({
+                "op": "add",
+                "path": "/fields/System.AssignedTo",
+                "value": "jacob@example.com",
+            })],
+            "Azure DevOps resolves the sign-in address"
+        );
+        assert_eq!(
+            edit.summary(),
+            "Assignee → Jacob Ragsdale",
+            "the notification says the name, not the address"
+        );
+
+        let mut assigned = ticket();
+        edit.apply(&mut assigned);
+        assert_eq!(
+            assigned.assigned_to.as_deref(),
+            Some("Jacob Ragsdale"),
+            "the cell shows the name while the write is in flight"
+        );
+
+        let by_name = FieldEdit::assignee("Jordan Patel", None);
+        assert_eq!(
+            by_name.patch(),
+            vec![json!({
+                "op": "add",
+                "path": "/fields/System.AssignedTo",
+                "value": "Jordan Patel",
+            })],
+            "a name with no address known is sent as itself"
+        );
+
+        let unassign = FieldEdit::unassign();
+        assert_eq!(
+            unassign.patch(),
+            vec![json!({"op": "remove", "path": "/fields/System.AssignedTo"})]
+        );
+        assert_eq!(unassign.summary(), "Assignee → (none)");
+        unassign.apply(&mut assigned);
+        assert_eq!(assigned.assigned_to, None);
     }
 
     #[test]
