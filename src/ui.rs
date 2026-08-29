@@ -52,6 +52,9 @@ struct Theme {
     priority_critical: Color,
     priority_high: Color,
     priority_normal: Color,
+    /// Restrained badge colours a tag is hashed into, so one tag always reads
+    /// the same wherever it appears.
+    tag_palette: [Color; 6],
 }
 
 impl Theme {
@@ -82,6 +85,7 @@ impl Theme {
                 priority_critical: Color::Reset,
                 priority_high: Color::Reset,
                 priority_normal: Color::Reset,
+                tag_palette: [Color::Reset; 6],
             }
         } else {
             Self {
@@ -109,6 +113,14 @@ impl Theme {
                 priority_critical: Color::Red,
                 priority_high: Color::Yellow,
                 priority_normal: Color::Blue,
+                tag_palette: [
+                    Color::Cyan,
+                    Color::Blue,
+                    Color::Magenta,
+                    Color::Green,
+                    Color::Yellow,
+                    Color::White,
+                ],
             }
         }
     }
@@ -2128,7 +2140,9 @@ fn search_match_style(base: Style) -> Style {
 
 fn highlight_line(text: String, indices: &[u32], base: Style, matched: Style) -> Line<'static> {
     if indices.is_empty() {
-        return Line::styled(text, base);
+        // The style rides on the span so callers that harvest `spans` — the
+        // badges, the details pane — keep the colour.
+        return Line::from(Span::styled(text, base));
     }
 
     let mut spans = Vec::new();
@@ -2200,12 +2214,26 @@ fn tag_badge_spans(
         }
         spans.extend(badge_spans(
             tag,
-            Style::default().fg(theme().muted),
+            Style::default().fg(tag_color(tag)),
             tone,
             highlighter,
         ));
     }
     spans
+}
+
+/// Hash a tag onto a stable palette entry, ignoring case.
+///
+/// FNV-1a over the lowercased bytes keeps the mapping deterministic between
+/// runs and between panes without reaching for a hasher dependency.
+fn tag_color(tag: &str) -> Color {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in tag.bytes() {
+        hash ^= u32::from(byte.to_ascii_lowercase());
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    let palette = theme().tag_palette;
+    palette[usize::try_from(hash).unwrap_or_default() % palette.len()]
 }
 
 fn badge_spans(
@@ -2925,6 +2953,12 @@ mod tests {
         assert_eq!(monochrome.priority_critical, Color::Reset);
         assert_eq!(monochrome.search_match, Color::Reset);
         assert_eq!(monochrome.error, Color::Reset);
+        assert!(
+            monochrome
+                .tag_palette
+                .iter()
+                .all(|color| *color == Color::Reset)
+        );
     }
 
     /// Foreground colours of one table column, top row first.
@@ -3099,6 +3133,48 @@ mod tests {
             find_buffer_text_in(buffer, details, "Atlas\\Sprint 1").is_some(),
             "the details pane keeps the full path"
         );
+    }
+
+    #[test]
+    fn tag_colors_are_stable_and_case_insensitive() {
+        assert_eq!(tag_color("tech-debt"), tag_color("TECH-DEBT"));
+        assert_eq!(tag_color("Rust"), tag_color("rust"));
+
+        if theme() == &Theme::new(true) {
+            return; // NO_COLOR: every colour is intentionally Reset.
+        }
+        let colors: Vec<Color> = ["docs", "flaky", "perf", "rust"]
+            .iter()
+            .map(|tag| tag_color(tag))
+            .collect();
+        assert_distinct_and_legible(&colors);
+    }
+
+    #[test]
+    fn a_tag_keeps_one_colour_across_the_table_and_details() {
+        let mut app = App::new(vec![ticket()]);
+        let tags = app
+            .layout
+            .columns
+            .iter()
+            .position(|column| column.id == SortField::Tags)
+            .expect("tags column");
+        app.layout.toggle_visible(tags);
+
+        let mut terminal = Terminal::new(TestBackend::new(150, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let body = app.hit_regions.table_body.expect("table body");
+        let details = app.hit_regions.details.expect("details pane");
+        let (table_x, table_y) = find_buffer_text_in(terminal.backend().buffer(), body, "[rust]")
+            .expect("tag badge in the table");
+        let (details_x, details_y) =
+            find_buffer_text_in(terminal.backend().buffer(), details, "[rust]")
+                .expect("tag badge in the details pane");
+
+        let (table_fg, _, _) = painted_cell(&terminal, table_x + 1, table_y);
+        let (details_fg, _, _) = painted_cell(&terminal, details_x + 1, details_y);
+        assert_eq!(table_fg, tag_color("rust"));
+        assert_eq!(table_fg, details_fg, "one tag, one colour");
     }
 
     fn await_search(app: &mut App) {
