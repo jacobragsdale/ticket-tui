@@ -6,7 +6,6 @@ use ratatui::Frame;
 use crate::columns::ColumnLayout;
 
 use super::*;
-use shell::{MAX_SPLIT_PERCENT, MIN_SPLIT_PERCENT};
 
 use edits::{BulkEdit, PendingEdit, UndoEntry};
 pub use edits::{DeleteConfirm, EditMenu, EditScope, PromptField, SyncTarget, TextPrompt};
@@ -928,6 +927,14 @@ impl Screen for WorkItemsScreen {
 
     fn scroll_state_mut(&mut self, surface: ScrollSurface) -> &mut ScrollState {
         Self::scroll_state_mut(self, surface)
+    }
+
+    fn snapshot(&self) -> TabSession {
+        Self::snapshot(self)
+    }
+
+    fn restore(&mut self, shell: &mut Shell, session: TabSession) {
+        Self::restore(self, shell, session, None);
     }
 
     fn columns(&self) -> &dyn ColumnLayout {

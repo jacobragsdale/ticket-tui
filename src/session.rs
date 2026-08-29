@@ -4,14 +4,18 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::model::{RowDensity, SearchOrder, SortDirection, SortField, TicketKey};
+use crate::app::TabId;
+use crate::model::{RowDensity, SearchOrder, SortDirection, TicketKey};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Session {
+/// One tab's slice of the session file: what it was showing, how it was
+/// arranged, and the views saved on it. Sort field and columns are key strings
+/// so one shape serves every tab.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TabSession {
     #[serde(default)]
     pub query: String,
     #[serde(default)]
-    pub sort_field: SortField,
+    pub sort_field: String,
     #[serde(default)]
     pub sort_direction: SortDirection,
     #[serde(default)]
@@ -23,18 +27,60 @@ pub struct Session {
     #[serde(default)]
     pub auto_hide: Option<bool>,
     #[serde(default)]
-    pub bookmarks: Vec<TicketKey>,
-    #[serde(default)]
-    pub recent: Vec<TicketKey>,
-    #[serde(default)]
     pub views: Vec<NamedView>,
     #[serde(default)]
     pub active_view: Option<String>,
+}
+
+/// The flat shape written before the tabs existed. A file carrying these loads
+/// them into the work items tab and writes the new shape back; nothing written
+/// by this build fills them in.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct FlatSession {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sort_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sort_direction: Option<SortDirection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    search_order: Option<SearchOrder>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    row_density: Option<RowDensity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    columns: Option<Vec<SessionColumn>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auto_hide: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    views: Option<Vec<NamedView>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_view: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Session {
+    /// The tab the run was left on, which is the one it reopens on.
+    #[serde(default)]
+    pub active_tab: TabId,
+    #[serde(default)]
+    pub work_items: TabSession,
+    #[serde(default)]
+    pub repos: TabSession,
+    #[serde(default)]
+    pub pull_requests: TabSession,
+    #[serde(default)]
+    pub pipelines: TabSession,
+    #[serde(default)]
+    pub bookmarks: Vec<TicketKey>,
+    #[serde(default)]
+    pub recent: Vec<TicketKey>,
     /// Whether the table lists finished work. Absent from every session
     /// written before the toggle existed, so `false` is what those load as and
     /// an old session opens on the open backlog like a new one.
     #[serde(default)]
     pub show_finished: bool,
+    /// The work item the cursor was left on. Rows belong to the work items tab
+    /// for now; the tabs that grow rows of their own bring their own key.
     #[serde(default)]
     pub selected: Option<TicketKey>,
     #[serde(default = "wide_split")]
@@ -43,6 +89,66 @@ pub struct Session {
     pub pane_split_stacked: u16,
     #[serde(default = "stale_days")]
     pub stale_days: u16,
+    /// The flat shape a pre-tabs file carries, folded into the work items tab
+    /// by [`load`] and never written back.
+    #[serde(flatten)]
+    pub(crate) flat: FlatSession,
+}
+
+impl Session {
+    /// Folds a pre-tabs file into the work items tab, so nobody loses their
+    /// query, columns or views on upgrade.
+    fn fold_flat(&mut self) {
+        let flat = std::mem::take(&mut self.flat);
+        let tab = &mut self.work_items;
+        if let Some(query) = flat.query {
+            tab.query = query;
+        }
+        if let Some(field) = flat.sort_field {
+            tab.sort_field = field;
+        }
+        if let Some(direction) = flat.sort_direction {
+            tab.sort_direction = direction;
+        }
+        if let Some(order) = flat.search_order {
+            tab.search_order = order;
+        }
+        if let Some(density) = flat.row_density {
+            tab.row_density = density;
+        }
+        if let Some(columns) = flat.columns {
+            tab.columns = columns;
+        }
+        if flat.auto_hide.is_some() {
+            tab.auto_hide = flat.auto_hide;
+        }
+        if let Some(views) = flat.views {
+            tab.views = views;
+        }
+        if flat.active_view.is_some() {
+            tab.active_view = flat.active_view;
+        }
+    }
+
+    /// One tab's slice.
+    #[must_use]
+    pub fn tab(&self, tab: TabId) -> &TabSession {
+        match tab {
+            TabId::WorkItems => &self.work_items,
+            TabId::Repos => &self.repos,
+            TabId::PullRequests => &self.pull_requests,
+            TabId::Pipelines => &self.pipelines,
+        }
+    }
+
+    pub fn set_tab(&mut self, tab: TabId, session: TabSession) {
+        match tab {
+            TabId::WorkItems => self.work_items = session,
+            TabId::Repos => self.repos = session,
+            TabId::PullRequests => self.pull_requests = session,
+            TabId::Pipelines => self.pipelines = session,
+        }
+    }
 }
 
 /// Sessions written before the divider was draggable carry no split, so both
@@ -64,22 +170,19 @@ const fn stale_days() -> u16 {
 impl Default for Session {
     fn default() -> Self {
         Self {
-            query: String::new(),
-            sort_field: SortField::default(),
-            sort_direction: SortDirection::default(),
-            search_order: SearchOrder::default(),
-            row_density: RowDensity::default(),
-            columns: Vec::new(),
-            auto_hide: None,
+            active_tab: TabId::default(),
+            work_items: TabSession::default(),
+            repos: TabSession::default(),
+            pull_requests: TabSession::default(),
+            pipelines: TabSession::default(),
             bookmarks: Vec::new(),
             recent: Vec::new(),
-            views: Vec::new(),
-            active_view: None,
             show_finished: false,
             selected: None,
             pane_split_wide: wide_split(),
             pane_split_stacked: stacked_split(),
             stale_days: stale_days(),
+            flat: FlatSession::default(),
         }
     }
 }
@@ -99,8 +202,10 @@ pub struct SessionColumn {
 pub struct NamedView {
     pub name: String,
     pub query: String,
+    /// The column the view sorts by, by key — the same spelling the columns
+    /// use, so one shape serves every tab's views.
     #[serde(default)]
-    pub sort_field: SortField,
+    pub sort_field: String,
     #[serde(default)]
     pub sort_direction: SortDirection,
     #[serde(default)]
@@ -142,8 +247,10 @@ pub fn load(path: &Path) -> Result<Session> {
     }
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read session {}", path.display()))?;
-    serde_json::from_str(&raw)
-        .with_context(|| format!("failed to parse session {}", path.display()))
+    let mut session: Session = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse session {}", path.display()))?;
+    session.fold_flat();
+    Ok(session)
 }
 
 pub fn save(path: &Path, session: &Session) -> Result<()> {
@@ -170,25 +277,23 @@ mod tests {
         let mut filters = FilterSet::<WorkItemSchema>::default();
         filters.insert(FilterField::Iteration, "Atlas\\Sprint 1");
         let query = format_query(&filters, "");
-        let mut session = Session {
-            query: query.clone(),
-            ..Session::default()
-        };
-        session.views.push(NamedView {
+        let mut session = Session::default();
+        session.work_items.query = query.clone();
+        session.work_items.views.push(NamedView {
             name: "Sprint 1".into(),
             query: query.clone(),
-            sort_field: SortField::Changed,
+            sort_field: "changed".to_owned(),
             sort_direction: SortDirection::Descending,
             search_order: SearchOrder::Relevance,
             row_density: RowDensity::Compact,
-            columns: TableLayout::<SortField>::default().to_session_columns(),
+            columns: TableLayout::<crate::model::SortField>::default().to_session_columns(),
             auto_hide: true,
         });
 
         save(&path, &session).unwrap();
         let loaded = load(&path).unwrap();
 
-        for stored in [&loaded.query, &loaded.views[0].query] {
+        for stored in [&loaded.work_items.query, &loaded.work_items.views[0].query] {
             assert_eq!(stored, &query, "the query text came back as it was written");
             assert!(
                 parse_query::<WorkItemSchema>(stored)
@@ -204,26 +309,30 @@ mod tests {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tickets.session.json");
         let mut session = Session {
-            query: "state:active".into(),
-            sort_field: SortField::Title,
-            sort_direction: SortDirection::Ascending,
             pane_split_wide: 70,
             pane_split_stacked: 44,
             stale_days: 21,
             ..Session::default()
         };
+        session.work_items.query = "state:active".into();
+        session.work_items.sort_field = "title".to_owned();
+        session.work_items.sort_direction = SortDirection::Ascending;
+        session.repos.query = "status:dirty".into();
+        session.pull_requests.query = "author:@me".into();
+        session.pipelines.query = "result:failed".into();
+        session.active_tab = crate::app::TabId::Pipelines;
         session.bookmarks.push(TicketKey {
             organization: "demo".into(),
             id: 7,
         });
-        session.views.push(NamedView {
+        session.work_items.views.push(NamedView {
             name: "Active".into(),
             query: "state:active".into(),
-            sort_field: SortField::Changed,
+            sort_field: "changed".to_owned(),
             sort_direction: SortDirection::Descending,
             search_order: SearchOrder::Relevance,
             row_density: RowDensity::Compact,
-            columns: TableLayout::<SortField>::default().to_session_columns(),
+            columns: TableLayout::<crate::model::SortField>::default().to_session_columns(),
             auto_hide: true,
         });
 
@@ -232,24 +341,36 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let loaded = load(&path).unwrap();
 
-        assert_eq!(stored["sort_field"], "title");
-        assert_eq!(stored["sort_direction"], "asc");
-        assert_eq!(stored["search_order"], "relevance");
-        assert_eq!(stored["row_density"], "compact");
-        assert_eq!(stored["views"][0]["columns"][0]["id"], "id");
+        assert_eq!(stored["active_tab"], "pipelines");
+        assert_eq!(stored["work_items"]["sort_field"], "title");
+        assert_eq!(stored["work_items"]["sort_direction"], "asc");
+        assert_eq!(stored["work_items"]["search_order"], "relevance");
+        assert_eq!(stored["work_items"]["row_density"], "compact");
+        assert_eq!(stored["work_items"]["views"][0]["columns"][0]["id"], "id");
+        assert_eq!(stored["repos"]["query"], "status:dirty");
+        assert!(
+            stored.get("query").is_none(),
+            "the flat shape is not written any more: {stored}"
+        );
         assert_eq!(stored["pane_split_wide"], 70);
         assert_eq!(stored["pane_split_stacked"], 44);
         assert_eq!(stored["stale_days"], 21);
 
-        assert_eq!(loaded.query, "state:active");
-        assert_eq!(loaded.sort_field, SortField::Title);
-        assert_eq!(loaded.sort_direction, SortDirection::Ascending);
+        assert_eq!(loaded.active_tab, crate::app::TabId::Pipelines);
+        assert_eq!(loaded.work_items.query, "state:active");
+        assert_eq!(loaded.work_items.sort_field, "title");
+        assert_eq!(loaded.work_items.sort_direction, SortDirection::Ascending);
+        assert_eq!(loaded.repos.query, "status:dirty");
+        assert_eq!(loaded.pull_requests.query, "author:@me");
+        assert_eq!(loaded.pipelines.query, "result:failed");
         assert_eq!(loaded.bookmarks[0].id, 7);
-        assert_eq!(loaded.views[0].name, "Active");
-        assert_eq!(loaded.views[0].sort_field, SortField::Changed);
+        assert_eq!(loaded.work_items.views[0].name, "Active");
+        assert_eq!(loaded.work_items.views[0].sort_field, "changed");
         assert_eq!(
-            loaded.views[0].columns.len(),
-            TableLayout::<SortField>::default().columns.len()
+            loaded.work_items.views[0].columns.len(),
+            TableLayout::<crate::model::SortField>::default()
+                .columns
+                .len()
         );
         assert_eq!(loaded.pane_split_wide, 70);
         assert_eq!(loaded.pane_split_stacked, 44);
@@ -263,25 +384,28 @@ mod tests {
     fn a_progress_column_switched_on_is_still_on_after_a_restart() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tickets.session.json");
-        let mut layout = TableLayout::<SortField>::default();
+        let mut layout = TableLayout::<crate::model::SortField>::default();
         let index = layout
             .columns
             .iter()
-            .position(|column| column.id == SortField::Progress)
+            .position(|column| column.id == crate::model::SortField::Progress)
             .expect("the layout offers a Progress column");
         ColumnLayout::toggle_visible(&mut layout, index);
-        let session = Session {
-            columns: layout.to_session_columns(),
-            auto_hide: Some(layout.auto_hide),
-            ..Session::default()
-        };
+        let mut session = Session::default();
+        session.work_items.columns = layout.to_session_columns();
+        session.work_items.auto_hide = Some(layout.auto_hide);
 
         save(&path, &session).unwrap();
         let loaded = load(&path).unwrap();
-        let restored =
-            TableLayout::<SortField>::from_session_columns(&loaded.columns, loaded.auto_hide);
+        let restored = TableLayout::<crate::model::SortField>::from_session_columns(
+            &loaded.work_items.columns,
+            loaded.work_items.auto_hide,
+        );
 
-        assert_eq!(restored.columns[index].id, SortField::Progress);
+        assert_eq!(
+            restored.columns[index].id,
+            crate::model::SortField::Progress
+        );
         assert!(
             restored.columns[index].visible,
             "the column the overlay switched on comes back switched on"
@@ -333,18 +457,43 @@ mod tests {
                     { "id": "sprint", "visible": true, "width": 9 },
                     { "id": "title", "visible": true, "width": 0 }
                 ],
-                "auto_hide": false
+                "auto_hide": false,
+                "views": [
+                    { "name": "Mine", "query": "assignee:@me", "sort_field": "changed",
+                      "sort_direction": "desc", "search_order": "relevance",
+                      "row_density": "compact", "columns": [], "auto_hide": true }
+                ],
+                "active_view": "Mine"
             }"#,
         )
         .unwrap();
 
         let loaded = load(&path).unwrap();
 
-        assert_eq!(loaded.sort_field, SortField::Priority);
-        assert_eq!(loaded.sort_direction, SortDirection::Ascending);
-        assert_eq!(loaded.search_order, SearchOrder::Field);
-        assert_eq!(loaded.row_density, RowDensity::Comfortable);
-        assert_eq!(loaded.auto_hide, Some(false));
+        let work_items = &loaded.work_items;
+        assert_eq!(
+            work_items.query, "state:active",
+            "the flat shape loads into the work items tab"
+        );
+        assert_eq!(work_items.sort_field, "priority");
+        assert_eq!(work_items.sort_direction, SortDirection::Ascending);
+        assert_eq!(work_items.search_order, SearchOrder::Field);
+        assert_eq!(work_items.row_density, RowDensity::Comfortable);
+        assert_eq!(work_items.auto_hide, Some(false));
+        assert_eq!(
+            loaded.active_tab,
+            crate::app::TabId::WorkItems,
+            "and a file written before the tabs opens on the first of them"
+        );
+        assert_eq!(
+            work_items.views[0].name, "Mine",
+            "the views written before the tabs are the work items tab's"
+        );
+        assert_eq!(work_items.active_view.as_deref(), Some("Mine"));
+        assert!(
+            loaded.repos.query.is_empty() && loaded.pipelines.views.is_empty(),
+            "and the tabs that did not exist start empty"
+        );
         assert_eq!(
             (loaded.pane_split_wide, loaded.pane_split_stacked),
             (62, 56),
@@ -354,7 +503,7 @@ mod tests {
             loaded.stale_days, 14,
             "and one written before the Changed column flagged anything keeps the fortnight"
         );
-        let ids: Vec<_> = loaded
+        let ids: Vec<_> = work_items
             .columns
             .iter()
             .map(|column| column.id.as_str())
@@ -364,8 +513,10 @@ mod tests {
             ["id", "sprint", "title"],
             "the file keeps every key it holds, whoever they belong to"
         );
-        let layout =
-            TableLayout::<SortField>::from_session_columns(&loaded.columns, loaded.auto_hide);
+        let layout = TableLayout::<crate::model::SortField>::from_session_columns(
+            &work_items.columns,
+            work_items.auto_hide,
+        );
         let restored: Vec<_> = layout
             .columns
             .iter()
@@ -374,7 +525,7 @@ mod tests {
             .collect();
         assert_eq!(
             restored,
-            [SortField::Id, SortField::Title],
+            [crate::model::SortField::Id, crate::model::SortField::Title],
             "and the work-item layout drops a column it has no name for"
         );
     }

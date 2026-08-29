@@ -360,12 +360,10 @@ fn showing_the_finished_tickets_puts_them_back_and_the_choice_outlives_the_run()
     assert_eq!(visible_ids(&app), vec![1, 2, 3, 4, 5]);
     assert!(!app.work_items.finished_hidden());
     assert_eq!(app.work_items.hidden_finished(&app.shell), 0);
-    session::save(&path, &app.work_items.snapshot_session(&app.shell)).unwrap();
+    session::save(&path, &app.snapshot_session()).unwrap();
 
     let mut restored = backlog_app();
-    restored
-        .work_items
-        .restore_session(&mut restored.shell, session::load(&path).unwrap());
+    restored.restore_session(session::load(&path).unwrap());
     assert!(
         restored.work_items.show_finished(),
         "the choice comes back off the session file"
@@ -544,12 +542,10 @@ fn sentinels_come_back_from_the_session_file_as_the_chips_they_were_typed_as() {
     app.work_items
         .set_query(&mut app.shell, "assignee:@me iteration:@current".into());
     app.work_items.save_view(&mut app.shell, "My sprint".into());
-    session::save(&path, &app.work_items.snapshot_session(&app.shell)).unwrap();
+    session::save(&path, &app.snapshot_session()).unwrap();
 
     let mut restored = views_app();
-    restored
-        .work_items
-        .restore_session(&mut restored.shell, session::load(&path).unwrap());
+    restored.restore_session(session::load(&path).unwrap());
 
     assert_eq!(
         restored.work_items.query(),
@@ -587,22 +583,18 @@ fn sentinels_come_back_from_the_session_file_as_the_chips_they_were_typed_as() {
 fn a_stored_view_never_takes_a_name_a_built_in_owns() {
     let mut app = views_app();
 
-    app.work_items.restore_session(
-        &mut app.shell,
-        Session {
-            views: vec![NamedView {
-                name: "Mine".into(),
-                query: "tag:rust".into(),
-                sort_field: SortField::Changed,
-                sort_direction: SortDirection::Descending,
-                search_order: SearchOrder::Relevance,
-                row_density: RowDensity::Compact,
-                columns: Vec::new(),
-                auto_hide: true,
-            }],
-            ..Session::default()
-        },
-    );
+    let mut session = Session::default();
+    session.work_items.views = vec![NamedView {
+        name: "Mine".into(),
+        query: "tag:rust".into(),
+        sort_field: "changed".to_owned(),
+        sort_direction: SortDirection::Descending,
+        search_order: SearchOrder::Relevance,
+        row_density: RowDensity::Compact,
+        columns: Vec::new(),
+        auto_hide: true,
+    }];
+    app.restore_session(session);
 
     assert!(app.work_items.views().is_empty());
     assert_eq!(
@@ -626,12 +618,10 @@ fn date_filters_come_back_from_the_session_file_as_the_chips_they_were_typed_as(
         &mut app.shell,
         "changed:<7d created:>2026-08-01 rust".into(),
     );
-    session::save(&path, &app.work_items.snapshot_session(&app.shell)).unwrap();
+    session::save(&path, &app.snapshot_session()).unwrap();
 
     let mut restored = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
-    restored
-        .work_items
-        .restore_session(&mut restored.shell, session::load(&path).unwrap());
+    restored.restore_session(session::load(&path).unwrap());
 
     assert_eq!(
         restored.work_items.query(),
@@ -703,11 +693,9 @@ fn the_stale_threshold_takes_the_flag_over_the_session_and_the_palette_over_both
     let mut app = App::new(vec![]);
 
     app.work_items.set_stale_days(&mut app.shell, 30);
-    let session = app.work_items.snapshot_session(&app.shell);
+    let session = app.snapshot_session();
     let mut restored = App::new(vec![]);
-    restored
-        .work_items
-        .restore_session(&mut restored.shell, session.clone());
+    restored.restore_session(session.clone());
     assert_eq!(
         restored.work_items.stale_days(),
         30,
@@ -727,10 +715,7 @@ fn the_stale_threshold_takes_the_flag_over_the_session_and_the_palette_over_both
         Some(21)
     );
     assert_eq!(
-        restored
-            .work_items
-            .snapshot_session(&restored.shell)
-            .stale_days,
+        restored.snapshot_session().stale_days,
         30,
         "a flag passed once does not quietly become the setting"
     );
@@ -744,10 +729,7 @@ fn the_stale_threshold_takes_the_flag_over_the_session_and_the_palette_over_both
         "the palette steps up from the seven days in force"
     );
     assert_eq!(
-        restored
-            .work_items
-            .snapshot_session(&restored.shell)
-            .stale_days,
+        restored.snapshot_session().stale_days,
         14,
         "and the palette is what gets remembered"
     );
@@ -791,13 +773,10 @@ fn a_threshold_of_no_days_at_all_is_held_at_the_one_day_floor() {
     assert_eq!(app.work_items.stale_days(), 1);
 
     let mut restored = App::new(vec![]);
-    restored.work_items.restore_session(
-        &mut restored.shell,
-        Session {
-            stale_days: 0,
-            ..Session::default()
-        },
-    );
+    restored.restore_session(Session {
+        stale_days: 0,
+        ..Session::default()
+    });
     assert_eq!(
         restored.work_items.stale_days(),
         1,
@@ -1188,5 +1167,30 @@ fn left_and_right_walk_the_cached_iterations_and_stop_at_either_end() {
         app.work_items.sprint_overlay.iteration.as_deref(),
         Some("development\\Sprint 1"),
         "and the project root is somewhere to file work, not a sprint to stop on"
+    );
+}
+
+#[test]
+fn the_run_reopens_on_the_tab_it_was_left_on_and_every_tab_keeps_its_own_slice() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("tickets.session.json");
+    let mut app = views_app();
+    app.work_items
+        .set_query(&mut app.shell, "state:Active".into());
+    app.select_tab(TabId::Pipelines);
+    session::save(&path, &app.snapshot_session()).unwrap();
+
+    let mut restored = views_app();
+    restored.restore_session(session::load(&path).unwrap());
+
+    assert_eq!(
+        restored.tab,
+        TabId::Pipelines,
+        "the run comes back on the tab it was left on"
+    );
+    assert_eq!(
+        restored.work_items.query(),
+        "state:Active",
+        "and the work items tab is still the way it was left, unseen"
     );
 }

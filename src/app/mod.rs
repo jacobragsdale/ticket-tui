@@ -39,7 +39,7 @@ use crate::pointer::{
 };
 pub use crate::pointer::{EditableField, HitRegions, OverlayAnchor, PointerTarget};
 use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
-use crate::session::{NamedView, Session};
+use crate::session::{NamedView, Session, TabSession};
 use crate::sprint::{self, SprintSummary, SummaryRow, SummaryRowKind};
 use crate::sync::{ReparentApplied, ReparentRejection};
 use crate::text_input::TextInput;
@@ -58,6 +58,7 @@ pub use shell::{
     DEFAULT_PANE_SPLIT_STACKED, DEFAULT_PANE_SPLIT_WIDE, DividerOrientation, Focus,
     NotificationLevel, PointerUpdate, Shell,
 };
+use shell::{MAX_SPLIT_PERCENT, MIN_SPLIT_PERCENT};
 pub use work_items::{
     BuiltinView, ChildProgress, ChildProgressIndex, ColumnOverlay, DEFAULT_STALE_DAYS,
     DeleteConfirm, EditMenu, EditScope, FacetBar, FilterOverlay, FormField, FormFieldId,
@@ -217,6 +218,58 @@ impl App {
         let (shell, screen) = self.screen();
         screen.close_overlay(shell);
         self.tab = tab;
+    }
+
+    /// The whole session: which tab was showing, each tab's slice, and what
+    /// the shell keeps across all of them.
+    #[must_use]
+    pub fn snapshot_session(&self) -> Session {
+        let mut session = Session {
+            active_tab: self.tab,
+            bookmarks: self.work_items.bookmark_keys(),
+            recent: self.work_items.recent_keys(),
+            show_finished: self.work_items.show_finished(),
+            selected: self
+                .work_items
+                .selected_ticket()
+                .map(|ticket| ticket.key.clone()),
+            pane_split_wide: self.shell.pane_split_wide,
+            pane_split_stacked: self.shell.pane_split_stacked,
+            stale_days: self.work_items.remembered_stale_days(),
+            ..Session::default()
+        };
+        for tab in TabId::ALL {
+            session.set_tab(tab, self.screen_for(tab).snapshot());
+        }
+        session
+    }
+
+    /// The same, coming back on the next run: every tab is put back, and the
+    /// run reopens on the one it was left on.
+    pub fn restore_session(&mut self, session: Session) {
+        self.shell.pane_split_wide = session
+            .pane_split_wide
+            .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
+        self.shell.pane_split_stacked = session
+            .pane_split_stacked
+            .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
+        self.work_items
+            .restore_shared(session.stale_days, session.show_finished, &session);
+        self.tab = session.active_tab;
+        let selected = session.selected.clone();
+        let Session {
+            work_items,
+            repos,
+            pull_requests,
+            pipelines,
+            ..
+        } = session;
+        self.work_items
+            .restore(&mut self.shell, work_items, selected);
+        Screen::restore(&mut self.repos, &mut self.shell, repos);
+        Screen::restore(&mut self.pull_requests, &mut self.shell, pull_requests);
+        Screen::restore(&mut self.pipelines, &mut self.shell, pipelines);
+        self.shell.session_dirty = false;
     }
 
     /// The shell and the screen the keyboard and the mouse are talking to,

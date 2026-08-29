@@ -2,6 +2,7 @@
 //! views share: the stale threshold and whether finished work is on the table.
 
 use super::*;
+use crate::columns::ColumnId;
 
 /// A view the app always offers, above whatever the user has saved: one of the
 /// questions asked every morning, each written as a query somebody could have
@@ -169,6 +170,13 @@ impl WorkItemsScreen {
             Some(days) => days,
             None => self.stale_days,
         }
+    }
+
+    /// The threshold the session remembers, which is what the next run reads
+    /// and never what a flag passed once asked for.
+    #[must_use]
+    pub const fn remembered_stale_days(&self) -> u16 {
+        self.stale_days
     }
 
     /// The threshold `--stale-days` or `TICKET_TUI_STALE_DAYS` asked for. It
@@ -356,7 +364,7 @@ impl WorkItemsScreen {
         let view = NamedView {
             name: name.clone(),
             query: self.query.text().to_owned(),
-            sort_field: self.sort_field,
+            sort_field: self.sort_field.key().to_owned(),
             sort_direction: self.sort_direction,
             search_order: self.search_order,
             row_density: self.row_density,
@@ -406,7 +414,7 @@ impl WorkItemsScreen {
             return;
         };
         self.active_view = Some(view.name.clone());
-        self.sort_field = view.sort_field;
+        self.sort_field = SortField::from_key(&view.sort_field).unwrap_or_default();
         self.sort_direction = view.sort_direction;
         self.search_order = view.search_order;
         self.row_density = view.row_density;

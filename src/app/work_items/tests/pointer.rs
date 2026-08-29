@@ -63,11 +63,9 @@ fn clicking_the_pane_divider_neither_acts_nor_selects_text() {
 
     app.shell.pane_split_wide = 71;
     app.shell.pane_split_stacked = 45;
-    let session = app.work_items.snapshot_session(&app.shell);
+    let session = app.snapshot_session();
     let mut restored = App::new(vec![ticket(1, "One", "2026-01-02T00:00:00Z")]);
-    restored
-        .work_items
-        .restore_session(&mut restored.shell, session);
+    restored.restore_session(session);
     assert_eq!(
         restored.shell.pane_split_wide, 71,
         "the split is remembered"

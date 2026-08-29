@@ -312,7 +312,7 @@ fn run() -> Result<()> {
     app.shell.set_offline_reason(offline_reason.clone());
     let session_path = session::path_for(repository.path());
     match session::load(&session_path) {
-        Ok(loaded) => app.work_items.restore_session(&mut app.shell, loaded),
+        Ok(loaded) => app.restore_session(loaded),
         Err(error) => app
             .shell
             .set_error(format!("Could not load session: {error:#}")),
@@ -373,7 +373,7 @@ fn run() -> Result<()> {
         &mut context_publisher,
     );
     let remove_context = context_publisher.remove();
-    if let Err(error) = session::save(&session_path, &app.work_items.snapshot_session(&app.shell)) {
+    if let Err(error) = session::save(&session_path, &app.snapshot_session()) {
         eprintln!("warning: could not save session: {error:#}");
     }
     if let Err(error) = remove_context {
@@ -1139,7 +1139,7 @@ fn persist_session(app: &mut App, repository: &SqliteTicketRepository) -> bool {
         return false;
     }
     let path = session::path_for(repository.path());
-    match session::save(&path, &app.work_items.snapshot_session(&app.shell)) {
+    match session::save(&path, &app.snapshot_session()) {
         Ok(()) => app.shell.session_dirty = false,
         Err(error) => app
             .shell

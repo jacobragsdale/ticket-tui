@@ -4,14 +4,17 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
+use serde::{Deserialize, Serialize};
 
 use super::{AppAction, Shell};
 use crate::columns::ColumnLayout;
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
+use crate::session::TabSession;
 use crossterm::event::KeyEvent;
 
 /// The four screens the shell puts behind keys `1`–`4`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum TabId {
     #[default]
     WorkItems,
@@ -114,6 +117,15 @@ pub trait Screen {
     /// The same, to edit: whichever list this screen is
     /// showing, without the overlay knowing what its columns are.
     fn columns_mut(&mut self) -> &mut dyn ColumnLayout;
+
+    /// This tab's slice of the session file: what it is showing and how it is
+    /// arranged. A screen with nothing worth remembering keeps the default.
+    fn snapshot(&self) -> TabSession {
+        TabSession::default()
+    }
+
+    /// The same, coming back from the file on the next run.
+    fn restore(&mut self, _shell: &mut Shell, _session: TabSession) {}
 
     /// What the tab bar draws after this tab's name, when the tab has
     /// something waiting: `3` pull requests to review, `◐2` runs going.

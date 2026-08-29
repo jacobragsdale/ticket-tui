@@ -2,6 +2,7 @@
 //! session file.
 
 use super::*;
+use crate::columns::ColumnId;
 
 impl WorkItemsScreen {
     #[must_use]
@@ -125,52 +126,58 @@ impl WorkItemsScreen {
         shell.session_dirty = true;
     }
 
-    pub fn snapshot_session(&self, shell: &Shell) -> Session {
-        Session {
+    /// The bookmarks, for the shell to save.
+    #[must_use]
+    pub fn bookmark_keys(&self) -> Vec<TicketKey> {
+        self.bookmarks.iter().cloned().collect()
+    }
+
+    /// The work items visited this run, oldest first.
+    #[must_use]
+    pub fn recent_keys(&self) -> Vec<TicketKey> {
+        self.recent.clone()
+    }
+
+    /// What the shell keeps for this screen, put back before its own slice is:
+    /// the stale threshold and whether finished work is on the table have to
+    /// be in place before the rows are worked out.
+    pub fn restore_shared(&mut self, stale_days: u16, show_finished: bool, session: &Session) {
+        self.stale_days = clamp_stale_days(stale_days);
+        self.show_finished = show_finished;
+        self.bookmarks = session.bookmarks.iter().cloned().collect();
+        self.recent = session.recent.clone();
+    }
+
+    /// This screen's slice of the session file. What the shell keeps —
+    /// bookmarks, the visit history, the pane splits — is [`App`]'s to save.
+    pub fn snapshot(&self) -> TabSession {
+        TabSession {
             query: self.query.text().to_owned(),
-            sort_field: self.sort_field,
+            sort_field: self.sort_field.key().to_owned(),
             sort_direction: self.sort_direction,
             search_order: self.search_order,
             row_density: self.row_density,
             columns: self.layout.to_session_columns(),
             auto_hide: Some(self.layout.auto_hide),
-            bookmarks: self.bookmarks.iter().cloned().collect(),
-            recent: self.recent.clone(),
             views: self.views.clone(),
             active_view: self.active_view.clone(),
-            show_finished: self.show_finished,
-            selected: self.selected_ticket().map(|ticket| ticket.key.clone()),
-            pane_split_wide: shell.pane_split_wide,
-            pane_split_stacked: shell.pane_split_stacked,
-            stale_days: self.stale_days,
         }
     }
 
-    pub fn restore_session(&mut self, shell: &mut Shell, session: Session) {
-        self.sort_field = session.sort_field;
+    /// The same, coming back. `selected` is the row to settle on once the
+    /// query has been applied, and belongs to the shell's half of the file.
+    pub fn restore(&mut self, shell: &mut Shell, session: TabSession, selected: Option<TicketKey>) {
+        self.sort_field = SortField::from_key(&session.sort_field).unwrap_or_default();
         self.sort_direction = session.sort_direction;
         self.search_order = session.search_order;
         self.row_density = session.row_density;
         self.layout = TableLayout::from_session_columns(&session.columns, session.auto_hide);
-        shell.pane_split_wide = session
-            .pane_split_wide
-            .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
-        shell.pane_split_stacked = session
-            .pane_split_stacked
-            .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
-        self.stale_days = clamp_stale_days(session.stale_days);
-        self.bookmarks = session.bookmarks.into_iter().collect();
-        self.recent = session.recent;
         self.views = session
             .views
             .into_iter()
             .filter(|view| builtin_named(&view.name).is_none())
             .collect();
         self.active_view = session.active_view;
-        // Set before the rows are worked out, so the first pass over them
-        // already knows whether finished work belongs on the table.
-        self.show_finished = session.show_finished;
-        let selected = session.selected;
         if session.query.is_empty() {
             self.show_all(shell, selected.as_ref());
         } else {
@@ -179,6 +186,5 @@ impl WorkItemsScreen {
                 self.pending_selection = Some(selected);
             }
         }
-        shell.session_dirty = false;
     }
 }
