@@ -17,6 +17,8 @@ pub const TITLE_FIELD: &str = "System.Title";
 pub const ASSIGNED_TO_FIELD: &str = "System.AssignedTo";
 pub const TAGS_FIELD: &str = "System.Tags";
 pub const PRIORITY_FIELD: &str = "Microsoft.VSTS.Common.Priority";
+pub const ITERATION_PATH_FIELD: &str = "System.IterationPath";
+pub const AREA_PATH_FIELD: &str = "System.AreaPath";
 
 /// One JSON Patch operation setting a work-item field. Azure DevOps takes `add`
 /// for a field that is already present as well as for one that is not.
@@ -166,6 +168,20 @@ impl FieldEdit {
         }
     }
 
+    /// Move a work item to another iteration. `path` is the full backslash
+    /// path the field holds — `development\Sprint 1` — not the leaf the
+    /// table column shows.
+    #[must_use]
+    pub fn iteration(path: &str) -> Self {
+        Self::new(ITERATION_PATH_FIELD, "Iteration", path)
+    }
+
+    /// Move a work item to another area, by the same full backslash path.
+    #[must_use]
+    pub fn area(path: &str) -> Self {
+        Self::new(AREA_PATH_FIELD, "Area", path)
+    }
+
     /// Take a work item off whoever holds it. `System.AssignedTo` goes back to
     /// nobody by being removed, not by being set to an empty identity.
     #[must_use]
@@ -239,6 +255,12 @@ impl FieldEdit {
             ASSIGNED_TO_FIELD => {
                 ticket.assigned_to = text.filter(|name| !name.is_empty()).map(str::to_owned);
             }
+            // A work item always sits somewhere in both trees, so neither is
+            // ever cleared; a clear leaves the path alone.
+            ITERATION_PATH_FIELD if !self.value.is_clear() => {
+                ticket.iteration_path = self.value_string();
+            }
+            AREA_PATH_FIELD if !self.value.is_clear() => ticket.area_path = self.value_string(),
             TAGS_FIELD => {
                 ticket.tags = text
                     .unwrap_or_default()

@@ -1,6 +1,7 @@
 pub mod agent_context;
 pub mod app;
 pub mod azure;
+pub mod classification;
 pub mod columns;
 pub mod command;
 pub mod db;
