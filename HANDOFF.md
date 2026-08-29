@@ -6,11 +6,12 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
 
 ## State of `main`
 
-- The four-tab roadmap is under way: Epic 656 is finished (#661–#667) and
-  #668 (repos sync) is Done. Epic 659 (Pipelines, #680–#689) is next. `cargo fmt --check`, `cargo clippy --all-targets
+- The four-tab roadmap is under way: Epic 656 (#661–#667), #668 (repos sync)
+  and Epic 659 (Pipelines, #680–#689) are all Done. Epic 658 (Pull requests,
+  #674–#679) is next, then the rest of Epic 657 (#669–#673), then Epic 660. `cargo fmt --check`, `cargo clippy --all-targets
   --all-features -D warnings`, `cargo test --all-targets` (415 tests, and again
   under `NO_COLOR=1`) and `cargo build --release` are clean.
-- Database schema is `PRAGMA user_version = 13`. The first launch of this build
+- Database schema is `PRAGMA user_version = 14`. The first launch of this build
   rebuilds any older database and does one full pull automatically.
 
 ## The module tree (#661, #662)
@@ -36,12 +37,16 @@ after the receiver; nothing else reaches across.
             query.rs    the search box, filters, facets, columns, commands
             views.rs    saved and built-in views, the sprint summary, staleness
             tests/      the same split, plus tests/deletes.rs
+        pipelines/      the Pipelines tab: two levels, the timeline, the log
+    src/watch.rs        the pipeline watcher thread: live runs, timelines, logs,
+                        approvals — cadences that stretch, and no SQLite at all
     src/ui/mod.rs       render, render_screen, the layout, the theme, anchoring
         details.rs      the details pane and the family tree it draws
         overlays.rs     the list overlays, chips and facet bar
         pickers.rs      pickers, the prompt, the form, the delete confirmation
         table.rs        the table, its cells and their colours
         widgets.rs      the modal frame, query field, controls, scrollbar, paint
+        pipelines.rs    the Pipelines tab's own renderer
         tests/          the same split
 
 Every ui function takes `screen` and `shell` rather than `app`, and
@@ -141,9 +146,15 @@ subcommands and context v3.
 
 ## What is left
 
-The roadmap above. #661–#668 are Done; start at **Epic 659** (#680–#689, the
-live log tail in #684 is the critical one), then Epic 658, the rest of Epic
-657, then Epic 660. then #668 before anything in Epic 659. Query round-tripping was an
+The roadmap above. #661–#668 and Epic 659 (#680–#689) are Done; start at
+**Epic 658** (#674–#679, pull requests), then the rest of Epic 657 (#669–#673,
+repos), then Epic 660 (#690–#694, cross-links and agents).
+
+Two things the Pipelines tab left behind, neither ticketed: its details pane
+does not scroll as a whole (the log has its own scroll; the header, the Related
+links and the timeline above it do not), and the facet bar and chip row are
+still written against the work items screen, so the new tabs filter through
+their search box but draw no pills. Both are noted on #689 and #681. then #668 before anything in Epic 659. Query round-tripping was an
 earlier loose end and is fixed: `quote_if_needed` now escapes `\` and `take_quoted`
 unescapes it, so `iteration:"development\Sprint 1"` survives
 `format_query`/`parse_query` (#654), and a backslash typed once inside a quoted
