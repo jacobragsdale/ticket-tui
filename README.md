@@ -1094,7 +1094,8 @@ opens, and the tab badge adds `◇1` beside the `◐2` of anything running.
 the row wears a `◉` in its gutter, the watcher keeps polling it whatever tab is
 showing, and when it stops the footer says so for eight seconds, `✓ Build
 20260829.4 succeeded · 4m 12s` or `✗ Build 20260829.4 failed`. Clicking the
-marker does the same. Watches live for the session only.
+marker does the same. A run that has already finished is refused rather than
+announced. Watches live for the session only.
 
 Each level has its own search box and its own grammar. Pipelines filter on
 `name:`, `folder:`, `repo:` and `result:` — the result of the run they last
@@ -1197,7 +1198,9 @@ The help overlay's key sections and the palette's key labels are generated from
 the same command table these keys are bound in, so a binding reads the same way
 everywhere. Each command carries the scope it belongs to — global, or one tab —
 which is what groups them under headings in the help and keeps another tab's
-keys out of the palette.
+keys out of the palette. `?`, `p`/`:`, `c` and `i` open on every tab: the
+palette lists the commands of the tab that is showing and runs its choice
+there, and the columns editor edits that tab's columns.
 
 The details pane is one scrolling document rather than a pinned heading over a
 scrolling body. Its heading — title, ID / Type / State, the family breadcrumb,

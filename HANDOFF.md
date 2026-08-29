@@ -9,8 +9,11 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
 - **The four-tab roadmap is done**: Epics 656 (#661–#667), 657 (#669–#673),
   658 (#674–#679), 659 (#680–#689) and 660 (#690–#694) are all closed, as is
   #668. `cargo fmt --check`, `cargo clippy --all-targets --all-features -D
-  warnings`, `cargo test --all-targets` (505 lib + 28 bin tests, and again under
+  warnings`, `cargo test --all-targets` (516 lib + 28 bin tests, and again under
   `NO_COLOR=1`) and `cargo build --release` are clean.
+- **A review round followed the roadmap** (evening of 2026-08-29; see "Review
+  round" below): the four tabs were read end to end as a QA pass, and what it
+  found is fixed and on `main`.
 - Database schema is `PRAGMA user_version = 17`. A schema bump drops and
   rebuilds rather than migrating, so the first launch of a build that raises it
   does one full pull automatically — and a running `ticket-tui` binary from
@@ -179,9 +182,9 @@ Three things the finished tabs left behind, all noted on tickets:
   (#681).
 - The Pipelines details pane does not scroll as a whole: the log has its own
   scroll, the header, Related links and timeline above it do not (#689).
-- The Actions overlay and the command palette are work-items-only too, so the
-  Repos tab's git commands are reachable by key and by the details-pane buttons
-  but not from a menu (#671, #672).
+- The Actions overlay is work-items-only. (The command palette, the help, the
+  columns editor and the database overlay are not any more: the review round
+  below opened them on every tab.)
 
 Four bugs the CLI work turned up in code that had already shipped, all fixed —
 worth knowing about because they share a shape: **the fake source in the tests
@@ -213,3 +216,73 @@ Doing (`ticket-tui edit N --state Doing`), implement it on `main`, keep
 fmt/clippy/test/release green, commit and push at each working checkpoint, then
 comment on the ticket saying what shipped and set it Done. One ticket at a time,
 in the build order; no worktrees and no feature branches.
+
+## Review round, 2026-08-29 (evening)
+
+Jacob reported two bugs off the bat — a clone that sat on `cloning…` for ever,
+and "hovering selects the element" — and asked for the whole four-tab delivery
+to be reviewed as a QA pass. Everything below is fixed and on `main`.
+
+**The clone.** `C` cloned over ssh, and the machine's key is not registered
+with Azure DevOps, so ssh fell back to a *password prompt on /dev/tty* — the
+terminal the TUI owns — and git waited for ever. `local.rs` now runs every
+remote git command with prompts off (`GIT_TERMINAL_PROMPT=0`, `ssh -o
+BatchMode=yes -o ConnectTimeout=20`, stdin closed), a 30-second stall timeout
+(`http.lowSpeedLimit/Time`), and — the part that makes it *work* rather than
+merely fail fast — signs an Azure DevOps https remote with the same
+`authorization_header()` the sync uses, plus `X-VSS-ForceMsaPassThrough: true`,
+which git needs for an MSA-backed org exactly as the REST calls do. The header
+is scoped to the host (`http.https://dev.azure.com.extraheader`) and passed as
+`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` so it is never offered to GitHub and
+never shows in `ps`. https is the default clone URL now;
+`TICKET_TUI_CLONE_PROTOCOL=ssh` asks for ssh. Fetch and pull of a clone whose
+origin is an Azure DevOps https remote are signed the same way.
+
+**The hover.** Not reproduced: driving the release binary under a pty with
+Ghostty-style SGR motion (`ESC [ < 35 ; x ; y M`) hovers rows (the
+`Indexed(237)` tint from #642) and never moves the selection, and grok-night's
+palette makes the selection (`#6c6c6c`) brighter than the tint. One real defect
+was found on the way and fixed: a click on the tab bar recorded its press on
+the screen but the release was swallowed by `App::handle_mouse`, so the pointer
+believed the button was still down and every later move read as a drag. If
+the report stands after that, the next thing to capture is the raw byte stream
+Ghostty sends while hovering.
+
+**Everything else the pass found**, each with a test:
+
+- The Repos tab was empty until the first pull (`App::relate_repos` now runs at
+  start-up too).
+- `?`, `p`/`:`, `c` and `i` did nothing on tabs 2–4 while their footers said
+  `? help`: the four shared overlays now open on every tab, drawn and driven
+  by the work items screen on the other tab's behalf (`App::overlay_for`,
+  `AppAction::RunCommand`); the palette lists that tab's commands and the
+  columns editor edits that tab's layout.
+- The Pull requests and Pipelines verbs were raw keys with no command behind
+  them, so the help listed none of them and the `[Approve]`… and
+  `[Cancel] [Retry]` buttons had no click regions. They are scoped commands
+  now (`CommandId::ApprovePr`… `WatchRun`), and the buttons are the keys.
+- The Repos, Pull request and run details panes placed their click targets by
+  line index while wrapping long lines, so once a URL or title wrapped every
+  target under it was off by a row or more (`ui::widgets::wrapped_rows`). The
+  Repos and Pull request panes scroll now, with a `Details` scroll region.
+- A timer pull replaced the pull request and run lists and kept only the row
+  *number*, so the hand moved to a different row when something new arrived;
+  the watcher's `merge_live_runs` did the same. Both keep the selection by id,
+  and `set_pipelines` keeps what the watcher already saw (a run newer than the
+  pull's window, or one it has already seen finish).
+- A jump to a pull request, pipeline, run or repository the tab's query hid
+  said "not in this database"; the query is cleared instead.
+- `Enter` on the runs level re-opened the runs and reset the cursor; `R`
+  retried runs that had succeeded; `W` on a finished run produced an instant
+  "finished" toast rather than a refusal.
+- A pull request was only re-read when its head or reviewers moved, so the
+  Build column never left `queued`; one whose policy build is undecided is
+  read again (`sync::build_undecided`).
+- `runs trigger --follow` failed at once ("has written no log yet") because a
+  just-queued run has no timeline, and `--follow` stopped when the first node
+  finished; it waits, and follows the run node by node to the end.
+- `runs trigger` sent `refs/heads/refs/heads/<branch>` (`start_run` takes
+  either spelling now); `prs vote` by a non-reviewer left the stored copy
+  without the vote.
+- The help popup wrapped its longest rows; the empty table said "No tickets
+  in this database" when all 100 were merely finished and hidden.
