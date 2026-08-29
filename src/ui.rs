@@ -11,8 +11,9 @@ use ratatui::widgets::{
 use time::OffsetDateTime;
 
 use crate::app::{
-    App, AppMode, ChildProgress, DividerOrientation, Focus, HitRegions, NotificationLevel,
-    PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PromptField, RowDensity, SearchOrder, UNASSIGNED_LABEL,
+    App, AppMode, ChildProgress, DividerOrientation, Focus, FormOverlay, HitRegions,
+    NotificationLevel, PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PromptField, RowDensity, SearchOrder,
+    UNASSIGNED_LABEL,
 };
 use crate::command::{COMMANDS, EDIT_MENU, key_label_for};
 use crate::filter::{FacetTarget, FilterField};
@@ -210,6 +211,8 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::Prompt => render_prompt(frame, app),
         AppMode::AssigneePicker => render_assignee_picker(frame, app),
         AppMode::NodePicker => render_node_picker(frame, app),
+        AppMode::Form => render_form(frame, app),
+        AppMode::TypePicker => render_type_picker(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
 }
@@ -1028,6 +1031,8 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             AppMode::NodePicker => {
                 "Type to filter  \u{2191}\u{2193} select  Enter move  Esc cancel"
             }
+            AppMode::TypePicker => "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel",
+            AppMode::Form => "\u{2191}\u{2193}/Tab fields  Enter picker  Ctrl-S create  Esc cancel",
             AppMode::Browse if app.focus == Focus::Family => "↑↓ move  Enter select  Tab details",
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
@@ -1887,7 +1892,10 @@ fn render_assignee_picker(frame: &mut Frame<'_>, app: &mut App) {
     let width = overlay_width(app.overlay_anchor, &rows, 52, frame.area());
     let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
     frame.render_widget(Clear, area);
-    let title = format!(" Assignee \u{b7} {} ", app.assignee_picker.scope.label());
+    let title = format!(
+        " Assignee \u{b7} {} ",
+        app.scope_label(app.assignee_picker.scope)
+    );
     let inner = render_modal_frame(frame, app, area, &title);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
     let query_area = chunks[0];
@@ -1978,7 +1986,7 @@ fn render_node_picker(frame: &mut Frame<'_>, app: &mut App) {
     let title = format!(
         " {} \u{b7} {} ",
         kind.label(),
-        app.node_picker.scope.label()
+        app.scope_label(app.node_picker.scope)
     );
     let inner = render_modal_frame(frame, app, area, &title);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
@@ -2099,6 +2107,201 @@ fn render_prompt(frame: &mut Frame<'_>, app: &mut App) {
         Rect::new(chunks[1].x.saturating_add(7), chunks[1].y, 8, 1),
         "[Cancel]",
         PointerTarget::CancelPrompt,
+        PointerLayer::Modal,
+        true,
+    );
+}
+
+/// How wide the label column of a form is, so every value lines up whatever
+/// the field is called.
+const FORM_LABEL_WIDTH: u16 = 11;
+
+/// The work item type picker: every type the project's process offers, with the
+/// one the form already names marked and under the cursor.
+fn render_type_picker(frame: &mut Frame<'_>, app: &mut App) {
+    let options = app.type_picker.options.clone();
+    let current = app.type_picker.current.clone();
+    let height = u16::try_from(options.len().saturating_add(2))
+        .unwrap_or(u16::MAX)
+        .clamp(3, 16);
+    let selected = app.type_picker.index;
+    let rows: Vec<Line> = options
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let marker = if index == selected { "\u{203a}" } else { " " };
+            let here = if *name == current { "\u{2022}" } else { " " };
+            Line::from(vec![
+                Span::raw(format!("{marker}{here} ")),
+                Span::styled(name.clone(), Style::default().fg(theme().text)),
+            ])
+        })
+        .collect();
+    let area = centered_rect(frame.area(), 36, height);
+    frame.render_widget(Clear, area);
+    let inner = render_modal_frame(frame, app, area, " Type ");
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: inner,
+            surface: ScrollSurface::TypePicker,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: true,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::TypeOption { index },
+            decorate: None,
+        },
+    );
+}
+
+/// A form: its fields down the left, their values beside them, and the two
+/// buttons underneath. Nothing here knows what the fields mean — the labels,
+/// the order, and which of them open pickers all come off the form itself — so
+/// every form in the app is drawn by this one function.
+fn render_form(frame: &mut Frame<'_>, app: &mut App) {
+    let Some((title, fields, selected)) = app.form.as_ref().map(|form| {
+        (
+            form.title.clone(),
+            form.fields.clone(),
+            form.index.min(form.fields.len().saturating_sub(1)),
+        )
+    }) else {
+        return;
+    };
+    let submittable = app.form.as_ref().is_some_and(FormOverlay::is_submittable);
+    let height = u16::try_from(fields.len().saturating_add(4))
+        .unwrap_or(u16::MAX)
+        .min(frame.area().height);
+    let area = centered_rect(frame.area(), 66, height);
+    frame.render_widget(Clear, area);
+    let inner = render_modal_frame(frame, app, area, &format!(" {title} "));
+    let chunks = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    let rows = chunks[0];
+    let viewport = usize::from(rows.height);
+    app.scroll_state_mut(ScrollSurface::Form)
+        .set_viewport(viewport, fields.len());
+    let scroll = app.scroll_state(ScrollSurface::Form).offset;
+    let value_x = rows.x.saturating_add(2).saturating_add(FORM_LABEL_WIDTH);
+    let value_width = rows
+        .width
+        .saturating_sub(value_x.saturating_sub(rows.x))
+        .saturating_sub(1);
+    let mut caret: Option<(u16, u16)> = None;
+    for (index, y) in (scroll..fields.len().min(scroll + viewport)).zip(rows.y..) {
+        let field = &fields[index];
+        let focused = index == selected;
+        let label = if field.required {
+            format!("{} *", field.label)
+        } else {
+            field.label.to_owned()
+        };
+        let value_style = if field.read_only {
+            Style::default().fg(theme().muted)
+        } else {
+            Style::default().fg(theme().text)
+        };
+        let value = if field.value().is_empty() {
+            Span::styled(
+                field.placeholder.to_owned(),
+                Style::default().fg(theme().muted),
+            )
+        } else {
+            Span::styled(field.value().to_owned(), value_style)
+        };
+        let mut spans = vec![
+            Span::raw(if focused { "\u{203a} " } else { "  " }),
+            Span::styled(
+                format!("{label:<width$}", width = usize::from(FORM_LABEL_WIDTH)),
+                Style::default().fg(theme().muted),
+            ),
+            value,
+        ];
+        if field.picker_kind().is_some() {
+            spans.push(Span::styled(
+                " \u{25be}",
+                Style::default().fg(theme().accent),
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(overlay_line(Line::from(spans), focused)),
+            Rect::new(rows.x, y, rows.width, 1),
+        );
+        let label_rect = Rect::new(rows.x, y, FORM_LABEL_WIDTH.saturating_add(2), 1);
+        let value_rect = Rect::new(value_x, y, value_width, 1);
+        for rect in [label_rect, value_rect] {
+            app.hit_regions.push(region(
+                rect,
+                PointerTarget::FormField { index },
+                PointerLayer::Modal,
+                Some(SelectableSurface::Overlay),
+                Some(ScrollSurface::Form),
+            ));
+        }
+        if focused && field.is_typed() {
+            caret = Some((
+                value_x
+                    .saturating_add(u16::try_from(field.input.cursor()).unwrap_or(u16::MAX))
+                    .min(value_x.saturating_add(value_width.saturating_sub(1))),
+                y,
+            ));
+        }
+    }
+    if fields.len() > viewport {
+        render_scrollbar(
+            frame,
+            app,
+            rows,
+            ScrollSurface::Form,
+            fields.len(),
+            scroll,
+            viewport,
+        );
+    }
+    if let Some(field) = fields.get(selected)
+        && field.is_typed()
+    {
+        capture_selectable(
+            frame,
+            app,
+            SelectableSurface::Overlay,
+            Rect::new(
+                value_x,
+                rows.y
+                    .saturating_add(u16::try_from(selected.saturating_sub(scroll)).unwrap_or(0)),
+                value_width,
+                1,
+            ),
+            false,
+        );
+    }
+    if let Some((x, y)) = caret {
+        frame.set_cursor_position((x, y));
+    }
+    let buttons = chunks[2];
+    render_control(
+        frame,
+        app,
+        Rect::new(buttons.x, buttons.y, 8, 1),
+        "[Create]",
+        PointerTarget::SubmitForm,
+        PointerLayer::Modal,
+        submittable,
+    );
+    render_control(
+        frame,
+        app,
+        Rect::new(buttons.x.saturating_add(9), buttons.y, 8, 1),
+        "[Cancel]",
+        PointerTarget::CancelForm,
         PointerLayer::Modal,
         true,
     );
@@ -3655,6 +3858,7 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+    use crate::app::FormFieldId;
     use crate::model::{
         CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateCatalog, StateOption,
         TicketGraph, TicketKey,
@@ -5098,6 +5302,105 @@ mod tests {
         click(&mut app, x, y);
         assert!(app.filter_overlay.showing_values);
         assert_eq!(app.filter_overlay.field_index, 2);
+    }
+
+    #[test]
+    fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
+        let mut app = App::new(vec![ticket_at(
+            10_001,
+            "Fix ticket search",
+            "Issue",
+            "To Do",
+            "2026-03-03T00:00:00Z",
+        )]);
+        app.enable_sync();
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Form);
+
+        let form = render_text(90, 24, &mut app);
+        assert!(form.contains("New work item"), "{form}");
+        for label in [
+            "Type *",
+            "Title *",
+            "Parent",
+            "Iteration",
+            "Assignee",
+            "Priority",
+            "Tags",
+        ] {
+            assert!(form.contains(label), "{label} is missing: {form}");
+        }
+        assert!(form.contains("Issue"), "the type defaults to Issue: {form}");
+        assert!(
+            form.contains("what needs doing"),
+            "an empty field says what it is for: {form}"
+        );
+        assert!(form.contains("[Create]"), "{form}");
+        assert!(form.contains("[Cancel]"), "{form}");
+        assert!(
+            form.contains("Ctrl-S create"),
+            "the footer explains the form: {form}"
+        );
+        // A form wider and taller than the terminal is clipped rather than a
+        // panic, the way every other overlay is.
+        render_text(34, 9, &mut app);
+        render_text(90, 24, &mut app);
+
+        let tags = app
+            .form
+            .as_ref()
+            .and_then(|form| form.index_of(FormFieldId::Tags))
+            .expect("the form has a Tags row");
+        let (x, y) = app
+            .hit_regions
+            .find_target(
+                |target| matches!(target, PointerTarget::FormField { index } if *index == tags),
+            )
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("every field is clickable");
+        click(&mut app, x, y);
+        assert_eq!(
+            app.form.as_ref().unwrap().focused().unwrap().id,
+            FormFieldId::Tags,
+            "clicking a row focuses it"
+        );
+
+        let iteration = app
+            .form
+            .as_ref()
+            .and_then(|form| form.index_of(FormFieldId::Iteration))
+            .expect("the form has an Iteration row");
+        let (x, y) = app
+            .hit_regions
+            .find_target(
+                |target| matches!(target, PointerTarget::FormField { index } if *index == iteration),
+            )
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("the Iteration row is clickable too");
+        click(&mut app, x, y);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let picker = render_text(90, 24, &mut app);
+        assert!(
+            picker.contains("Iteration \u{b7} New work item"),
+            "a picker a form opened says which form it is filling in: {picker}"
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            app.mode,
+            AppMode::Form,
+            "escaping the picker comes back to the form, not the table"
+        );
+        render_text(90, 24, &mut app);
+
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::CancelForm))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("the form offers a Cancel button");
+        click(&mut app, x, y);
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.form.is_none());
     }
 
     #[test]

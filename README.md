@@ -592,6 +592,96 @@ locally stays exactly where it was. The insert deliberately leaves `details_rev`
 alone, so the next lazy details fetch still reads the discussion and settles it
 against the server.
 
+## Creating work items
+
+New work starts in the terminal too. `n` opens the new work item form — the
+first multi-field overlay in the app — over whatever is on screen:
+
+```
+┌ New work item ────────────────────────────────────────────── [×] ┐
+│ › Type *      Issue                                            ▾ │
+│   Title *     Back off on throttling                             │
+│   Parent      none — a work item id                              │
+│   Iteration   development\Sprint 1                             ▾ │
+│   Assignee    Jacob Ragsdale                                   ▾ │
+│   Priority    2                                                  │
+│   Tags        sync; infra                                        │
+│                                                                  │
+│ [Create]  [Cancel]                                               │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+`↑`/`↓` and `Tab`/`Shift-Tab` move between fields, wrapping at both ends. Three
+of them are chosen from a list rather than typed — the `▾` says which — and
+`Enter` on one opens the same picker the Edit menu opens over a work item: the
+work item types the project's process offers, the iteration tree, and the
+assignee list, each writing its choice back into the field and returning to the
+form. `Enter` on a typed field moves on to the next one; submitting is
+deliberately not bound to it, so a stray `Enter` halfway down the form never
+files a half-typed work item. `Ctrl-S` or `[Create]` files it, `Esc` or
+`[Cancel]` closes it. Clicking a field focuses it and puts the caret where the
+click landed, and the two buttons are clickable.
+
+The defaults are the ones that are usually right. **Type** starts at `Issue`,
+the Basic process's everyday unit of work, and the picker lists the project's
+own types read from `GET /<project>/_apis/wit/workitemtypes` once a session and
+cached in `work_item_types` for the next run — less the ones the process has
+disabled and the ones it keeps in its hidden category, which are the code review
+and feedback requests nobody files by hand. Before that fetch lands the picker
+offers every type the database already holds a work item of, so the form never
+waits for the network. **Iteration** starts where the selected work item sits,
+falling back to the sprint the project is in, because new work almost always
+joins the work beside it. **Parent** is a work item id, left empty for work that
+hangs under nothing.
+
+**Type** and **Title** are required; the rest are optional and are left off the
+document when empty. A refusal that can be made before the network is made
+before the network, with the cursor moved to the field at fault: `Title is
+required`, or `Priority must be a whole number, not "high"`. Tags are typed the
+way the Tags prompt takes them — semicolon separated — and normalised the same
+way.
+
+Submitting sends the fields as a JSON Patch document to
+`POST /<project>/_apis/wit/workitems/$<type>?$expand=relations`. A parent
+travels as a link rather than as a field:
+
+```json
+[
+  {"op": "add", "path": "/fields/System.Title", "value": "Back off on throttling"},
+  {"op": "add", "path": "/fields/Microsoft.VSTS.Common.Priority", "value": 2},
+  {"op": "add", "path": "/relations/-", "value": {
+    "rel": "System.LinkTypes.Hierarchy-Reverse",
+    "url": "https://dev.azure.com/<org>/_apis/wit/workItems/613"
+  }}
+]
+```
+
+Like a comment, this is not an optimistic write. A work item has no id,
+revision, or URL until Azure DevOps gives it one, so nothing appears in the
+table until the server answers: the status line reads `Creating Issue…` while it
+is out. When it lands the copy Azure DevOps stored joins the rows with the links
+it came back carrying — so the family tree shows it under its parent, and the
+parent's child progress counts it, at once — and the selection moves onto it.
+The status line reads `Created Issue #613`. The sync worker writes it to SQLite
+itself on the way through, so nothing is reloaded behind it.
+
+A row nobody could see is worth no filter, so a new work item the query on
+screen would hide clears that query and says so:
+`Created Issue #613 · search cleared so it is visible`. A search term counts as
+hiding it whatever it says, because the matching runs on the search thread and
+answers a frame or two later.
+
+A refusal writes nothing at all and reopens the form with everything still in
+it, so the reason can be answered where it was caused:
+`Work item not created: TF401320: rule error`. One create is in flight at a
+time; `n` while one is out says `A work item is already being created`.
+
+`Esc` keeps the draft. The form closes, the table comes back, and the next `n`
+brings the form back exactly as it was — every field and the cursor with them —
+so closing it to go and read something is not the same as retyping it. The draft
+lives in memory for the session only: the session file records how the table is
+arranged, not a half-typed work item, so it is gone at quit.
+
 ## Controls
 
 | Input | Action |
@@ -621,6 +711,7 @@ against the server.
 | `e` → Title/Priority/Tags/Iteration/Area | Edit the title, priority, tags, iteration, or area; also `Edit title`, `Edit priority`, `Edit tags`, `Change iteration`, `Change area`, and `Change assignee` in the palette |
 | `e` → Description | Edit the description in `$VISUAL`/`$EDITOR`/`vi` as Markdown; also `Edit description` in the palette |
 | `e` → Add comment | Leave a one-line comment on the selected work item; also `Add comment` in the palette |
+| `n` | Open the new work item form; `↑`/`↓` or `Tab` moves between fields, `Enter` opens a field's picker, `Ctrl-S` creates, `Esc` keeps the draft |
 | `u` | Undo the last edit, putting the value back; a bulk change goes back under one press |
 | `m` | Bookmark or unbookmark the selected ticket |
 | `Space` | Toggle ticket multi-select; two or more make `S`, `a`, and Iteration bulk edits |
@@ -834,7 +925,16 @@ the project's process rather than its work items, so a pull leaves it alone; a
 type is rewritten whole when its states are fetched, so a retired state stops
 being offered.
 
-The database carries `PRAGMA user_version = 11`. Because Azure DevOps is the
+The `work_item_types` table holds what the new work item form's Type field
+offers: `name`, the primary key, and `position`, the order the process listed
+the type in. It is filled the first time a form is opened in a run and read back
+at startup, so the next run's picker is complete before any network call, and it
+holds only the types worth filing by hand — the disabled and hidden ones are
+dropped on the way in. Like `sync_meta` it describes the project's process
+rather than its work items, so a pull leaves it alone; it is rewritten whole
+when the types are read, so a retired type stops being offered.
+
+The database carries `PRAGMA user_version = 12`. Because Azure DevOps is the
 record of truth, there are no migrations: a database at any other version has
 its tables dropped and recreated at startup, and a pull runs immediately to
 refill it, whatever `--refresh` says. Deleting the file has the same effect. The

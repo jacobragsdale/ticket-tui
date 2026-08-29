@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
+use serde_json::Value;
 
 use crate::agent_context::{
     AgentContext, PendingEditContext, SearchContext, SortContext, SyncContext, TicketContext,
@@ -65,6 +66,10 @@ pub enum AppMode {
     /// The iteration or area tree the selected work item can be moved into,
     /// filtered by typing. Which of the two is on [`NodePicker::kind`].
     NodePicker,
+    /// A multi-field form, such as the one `n` opens to file a new work item.
+    Form,
+    /// The work item types a form's Type field can name.
+    TypePicker,
 }
 
 /// Percentage of the workspace given to the tickets pane when the panes sit
@@ -122,6 +127,19 @@ pub enum AppAction {
     /// either picker first opens on a cache that is empty or stale; the picker
     /// does not wait on it.
     FetchClassificationNodes,
+    /// Read the work item types the project's process offers, for a form's
+    /// Type field. Asked for once a session, when the first form opens; the
+    /// form does not wait on it.
+    FetchWorkItemTypes,
+    /// Add one work item to the project. `patch` sets its fields and nothing
+    /// else — the parent travels as a link the client appends — and, like a
+    /// comment, nothing is shown until Azure DevOps has stored it: a work item
+    /// has no id, revision, or URL until the server gives it one.
+    Create {
+        work_item_type: String,
+        patch: Vec<Value>,
+        parent: Option<i64>,
+    },
     /// Leave one comment on one work item. Nothing appears on the work item
     /// until Azure DevOps has stored it, so this is the one write the table
     /// does not make optimistically.
@@ -263,6 +281,9 @@ pub enum EditScope {
     Ticket(i64),
     /// Every checked row, counted.
     Checked(usize),
+    /// One field of an open form, which is not a work item at all: the choice
+    /// is written back into the form and nothing is sent anywhere.
+    Form(FormFieldId),
 }
 
 impl Default for EditScope {
@@ -279,6 +300,7 @@ impl EditScope {
         match self {
             Self::Ticket(id) => format!("#{id}"),
             Self::Checked(count) => format!("{count} tickets"),
+            Self::Form(_) => "the form".to_owned(),
         }
     }
 
@@ -486,6 +508,269 @@ impl Default for NodePicker {
             scope: EditScope::default(),
         }
     }
+}
+
+/// Which form is open. A form Esc closed is kept under this, so `n` brings back
+/// what was typed and a form opened over a different work item never inherits
+/// somebody else's draft.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FormKind {
+    /// The new work item form `n` opens, hanging under nothing in particular.
+    NewWorkItem,
+}
+
+/// Which value one field of a form holds. A form is read back by these rather
+/// than by row number, so adding a field to one never moves what submit reads,
+/// and a picker knows where to write its answer.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum FormFieldId {
+    #[default]
+    Type,
+    Title,
+    Parent,
+    Iteration,
+    Assignee,
+    Priority,
+    Tags,
+}
+
+/// The picker one form field opens, which is the same picker the Edit menu
+/// opens over a work item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FormPicker {
+    WorkItemType,
+    Iteration,
+    Assignee,
+}
+
+/// How one field is filled in: typed into, or chosen from a list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FormFieldKind {
+    Text,
+    /// `Enter` opens the picker, which writes the choice back into the field.
+    Picker(FormPicker),
+}
+
+/// One field of a form: what it is called, how it is filled in, and what it
+/// holds. A picker's choice lands in the same [`TextInput`] typing would, so
+/// every field is read back the same way whatever filled it.
+#[derive(Clone, Debug)]
+pub struct FormField {
+    pub id: FormFieldId,
+    /// What the row is called, which is also what a refusal names.
+    pub label: &'static str,
+    pub kind: FormFieldKind,
+    /// Whether submitting the form without it is refused.
+    pub required: bool,
+    /// Whether whoever opened the form filled this in and it cannot be changed
+    /// here — the parent a child is being filed under.
+    pub read_only: bool,
+    pub input: TextInput,
+    /// What an empty field says, so a blank row still reads as a field.
+    pub placeholder: &'static str,
+}
+
+impl FormField {
+    #[must_use]
+    pub fn text(id: FormFieldId, label: &'static str) -> Self {
+        Self {
+            id,
+            label,
+            kind: FormFieldKind::Text,
+            required: false,
+            read_only: false,
+            input: TextInput::default(),
+            placeholder: "",
+        }
+    }
+
+    #[must_use]
+    pub fn picker(id: FormFieldId, label: &'static str, picker: FormPicker) -> Self {
+        Self {
+            kind: FormFieldKind::Picker(picker),
+            ..Self::text(id, label)
+        }
+    }
+
+    #[must_use]
+    pub fn required(self) -> Self {
+        Self {
+            required: true,
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub fn read_only(self) -> Self {
+        Self {
+            read_only: true,
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub fn with_value(mut self, value: impl Into<String>) -> Self {
+        self.input = TextInput::new(value);
+        self
+    }
+
+    #[must_use]
+    pub fn with_placeholder(self, placeholder: &'static str) -> Self {
+        Self {
+            placeholder,
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub fn value(&self) -> &str {
+        self.input.text()
+    }
+
+    /// Whether the field says nothing, which is what a required field is
+    /// refused for. Whitespace is nothing.
+    #[must_use]
+    pub fn is_blank(&self) -> bool {
+        self.value().trim().is_empty()
+    }
+
+    /// Whether typing goes into this field. A picker field is filled from its
+    /// list, and a read-only one by whoever opened the form.
+    #[must_use]
+    pub const fn is_typed(&self) -> bool {
+        matches!(self.kind, FormFieldKind::Text) && !self.read_only
+    }
+
+    /// The picker `Enter` opens on this field, if it opens one.
+    #[must_use]
+    pub const fn picker_kind(&self) -> Option<FormPicker> {
+        match self.kind {
+            FormFieldKind::Picker(picker) if !self.read_only => Some(picker),
+            _ => None,
+        }
+    }
+}
+
+/// A multi-field overlay: an ordered list of fields and a cursor over them, and
+/// nothing at all about what any of them mean. Which fields a form has, what
+/// its frame says, and what submitting it does all belong to whoever built it,
+/// so the next form in the app is a field list rather than a second widget.
+#[derive(Clone, Debug)]
+pub struct FormOverlay {
+    /// Which form this is, which is what a kept draft is filed under.
+    pub kind: FormKind,
+    /// What the frame says.
+    pub title: String,
+    pub fields: Vec<FormField>,
+    /// The field under the cursor.
+    pub index: usize,
+}
+
+impl FormOverlay {
+    #[must_use]
+    pub fn new(kind: FormKind, title: impl Into<String>, fields: Vec<FormField>) -> Self {
+        Self {
+            kind,
+            title: title.into(),
+            fields,
+            index: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn focused(&self) -> Option<&FormField> {
+        self.fields.get(self.index)
+    }
+
+    /// Moves the cursor a field at a time, wrapping at both ends: a form is a
+    /// ring, so a step past the last field comes back to the first rather than
+    /// stopping dead against it.
+    pub fn move_focus(&mut self, delta: isize) {
+        let count = isize::try_from(self.fields.len()).unwrap_or(isize::MAX);
+        if count == 0 {
+            return;
+        }
+        let index = isize::try_from(self.index).unwrap_or_default() + delta;
+        self.focus(usize::try_from(index.rem_euclid(count)).unwrap_or_default());
+    }
+
+    pub fn focus(&mut self, index: usize) {
+        self.index = index.min(self.fields.len().saturating_sub(1));
+    }
+
+    #[must_use]
+    pub fn field(&self, id: FormFieldId) -> Option<&FormField> {
+        self.fields.iter().find(|field| field.id == id)
+    }
+
+    #[must_use]
+    pub fn index_of(&self, id: FormFieldId) -> Option<usize> {
+        self.fields.iter().position(|field| field.id == id)
+    }
+
+    /// What one field holds, or nothing at all for a field this form does not
+    /// have: a form is read by name, so asking after a field it never had is an
+    /// empty answer rather than a panic.
+    #[must_use]
+    pub fn value(&self, id: FormFieldId) -> &str {
+        self.field(id).map_or("", FormField::value)
+    }
+
+    /// Writes one field, which is how a picker hands its choice back.
+    pub fn set_value(&mut self, id: FormFieldId, value: impl Into<String>) {
+        if let Some(field) = self.fields.iter_mut().find(|field| field.id == id) {
+            field.input = TextInput::new(value);
+        }
+    }
+
+    /// The first required field left empty, which is what a refused submit
+    /// names and moves the cursor to.
+    #[must_use]
+    pub fn first_blank_required(&self) -> Option<&FormField> {
+        self.fields
+            .iter()
+            .find(|field| field.required && field.is_blank())
+    }
+
+    /// Whether every required field says something, which is what leaves the
+    /// `[Create]` button lit rather than greyed.
+    #[must_use]
+    pub fn is_submittable(&self) -> bool {
+        self.first_blank_required().is_none()
+    }
+}
+
+/// The work item type picker: every type the project's process offers, built
+/// when it opens so it never waits for the network.
+#[derive(Clone, Debug, Default)]
+pub struct TypePicker {
+    pub options: Vec<String>,
+    pub index: usize,
+    pub scroll: ScrollState,
+    /// The type the form already names, which the picker marks.
+    pub current: String,
+    /// The form field the choice is written back into.
+    pub field: FormFieldId,
+}
+
+/// What a new work item is filed as unless the Type field says otherwise,
+/// which is what the Basic process calls its everyday unit of work.
+pub const DEFAULT_WORK_ITEM_TYPE: &str = "Issue";
+
+/// What one form field holding a whole number says, or a refusal naming it. An
+/// empty field is no number at all rather than a bad one: both the parent and
+/// the priority are optional.
+fn form_number(form: &FormOverlay, id: FormFieldId) -> Result<Option<i64>, String> {
+    let Some(field) = form.field(id) else {
+        return Ok(None);
+    };
+    let text = field.value().trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse::<i64>()
+        .map(Some)
+        .map_err(|_| format!("{} must be a whole number, not \"{text}\"", field.label))
 }
 
 /// Azure DevOps echoes display names back with inconsistent casing and spacing,
@@ -1066,6 +1351,21 @@ pub struct App {
     pub priority_picker: PriorityPicker,
     pub assignee_picker: AssigneePicker,
     pub node_picker: NodePicker,
+    pub type_picker: TypePicker,
+    /// The open multi-field form, if there is one.
+    pub form: Option<FormOverlay>,
+    /// How far the open form's field list is scrolled, kept beside every other
+    /// surface's offset rather than inside the widget.
+    pub form_scroll: ScrollState,
+    /// The last form `Esc` closed, kept whole so reopening it brings back every
+    /// field and the cursor with them. It lives in memory for the session only:
+    /// the session file records how the table is arranged, not a half-typed
+    /// work item.
+    form_draft: Option<FormOverlay>,
+    /// The form a create is out on. It is held rather than dropped so a refusal
+    /// can put it back with everything still in it, and it is what stops a
+    /// second create being sent on top of the first.
+    pending_create: Option<FormOverlay>,
     /// The open single-line field editor, if there is one.
     pub prompt: Option<TextPrompt>,
     /// Where the open picker or prompt is drawn: centred, as every
@@ -1156,6 +1456,13 @@ pub struct App {
     /// Whether the trees have been asked for this session, so opening either
     /// picker a second time costs nothing.
     classification_requested: bool,
+    /// The work item types the project's process offers, as the last fetch
+    /// cached them, read out of the database at startup. A form's Type field is
+    /// built from these.
+    work_item_types: Vec<String>,
+    /// Whether the types have been asked for this session, so opening a second
+    /// form costs nothing.
+    work_item_types_requested: bool,
 }
 
 /// Which editor a clicked details-pane field opens. Every one of them is a
@@ -1277,6 +1584,13 @@ impl App {
             undo_stack: Vec::new(),
             undo_groups: 0,
             pending_comments: HashSet::new(),
+            type_picker: TypePicker::default(),
+            form: None,
+            form_scroll: ScrollState::default(),
+            form_draft: None,
+            pending_create: None,
+            work_item_types: Vec::new(),
+            work_item_types_requested: false,
             offline_reason: None,
             sync_enabled: false,
             sync_source: None,
@@ -2406,6 +2720,11 @@ impl App {
                     prompt.input.paste(pasted, false);
                 }
             }
+            Some(TextEditor::Form) => {
+                if let Some(field) = self.focused_form_field_mut() {
+                    field.input.paste(pasted, false);
+                }
+            }
             Some(TextEditor::Assignee) => self.assignee_picker.query.paste(pasted, false),
             Some(TextEditor::Node) => self.node_picker.query.paste(pasted, false),
             None => {}
@@ -2457,6 +2776,7 @@ impl App {
             AppMode::Prompt => Some(TextEditor::Prompt),
             AppMode::AssigneePicker => Some(TextEditor::Assignee),
             AppMode::NodePicker => Some(TextEditor::Node),
+            AppMode::Form => Some(TextEditor::Form),
             _ => None,
         }
     }
@@ -2487,6 +2807,8 @@ impl App {
             ScrollSurface::PriorityPicker => self.priority_picker.scroll,
             ScrollSurface::AssigneePicker => self.assignee_picker.scroll,
             ScrollSurface::NodePicker => self.node_picker.scroll,
+            ScrollSurface::TypePicker => self.type_picker.scroll,
+            ScrollSurface::Form => self.form_scroll,
         }
     }
 
@@ -2509,6 +2831,8 @@ impl App {
             ScrollSurface::PriorityPicker => &mut self.priority_picker.scroll,
             ScrollSurface::AssigneePicker => &mut self.assignee_picker.scroll,
             ScrollSurface::NodePicker => &mut self.node_picker.scroll,
+            ScrollSurface::TypePicker => &mut self.type_picker.scroll,
+            ScrollSurface::Form => &mut self.form_scroll,
         }
     }
 
@@ -2613,6 +2937,8 @@ impl App {
             AppMode::Prompt => self.handle_prompt_key(key),
             AppMode::AssigneePicker => self.handle_assignee_picker_key(key),
             AppMode::NodePicker => self.handle_node_picker_key(key),
+            AppMode::Form => self.handle_form_key(key),
+            AppMode::TypePicker => self.handle_type_picker_key(key),
         }
     }
 
@@ -3078,6 +3404,16 @@ impl App {
             PointerTarget::NodeQuery => {
                 self.place_caret(TextEditor::Node, column, row);
             }
+            PointerTarget::FormField { index } => {
+                self.focus_form_field(index);
+                self.place_caret(TextEditor::Form, column, row);
+            }
+            PointerTarget::SubmitForm => return self.submit_form(),
+            PointerTarget::CancelForm => self.cancel_form(),
+            PointerTarget::TypeOption { index } => {
+                self.type_picker.index = index;
+                self.choose_work_item_type(index);
+            }
             PointerTarget::EditField { field } => return self.open_field_editor(field),
             PointerTarget::DismissOverlay => self.close_overlay(),
             PointerTarget::PromptInput => {
@@ -3158,6 +3494,10 @@ impl App {
                 self.views_overlay.naming = None;
             }
             AppMode::Prompt => self.close_prompt(),
+            AppMode::Form => self.cancel_form(),
+            AppMode::AssigneePicker => self.close_picker(self.assignee_picker.scope),
+            AppMode::NodePicker => self.close_picker(self.node_picker.scope),
+            AppMode::TypePicker => self.close_picker(EditScope::Form(self.type_picker.field)),
             AppMode::Facets => self.mode = AppMode::Browse,
             AppMode::Filter if self.filter_overlay.showing_values => {
                 self.filter_overlay.showing_values = false;
@@ -3184,7 +3524,8 @@ impl App {
                 | TextEditor::ViewName
                 | TextEditor::Prompt
                 | TextEditor::Assignee
-                | TextEditor::Node => SelectableSurface::Overlay,
+                | TextEditor::Node
+                | TextEditor::Form => SelectableSurface::Overlay,
             })
             .and_then(|snapshot| snapshot.pos_at(column, row))
             .or_else(|| {
@@ -3212,6 +3553,11 @@ impl App {
             }
             TextEditor::Assignee => self.assignee_picker.query.set_cursor(index),
             TextEditor::Node => self.node_picker.query.set_cursor(index),
+            TextEditor::Form => {
+                if let Some(field) = self.focused_form_field_mut() {
+                    field.input.set_cursor(index);
+                }
+            }
         }
     }
 
@@ -4028,6 +4374,15 @@ impl App {
             return AppAction::None;
         };
         let current = ticket.assigned_to.clone();
+        self.show_assignee_picker(current, scope)
+    }
+
+    /// The assignee picker itself, over whoever holds the work item now — or
+    /// over the name a form field carries — and whatever it was opened for.
+    /// Both the Edit menu and a form's Assignee field come through here, so
+    /// the list, its cursor, and the one fetch a session are the same either
+    /// way.
+    fn show_assignee_picker(&mut self, current: Option<String>, scope: EditScope) -> AppAction {
         let candidates = self.assignee_candidates();
         let index = candidates
             .iter()
@@ -4053,7 +4408,7 @@ impl App {
 
     fn handle_assignee_picker_key(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
-            KeyCode::Esc => self.mode = AppMode::Browse,
+            KeyCode::Esc => self.close_picker(self.assignee_picker.scope),
             KeyCode::Up => self.move_assignee_selection(-1),
             KeyCode::Down => self.move_assignee_selection(1),
             KeyCode::PageUp => self.move_assignee_selection(-5),
@@ -4098,10 +4453,22 @@ impl App {
     /// rows reassigns every one of them, so whoever holds the row under the
     /// cursor is a change to make to the rest rather than a no-op.
     fn choose_assignee(&mut self, index: usize) -> AppAction {
+        let scope = self.assignee_picker.scope;
         let Some(candidate) = self.assignee_matches().get(index).cloned() else {
-            self.mode = AppMode::Browse;
+            self.close_picker(scope);
             return AppAction::None;
         };
+        if let EditScope::Form(field) = scope {
+            // A form holds a name, not an edit, so `Unassigned` empties the
+            // field rather than writing a clear anywhere.
+            let name = if candidate.unassigned {
+                String::new()
+            } else {
+                candidate.display.clone()
+            };
+            self.fill_form_field(field, name);
+            return AppAction::None;
+        }
         self.mode = AppMode::Browse;
         if !self.assignee_picker.scope.is_bulk()
             && candidate.is_current(self.assignee_picker.current.as_deref())
@@ -4254,6 +4621,14 @@ impl App {
             NodeKind::Area => ticket.area_path.clone(),
             NodeKind::Iteration => ticket.iteration_path.clone(),
         };
+        self.show_node_picker(kind, current, scope)
+    }
+
+    /// The node picker itself, over the path the work item carries now — or the
+    /// one a form field carries — and whatever it was opened for. Both the Edit
+    /// menu and a form's Iteration field come through here, so the tree, its
+    /// cursor, and the once-a-session fetch behind it are the same either way.
+    fn show_node_picker(&mut self, kind: NodeKind, current: String, scope: EditScope) -> AppAction {
         let rows = self.node_rows(kind);
         let index = rows
             .iter()
@@ -4297,7 +4672,7 @@ impl App {
 
     fn handle_node_picker_key(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
-            KeyCode::Esc => self.mode = AppMode::Browse,
+            KeyCode::Esc => self.close_picker(self.node_picker.scope),
             KeyCode::Up => self.move_node_selection(-1),
             KeyCode::Down => self.move_node_selection(1),
             KeyCode::PageUp => self.move_node_selection(-5),
@@ -4342,10 +4717,15 @@ impl App {
     /// so the sprint the row under the cursor is in is a change to make to the
     /// rest rather than a no-op.
     fn choose_node(&mut self, index: usize) -> AppAction {
+        let scope = self.node_picker.scope;
         let Some(row) = self.node_matches().get(index).cloned() else {
-            self.mode = AppMode::Browse;
+            self.close_picker(scope);
             return AppAction::None;
         };
+        if let EditScope::Form(field) = scope {
+            self.fill_form_field(field, row.path);
+            return AppAction::None;
+        }
         self.mode = AppMode::Browse;
         if !self.node_picker.scope.is_bulk() && row.path == self.node_picker.current {
             return AppAction::None;
@@ -4510,6 +4890,492 @@ impl App {
     pub fn reject_comment(&mut self, key: &TicketKey, message: &str) {
         self.pending_comments.remove(key);
         self.set_error(format!("#{} comment not posted: {message}", key.id));
+    }
+
+    /// The work item types the project's process offers, as the database
+    /// cached them.
+    #[must_use]
+    pub fn work_item_types(&self) -> &[String] {
+        &self.work_item_types
+    }
+
+    /// The types read out of the database at startup, so the first form of a
+    /// run opens over the list the last one fetched.
+    pub fn set_work_item_types(&mut self, types: Vec<String>) {
+        self.work_item_types = types;
+    }
+
+    /// The types a fetch brought back. An empty answer changes nothing: the
+    /// endpoint could not be read, and the cached list is better than none. An
+    /// open picker is rebuilt around them, keeping the row under the cursor.
+    pub fn merge_work_item_types(&mut self, types: Vec<String>) {
+        if types.is_empty() {
+            return;
+        }
+        self.work_item_types = types;
+        if self.mode != AppMode::TypePicker {
+            return;
+        }
+        let focused = self
+            .type_picker
+            .options
+            .get(self.type_picker.index)
+            .cloned();
+        self.type_picker.options = self.work_item_type_options();
+        let index = focused
+            .and_then(|name| self.type_picker.options.iter().position(|it| *it == name))
+            .or_else(|| {
+                self.type_picker
+                    .options
+                    .iter()
+                    .position(|name| *name == self.type_picker.current)
+            })
+            .unwrap_or(self.type_picker.index)
+            .min(self.type_picker.options.len().saturating_sub(1));
+        self.focus_type(index);
+    }
+
+    /// The types a form's Type field offers: the cached process list when there
+    /// is one, and otherwise every type the rows already carry, which is enough
+    /// to file work alongside what is already there. The default is always
+    /// among them, so a form on an empty database still has something to file.
+    #[must_use]
+    fn work_item_type_options(&self) -> Vec<String> {
+        let mut options = self.work_item_types.clone();
+        if options.is_empty() {
+            for ticket in self.tickets.iter() {
+                if !options.contains(&ticket.work_item_type) {
+                    options.push(ticket.work_item_type.clone());
+                }
+            }
+            options.sort();
+        }
+        if !options.iter().any(|name| name == DEFAULT_WORK_ITEM_TYPE) {
+            options.insert(0, DEFAULT_WORK_ITEM_TYPE.to_owned());
+        }
+        options
+    }
+
+    /// Opens the new work item form: `n`. A draft `Esc` left behind comes back
+    /// exactly as it was, cursor and all, so a form closed to go and read
+    /// something is not a form retyped.
+    pub fn open_create_form(&mut self) -> AppAction {
+        if self.pending_create.is_some() {
+            self.set_error("A work item is already being created");
+            return AppAction::None;
+        }
+        let form = self.take_draft(FormKind::NewWorkItem).unwrap_or_else(|| {
+            FormOverlay::new(
+                FormKind::NewWorkItem,
+                "New work item",
+                self.create_form_fields(None),
+            )
+        });
+        self.open_form(form)
+    }
+
+    /// Shows one form and asks for whatever it needs that is not in memory yet.
+    /// Every form opens this way, so the placement, the cursor, and the single
+    /// types fetch a session are the same for all of them.
+    fn open_form(&mut self, form: FormOverlay) -> AppAction {
+        self.form = Some(form);
+        self.mode = AppMode::Form;
+        self.overlay_anchor = OverlayAnchor::Centered;
+        self.form_scroll.scroll_to(0);
+        if self.work_item_types_requested {
+            AppAction::None
+        } else {
+            self.work_item_types_requested = true;
+            AppAction::FetchWorkItemTypes
+        }
+    }
+
+    /// The draft kept for one form, if the last one cancelled was that form.
+    /// A draft of some other form is left where it is: what was typed about
+    /// one work item is no use in a form about another.
+    fn take_draft(&mut self, kind: FormKind) -> Option<FormOverlay> {
+        if self
+            .form_draft
+            .as_ref()
+            .is_some_and(|draft| draft.kind == kind)
+        {
+            self.form_draft.take()
+        } else {
+            None
+        }
+    }
+
+    /// The fields of the new work item form, in the order they are filled in.
+    /// The iteration starts where the selected work item sits, falling back to
+    /// the sprint the project is in, because new work almost always joins the
+    /// work beside it. `parent` is filled in by whoever opened the form.
+    #[must_use]
+    fn create_form_fields(&self, parent: Option<i64>) -> Vec<FormField> {
+        let iteration = self
+            .selected_ticket()
+            .map(|ticket| ticket.iteration_path.clone())
+            .or_else(|| self.current_iteration())
+            .unwrap_or_default();
+        let parent_field = FormField::text(FormFieldId::Parent, "Parent")
+            .with_placeholder("none — a work item id");
+        vec![
+            FormField::picker(FormFieldId::Type, "Type", FormPicker::WorkItemType)
+                .required()
+                .with_value(DEFAULT_WORK_ITEM_TYPE),
+            FormField::text(FormFieldId::Title, "Title")
+                .required()
+                .with_placeholder("what needs doing"),
+            match parent {
+                Some(id) => parent_field.with_value(id.to_string()).read_only(),
+                None => parent_field,
+            },
+            FormField::picker(FormFieldId::Iteration, "Iteration", FormPicker::Iteration)
+                .with_value(iteration)
+                .with_placeholder("the project root"),
+            FormField::picker(FormFieldId::Assignee, "Assignee", FormPicker::Assignee)
+                .with_placeholder("nobody"),
+            FormField::text(FormFieldId::Priority, "Priority").with_placeholder("unset — 1 to 4"),
+            FormField::text(FormFieldId::Tags, "Tags").with_placeholder("semicolon separated"),
+        ]
+    }
+
+    fn handle_form_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => self.cancel_form(),
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return self.submit_form();
+            }
+            KeyCode::Up | KeyCode::BackTab => self.move_form_focus(-1),
+            KeyCode::Down | KeyCode::Tab => self.move_form_focus(1),
+            KeyCode::Enter => return self.activate_form_field(),
+            // Everything else is typing, and a field filled from a picker or by
+            // whoever opened the form takes none of it.
+            _ => {
+                if let Some(field) = self.focused_form_field_mut()
+                    && field.is_typed()
+                {
+                    field.input.handle_key(key);
+                }
+            }
+        }
+        AppAction::None
+    }
+
+    fn focused_form_field_mut(&mut self) -> Option<&mut FormField> {
+        let form = self.form.as_mut()?;
+        form.fields.get_mut(form.index)
+    }
+
+    fn move_form_focus(&mut self, delta: isize) {
+        if let Some(form) = self.form.as_mut() {
+            form.move_focus(delta);
+            let index = form.index;
+            self.form_scroll.ensure_visible(index);
+        }
+    }
+
+    fn focus_form_field(&mut self, index: usize) {
+        if let Some(form) = self.form.as_mut() {
+            form.focus(index);
+            let index = form.index;
+            self.form_scroll.ensure_visible(index);
+        }
+    }
+
+    /// `Enter` on a field: a picker field opens its picker, and anything else
+    /// moves on to the next field. Submitting is deliberately not bound here —
+    /// `Ctrl-S` and `[Create]` do that — so a stray `Enter` halfway down a form
+    /// never files a half-typed work item.
+    fn activate_form_field(&mut self) -> AppAction {
+        let Some(field) = self.form.as_ref().and_then(FormOverlay::focused) else {
+            return AppAction::None;
+        };
+        let (id, picker, current) = (field.id, field.picker_kind(), field.value().to_owned());
+        match picker {
+            Some(FormPicker::WorkItemType) => {
+                self.open_type_picker(id, current);
+                AppAction::None
+            }
+            Some(FormPicker::Iteration) => {
+                let current = if current.is_empty() {
+                    self.current_iteration().unwrap_or_default()
+                } else {
+                    current
+                };
+                self.show_node_picker(NodeKind::Iteration, current, EditScope::Form(id))
+            }
+            Some(FormPicker::Assignee) => {
+                let current = (!current.trim().is_empty()).then_some(current);
+                self.show_assignee_picker(current, EditScope::Form(id))
+            }
+            None => {
+                self.move_form_focus(1);
+                AppAction::None
+            }
+        }
+    }
+
+    /// Writes a picker's choice back into the form that opened it and returns
+    /// to it, which is what every picker a form field opens does with its
+    /// answer.
+    fn fill_form_field(&mut self, id: FormFieldId, value: impl Into<String>) {
+        if let Some(form) = self.form.as_mut() {
+            form.set_value(id, value);
+            if let Some(index) = form.index_of(id) {
+                form.focus(index);
+            }
+        }
+        self.mode = if self.form.is_some() {
+            AppMode::Form
+        } else {
+            AppMode::Browse
+        };
+    }
+
+    /// Where a picker goes when it closes with nothing chosen: back to the form
+    /// that opened it, or to the table.
+    fn close_picker(&mut self, scope: EditScope) {
+        self.mode = if matches!(scope, EditScope::Form(_)) && self.form.is_some() {
+            AppMode::Form
+        } else {
+            AppMode::Browse
+        };
+    }
+
+    /// What a picker's frame says it is changing: the work item or the checked
+    /// rows, or the form that opened it.
+    #[must_use]
+    pub fn scope_label(&self, scope: EditScope) -> String {
+        match scope {
+            EditScope::Form(_) => self
+                .form
+                .as_ref()
+                .map_or_else(|| scope.label(), |form| form.title.clone()),
+            other => other.label(),
+        }
+    }
+
+    /// `Esc`: the form closes and everything typed into it is kept, so `n`
+    /// brings it back. The draft lives in memory for the session and is never
+    /// written to the session file.
+    fn cancel_form(&mut self) {
+        self.form_draft = self.form.take();
+        self.mode = AppMode::Browse;
+    }
+
+    /// Files the form: `Ctrl-S`, or `[Create]`. Everything that can be refused
+    /// before the network is refused here — a required field left empty, a
+    /// parent or a priority that is not a number — with the form left open on
+    /// the field at fault rather than a document of nonsense sent out.
+    fn submit_form(&mut self) -> AppAction {
+        let Some(form) = self.form.as_ref() else {
+            self.mode = AppMode::Browse;
+            return AppAction::None;
+        };
+        if let Some(missing) = form.first_blank_required() {
+            let (label, id) = (missing.label, missing.id);
+            let index = form.index_of(id).unwrap_or_default();
+            self.focus_form_field(index);
+            self.set_error(format!("{label} is required"));
+            return AppAction::None;
+        }
+        let parent = match form_number(form, FormFieldId::Parent) {
+            Ok(parent) => parent,
+            Err(message) => {
+                self.refuse_form(FormFieldId::Parent, message);
+                return AppAction::None;
+            }
+        };
+        let priority = match form_number(form, FormFieldId::Priority) {
+            Ok(priority) => priority,
+            Err(message) => {
+                self.refuse_form(FormFieldId::Priority, message);
+                return AppAction::None;
+            }
+        };
+        let work_item_type = form.value(FormFieldId::Type).trim().to_owned();
+        let mut edits = vec![FieldEdit::title(form.value(FormFieldId::Title).trim())];
+        let assignee = form.value(FormFieldId::Assignee).trim().to_owned();
+        if !assignee.is_empty() {
+            edits.push(self.assignee_edit(&assignee));
+        }
+        if let Some(priority) = priority {
+            edits.push(FieldEdit::priority(priority));
+        }
+        let iteration = form.value(FormFieldId::Iteration).trim().to_owned();
+        if !iteration.is_empty() {
+            edits.push(FieldEdit::iteration(&iteration));
+        }
+        let tags = normalize_tags(form.value(FormFieldId::Tags));
+        if !tags.is_empty() {
+            edits.push(FieldEdit::tags(&tags));
+        }
+        if !self.sync_enabled {
+            let reason = self
+                .offline_reason
+                .clone()
+                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned());
+            self.set_error(format!("Work item not created: {reason}"));
+            return AppAction::None;
+        }
+        let patch: Vec<Value> = edits.iter().flat_map(FieldEdit::patch).collect();
+        // The form is held rather than dropped: a refusal has to put it back
+        // with everything still in it.
+        self.pending_create = self.form.take();
+        self.mode = AppMode::Browse;
+        self.set_status(format!("Creating {work_item_type}\u{2026}"));
+        AppAction::Create {
+            work_item_type,
+            patch,
+            parent,
+        }
+    }
+
+    /// Refuses a submit and puts the cursor on the field that caused it, so the
+    /// message and the caret name the same thing.
+    fn refuse_form(&mut self, id: FormFieldId, message: String) {
+        if let Some(index) = self.form.as_ref().and_then(|form| form.index_of(id)) {
+            self.focus_form_field(index);
+        }
+        self.set_error(message);
+    }
+
+    /// Who a typed assignee names. A name the database already knows is written
+    /// by the address the assignee picker would have used, and anything else
+    /// goes out as it was typed for Azure DevOps to resolve — the same rule
+    /// `ticket-tui create --assignee` follows.
+    #[must_use]
+    fn assignee_edit(&self, name: &str) -> FieldEdit {
+        self.identities
+            .iter()
+            .find(|identity| {
+                same_name(&identity.display_name, name)
+                    || identity
+                        .unique_name
+                        .as_deref()
+                        .is_some_and(|unique| same_name(unique, name))
+            })
+            .map_or_else(
+                || FieldEdit::assignee(name, None),
+                |identity| {
+                    FieldEdit::assignee(&identity.display_name, identity.unique_name.as_deref())
+                },
+            )
+    }
+
+    /// Whether a work item is waiting to be created. The database watcher
+    /// stands down while one is, because the sync worker is writing that row
+    /// itself.
+    #[must_use]
+    pub fn creates_pending(&self) -> bool {
+        self.pending_create.is_some()
+    }
+
+    /// Files the work item Azure DevOps stored. Nothing was shown for it until
+    /// now — a work item has no id, revision, or URL until the server gives it
+    /// one — so this is where the row appears, with the links it came back
+    /// carrying, and the selection moves onto it. A row the current query would
+    /// hide is no use to anybody, so the query is cleared and the status line
+    /// says it was.
+    pub fn apply_created(&mut self, ticket: Ticket, relations: Vec<RelationRecord>) {
+        self.pending_create = None;
+        let key = ticket.key.clone();
+        let headline = format!("Created {} #{}", ticket.work_item_type, key.id);
+        let hidden = self.query_would_hide(&ticket);
+        let index = self.tickets.len();
+        Arc::make_mut(&mut self.tickets).push(ticket);
+        self.search.push_document(index, &self.tickets[index]);
+        self.graph.replace_relations_from(&key, relations);
+        self.refresh_child_progress();
+        if hidden {
+            self.set_query(String::new());
+        }
+        self.show_all(Some(&key));
+        self.details.scroll_to(0);
+        self.set_status(if hidden {
+            format!("{headline} \u{b7} search cleared so it is visible")
+        } else {
+            headline
+        });
+    }
+
+    /// Whether the query on screen would leave a work item off the table. A
+    /// search term counts as hiding it whatever it says: the matching runs on
+    /// the search thread and answers a frame or two later, and a new work item
+    /// nobody can see is worse than a query cleared a little eagerly.
+    #[must_use]
+    fn query_would_hide(&self, ticket: &Ticket) -> bool {
+        let parsed = self.parsed_query();
+        !parsed.fuzzy.trim().is_empty()
+            || !parsed
+                .filters
+                .matches(ticket, self.bookmarks.contains(&ticket.key))
+    }
+
+    /// A work item that was never created. The form comes back exactly as it
+    /// went out, so nothing typed is lost and the refusal can be answered where
+    /// it was caused.
+    pub fn reject_create(&mut self, message: &str) {
+        if let Some(form) = self.pending_create.take() {
+            self.form = Some(form);
+            self.mode = AppMode::Form;
+            self.overlay_anchor = OverlayAnchor::Centered;
+        }
+        self.set_error(format!("Work item not created: {message}"));
+    }
+
+    /// The work item type picker, over the type the form names now.
+    fn open_type_picker(&mut self, field: FormFieldId, current: String) {
+        let options = self.work_item_type_options();
+        let index = options
+            .iter()
+            .position(|name| *name == current)
+            .unwrap_or_default();
+        self.type_picker = TypePicker {
+            options,
+            index,
+            scroll: ScrollState::default(),
+            current,
+            field,
+        };
+        self.type_picker.scroll.ensure_visible(index);
+        self.mode = AppMode::TypePicker;
+    }
+
+    fn handle_type_picker_key(&mut self, key: KeyEvent) -> AppAction {
+        let last = self.type_picker.options.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc => self.close_picker(EditScope::Form(self.type_picker.field)),
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.focus_type(self.type_picker.index.saturating_sub(1));
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.focus_type((self.type_picker.index + 1).min(last));
+            }
+            KeyCode::PageUp => self.focus_type(self.type_picker.index.saturating_sub(5)),
+            KeyCode::PageDown => self.focus_type((self.type_picker.index + 5).min(last)),
+            KeyCode::Home => self.focus_type(0),
+            KeyCode::End => self.focus_type(last),
+            KeyCode::Enter => self.choose_work_item_type(self.type_picker.index),
+            _ => {}
+        }
+        AppAction::None
+    }
+
+    fn focus_type(&mut self, index: usize) {
+        self.type_picker.index = index;
+        self.type_picker.scroll.ensure_visible(index);
+    }
+
+    /// Confirms one type, which writes it back into the form field that opened
+    /// the picker. Nothing is sent anywhere: a form is not a work item yet.
+    fn choose_work_item_type(&mut self, index: usize) {
+        let field = self.type_picker.field;
+        let Some(name) = self.type_picker.options.get(index).cloned() else {
+            self.close_picker(EditScope::Form(field));
+            return;
+        };
+        self.fill_form_field(field, name);
     }
 
     fn handle_filter_key(&mut self, key: KeyEvent) {
@@ -4720,6 +5586,7 @@ impl App {
                 self.open_prompt(PromptField::Comment);
                 AppAction::None
             }
+            CommandId::NewWorkItem => self.open_create_form(),
             CommandId::SaveView => {
                 self.open_views();
                 self.views_overlay.naming =
@@ -5148,6 +6015,8 @@ const fn mode_name(mode: AppMode) -> &'static str {
         AppMode::Prompt => "prompt",
         AppMode::AssigneePicker => "assignee-picker",
         AppMode::NodePicker => "node-picker",
+        AppMode::Form => "form",
+        AppMode::TypePicker => "type-picker",
     }
 }
 
@@ -5241,6 +6110,404 @@ mod tests {
             assert!(Instant::now() < deadline, "search worker timed out");
             thread::yield_now();
         }
+    }
+
+    /// Types one line into the focused form field.
+    fn type_text(app: &mut App, text: &str) {
+        for character in text.chars() {
+            press(app, KeyCode::Char(character));
+        }
+    }
+
+    /// Moves the form cursor onto one field by name.
+    fn focus_field(app: &mut App, id: FormFieldId) {
+        let index = app
+            .form
+            .as_ref()
+            .and_then(|form| form.index_of(id))
+            .expect("the form has that field");
+        app.focus_form_field(index);
+    }
+
+    /// An app that can write, with one work item to hang new work under.
+    fn creating_app() -> App {
+        let mut app = App::new(vec![ticket(10, "Sync timer", "2026-01-01T00:00:00Z")]);
+        app.enable_sync();
+        app
+    }
+
+    /// A work item as Azure DevOps hands one back from a create: an id, a
+    /// revision, and a URL only the server could have given it.
+    fn created(id: i64, work_item_type: &str, title: &str) -> Ticket {
+        Ticket {
+            work_item_type: work_item_type.into(),
+            title: title.into(),
+            state: "To Do".into(),
+            assigned_to: None,
+            priority: None,
+            ..ticket(id, title, "2026-08-29T12:00:00Z")
+        }
+    }
+
+    #[test]
+    fn walking_a_form_moves_a_field_at_a_time_and_wraps_at_both_ends() {
+        let mut app = creating_app();
+        press(&mut app, KeyCode::Char('n'));
+
+        assert_eq!(app.mode, AppMode::Form);
+        let fields = app.form.as_ref().expect("the form is open").fields.len();
+        assert_eq!(
+            fields, 7,
+            "type, title, parent, iteration, assignee, priority, tags"
+        );
+        assert_eq!(app.form.as_ref().unwrap().index, 0);
+
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.form.as_ref().unwrap().index, 1, "down moves on");
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.form.as_ref().unwrap().index, 2, "tab moves on too");
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.form.as_ref().unwrap().index, 1, "shift-tab moves back");
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.form.as_ref().unwrap().index, 0);
+
+        press(&mut app, KeyCode::Up);
+        assert_eq!(
+            app.form.as_ref().unwrap().index,
+            fields - 1,
+            "up from the first field wraps to the last"
+        );
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            app.form.as_ref().unwrap().index,
+            0,
+            "and down from the last comes back to the first"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_picker_field_opens_that_picker_and_the_choice_lands_in_the_form() {
+        let mut app = creating_app();
+        app.set_work_item_types(vec!["Epic".into(), "Issue".into(), "Task".into()]);
+        app.set_identities(vec![Identity::new(
+            "Avery Chen",
+            Some("avery@example.com".into()),
+        )]);
+        app.set_classification_nodes(
+            vec![ClassificationNode {
+                kind: NodeKind::Iteration,
+                path: "Atlas\\Sprint 2".into(),
+                depth: 1,
+                start_date: None,
+                finish_date: None,
+            }],
+            Some(Timestamp::now()),
+        );
+        press(&mut app, KeyCode::Char('n'));
+
+        focus_field(&mut app, FormFieldId::Type);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, AppMode::TypePicker);
+        assert_eq!(app.type_picker.options, ["Epic", "Issue", "Task"]);
+        press(&mut app, KeyCode::Home);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, AppMode::Form, "the picker hands back to the form");
+        assert_eq!(app.form.as_ref().unwrap().value(FormFieldId::Type), "Epic");
+
+        focus_field(&mut app, FormFieldId::Iteration);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, AppMode::NodePicker);
+        assert_eq!(
+            app.node_picker.scope,
+            EditScope::Form(FormFieldId::Iteration),
+            "the picker knows which field it is filling in"
+        );
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, AppMode::Form);
+        assert_eq!(
+            app.form.as_ref().unwrap().value(FormFieldId::Iteration),
+            "Atlas\\Sprint 2"
+        );
+
+        focus_field(&mut app, FormFieldId::Assignee);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, AppMode::AssigneePicker);
+        let row = app
+            .assignee_matches()
+            .iter()
+            .position(|candidate| candidate.display == "Avery Chen")
+            .expect("the picker offers the person the project knows");
+        app.choose_assignee(row);
+        assert_eq!(app.mode, AppMode::Form);
+        assert_eq!(
+            app.form.as_ref().unwrap().value(FormFieldId::Assignee),
+            "Avery Chen"
+        );
+
+        focus_field(&mut app, FormFieldId::Title);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            app.mode,
+            AppMode::Form,
+            "enter on a typed field moves on rather than filing the form"
+        );
+    }
+
+    #[test]
+    fn escaping_a_picker_a_form_opened_goes_back_to_the_form_rather_than_the_table() {
+        let mut app = creating_app();
+        press(&mut app, KeyCode::Char('n'));
+        focus_field(&mut app, FormFieldId::Iteration);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, AppMode::NodePicker);
+
+        press(&mut app, KeyCode::Esc);
+
+        assert_eq!(app.mode, AppMode::Form);
+        assert!(app.form.is_some(), "the form is still open behind it");
+    }
+
+    #[test]
+    fn submitting_a_form_sends_the_fields_it_holds_and_the_parent_as_a_link() {
+        let mut app = creating_app();
+        app.set_identities(vec![Identity::new(
+            "Avery Chen",
+            Some("avery@example.com".into()),
+        )]);
+        press(&mut app, KeyCode::Char('n'));
+
+        focus_field(&mut app, FormFieldId::Title);
+        type_text(&mut app, "Back off on throttling");
+        focus_field(&mut app, FormFieldId::Parent);
+        type_text(&mut app, "10");
+        focus_field(&mut app, FormFieldId::Assignee);
+        app.form
+            .as_mut()
+            .unwrap()
+            .set_value(FormFieldId::Assignee, "Avery Chen");
+        focus_field(&mut app, FormFieldId::Priority);
+        type_text(&mut app, "2");
+        focus_field(&mut app, FormFieldId::Tags);
+        type_text(&mut app, "sync;  infra");
+
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        let AppAction::Create {
+            work_item_type,
+            patch,
+            parent,
+        } = action
+        else {
+            panic!("Ctrl-S files the form");
+        };
+        assert_eq!(work_item_type, "Issue", "the default type is filed as is");
+        assert_eq!(parent, Some(10));
+        assert_eq!(
+            patch,
+            vec![
+                crate::edit::set_field(crate::edit::TITLE_FIELD, "Back off on throttling"),
+                crate::edit::set_field(crate::edit::ASSIGNED_TO_FIELD, "avery@example.com"),
+                crate::edit::set_field(crate::edit::PRIORITY_FIELD, 2),
+                crate::edit::set_field(crate::edit::ITERATION_PATH_FIELD, "Atlas\\Sprint 1"),
+                crate::edit::set_field(crate::edit::TAGS_FIELD, "sync; infra"),
+            ],
+            "the fields travel in the order the form holds them, and only the ones filled in"
+        );
+
+        let config = crate::azure::AzureConfig {
+            organization: "demo".into(),
+            project: "atlas".into(),
+            scope: None,
+        };
+        let document = crate::azure::create_document(&patch, parent, &config);
+        assert_eq!(&document[..patch.len()], &patch[..], "the fields lead");
+        assert_eq!(
+            document[patch.len()],
+            serde_json::json!({
+                "op": "add",
+                "path": "/relations/-",
+                "value": {
+                    "rel": "System.LinkTypes.Hierarchy-Reverse",
+                    "url": "https://dev.azure.com/demo/_apis/wit/workItems/10",
+                },
+            }),
+            "the parent travels as a link rather than as a field"
+        );
+        assert!(app.creates_pending(), "the form is held until it answers");
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Creating Issue\u{2026}")
+        );
+    }
+
+    #[test]
+    fn a_form_missing_a_required_field_or_holding_nonsense_refuses_to_be_sent() {
+        let mut app = creating_app();
+        press(&mut app, KeyCode::Char('n'));
+
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(action, AppAction::None, "nothing goes out without a title");
+        assert_eq!(app.mode, AppMode::Form, "the form stays open on it");
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Title is required")
+        );
+        assert_eq!(
+            app.form.as_ref().unwrap().focused().unwrap().id,
+            FormFieldId::Title,
+            "the cursor lands on the field the refusal names"
+        );
+
+        focus_field(&mut app, FormFieldId::Title);
+        type_text(&mut app, "Something to do");
+        app.form
+            .as_mut()
+            .unwrap()
+            .set_value(FormFieldId::Type, "   ");
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(action, AppAction::None);
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Type is required")
+        );
+
+        app.form
+            .as_mut()
+            .unwrap()
+            .set_value(FormFieldId::Type, "Issue");
+        focus_field(&mut app, FormFieldId::Priority);
+        type_text(&mut app, "high");
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(action, AppAction::None, "garbage is refused, not sent");
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Priority must be a whole number, not \"high\"")
+        );
+        assert!(!app.creates_pending());
+    }
+
+    #[test]
+    fn escape_keeps_the_draft_and_opening_the_form_again_brings_it_back() {
+        let mut app = creating_app();
+        press(&mut app, KeyCode::Char('n'));
+        focus_field(&mut app, FormFieldId::Title);
+        type_text(&mut app, "Half a thought");
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(app.form.is_none(), "the form is closed");
+
+        press(&mut app, KeyCode::Char('n'));
+
+        assert_eq!(app.mode, AppMode::Form);
+        let form = app.form.as_ref().expect("the draft came back");
+        assert_eq!(form.value(FormFieldId::Title), "Half a thought");
+        assert_eq!(
+            form.focused().unwrap().id,
+            FormFieldId::Title,
+            "and the cursor came back with it"
+        );
+    }
+
+    #[test]
+    fn a_created_work_item_joins_the_rows_with_its_family_and_the_selection_follows_it() {
+        let mut app = creating_app();
+        let parent = app.tickets()[0].key.clone();
+        press(&mut app, KeyCode::Char('n'));
+        app.form
+            .as_mut()
+            .unwrap()
+            .set_value(FormFieldId::Title, "Honour Retry-After");
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        let child = created(42, "Issue", "Honour Retry-After");
+        let key = child.key.clone();
+        app.apply_created(
+            child,
+            vec![RelationRecord {
+                from: key.clone(),
+                to: parent.clone(),
+                kind: RelationKind::Parent,
+            }],
+        );
+
+        assert!(!app.creates_pending(), "the create has answered");
+        assert_eq!(app.tickets().len(), 2, "the new row joined the table");
+        assert_eq!(
+            app.selected_ticket().map(|ticket| ticket.key.id),
+            Some(42),
+            "and the selection moved onto it"
+        );
+        assert_eq!(
+            app.family_of(&key).ancestors,
+            vec![parent.clone()],
+            "the child knows its parent"
+        );
+        assert_eq!(
+            app.family_of(&parent).children,
+            vec![key],
+            "and the parent knows its child"
+        );
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Created Issue #42")
+        );
+    }
+
+    #[test]
+    fn a_created_work_item_the_query_would_hide_clears_it_and_says_so() {
+        let mut app = creating_app();
+        app.set_query("type:Task".into());
+        assert_eq!(app.visible_count(), 1);
+
+        app.apply_created(created(42, "Issue", "Honour Retry-After"), Vec::new());
+
+        assert_eq!(app.query(), "", "a row nobody could see is worth no filter");
+        assert_eq!(app.visible_count(), 2);
+        assert_eq!(app.selected_ticket().map(|ticket| ticket.key.id), Some(42));
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Created Issue #42 \u{b7} search cleared so it is visible")
+        );
+    }
+
+    #[test]
+    fn a_created_work_item_the_query_already_admits_leaves_it_alone() {
+        let mut app = creating_app();
+        app.set_query("type:Issue".into());
+
+        app.apply_created(created(42, "Issue", "Honour Retry-After"), Vec::new());
+
+        assert_eq!(app.query(), "type:Issue", "the filter still holds");
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Created Issue #42")
+        );
+    }
+
+    #[test]
+    fn a_refused_create_reopens_the_form_with_everything_still_in_it() {
+        let mut app = creating_app();
+        press(&mut app, KeyCode::Char('n'));
+        focus_field(&mut app, FormFieldId::Title);
+        type_text(&mut app, "Honour Retry-After");
+        focus_field(&mut app, FormFieldId::Tags);
+        type_text(&mut app, "sync");
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(app.form.is_none(), "the form is out with the request");
+
+        app.reject_create("the work item type Issue is not in this project");
+
+        assert_eq!(app.mode, AppMode::Form, "the form comes straight back");
+        let form = app.form.as_ref().expect("with the draft in it");
+        assert_eq!(form.value(FormFieldId::Title), "Honour Retry-After");
+        assert_eq!(form.value(FormFieldId::Tags), "sync");
+        assert!(!app.creates_pending(), "nothing is in flight any more");
+        assert_eq!(
+            app.notification().map(|(message, _)| message),
+            Some("Work item not created: the work item type Issue is not in this project")
+        );
+        assert_eq!(app.tickets().len(), 1, "and no row was ever shown for it");
     }
 
     #[test]
