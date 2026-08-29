@@ -154,8 +154,9 @@ fn c_clones_what_is_not_here_and_refuses_what_is() {
         action,
         crate::app::AppAction::LocalGit(LocalRequest::Clone {
             repo_id: "ccc-333".to_owned(),
-            // ssh by default, which is what a clone by hand would use.
-            url: "git@ssh.dev.azure.com:v3/demo/atlas/home-server".to_owned(),
+            // https by default: the local thread signs it with the sync's
+            // login, so it works before any SSH key is set up.
+            url: "https://dev.azure.com/demo/atlas/_git/home-server".to_owned(),
             into: "/Users/jacob/Development/home-server".into(),
         })
     );

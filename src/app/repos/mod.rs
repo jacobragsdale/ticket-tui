@@ -469,16 +469,17 @@ fn repo_context(row: &RepoRow) -> crate::agent_context::RepoContext {
     }
 }
 
-/// What a clone reads from: ssh by default, because that is what a developer
-/// with an SSH key set up wants, and https when `TICKET_TUI_CLONE_PROTOCOL`
-/// says so or there is no ssh URL on file.
+/// What a clone reads from: https by default, because the local thread signs
+/// that with the login the sync already has, so it works before any SSH key
+/// is registered with Azure DevOps; ssh when `TICKET_TUI_CLONE_PROTOCOL=ssh`
+/// asks for it or there is no https URL on file.
 fn clone_url(repo: &Repo) -> Option<String> {
-    let https = std::env::var("TICKET_TUI_CLONE_PROTOCOL")
-        .is_ok_and(|protocol| protocol.eq_ignore_ascii_case("https"));
-    let (first, second) = if https {
-        (&repo.remote_url, &repo.ssh_url)
-    } else {
+    let ssh = std::env::var("TICKET_TUI_CLONE_PROTOCOL")
+        .is_ok_and(|protocol| protocol.eq_ignore_ascii_case("ssh"));
+    let (first, second) = if ssh {
         (&repo.ssh_url, &repo.remote_url)
+    } else {
+        (&repo.remote_url, &repo.ssh_url)
     };
     [first, second]
         .into_iter()

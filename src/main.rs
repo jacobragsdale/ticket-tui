@@ -342,7 +342,9 @@ fn run() -> Result<()> {
     app.pipelines.set_pipelines(pipelines, runs, shell);
     let pull_requests = repository.load_pull_requests()?;
     let shell = &app.shell;
-    app.pull_requests.set_pull_requests(pull_requests, shell);
+    app.pull_requests
+        .set_pull_requests(pull_requests.clone(), shell);
+    app.relate_repos(&pull_requests);
     app.work_items.set_identities(repository.load_identities()?);
     app.work_items
         .set_work_item_types(repository.load_work_item_types()?);

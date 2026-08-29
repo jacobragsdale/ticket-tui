@@ -238,3 +238,31 @@ fn following_several_work_items_at_once_filters_the_table_to_them() {
         "exactly the two the jump named"
     );
 }
+
+#[test]
+fn a_click_on_the_tab_bar_releases_the_press_it_started_with() {
+    let mut app = App::new(vec![ticket()]);
+    let text = render_text(120, 30, &mut app);
+    let bar = text.lines().next().expect("a tab bar row");
+    let x = u16::try_from(bar.find("2 Repos").unwrap()).unwrap();
+    click(&mut app, x, 0);
+    assert_eq!(app.tab, TabId::Repos, "the click switched tabs");
+    assert!(
+        !app.shell.pointer.is_pressed(),
+        "the release that switched tabs also ended the press: nothing is being dragged"
+    );
+    // Back on the work items, moving the mouse is a hover, not a drag that
+    // paints a text selection behind the pointer.
+    press(&mut app, KeyCode::Char('1'));
+    render_text(120, 30, &mut app);
+    app.handle_mouse(mouse(MouseEventKind::Moved, 30, 9));
+    app.handle_mouse(mouse(MouseEventKind::Moved, 30, 12));
+    assert!(
+        app.shell.selection().is_none(),
+        "no text selection follows a hover"
+    );
+    assert!(matches!(
+        app.shell.pointer.drag(),
+        crate::pointer::DragKind::None
+    ));
+}

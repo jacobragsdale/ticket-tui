@@ -1875,8 +1875,9 @@ fn read_json(mut response: ureq::http::Response<ureq::Body>, url: &str) -> Resul
 }
 
 /// Prefer a personal access token from `AZURE_DEVOPS_EXT_PAT`, otherwise
-/// borrow the Azure CLI's login.
-fn authorization_header() -> Result<String> {
+/// borrow the Azure CLI's login. The same header signs the Repos tab's git
+/// commands, so a clone needs nothing set up that the sync did not.
+pub fn authorization_header() -> Result<String> {
     if let Ok(pat) = std::env::var("AZURE_DEVOPS_EXT_PAT")
         && !pat.trim().is_empty()
     {

@@ -7,13 +7,18 @@
 //! behind your back: a status read is `git status`, nothing more.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use anyhow::{Context, Result};
 
 use crate::model::{GitJob, LocalRepo};
+
+/// How long a transfer may crawl below 1 KB/s before git gives up on it. The
+/// TUI has no way to interrupt a git command, so one that stalls has to end
+/// itself.
+const STALL_SECONDS: &str = "30";
 
 /// What the scan matches a directory against: the repository, the
 /// `org/project/name` its remote normalises to, and what it is called.
@@ -124,12 +129,12 @@ fn work(requests: &Receiver<LocalRequest>, events: &Sender<LocalEvent>) {
             }
             LocalRequest::Fetch { repo_id, path } => {
                 run_job(events, &repo_id, GitJob::Fetching, || {
-                    git(&path, &["fetch", "--prune"]).map(|_| "Fetched".to_owned())
+                    remote_git(&path, &["fetch", "--prune"]).map(|_| "Fetched".to_owned())
                 })
             }
             LocalRequest::Pull { repo_id, path } => {
                 run_job(events, &repo_id, GitJob::Pulling, || {
-                    git(&path, &["pull", "--ff-only"]).map(|_| "Pulled".to_owned())
+                    remote_git(&path, &["pull", "--ff-only"]).map(|_| "Pulled".to_owned())
                 })
             }
         };
@@ -305,28 +310,119 @@ fn clone(url: &str, into: &Path) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("{} has nowhere to go", into.display()))?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("failed to make {}", parent.display()))?;
-    let output = Command::new("git")
-        .arg("clone")
-        .arg(url)
-        .arg(into)
-        .output()
-        .context("git could not be run")?;
-    if output.status.success() {
-        Ok(format!(
-            "Cloned {}",
-            into.file_name().unwrap_or_default().to_string_lossy()
-        ))
-    } else {
-        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr))
-    }
+    let mut command = Command::new("git");
+    command.arg("clone").arg(url).arg(into);
+    run_remote(command, url)?;
+    Ok(format!(
+        "Cloned {}",
+        into.file_name().unwrap_or_default().to_string_lossy()
+    ))
 }
 
-/// One git command inside one repository.
+/// One git command inside one repository that talks to its `origin`.
+fn remote_git(path: &Path, arguments: &[&str]) -> Result<String> {
+    let origin = git(path, &["remote", "get-url", "origin"])
+        .map(|url| url.trim().to_owned())
+        .unwrap_or_default();
+    let mut command = Command::new("git");
+    command.arg("-C").arg(path).args(arguments);
+    run_remote(command, &origin)
+}
+
+/// Runs a git command that reaches a remote, on the terms the TUI can live
+/// with: git and ssh may never prompt — the terminal is the TUI's, and a
+/// question asked on it is a command that hangs for ever — a transfer that
+/// stalls ends itself, and an Azure DevOps remote over https is signed with
+/// the login the sync already has, so no key or credential helper has to be
+/// set up first.
+fn run_remote(mut command: Command, remote: &str) -> Result<String> {
+    command
+        .stdin(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_SSH_COMMAND", batch_ssh_command());
+    let mut config: Vec<(String, String)> = vec![
+        ("http.lowSpeedLimit".to_owned(), "1000".to_owned()),
+        ("http.lowSpeedTime".to_owned(), STALL_SECONDS.to_owned()),
+    ];
+    let mut login_error = None;
+    if let Some(host) = azure_https_host(remote) {
+        match crate::azure::authorization_header() {
+            Ok(authorization) => {
+                // Scoped to the host, so the token is never offered to any
+                // other remote, and passed as configuration in the
+                // environment rather than on the command line, where `ps`
+                // would show it.
+                config.push((
+                    format!("http.{host}.extraheader"),
+                    format!("AUTHORIZATION: {authorization}"),
+                ));
+                config.push((
+                    format!("http.{host}.extraheader"),
+                    "X-VSS-ForceMsaPassThrough: true".to_owned(),
+                ));
+            }
+            Err(error) => login_error = Some(error),
+        }
+    }
+    command.env("GIT_CONFIG_COUNT", config.len().to_string());
+    for (index, (key, value)) in config.into_iter().enumerate() {
+        command
+            .env(format!("GIT_CONFIG_KEY_{index}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
+    let output = command.output().context("git could not be run")?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // A remote that wanted a login it could not ask for is reported as the
+    // login that is missing, not as the prompt git was not allowed to show.
+    if stderr.contains("terminal prompts disabled") || stderr.contains("Permission denied") {
+        let hint = match login_error {
+            Some(error) => format!("{error:#}"),
+            None => "Azure DevOps refused the login; run `az login` or set AZURE_DEVOPS_EXT_PAT"
+                .to_owned(),
+        };
+        anyhow::bail!("{}\n{hint}", stderr.trim());
+    }
+    anyhow::bail!("{stderr}")
+}
+
+/// The ssh git runs, told never to ask anything: an unknown key or a missing
+/// one fails at once, with ssh's own words, instead of waiting on a prompt
+/// nobody can see. Whatever `GIT_SSH_COMMAND` already says is kept in front.
+fn batch_ssh_command() -> String {
+    let base = std::env::var("GIT_SSH_COMMAND")
+        .ok()
+        .filter(|command| !command.trim().is_empty())
+        .unwrap_or_else(|| "ssh".to_owned());
+    format!("{base} -o BatchMode=yes -o ConnectTimeout=20")
+}
+
+/// `https://host` for an Azure DevOps remote reached over https — the scope
+/// the login header is attached under — and nothing for any other remote.
+#[must_use]
+pub fn azure_https_host(remote: &str) -> Option<String> {
+    let (scheme, tail) = remote.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("https") {
+        return None;
+    }
+    let authority = tail.split('/').next()?;
+    let host = authority.rsplit('@').next()?.to_ascii_lowercase();
+    let azure = host == "dev.azure.com"
+        || host.ends_with(".dev.azure.com")
+        || host.ends_with(".visualstudio.com");
+    azure.then(|| format!("https://{host}"))
+}
+
+/// One git command inside one repository that stays on this machine.
 fn git(path: &Path, arguments: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(path)
         .args(arguments)
+        .stdin(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .context("git could not be run")?;
     if output.status.success() {
@@ -373,6 +469,31 @@ mod tests {
             "the older host spells the organization in front"
         );
         assert_eq!(normalise_remote("git@github.com:jacob/other.git"), None);
+    }
+
+    #[test]
+    fn only_an_azure_devops_https_remote_is_signed_with_the_login() {
+        assert_eq!(
+            azure_https_host(
+                "https://jacobragsdale@dev.azure.com/jacobragsdale/development/_git/x"
+            )
+            .as_deref(),
+            Some("https://dev.azure.com"),
+            "the user in front of the host is not part of the scope"
+        );
+        assert_eq!(
+            azure_https_host("https://jacobragsdale.visualstudio.com/development/_git/x")
+                .as_deref(),
+            Some("https://jacobragsdale.visualstudio.com")
+        );
+        for remote in [
+            "git@ssh.dev.azure.com:v3/jacobragsdale/development/x",
+            "https://github.com/jacobragsdale/x.git",
+            "file:///tmp/x.git",
+            "",
+        ] {
+            assert_eq!(azure_https_host(remote), None, "{remote}");
+        }
     }
 
     /// A bare repository with one commit, which the clones below come from.

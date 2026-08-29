@@ -30,9 +30,9 @@ use crate::filter::{
 pub use crate::model::Jump;
 use crate::model::{
     ArtifactLink, CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord,
-    Identity, RelationKind, RelationRecord, Repo, SortDirection, SortField, StateCatalog,
-    StateCategory, StateOption, Ticket, TicketGraph, TicketKey, compare_tickets, path_leaf,
-    same_text,
+    Identity, PullRequest, RelationKind, RelationRecord, Repo, SortDirection, SortField,
+    StateCatalog, StateCategory, StateOption, Ticket, TicketGraph, TicketKey, compare_tickets,
+    path_leaf, same_text,
 };
 pub use crate::model::{RowDensity, SearchOrder};
 use crate::pointer::{
@@ -393,6 +393,14 @@ impl App {
         self.pipelines.set_pipelines(pipelines, runs, &self.shell);
         self.pull_requests
             .set_pull_requests(pull_requests.clone(), &self.shell);
+        self.relate_repos(&pull_requests);
+    }
+
+    /// Gives the Repos tab the repositories the shell holds and what the other
+    /// two tabs have open against each. Called after every reload, and once
+    /// at start-up from the database, so the tab is never empty until the
+    /// first pull lands.
+    pub fn relate_repos(&mut self, pull_requests: &[PullRequest]) {
         self.repos.set_repos(&self.shell);
         self.repos.set_related(
             pull_requests
@@ -530,6 +538,11 @@ impl App {
             && let Some(tab) = TabId::ALL.get(index).copied()
         {
             self.shell.pointer.set_position(mouse.column, mouse.row);
+            // The press that started this click went to the screen, so the
+            // release has to end it here: left open, every later mouse move
+            // would read as a drag.
+            self.shell.pointer.clear_press();
+            self.shell.pointer.clear_selection();
             self.select_tab(tab);
             return PointerUpdate::none(true);
         }

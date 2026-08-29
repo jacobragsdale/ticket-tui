@@ -999,8 +999,14 @@ status goes, with a glyph that turns four times a second; the status is re-read
 when it finishes, and a notification says what happened — `Cloned ticket-tui`,
 or git's own last line when it failed.
 
-`C` clones over ssh, or over https when `TICKET_TUI_CLONE_PROTOCOL=https` or
-Azure DevOps gave no ssh URL. Each is refused, with a word about why, when it
+`C` clones over https, signing the request with the same login the sync uses
+(`az login` or `AZURE_DEVOPS_EXT_PAT`), so it works before any SSH key is
+registered with Azure DevOps; `TICKET_TUI_CLONE_PROTOCOL=ssh` asks for the ssh
+URL instead. Fetches and pulls of a clone whose `origin` is an Azure DevOps
+https remote are signed the same way. Neither git nor ssh is allowed to ask a
+question — the terminal is the TUI's — so a missing login or key fails at once
+with the reason, and a transfer that stalls for thirty seconds ends itself.
+Each is refused, with a word about why, when it
 cannot be what you meant: cloning what is already here, fetching or pulling what
 is not, pulling a tree with uncommitted changes, or asking for a second command
 while one is still running. A pull that cannot fast-forward is refused by git
