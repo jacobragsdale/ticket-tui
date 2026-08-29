@@ -227,7 +227,7 @@ impl AgentContextPublisher {
     }
 
     fn publish(&mut self, app: &App) -> Result<()> {
-        let context = app.work_items.agent_context(&app.shell);
+        let context = app.agent_context();
         if self.last.as_ref() == Some(&context) {
             return Ok(());
         }
@@ -3172,12 +3172,12 @@ mod tests {
         let observed: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&context_path).unwrap()).unwrap();
         assert_eq!(
-            observed["selected_ticket"]["organization"],
+            observed["work_items"]["selected_ticket"]["organization"],
             expected.organization
         );
-        assert_eq!(observed["selected_ticket"]["id"], expected.id);
+        assert_eq!(observed["work_items"]["selected_ticket"]["id"], expected.id);
         assert_eq!(
-            observed["tickets"]["visible_rows"]
+            observed["work_items"]["tickets"]["visible_rows"]
                 .as_array()
                 .unwrap()
                 .len(),

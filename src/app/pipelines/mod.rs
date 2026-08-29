@@ -272,6 +272,88 @@ impl PipelinesScreen {
         self.focused = Some((run, index.min(count.saturating_sub(1))));
     }
 
+    /// This tab's slice of the context file: which level it is on, what is
+    /// selected, what the watcher is following, and what is waiting on a
+    /// person.
+    #[must_use]
+    pub fn agent_context(&self, shell: &Shell) -> crate::agent_context::PipelinesContext {
+        let pipelines = self.visible_pipelines(shell);
+        let selected_pipeline = match self.level {
+            Level::Pipelines => pipelines
+                .get(self.pipeline_cursor.index)
+                .map(|row| row.pipeline.clone()),
+            Level::Runs(id) => self
+                .pipelines
+                .iter()
+                .find(|pipeline| pipeline.id == id)
+                .cloned(),
+        };
+        crate::agent_context::PipelinesContext {
+            level: match self.level {
+                Level::Pipelines => "pipelines",
+                Level::Runs(_) => "runs",
+            }
+            .to_owned(),
+            selected_pipeline: selected_pipeline.map(|pipeline| {
+                crate::agent_context::PipelineContext {
+                    id: pipeline.id,
+                    name: pipeline.name.clone(),
+                    folder: pipeline.folder.clone(),
+                    repo: pipeline.repo_id.as_ref().map(|id| shell.repo_name(id)),
+                    web_url: pipeline.url.clone(),
+                }
+            }),
+            selected_run: self
+                .selected_run(shell)
+                .map(|row| self.run_context(&row.run)),
+            following_log: self.following_log_context(),
+            running: self.runs.iter().filter(|run| run.status.is_live()).count(),
+            watched: self.watched_runs(),
+            pending_approvals: self.approvals().len(),
+        }
+    }
+
+    /// One run as an agent reads it, with its stages — the top level of the
+    /// timeline, because the whole tree would be longer than the rest of the
+    /// document.
+    fn run_context(&self, run: &Run) -> crate::agent_context::RunContext {
+        crate::agent_context::RunContext {
+            id: run.id,
+            pipeline_id: run.pipeline_id,
+            build_number: run.build_number.clone(),
+            status: run.status.as_str().to_owned(),
+            result: run.result.map(|result| result.as_str().to_owned()),
+            branch: rows::short_branch(&run.source_branch),
+            requested_for: run.requested_for.clone(),
+            started_at: run.start_time.map(|at| at.to_rfc3339()),
+            finished_at: run.finish_time.map(|at| at.to_rfc3339()),
+            web_url: run.url.clone(),
+            stages: self
+                .timeline(run.id)
+                .iter()
+                .filter(|record| record.kind == crate::model::TimelineKind::Stage)
+                .map(|record| crate::agent_context::StageContext {
+                    name: record.name.clone(),
+                    state: record.state.as_str().to_owned(),
+                    result: record.result.map(|result| result.as_str().to_owned()),
+                })
+                .collect(),
+        }
+    }
+
+    /// The log the details pane is tailing, if it is on one.
+    fn following_log_context(&self) -> Option<crate::agent_context::FollowingLogContext> {
+        let (run_id, _) = self.focused?;
+        let target = self.log_target()?;
+        Some(crate::agent_context::FollowingLogContext {
+            run_id,
+            log_id: target.log_id,
+            node: self.log_node_name().unwrap_or_default(),
+            line_count: self.log(run_id, target.log_id).len(),
+            following: self.log_following(),
+        })
+    }
+
     /// The node whose log is on screen: the one the tree cursor is on, or the
     /// deepest task still running when nobody has chosen one. This is what the
     /// watcher is asked to follow, and it moves on as tasks finish.

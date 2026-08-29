@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::agent_context::{
     AgentContext, PendingEditContext, SearchContext, SortContext, SyncContext, TicketContext,
-    TicketReference, TicketsContext,
+    TicketReference, TicketsContext, WorkItemsContext,
 };
 use crate::classification::{self, ClassificationNode, NodeKind};
 use crate::columns::TableLayout;
@@ -411,6 +411,30 @@ impl App {
                 })
                 .collect(),
         );
+    }
+
+    /// The whole workspace as an agent reads it: what the shell knows, and
+    /// every tab's slice whether or not it is the one showing — an agent asked
+    /// about a pull request should not have to ask the user to press `3`.
+    #[must_use]
+    pub fn agent_context(&self) -> AgentContext {
+        AgentContext {
+            database_path: self.shell.database_path.display().to_string(),
+            me: self.shell.me.clone(),
+            sync: self.work_items.sync_context(&self.shell),
+            pending_edits: self.work_items.pending_edit_contexts(),
+            active_tab: match self.tab {
+                TabId::WorkItems => "work_items",
+                TabId::Repos => "repos",
+                TabId::PullRequests => "pull_requests",
+                TabId::Pipelines => "pipelines",
+            }
+            .to_owned(),
+            work_items: self.work_items.agent_context(&self.shell),
+            repos: self.repos.agent_context(&self.shell),
+            pull_requests: self.pull_requests.agent_context(&self.shell),
+            pipelines: self.pipelines.agent_context(&self.shell),
+        }
     }
 
     /// The whole session: which tab was showing, each tab's slice, and what

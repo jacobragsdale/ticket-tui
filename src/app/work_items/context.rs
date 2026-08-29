@@ -5,8 +5,33 @@ use crate::agent_context::ArtifactContext;
 use crate::model::ArtifactKind;
 
 impl WorkItemsScreen {
+    /// What the shell knows whichever tab is showing: where the rows come
+    /// from, how the last pull went, and what is still in flight.
     #[must_use]
-    pub fn agent_context(&self, shell: &Shell) -> AgentContext {
+    pub fn sync_context(&self, shell: &Shell) -> SyncContext {
+        SyncContext {
+            organization: shell
+                .sync_target
+                .as_ref()
+                .map(|target| target.organization.clone()),
+            project: shell
+                .sync_target
+                .as_ref()
+                .map(|target| target.project.clone()),
+            refresh_seconds: shell
+                .sync_target
+                .as_ref()
+                .map_or(0, |target| target.refresh_seconds),
+            in_progress: shell.sync_pending,
+            last_success_at: shell.synced_wall_clock.map(Timestamp::to_rfc3339),
+            last_error: shell.sync_error.clone(),
+            offline: !shell.sync_enabled,
+        }
+    }
+
+    /// This tab's slice of the context file.
+    #[must_use]
+    pub fn agent_context(&self, shell: &Shell) -> WorkItemsContext {
         let parsed = self.parsed_query();
         let visible_rows = self
             .visible_tickets()
@@ -20,28 +45,7 @@ impl WorkItemsScreen {
             .filter(|ticket| self.selected_keys.contains(&ticket.key))
             .map(|ticket| self.ticket_context(ticket))
             .collect();
-        AgentContext {
-            database_path: shell.database_path.display().to_string(),
-            me: shell.me.clone(),
-            sync: SyncContext {
-                organization: shell
-                    .sync_target
-                    .as_ref()
-                    .map(|target| target.organization.clone()),
-                project: shell
-                    .sync_target
-                    .as_ref()
-                    .map(|target| target.project.clone()),
-                refresh_seconds: shell
-                    .sync_target
-                    .as_ref()
-                    .map_or(0, |target| target.refresh_seconds),
-                in_progress: shell.sync_pending,
-                last_success_at: shell.synced_wall_clock.map(Timestamp::to_rfc3339),
-                last_error: shell.sync_error.clone(),
-                offline: !shell.sync_enabled,
-            },
-            pending_edits: self.pending_edit_contexts(),
+        WorkItemsContext {
             mode: mode_name(self.mode).into(),
             focus: focus_name(shell.focus).into(),
             screen: if shell.narrow_details {
@@ -93,7 +97,7 @@ impl WorkItemsScreen {
     /// rather than taken in map order, because the context file is only
     /// rewritten when it changes and a reshuffled list would look like a change
     /// on every render.
-    fn pending_edit_contexts(&self) -> Vec<PendingEditContext> {
+    pub(crate) fn pending_edit_contexts(&self) -> Vec<PendingEditContext> {
         let mut edits: Vec<PendingEditContext> = self
             .pending_edits
             .iter()

@@ -564,14 +564,15 @@ fn sentinels_come_back_from_the_session_file_as_the_chips_they_were_typed_as() {
         .collect();
     assert_eq!(labels, vec!["assignee:@me", "iteration:@current"]);
 
-    let context = restored.work_items.agent_context(&restored.shell);
+    let whole = restored.agent_context();
+    let context = &whole.work_items;
     assert_eq!(context.search.query, "assignee:@me iteration:@current");
     assert_eq!(
         context.search.filters,
         vec!["assignee:@me", "iteration:@current"],
         "an agent reads the sentinels as typed and the me field beside them"
     );
-    assert_eq!(context.me.as_deref(), Some("Avery Chen"));
+    assert_eq!(whole.me.as_deref(), Some("Avery Chen"));
     assert_eq!(
         visible_ids(&restored),
         vec![1],

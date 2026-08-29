@@ -255,6 +255,20 @@ impl ReposScreen {
         }
     }
 
+    /// This tab's slice of the context file: what is on the table, what the
+    /// cursor is on, and where clones live.
+    #[must_use]
+    pub fn agent_context(&self, shell: &Shell) -> crate::agent_context::ReposContext {
+        let rows = self.visible(shell);
+        crate::agent_context::ReposContext {
+            selected: rows.get(self.cursor.index).map(repo_context),
+            visible_rows: rows.iter().map(repo_context).collect(),
+            workspace: shell
+                .workspace()
+                .map(|workspace| workspace.display().to_string()),
+        }
+    }
+
     /// What `o` opens: the repository's own page.
     #[must_use]
     pub fn open_in_browser(&self, shell: &Shell) -> AppAction {
@@ -426,6 +440,32 @@ impl ReposScreen {
             }
             _ => AppAction::None,
         }
+    }
+}
+
+/// One repository as an agent reads it.
+fn repo_context(row: &RepoRow) -> crate::agent_context::RepoContext {
+    crate::agent_context::RepoContext {
+        id: row.repo.id.clone(),
+        name: row.repo.name.clone(),
+        default_branch: row.branch(),
+        is_disabled: row.repo.is_disabled,
+        pull_requests: row.pull_requests,
+        pipelines: row.pipelines,
+        web_url: row.repo.web_url.clone(),
+        local: row
+            .local
+            .as_ref()
+            .map(|local| crate::agent_context::LocalRepoContext {
+                path: local.path.display().to_string(),
+                branch: local.branch.clone(),
+                dirty: local.dirty,
+                ahead: local.ahead,
+                behind: local.behind,
+                busy: local
+                    .busy
+                    .map(|job| job.label().trim_end_matches('\u{2026}').to_owned()),
+            }),
     }
 }
 

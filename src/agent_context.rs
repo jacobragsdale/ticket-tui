@@ -9,7 +9,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::model::{RowDensity, SearchOrder, SortDirection, SortField};
 
-pub const SCHEMA_VERSION: u8 = 2;
+pub const SCHEMA_VERSION: u8 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct AgentContext {
@@ -24,6 +24,21 @@ pub struct AgentContext {
     /// them, so a value named here is optimistic until the edit leaves this
     /// list.
     pub pending_edits: Vec<PendingEditContext>,
+    /// Which tab is showing: `work_items`, `repos`, `pull_requests` or
+    /// `pipelines`. Every tab is described whether or not it is the one on
+    /// screen, so an agent can read the whole workspace; this says where the
+    /// user actually is.
+    pub active_tab: String,
+    pub work_items: WorkItemsContext,
+    pub repos: ReposContext,
+    pub pull_requests: PullRequestsContext,
+    pub pipelines: PipelinesContext,
+}
+
+/// The work items tab, which is everything schema 2 described at the top
+/// level, moved under a name of its own and otherwise unchanged.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WorkItemsContext {
     pub mode: String,
     pub focus: String,
     pub screen: String,
@@ -35,6 +50,160 @@ pub struct AgentContext {
     pub checked_tickets: Vec<TicketContext>,
     pub family_cursor: Option<TicketReference>,
     pub details_scroll_line: u16,
+}
+
+/// The Repos tab: the project's repositories and which of them are on this
+/// machine.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct ReposContext {
+    pub selected: Option<RepoContext>,
+    pub visible_rows: Vec<RepoContext>,
+    /// Where clones are looked for and made, or `null` when there is nowhere.
+    pub workspace: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepoContext {
+    pub id: String,
+    pub name: String,
+    pub default_branch: String,
+    pub is_disabled: bool,
+    /// How many active pull requests and pipelines name it.
+    pub pull_requests: usize,
+    pub pipelines: usize,
+    pub web_url: String,
+    /// The clone on this machine, or `null` for a repository that is not here.
+    pub local: Option<LocalRepoContext>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct LocalRepoContext {
+    pub path: String,
+    pub branch: String,
+    pub dirty: bool,
+    pub ahead: u32,
+    pub behind: u32,
+    /// What git is doing to it right now — `cloning`, `fetching`, `pulling` —
+    /// or `null` when nothing is.
+    pub busy: Option<String>,
+}
+
+/// The Pull requests tab: the review queue and whichever request is selected.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct PullRequestsContext {
+    pub selected: Option<PullRequestContext>,
+    pub visible_rows: Vec<PullRequestRowContext>,
+    /// How many are waiting on the signed-in user's vote.
+    pub to_review_count: usize,
+    /// Whether closed pull requests are on the table.
+    pub closed_shown: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PullRequestRowContext {
+    pub id: i64,
+    pub repo: String,
+    pub title: String,
+    pub author: String,
+    pub status: String,
+    pub is_draft: bool,
+    pub source_branch: String,
+    pub target_branch: String,
+    /// `succeeded`, `conflicts`, `queued` — what Azure DevOps says a merge
+    /// would do.
+    pub merge_status: String,
+    /// The signed-in user's own vote, on the API's scale: 10 approved, 5
+    /// approved with suggestions, 0 no vote, -5 waiting, -10 rejected.
+    pub my_vote: i8,
+    pub web_url: String,
+}
+
+/// The selected pull request, which carries what the details pane draws.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PullRequestContext {
+    #[serde(flatten)]
+    pub row: PullRequestRowContext,
+    pub reviewers: Vec<ReviewerContext>,
+    /// The work items it carries, by id.
+    pub work_items: Vec<i64>,
+    pub build: Option<PrBuildContext>,
+    pub auto_complete: bool,
+    /// How many comment threads it has, and how many are unresolved.
+    pub thread_count: usize,
+    pub unresolved_threads: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ReviewerContext {
+    pub name: String,
+    pub vote: i8,
+    pub is_required: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PrBuildContext {
+    pub status: String,
+    pub run_id: Option<i64>,
+}
+
+/// The Pipelines tab: which level it is on, what is selected, and what the
+/// watcher is following.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct PipelinesContext {
+    /// `pipelines` or `runs`.
+    pub level: String,
+    pub selected_pipeline: Option<PipelineContext>,
+    pub selected_run: Option<RunContext>,
+    /// The log the details pane is tailing, or `null`.
+    pub following_log: Option<FollowingLogContext>,
+    /// How many runs are going right now.
+    pub running: usize,
+    /// The runs `w` is following, by id.
+    pub watched: Vec<i64>,
+    pub pending_approvals: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PipelineContext {
+    pub id: i64,
+    pub name: String,
+    pub folder: String,
+    pub repo: Option<String>,
+    pub web_url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RunContext {
+    pub id: i64,
+    pub pipeline_id: i64,
+    pub build_number: String,
+    pub status: String,
+    pub result: Option<String>,
+    pub branch: String,
+    pub requested_for: Option<String>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub web_url: String,
+    /// The run's stages and how each is going, top level of the timeline only:
+    /// the whole tree would be longer than the rest of the document.
+    pub stages: Vec<StageContext>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct StageContext {
+    pub name: String,
+    pub state: String,
+    pub result: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct FollowingLogContext {
+    pub run_id: i64,
+    pub log_id: i64,
+    pub node: String,
+    pub line_count: usize,
+    /// Whether the pane is pinned to the tail rather than scrolled back.
+    pub following: bool,
 }
 
 /// What the run knows about its own sync, so an agent can tell data that is a
@@ -229,34 +398,40 @@ mod tests {
                 offline: false,
             },
             pending_edits: Vec::new(),
-            mode: "browse".into(),
-            focus: "tickets".into(),
-            screen: "workspace".into(),
-            active_view: None,
-            search: SearchContext {
-                query: String::new(),
-                fuzzy_text: String::new(),
-                filters: Vec::new(),
-                pending: false,
-                order: SearchOrder::Relevance,
+            active_tab: "work_items".into(),
+            repos: ReposContext::default(),
+            pull_requests: PullRequestsContext::default(),
+            pipelines: PipelinesContext::default(),
+            work_items: WorkItemsContext {
+                mode: "browse".into(),
+                focus: "tickets".into(),
+                screen: "workspace".into(),
+                active_view: None,
+                search: SearchContext {
+                    query: String::new(),
+                    fuzzy_text: String::new(),
+                    filters: Vec::new(),
+                    pending: false,
+                    order: SearchOrder::Relevance,
+                },
+                sort: SortContext {
+                    field: SortField::Changed,
+                    direction: SortDirection::Descending,
+                    row_density: RowDensity::Compact,
+                },
+                tickets: TicketsContext {
+                    total_count: 0,
+                    matching_count: 0,
+                    finished_hidden: true,
+                    viewport_start: 0,
+                    viewport_size: 0,
+                    visible_rows: Vec::new(),
+                },
+                selected_ticket: None,
+                checked_tickets: Vec::new(),
+                family_cursor: None,
+                details_scroll_line: 0,
             },
-            sort: SortContext {
-                field: SortField::Changed,
-                direction: SortDirection::Descending,
-                row_density: RowDensity::Compact,
-            },
-            tickets: TicketsContext {
-                total_count: 0,
-                matching_count: 0,
-                finished_hidden: true,
-                viewport_start: 0,
-                viewport_size: 0,
-                visible_rows: Vec::new(),
-            },
-            selected_ticket: None,
-            checked_tickets: Vec::new(),
-            family_cursor: None,
-            details_scroll_line: 0,
         }
     }
 
@@ -278,11 +453,16 @@ mod tests {
         assert_eq!(first_json["schema_version"], SCHEMA_VERSION);
         assert_eq!(first_json["database_path"], "first.sqlite3");
         assert_eq!(first_json["me"], "Jacob Ragsdale");
-        assert_eq!(first_json["search"]["order"], "relevance");
-        assert_eq!(first_json["sort"]["field"], "changed");
-        assert_eq!(first_json["sort"]["direction"], "desc");
-        assert_eq!(first_json["sort"]["row_density"], "compact");
-        assert_eq!(first_json["tickets"]["finished_hidden"], true);
+        assert_eq!(first_json["active_tab"], "work_items");
+        assert_eq!(first_json["work_items"]["search"]["order"], "relevance");
+        assert_eq!(first_json["work_items"]["sort"]["field"], "changed");
+        assert_eq!(first_json["work_items"]["sort"]["direction"], "desc");
+        assert_eq!(first_json["work_items"]["sort"]["row_density"], "compact");
+        assert_eq!(first_json["work_items"]["tickets"]["finished_hidden"], true);
+        // Every tab is in the document whether or not it is the one showing.
+        assert!(first_json["repos"]["visible_rows"].is_array());
+        assert!(first_json["pull_requests"]["visible_rows"].is_array());
+        assert_eq!(first_json["pipelines"]["level"], "");
         assert_eq!(first_json["sync"]["organization"], "example-org");
         assert_eq!(first_json["sync"]["project"], "atlas");
         assert_eq!(first_json["sync"]["refresh_seconds"], 60);

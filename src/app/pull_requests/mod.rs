@@ -221,6 +221,65 @@ impl PullRequestsScreen {
         self.visible(shell).get(self.cursor.index).cloned()
     }
 
+    /// This tab's slice of the context file: the queue, the one the cursor is
+    /// on with everything the details pane draws, and how many wait on you.
+    #[must_use]
+    pub fn agent_context(&self, shell: &Shell) -> crate::agent_context::PullRequestsContext {
+        let rows = self.visible(shell);
+        let me = shell.me.clone().unwrap_or_default();
+        crate::agent_context::PullRequestsContext {
+            selected: rows.get(self.cursor.index).map(|row| {
+                let request = &row.request;
+                crate::agent_context::PullRequestContext {
+                    row: self.row_context(row, &me),
+                    reviewers: request
+                        .reviewers
+                        .iter()
+                        .map(|reviewer| crate::agent_context::ReviewerContext {
+                            name: reviewer.display_name.clone(),
+                            vote: reviewer.vote,
+                            is_required: reviewer.is_required,
+                        })
+                        .collect(),
+                    work_items: request.work_items.clone(),
+                    build: request.build.as_ref().map(|build| {
+                        crate::agent_context::PrBuildContext {
+                            status: build.status.clone(),
+                            run_id: build.run_id,
+                        }
+                    }),
+                    auto_complete: request.auto_complete_set_by.is_some(),
+                    thread_count: request.threads.len(),
+                    unresolved_threads: request
+                        .threads
+                        .iter()
+                        .filter(|thread| thread.status == "active")
+                        .count(),
+                }
+            }),
+            visible_rows: rows.iter().map(|row| self.row_context(row, &me)).collect(),
+            to_review_count: self.to_review(shell),
+            closed_shown: self.show_closed,
+        }
+    }
+
+    /// One pull request as an agent reads it.
+    fn row_context(&self, row: &PrRow, me: &str) -> crate::agent_context::PullRequestRowContext {
+        crate::agent_context::PullRequestRowContext {
+            id: row.request.id,
+            repo: row.repo.clone(),
+            title: row.request.title.clone(),
+            author: row.request.created_by.display_name.clone(),
+            status: row.request.status.as_str().to_owned(),
+            is_draft: row.request.is_draft,
+            source_branch: row.source_branch(),
+            target_branch: row.target_branch(),
+            merge_status: row.request.merge_status.clone(),
+            my_vote: self.my_vote(row.request.id, me),
+            web_url: row.request.url.clone(),
+        }
+    }
+
     fn match_context(&self, shell: &Shell) -> MatchContext {
         MatchContext::now().with_me(shell.me().map(str::to_owned))
     }

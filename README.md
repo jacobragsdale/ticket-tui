@@ -1546,15 +1546,35 @@ This is the supported interface for an LLM agent to understand the current view
 without scraping terminal cells or causing SQLite reloads; the
 [subcommands](#subcommands) above are how one acts on what it reads.
 
-The versioned snapshot includes:
+Schema 3 describes the whole workspace rather than one tab. At the top level:
+the cache path, the signed-in display name that marks your own work items, the
+process ID and last-change timestamp, a `sync` block, the `pending_edits` not
+yet answered, and `active_tab` — `work_items`, `repos`, `pull_requests` or
+`pipelines`. Under those, one block per tab, **all four filled whether or not
+the tab is showing**, so an agent asked about a pull request need not ask the
+user to press `3`:
 
-- selected and checked tickets;
-- the rows currently rendered in the ticket viewport, plus matching and total
-  counts and whether finished work is being left off the table;
-- the complete query, fuzzy text, and parsed filters;
-- sort order, named view, mode, focused pane, family cursor, and details scroll;
-- cache path, the signed-in display name that marks your own work items,
-  process ID, and last-change timestamp.
+- `work_items` — everything schema 2 kept at the top level, unchanged and one
+  level down: selected and checked tickets, the rows in the viewport with the
+  matching and total counts and whether finished work is off the table, the
+  complete query with its fuzzy text and parsed filters, and the sort order,
+  named view, mode, focused pane, family cursor and details scroll. The selected
+  ticket also carries `related`, its artifact links.
+- `repos` — the rows on the table and the selected one, each with its default
+  branch, its pull-request and pipeline counts and the clone on this machine
+  (path, branch, dirty, ahead, behind, and what git is doing to it), plus the
+  `workspace` they live in.
+- `pull_requests` — the queue and the selected request with its reviewers and
+  their votes, the work items it carries, its build, whether auto-complete is
+  set and how many threads are unresolved, plus `to_review_count` and whether
+  closed ones are shown. Every row carries `my_vote`.
+- `pipelines` — the `level` (`pipelines` or `runs`), the selected pipeline and
+  run — the run with its stages, each stage's state and result — the log being
+  tailed (`run_id`, `log_id`, `node`, `line_count`, `following`), how many runs
+  are going, which are watched, and how many approvals are pending.
+
+Schema 2 consumers read the work-item fields at the top level and will find them
+under `work_items` instead.
 
 The file is replaced after meaningful rendered-state changes and removed on a
 clean exit. A crash or forced termination can leave a stale file, so consumers
