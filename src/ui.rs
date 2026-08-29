@@ -7231,7 +7231,7 @@ mod tests {
         assert_eq!(app.mode, AppMode::Browse);
         assert_eq!(
             app.query(),
-            "assignee:\"Avery Chen\" iteration:\"Sprint 1\""
+            "assignee:\"Avery Chen\" iteration:\"Atlas\\\\Sprint 1\""
         );
 
         let mut empty = App::new(vec![]);

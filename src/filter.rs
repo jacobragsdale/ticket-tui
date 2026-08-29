@@ -827,12 +827,21 @@ fn take_quoted(input: &str) -> Option<(String, &str)> {
     None
 }
 
+/// One filter value, written so [`take_value`] reads it back unchanged.
+///
+/// A value is quoted when leaving it bare would split it or read as something
+/// else, and inside the quotes a backslash and the quote character are both
+/// escaped, because that is what [`take_quoted`] undoes. Escaping the
+/// backslash first matters: doing it second would escape the ones just written
+/// in front of the quotes. Outside quotes nothing is escaped, and nothing needs
+/// to be — the bare reader takes every character up to the next space, the
+/// backslash in an unspaced area path included.
 fn quote_if_needed(value: &str) -> String {
     if value
         .chars()
         .any(|character| character.is_whitespace() || character == ':' || character == '"')
     {
-        format!("\"{}\"", value.replace('"', "\\\""))
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         value.to_owned()
     }
@@ -896,6 +905,70 @@ mod tests {
         assert_eq!(
             format_query(&bookmarked.filters, "alpha"),
             "is:bookmarked priority:1 alpha"
+        );
+    }
+
+    #[test]
+    fn a_value_holding_a_backslash_or_a_quote_round_trips_through_the_query_text() {
+        // Every area and iteration path Azure DevOps hands back is
+        // backslash-separated, so the writer and the reader have to agree about
+        // what a backslash inside quotes means.
+        for value in [
+            "Atlas\\Sprint 1",
+            "Atlas\\Sub\\Sprint 1",
+            "say \"when\" now",
+            "Atlas\\say \"when\"",
+            "Atlas\\Sprint 1\\",
+            "Atlas\\Sprint1",
+            "Atlas\\Sprint1\\",
+        ] {
+            let mut filters = FilterSet::default();
+            filters.insert(FilterField::Iteration, value.to_owned());
+
+            let written = format_query(&filters, "");
+            let read = parse_query(&written);
+
+            assert_eq!(
+                read.filters, filters,
+                "{value:?} did not survive the round trip through {written:?}"
+            );
+            assert!(read.fuzzy.is_empty(), "{value:?} leaked into {written:?}");
+        }
+    }
+
+    #[test]
+    fn toggling_an_iteration_facet_selects_the_rows_it_was_built_from() {
+        let here = ticket("Active", "Bug", Some("Avery"), "rust");
+        let elsewhere = Ticket {
+            iteration_path: "Atlas\\Sprint 2".into(),
+            ..here.clone()
+        };
+        let tickets = [here.clone(), elsewhere.clone()];
+        let now = ts("2026-02-01T00:00:00Z");
+        let context = MatchContext::at(now);
+
+        // The facet lists the full path, which is what a toggle writes.
+        let facets = facet_values(
+            &tickets,
+            &FilterSet::default(),
+            FilterField::Iteration,
+            |_| false,
+            &context,
+        );
+        let paths: Vec<&str> = facets.iter().map(|facet| facet.value.as_str()).collect();
+        assert_eq!(paths, ["Atlas\\Sprint 1", "Atlas\\Sprint 2"]);
+
+        let mut filters = FilterSet::default();
+        filters.toggle(FilterField::Iteration, "Atlas\\Sprint 1");
+        let reread = parse_query(&format_query(&filters, "")).filters;
+
+        assert!(
+            reread.matches_at(&here, false, now),
+            "the row the facet was built from is still selected"
+        );
+        assert!(
+            !reread.matches_at(&elsewhere, false, now),
+            "a sibling sprint is not"
         );
     }
 

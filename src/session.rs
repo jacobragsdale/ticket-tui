@@ -178,7 +178,44 @@ pub fn save(path: &Path, session: &Session) -> Result<()> {
 mod tests {
     use super::*;
     use crate::columns::TableLayout;
+    use crate::filter::{FilterField, FilterSet, format_query, parse_query};
     use tempfile::tempdir;
+
+    #[test]
+    fn a_query_holding_a_full_iteration_path_survives_a_restart() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.session.json");
+        let mut filters = FilterSet::default();
+        filters.insert(FilterField::Iteration, "Atlas\\Sprint 1");
+        let query = format_query(&filters, "");
+        let mut session = Session {
+            query: query.clone(),
+            ..Session::default()
+        };
+        session.views.push(NamedView {
+            name: "Sprint 1".into(),
+            query: query.clone(),
+            sort_field: SortField::Changed,
+            sort_direction: SortDirection::Descending,
+            search_order: SearchOrder::Relevance,
+            row_density: RowDensity::Compact,
+            columns: TableLayout::default().to_session_columns(),
+            auto_hide: true,
+        });
+
+        save(&path, &session).unwrap();
+        let loaded = load(&path).unwrap();
+
+        for stored in [&loaded.query, &loaded.views[0].query] {
+            assert_eq!(stored, &query, "the query text came back as it was written");
+            assert!(
+                parse_query(stored)
+                    .filters
+                    .contains(FilterField::Iteration, "Atlas\\Sprint 1"),
+                "the path still selects its own rows: {stored}"
+            );
+        }
+    }
 
     #[test]
     fn session_round_trips_through_json() {

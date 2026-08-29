@@ -7038,10 +7038,13 @@ impl App {
     /// this iteration and the overlay closes, so the rows it counted are
     /// there to look at. The Total row asks for the iteration alone.
     ///
-    /// The iteration goes into the query as its leaf — `Sprint 1` rather than
-    /// `development\Sprint 1` — which is both what the `iteration:` filter
-    /// matches a path's last segment on and what the table, the chips, and the
-    /// picker all call it.
+    /// The iteration goes into the query as the full path the counts were taken
+    /// over, because that is what makes the two agree: the summary counts a
+    /// work item whose whole `iteration_path` matches, while a leaf written on
+    /// its own matches any node ending in that name, so two sprints named
+    /// `Sprint 1` under different parents would put rows in the table the grid
+    /// never counted. The status line still says the leaf, which is what the
+    /// table, the chips, and the picker all call it.
     fn apply_summary_row(&mut self, index: usize) {
         let Some(summary) = self.sprint_summary() else {
             return;
@@ -7060,7 +7063,7 @@ impl App {
         };
         let leaf = path_leaf(&summary.iteration).to_owned();
         let mut filters = FilterSet::default();
-        filters.insert(FilterField::Iteration, leaf.clone());
+        filters.insert(FilterField::Iteration, summary.iteration.clone());
         if let Some(assignee) = assignee.clone() {
             filters.insert(FilterField::Assignee, assignee);
         }
@@ -12268,7 +12271,11 @@ mod tests {
             AppMode::Browse,
             "the overlay closes so the rows it counted are there to look at"
         );
-        assert_eq!(app.query(), "assignee:Avery iteration:\"Sprint 1\"");
+        assert_eq!(
+            app.query(),
+            "assignee:Avery iteration:\"development\\\\Sprint 1\"",
+            "the full path the grid counted over, so the table shows exactly those rows"
+        );
         assert_eq!(visible_ids(&app), vec![1, 2]);
         assert_eq!(
             app.hidden_finished(),
@@ -12386,7 +12393,10 @@ mod tests {
 
         press(&mut app, KeyCode::Enter);
 
-        assert_eq!(app.query(), "assignee:Unassigned iteration:\"Sprint 1\"");
+        assert_eq!(
+            app.query(),
+            "assignee:Unassigned iteration:\"development\\\\Sprint 1\""
+        );
         assert_eq!(visible_ids(&app), vec![7]);
     }
 
@@ -12401,8 +12411,53 @@ mod tests {
 
         press(&mut app, KeyCode::Enter);
 
-        assert_eq!(app.query(), "iteration:\"Sprint 1\"", "nobody's name on it");
+        assert_eq!(
+            app.query(),
+            "iteration:\"development\\\\Sprint 1\"",
+            "nobody's name on it"
+        );
         assert_eq!(visible_ids(&app), vec![1, 2, 5, 7]);
+    }
+
+    #[test]
+    fn two_sprints_sharing_a_leaf_name_stay_apart_when_the_summary_filters() {
+        // The grid counts a work item whose whole iteration path matches, so
+        // the query it hands the table has to be just as exact: a bare
+        // `Sprint 1` also matches `development\Release 2\Sprint 1`, and the
+        // table would then show rows the grid never counted.
+        let mut tickets = sprint_tickets();
+        tickets.push(Ticket {
+            state: "To Do".into(),
+            assigned_to: Some("Avery".into()),
+            iteration_path: "development\\Release 2\\Sprint 1".into(),
+            ..ticket(9, "Another sprint of the same name", "2026-08-21T00:00:00Z")
+        });
+        let mut app = App::new(tickets);
+        app.select_row(0);
+
+        app.run_command(CommandId::SprintSummary);
+        let summary = app
+            .sprint_summary()
+            .expect("the selected row names a sprint");
+        assert_eq!(summary.iteration, "development\\Sprint 1");
+        assert_eq!(
+            summary.total.total(),
+            7,
+            "the namesake sprint is not counted"
+        );
+
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Down);
+        }
+        assert_eq!(summary_cursor(&app), SummaryRowKind::Total);
+        press(&mut app, KeyCode::Enter);
+
+        assert_eq!(app.query(), "iteration:\"development\\\\Sprint 1\"");
+        assert_eq!(
+            visible_ids(&app),
+            vec![1, 2, 5, 7],
+            "#9 sits in a different node that happens to end in the same name"
+        );
     }
 
     #[test]
