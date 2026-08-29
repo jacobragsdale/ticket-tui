@@ -48,12 +48,14 @@ use crate::text_input::TextInput;
 use crate::timestamp::Timestamp;
 
 pub mod cursor;
+pub mod pipelines;
 mod placeholder;
 mod screen;
 pub mod shell;
 pub mod work_items;
 
 pub use cursor::ListCursor;
+pub use pipelines::PipelinesScreen;
 pub use placeholder::PlaceholderScreen;
 pub use screen::{Screen, TabId};
 pub use shell::{
@@ -180,7 +182,7 @@ pub struct App {
     pub work_items: WorkItemsScreen,
     pub repos: PlaceholderScreen,
     pub pull_requests: PlaceholderScreen,
-    pub pipelines: PlaceholderScreen,
+    pub pipelines: PipelinesScreen,
 }
 
 impl App {
@@ -194,7 +196,7 @@ impl App {
             work_items,
             repos: PlaceholderScreen::new(TabId::Repos, "#669"),
             pull_requests: PlaceholderScreen::new(TabId::PullRequests, "#674"),
-            pipelines: PlaceholderScreen::new(TabId::Pipelines, "#680"),
+            pipelines: PipelinesScreen::default(),
         }
     }
 
@@ -306,6 +308,17 @@ impl App {
         }
     }
 
+    /// Hands one reload to every screen that has a slice of it: the rows and
+    /// their graph to the work items, the definitions and runs to Pipelines,
+    /// and the repositories to the shell every tab reads.
+    pub fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        let pipelines = snapshot.pipelines.clone();
+        let runs = snapshot.runs.clone();
+        self.work_items
+            .replace_prepared_tickets(&mut self.shell, snapshot);
+        self.pipelines.set_pipelines(pipelines, runs, &self.shell);
+    }
+
     /// The whole session: which tab was showing, each tab's slice, and what
     /// the shell keeps across all of them.
     #[must_use]
@@ -402,18 +415,11 @@ impl App {
             self.select_tab(tab);
             return PointerUpdate::none(true);
         }
-        match self.tab {
-            TabId::WorkItems => {
-                let update = self.work_items.handle_mouse(&mut self.shell, mouse);
-                PointerUpdate {
-                    action: self.apply(update.action),
-                    redraw: update.redraw,
-                }
-            }
-            _ => {
-                self.shell.pointer.set_position(mouse.column, mouse.row);
-                PointerUpdate::none(self.shell.refresh_hover())
-            }
+        let (shell, screen) = self.screen();
+        let update = screen.handle_mouse(shell, mouse);
+        PointerUpdate {
+            action: self.apply(update.action),
+            redraw: update.redraw,
         }
     }
 

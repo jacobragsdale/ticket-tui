@@ -879,6 +879,12 @@ impl Screen for WorkItemsScreen {
         Self::scroll_state_mut(self, surface)
     }
 
+    /// The work items screen reads the mouse itself: it has text to select,
+    /// a divider to drag and a scrollbar thumb to grab.
+    fn handle_mouse(&mut self, shell: &mut Shell, mouse: MouseEvent) -> PointerUpdate {
+        Self::handle_mouse(self, shell, mouse)
+    }
+
     fn select(&mut self, shell: &mut Shell, jump: &Jump) -> bool {
         self.select_jump(shell, jump)
     }

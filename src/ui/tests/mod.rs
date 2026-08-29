@@ -3,6 +3,7 @@
 mod details;
 mod overlays;
 mod pickers;
+mod pipelines;
 mod table;
 mod tabs;
 mod widgets;

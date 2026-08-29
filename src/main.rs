@@ -299,6 +299,9 @@ fn run() -> Result<()> {
     app.work_items
         .set_state_catalog(repository.load_type_states()?);
     app.shell.set_repos(repository.load_repos()?);
+    let (pipelines, runs) = (repository.load_pipelines()?, repository.load_runs()?);
+    let shell = &app.shell;
+    app.pipelines.set_pipelines(pipelines, runs, shell);
     app.work_items.set_identities(repository.load_identities()?);
     app.work_items
         .set_work_item_types(repository.load_work_item_types()?);
@@ -969,8 +972,7 @@ fn poll_sync(
                         count,
                     } => {
                         let extras = PulledExtras::of(&snapshot);
-                        app.work_items
-                            .replace_prepared_tickets(&mut app.shell, *snapshot);
+                        app.apply_snapshot(*snapshot);
                         app.shell.finish_sync();
                         stamp_database(app, repository);
                         if origin == PullOrigin::User {
@@ -1280,8 +1282,7 @@ fn poll_reload(
     match result {
         Ok(snapshot) => {
             let count = snapshot.ticket_count();
-            app.work_items
-                .replace_prepared_tickets(&mut app.shell, snapshot);
+            app.apply_snapshot(snapshot);
             stamp_database(app, repository);
             app.shell.set_status(format!("Reloaded {count} tickets"));
         }

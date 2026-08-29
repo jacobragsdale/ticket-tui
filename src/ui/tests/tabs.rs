@@ -120,7 +120,7 @@ fn clicking_a_tab_switches_to_it() {
     click(&mut app, pipelines.x, pipelines.y);
     assert_eq!(app.tab, TabId::Pipelines);
     assert!(
-        render_text(110, 30, &mut app).contains("Pipelines — coming in #680"),
+        render_text(110, 30, &mut app).contains("Pipelines 0"),
         "the tab that was clicked is the one showing"
     );
 }

@@ -6,12 +6,12 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 
-use super::{AppAction, Shell};
+use super::{AppAction, PointerUpdate, Shell};
 use crate::columns::ColumnLayout;
 use crate::model::Jump;
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 use crate::session::TabSession;
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
 /// The four screens the shell puts behind keys `1`–`4`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -87,6 +87,42 @@ pub trait Screen {
 
     /// Text pasted into whichever editor the screen has open.
     fn handle_paste(&mut self, shell: &mut Shell, pasted: &str);
+
+    /// One mouse event. The default is the plain reading of it — hover, a
+    /// click on whatever region is under the pointer, and the wheel over
+    /// whichever surface it is on — which is all a list screen needs. A screen
+    /// with text selection and draggable furniture overrides it.
+    fn handle_mouse(&mut self, shell: &mut Shell, mouse: MouseEvent) -> PointerUpdate {
+        shell.pointer.set_position(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                    -3
+                } else {
+                    3
+                };
+                let surface = shell
+                    .hit_regions
+                    .resolve(mouse.column, mouse.row)
+                    .and_then(|region| region.scroll);
+                let moved =
+                    surface.is_some_and(|surface| self.scroll_state_mut(surface).scroll_by(delta));
+                PointerUpdate::none(moved)
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(target) = shell
+                    .hit_regions
+                    .resolve(mouse.column, mouse.row)
+                    .map(|region| region.target.clone())
+                else {
+                    return PointerUpdate::none(false);
+                };
+                let action = self.activate_target(shell, target, mouse.column, mouse.row);
+                PointerUpdate::action(action)
+            }
+            _ => PointerUpdate::none(shell.refresh_hover()),
+        }
+    }
 
     /// A click on one of the hit regions the screen registered while painting.
     fn activate_target(

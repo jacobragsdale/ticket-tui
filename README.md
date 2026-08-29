@@ -934,6 +934,29 @@ follows on `Enter` or a click; one this database does not hold says so rather
 than opening an empty screen. The walk is remembered in the session file, and a
 file written before the tabs becomes the first cross-tab history.
 
+## Pipelines
+
+Tab `4` lists the project's build definitions: `Pipeline · Folder · Last run ·
+Branch · Age`, with the Last run cell carrying the run's glyph and build
+number — `◐ 20260829.4 · 3m 12s` for one that is going, its elapsed time
+recomputed every frame, `✓ 20260829.3` for one that finished. `Enter` opens a
+pipeline's runs — `Run · Result · Branch · Reason · By · Duration · Age`, newest
+first — and `Backspace` or `h` goes back up. The details pane heads the run
+under the cursor with its build number and result, the pipeline, the branch,
+the short commit, who set it going and why, when it was queued, started and
+finished, and how long it took. `o` opens the run, or the pipeline, in the
+browser; column headers sort; the tab wears a `◐2` badge while anything runs.
+
+Each level has its own search box and its own grammar. Pipelines filter on
+`name:`, `folder:`, `repo:` and `result:` — the result of the run they last
+had, so `result:failed` is every pipeline that is currently red. Runs filter on
+`pipeline:`, `branch:`, `result:`, `status:`, `reason:` and `by:`, where
+`by:@me` is whoever the last sync signed in as. Going down into a pipeline's
+runs and back up again puts each list back the way it was left.
+
+The live parts — the timeline of a run, the log tail that follows it, and the
+watcher that keeps both moving — are #682 to #684.
+
 ## Controls
 
 Everything above the tabs line is global; the work-item keys under it only do

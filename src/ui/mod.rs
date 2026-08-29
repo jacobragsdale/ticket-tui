@@ -32,6 +32,7 @@ use crate::timestamp::Timestamp;
 mod details;
 mod overlays;
 mod pickers;
+pub(crate) mod pipelines;
 mod table;
 #[cfg(test)]
 mod tests;
