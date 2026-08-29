@@ -220,6 +220,34 @@ mod tests {
     }
 
     #[test]
+    fn a_progress_column_switched_on_is_still_on_after_a_restart() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.session.json");
+        let mut layout = TableLayout::default();
+        let index = layout
+            .columns
+            .iter()
+            .position(|column| column.id == SortField::Progress)
+            .expect("the layout offers a Progress column");
+        layout.toggle_visible(index);
+        let session = Session {
+            columns: layout.to_session_columns(),
+            auto_hide: Some(layout.auto_hide),
+            ..Session::default()
+        };
+
+        save(&path, &session).unwrap();
+        let loaded = load(&path).unwrap();
+        let restored = TableLayout::from_session_columns(&loaded.columns, loaded.auto_hide);
+
+        assert_eq!(restored.columns[index].id, SortField::Progress);
+        assert!(
+            restored.columns[index].visible,
+            "the column the overlay switched on comes back switched on"
+        );
+    }
+
+    #[test]
     fn existing_string_sessions_load_into_typed_fields() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tickets.session.json");

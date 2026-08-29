@@ -24,8 +24,8 @@ use crate::filter::{
 };
 use crate::model::{
     CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity,
-    RelationRecord, SortDirection, SortField, StateCatalog, StateOption, Ticket, TicketGraph,
-    TicketKey, compare_tickets, path_leaf,
+    RelationKind, RelationRecord, SortDirection, SortField, StateCatalog, StateCategory,
+    StateOption, Ticket, TicketGraph, TicketKey, compare_tickets, path_leaf,
 };
 pub use crate::model::{RowDensity, SearchOrder};
 use crate::pointer::{
@@ -630,6 +630,145 @@ impl BulkEdit {
     }
 }
 
+/// How far a work item's direct children have got: how many are finished, and
+/// how many there are.
+///
+/// Grandchildren are deliberately left out. A parent's progress is the work it
+/// asked for directly, so an Epic reads over its Features rather than over
+/// every Task underneath them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChildProgress {
+    pub done: usize,
+    pub total: usize,
+}
+
+/// How many cells wide the details pane draws the bar beside the ratio.
+pub const PROGRESS_BAR_CELLS: usize = 6;
+
+impl ChildProgress {
+    /// Whether every child is off the board, which is what makes an Epic read
+    /// as finished without anybody counting its children.
+    #[must_use]
+    pub const fn is_complete(self) -> bool {
+        self.total > 0 && self.done >= self.total
+    }
+
+    /// The ratio as all three places write it: `3/7`.
+    #[must_use]
+    pub fn ratio(self) -> String {
+        format!("{}/{}", self.done, self.total)
+    }
+
+    /// How many cells of a bar `width` wide are filled. Rounding never lies at
+    /// either end: any progress at all fills one cell, and only a whole ratio
+    /// fills the last one.
+    #[must_use]
+    pub const fn filled_cells(self, width: usize) -> usize {
+        if width == 0 || self.total == 0 || self.done == 0 {
+            return 0;
+        }
+        if self.done >= self.total {
+            return width;
+        }
+        let scaled = self.done * width / self.total;
+        if scaled == 0 {
+            1
+        } else if scaled >= width {
+            width - 1
+        } else {
+            scaled
+        }
+    }
+}
+
+/// Done out of total over direct children, for every work item that has any.
+///
+/// Built in one pass over the relations and the states beside them, so drawing
+/// forty rows costs forty hash lookups rather than forty walks of the graph. A
+/// work item with no children is simply absent, which is what lets the table,
+/// the family tree, and the details pane all show nothing at all for it.
+#[derive(Clone, Debug, Default)]
+pub struct ChildProgressIndex {
+    by_parent: HashMap<TicketKey, ChildProgress>,
+}
+
+impl ChildProgressIndex {
+    #[must_use]
+    pub fn build(tickets: &[Ticket], graph: &TicketGraph) -> Self {
+        let categories: HashMap<&TicketKey, StateCategory> = tickets
+            .iter()
+            .map(|ticket| (&ticket.key, StateCategory::of(&ticket.state)))
+            .collect();
+        // A child reached both by its parent's child link and by its own
+        // parent link is still one child, so the pairs are deduplicated the
+        // way `TicketGraph::children_of` does before anything is counted.
+        let mut children: HashMap<&TicketKey, HashSet<&TicketKey>> = HashMap::new();
+        for relation in &graph.relations {
+            let (parent, child) = match relation.kind {
+                RelationKind::Child => (&relation.from, &relation.to),
+                RelationKind::Parent => (&relation.to, &relation.from),
+                _ => continue,
+            };
+            if parent == child {
+                continue;
+            }
+            children.entry(parent).or_default().insert(child);
+        }
+        let by_parent = children
+            .into_iter()
+            .map(|(parent, children)| {
+                // A child the loaded set does not hold still counts against
+                // the total: it is work that was asked for and is not known to
+                // be finished.
+                let done = children
+                    .iter()
+                    .filter(|child| {
+                        categories
+                            .get(*child)
+                            .copied()
+                            .is_some_and(StateCategory::is_done)
+                    })
+                    .count();
+                (
+                    parent.clone(),
+                    ChildProgress {
+                        done,
+                        total: children.len(),
+                    },
+                )
+            })
+            .collect();
+        Self { by_parent }
+    }
+
+    /// What one work item's children add up to, or nothing at all when it has
+    /// none.
+    #[must_use]
+    pub fn of(&self, key: &TicketKey) -> Option<ChildProgress> {
+        self.by_parent.get(key).copied()
+    }
+
+    /// Orders two work items by how far along they are, with the ones that
+    /// have no children last however the sort runs — the same place an empty
+    /// priority takes.
+    fn compare(&self, left: &TicketKey, right: &TicketKey, direction: SortDirection) -> Ordering {
+        match (self.of(left), self.of(right)) {
+            (Some(left), Some(right)) => {
+                // Cross-multiplied rather than divided, so 1/2 and 2/4 tie
+                // exactly and no ratio rounds its way past another.
+                let ordering = (left.done * right.total).cmp(&(right.done * left.total));
+                match direction {
+                    SortDirection::Ascending => ordering,
+                    SortDirection::Descending => ordering.reverse(),
+                }
+            }
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct PreparedTickets {
     tickets: Vec<Ticket>,
@@ -740,6 +879,9 @@ pub struct App {
     views: Vec<NamedView>,
     pub active_view: Option<String>,
     graph: TicketGraph,
+    /// Done out of total over each parent's direct children, rebuilt whenever
+    /// the rows or the graph move rather than counted again every frame.
+    child_progress: ChildProgressIndex,
     /// The states Azure DevOps allows for each work item type. Empty until a
     /// sync has fetched them, which is what [`App::states_for`] falls back for.
     state_catalog: StateCatalog,
@@ -915,6 +1057,7 @@ impl App {
             views: Vec::new(),
             active_view: None,
             graph: prepared.graph,
+            child_progress: ChildProgressIndex::default(),
             state_catalog: prepared.states,
             loaded_at: Instant::now(),
             database_path: PathBuf::new(),
@@ -940,6 +1083,7 @@ impl App {
             classification_fetched_at: None,
             classification_requested: false,
         };
+        app.refresh_child_progress();
         app.show_all(None);
         app
     }
@@ -1300,6 +1444,7 @@ impl App {
 
     pub fn set_workspace_graph(&mut self, graph: crate::model::TicketGraph) {
         self.graph = graph;
+        self.refresh_child_progress();
         self.sync_family_state();
     }
 
@@ -1514,6 +1659,7 @@ impl App {
         }
         self.search.replace_documents(prepared.search_documents);
         self.reapply_pending_edits();
+        self.refresh_child_progress();
         self.loaded_at = Instant::now();
         self.stale = false;
         if self.fuzzy_query().is_empty() {
@@ -1737,11 +1883,28 @@ impl App {
         self.tickets.iter().position(|ticket| ticket.key == *key)
     }
 
-    /// Replaces one work item in place, keeping its search document in step so
-    /// the next query sees the new value.
+    /// Replaces one work item in place, keeping its search document and its
+    /// parents' child counts in step so the next query and the next frame both
+    /// see the new value.
     fn set_ticket(&mut self, index: usize, ticket: Ticket) {
         Arc::make_mut(&mut self.tickets)[index] = ticket;
         self.search.update_document(index, &self.tickets[index]);
+        self.refresh_child_progress();
+    }
+
+    /// Counts each parent's children again. Called wherever the rows or the
+    /// relations move — a reload, a workspace graph, an edit settling — which
+    /// is what keeps an Epic's ratio right as its issues close without any
+    /// frame paying for the count.
+    fn refresh_child_progress(&mut self) {
+        self.child_progress = ChildProgressIndex::build(&self.tickets, &self.graph);
+    }
+
+    /// How far one work item's direct children have got, or nothing at all
+    /// when it has none.
+    #[must_use]
+    pub fn child_progress(&self, key: &TicketKey) -> Option<ChildProgress> {
+        self.child_progress.of(key)
     }
 
     /// Re-applies the filters and the sort to the rows already on screen, for
@@ -2975,20 +3138,25 @@ impl App {
         let direction = self.sort_direction;
         let relevance_first =
             !self.fuzzy_query().is_empty() && self.search_order == SearchOrder::Relevance;
+        // Child progress is the one column whose value is not on the work
+        // item, so the index supplies the ordering and `compare_tickets` is
+        // left to break the ties.
+        let progress = (field == SortField::Progress).then(|| self.child_progress.clone());
         self.visible.sort_by(|left, right| {
             let relevance = if relevance_first {
                 right.score.cmp(&left.score)
             } else {
                 Ordering::Equal
             };
-            relevance.then_with(|| {
-                compare_tickets(
-                    &tickets[left.ticket_index],
-                    &tickets[right.ticket_index],
-                    field,
-                    direction,
-                )
-            })
+            let left = &tickets[left.ticket_index];
+            let right = &tickets[right.ticket_index];
+            relevance
+                .then_with(|| {
+                    progress.as_ref().map_or(Ordering::Equal, |progress| {
+                        progress.compare(&left.key, &right.key, direction)
+                    })
+                })
+                .then_with(|| compare_tickets(left, right, field, direction))
         });
     }
 
@@ -5048,6 +5216,110 @@ mod tests {
 
     fn press(app: &mut App, code: KeyCode) -> AppAction {
         app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn child_of(child: i64, parent: i64) -> RelationRecord {
+        RelationRecord {
+            from: family_key(child),
+            to: family_key(parent),
+            kind: RelationKind::Parent,
+        }
+    }
+
+    /// An Epic over three issues — one closed, one removed, one still open —
+    /// with a task hanging off the open issue.
+    fn epic_tickets() -> Vec<Ticket> {
+        let mut epic = ticket(1, "Auth rewrite", "2026-01-05T00:00:00Z");
+        epic.work_item_type = "Epic".into();
+        let mut closed = ticket(2, "Login form", "2026-01-04T00:00:00Z");
+        closed.state = "Closed".into();
+        let mut removed = ticket(3, "Logout", "2026-01-03T00:00:00Z");
+        removed.state = "Removed".into();
+        let open = ticket(4, "Session notes", "2026-01-02T00:00:00Z");
+        let mut task = ticket(5, "Validate email", "2026-01-01T00:00:00Z");
+        task.state = "New".into();
+        vec![epic, closed, removed, open, task]
+    }
+
+    fn epic_graph() -> TicketGraph {
+        TicketGraph {
+            relations: vec![
+                child_of(2, 1),
+                child_of(3, 1),
+                child_of(4, 1),
+                child_of(5, 4),
+            ],
+            ..TicketGraph::default()
+        }
+    }
+
+    #[test]
+    fn child_progress_counts_direct_children_and_closes_on_completed_or_removed() {
+        let mut app = App::new(epic_tickets());
+        app.set_workspace_graph(epic_graph());
+
+        let epic = app
+            .child_progress(&family_key(1))
+            .expect("an epic with children has a ratio");
+        assert_eq!(
+            (epic.done, epic.total),
+            (2, 3),
+            "Closed and Removed both count as done, and the grandchild is not the epic's own child"
+        );
+        assert!(!epic.is_complete());
+        let issue = app
+            .child_progress(&family_key(4))
+            .expect("the issue has a task under it");
+        assert_eq!((issue.done, issue.total), (0, 1));
+        assert_eq!(
+            app.child_progress(&family_key(5)),
+            None,
+            "a work item nobody broke down has no ratio at all, not 0/0"
+        );
+    }
+
+    #[test]
+    fn an_epic_reads_as_complete_once_its_last_child_closes() {
+        let mut app = App::new(epic_tickets());
+        app.set_workspace_graph(epic_graph());
+        assert!(!app.child_progress(&family_key(1)).unwrap().is_complete());
+
+        let mut closing = epic_tickets();
+        closing[3].state = "Closed".into();
+        app.replace_prepared_tickets(PreparedTickets::with_graph(closing, epic_graph()));
+
+        let epic = app.child_progress(&family_key(1)).unwrap();
+        assert_eq!((epic.done, epic.total), (3, 3));
+        assert!(
+            epic.is_complete(),
+            "the last issue closing finishes the epic without anything recounting it by hand"
+        );
+    }
+
+    #[test]
+    fn sorting_by_progress_runs_least_finished_first_and_leaves_childless_rows_last() {
+        let mut app = App::new(epic_tickets());
+        app.set_workspace_graph(epic_graph());
+
+        app.set_sort(SortField::Progress, SortDirection::Ascending);
+
+        let order: Vec<i64> = app.visible_tickets().map(|ticket| ticket.key.id).collect();
+        assert_eq!(
+            order,
+            vec![4, 1, 2, 3, 5],
+            "0/1 before 2/3, then the work items with no children in id order"
+        );
+    }
+
+    #[test]
+    fn a_bar_fills_only_on_a_whole_ratio_and_never_reads_empty_once_work_has_landed() {
+        let bar = |done, total| ChildProgress { done, total }.filled_cells(PROGRESS_BAR_CELLS);
+
+        assert_eq!(bar(0, 7), 0);
+        assert_eq!(bar(1, 40), 1, "a single closed child still shows one cell");
+        assert_eq!(bar(3, 7), 2);
+        assert_eq!(bar(39, 40), 5, "an unfinished parent never fills the bar");
+        assert_eq!(bar(7, 7), PROGRESS_BAR_CELLS);
     }
 
     #[test]

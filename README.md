@@ -591,7 +591,7 @@ against the server.
 | `c` | Toggle compact or comfortable table rows |
 | `f` | Focus the filter bar; `h`/`l` change field, `j`/`k` values, `Space` toggles |
 | `+` | Open the full filter overlay for extra fields |
-| `w` | Show or hide (`Space`), reorder (`J`/`K`), and resize (`<`/`>`) columns |
+| `w` | Show or hide (`Space`), reorder (`J`/`K`), and resize (`<`/`>`) columns, Progress among them |
 | `p` / `:` | Open the command palette |
 | `V` | Open named views; `n` saves, `Enter` loads, `d` deletes |
 | `e` | Open the Edit menu of field editors; `Enter` opens the one chosen |
@@ -619,13 +619,23 @@ way everywhere.
 
 The details pane is one scrolling document rather than a pinned heading over a
 scrolling body. Its heading — title, ID / Type / State, the family breadcrumb,
-assignee and priority, tags, project and revision, and the work-item URL —
-scrolls away with everything under it, in this order: the family tree,
-Planning, Description, History, and Comments. The scrollbar therefore measures
-the whole pane and its thumb reaches the bottom, `End` lands on the last
-comment, and a field value stays clickable wherever the scroll has carried it.
-Moving the family cursor scrolls the tree back into view when the heading has
-pushed it below the fold.
+assignee and priority, tags, project and revision, child progress, and the
+work-item URL — scrolls away with everything under it, in this order: the
+family tree, Planning, Description, History, and Comments. The scrollbar
+therefore measures the whole pane and its thumb reaches the bottom, `End` lands
+on the last comment, and a field value stays clickable wherever the scroll has
+carried it. Moving the family cursor scrolls the tree back into view when the
+heading has pushed it below the fold.
+
+A work item with children reports how far they have got. The heading reads
+`Children: 3/7 done` with a six-cell bar beside it, every family-tree row that
+is itself a parent trails its own ` 3/7`, and the optional Progress table
+column shows the same ratio. All three count direct children only — an Epic
+reads over its Features rather than over every Task underneath them — and both
+Completed and Removed states count as done, so a cut work item stops holding
+its parent back. A work item nobody broke down shows nothing at all in any of
+the three places, never `0/0`. The bar is drawn from two different glyphs
+rather than two colours, so it reads the same under `NO_COLOR`.
 
 Mouse input stays captured so the TUI can provide its own pointer controls
 without restoring terminal drag-select. Wheel scrolling moves the hovered
@@ -686,8 +696,13 @@ so one tag reads the same everywhere. Completed and removed rows are dimmed so
 open work stands out, the Area and Iteration table columns show only the last
 path segment while details keeps the full path, family-tree rows carry a
 one-character state glyph (`○ ◐ ● ✓ ✗`), and matched search characters are
-underlined in visible results. A hovered row is tinted with a 256-colour
-background rather than repainted, so its coloured cells keep their own
+underlined in visible results. ID, Title, State, Type, Pri, Changed, and
+Assignee are the columns a fresh session shows; Org, Project, Area, Iteration,
+Created, Tags, and Progress are there under `w` and stay hidden until they are
+switched on, after which the choice is saved with the rest of the layout. A
+parent whose children have all finished goes green and bold, in the Progress
+column and in the details heading alike. A hovered row is tinted with a
+256-colour background rather than repainted, so its coloured cells keep their own
 foregrounds; hovered controls reverse instead. Setting the standard `NO_COLOR`
 environment variable selects the monochrome theme, where weight carries the same
 distinctions: badges keep their brackets, finished rows dim instead of fading,

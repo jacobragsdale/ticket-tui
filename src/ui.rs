@@ -11,8 +11,8 @@ use ratatui::widgets::{
 use time::OffsetDateTime;
 
 use crate::app::{
-    App, AppMode, DividerOrientation, Focus, HitRegions, NotificationLevel, PRIORITY_CHOICES,
-    PromptField, RowDensity, SearchOrder, UNASSIGNED_LABEL,
+    App, AppMode, ChildProgress, DividerOrientation, Focus, HitRegions, NotificationLevel,
+    PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PromptField, RowDensity, SearchOrder, UNASSIGNED_LABEL,
 };
 use crate::command::{COMMANDS, EDIT_MENU, key_label_for};
 use crate::filter::{FacetTarget, FilterField};
@@ -507,19 +507,16 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let bookmarked = app.is_bookmarked(&ticket.key);
         let checked = app.is_row_selected(&ticket.key);
         let mut cells = vec![Cell::from(row_marker_line(checked, bookmarked))];
-        let tone = RowTone::of(&ticket.state);
-        let mine = app.is_mine(ticket);
-        cells.extend(columns.iter().map(|column| {
-            table_cell(
-                ticket,
-                column.id,
-                now,
-                density,
-                tone,
-                mine,
-                &mut highlighter,
-            )
-        }));
+        let row = RowContext {
+            tone: RowTone::of(&ticket.state),
+            mine: app.is_mine(ticket),
+            progress: app.child_progress(&ticket.key),
+        };
+        cells.extend(
+            columns
+                .iter()
+                .map(|column| table_cell(ticket, column.id, now, density, row, &mut highlighter)),
+        );
         Row::new(cells).height(row_height)
     });
     let table = Table::new(rows, constraints.clone())
@@ -761,19 +758,25 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     for span in metadata_field_spans(&ticket, has_family) {
         field_hits.push((span.line, span.field, span.x, span.width));
     }
+    // Below the editable fields, so nothing a click aims at moves when a
+    // parent gains this line and a childless work item does without it.
+    if let Some(progress) = app.child_progress(&ticket.key) {
+        lines.push(child_progress_line(progress));
+    }
     let url_line = u16::try_from(lines.len()).ok();
     lines.push(link_line(ticket.web_url.clone()));
     lines.push(Line::default());
 
     if has_family {
         lines.push(family_section_line(
-            family_closed_summary(app, &family),
+            app.child_progress(&ticket.key),
             family_focused,
         ));
         for entry in app.visible_family_tree() {
             let related = app.ticket_by_key(&entry.key);
             let is_cursor = family_focused && cursor.as_ref() == Some(&entry.key);
-            let line = family_tree_line(&entry, related, is_cursor, width);
+            let progress = app.child_progress(&entry.key);
+            let line = family_tree_line(&entry, related, progress, is_cursor, width);
             if let Ok(index) = u16::try_from(lines.len()) {
                 tree_start.get_or_insert(index);
                 family_hits.push(FamilyHit {
@@ -2264,24 +2267,9 @@ struct FamilyHit {
     jumpable: bool,
 }
 
-fn family_closed_summary(app: &App, family: &FamilySnapshot) -> Option<(usize, usize)> {
-    if family.children.is_empty() {
-        return None;
-    }
-    let done = family
-        .children
-        .iter()
-        .filter(|key| {
-            app.ticket_by_key(key)
-                .is_some_and(|ticket| state_is_done(&ticket.state))
-        })
-        .count();
-    Some((done, family.children.len()))
-}
-
-fn family_section_line(summary: Option<(usize, usize)>, focused: bool) -> Line<'static> {
+fn family_section_line(progress: Option<ChildProgress>, focused: bool) -> Line<'static> {
     let heading = family_heading_style(focused);
-    let Some((done, total)) = summary else {
+    let Some(progress) = progress else {
         return Line::styled("Family", heading);
     };
     let mut count = Style::default().fg(state_color(StateCategory::Completed));
@@ -2290,7 +2278,7 @@ fn family_section_line(summary: Option<(usize, usize)>, focused: bool) -> Line<'
     }
     Line::from(vec![
         Span::styled("Family · ", heading),
-        Span::styled(format!("{done}/{total} closed"), count),
+        Span::styled(format!("{} closed", progress.ratio()), count),
     ])
 }
 
@@ -2359,6 +2347,7 @@ fn state_glyph_style(base: Style, category: StateCategory) -> Style {
 fn family_tree_line(
     entry: &FamilyTreeEntry,
     ticket: Option<&Ticket>,
+    progress: Option<ChildProgress>,
     is_cursor: bool,
     width: u16,
 ) -> Line<'static> {
@@ -2367,14 +2356,19 @@ fn family_tree_line(
     let type_label = ticket.map_or("?", |ticket| ticket.work_item_type.as_str());
     let title = ticket.map_or("missing ticket", |ticket| ticket.title.as_str());
     let category = ticket.map(|ticket| StateCategory::of(&ticket.state));
-    let current_label = if entry.is_current { " current" } else { "" };
+    // A parent says how far its own children have got; a leaf trails nothing.
+    let trailer = format!(
+        "{}{}",
+        progress.map_or_else(String::new, |progress| format!(" {}", progress.ratio())),
+        if entry.is_current { " current" } else { "" }
+    );
     let packed = pack_family_row(
         usize::from(width),
         &format!("{connector}{id}"),
         type_label,
         category.map_or("", state_glyph),
         title,
-        current_label,
+        &trailer,
     );
     let base = family_row_style(entry.is_current, is_cursor);
     let id_style = if entry.is_current || ticket.is_none() {
@@ -2435,13 +2429,16 @@ impl PackedFamilyRow {
     }
 }
 
+/// Packs one family row into `width`. The trailer is what follows the title —
+/// the child ratio, the `current` marker, or both — and is the first thing
+/// dropped after the title has been truncated as far as it goes.
 fn pack_family_row(
     width: usize,
     head: &str,
     type_label: &str,
     glyph: &str,
     title: &str,
-    current_label: &str,
+    trailer: &str,
 ) -> PackedFamilyRow {
     let assemble = |include_type: bool, include_glyph: bool, include_current: bool, title: &str| {
         let mut text = head.to_owned();
@@ -2460,11 +2457,11 @@ fn pack_family_row(
             text.push_str(title);
         }
         if include_current {
-            text.push_str(current_label);
+            text.push_str(trailer);
         }
         PackedFamilyRow { text, glyph_at }
     };
-    let include_current = !current_label.is_empty();
+    let include_current = !trailer.is_empty();
     let fit = |row: PackedFamilyRow| (row.text.chars().count() <= width).then_some(row);
     let budget = |include_type: bool, include_current: bool| {
         width.saturating_sub(
@@ -2480,7 +2477,7 @@ fn pack_family_row(
     }
     // Shed one thing at a time so the connector and id always survive: the
     // glyph goes before the title is truncated, then the type, then the
-    // current marker.
+    // trailer.
     if let Some(row) = fit(assemble(true, false, include_current, title)) {
         return row;
     }
@@ -2518,20 +2515,6 @@ fn family_breadcrumb_line(app: &App, family: &FamilySnapshot) -> Line<'static> {
         spans.push(Span::raw(format!("  {title} › this")));
     } else {
         spans.push(Span::raw("this"));
-    }
-    if !family.children.is_empty() {
-        let done = family
-            .children
-            .iter()
-            .filter(|key| {
-                app.ticket_by_key(key)
-                    .is_some_and(|ticket| state_is_done(&ticket.state))
-            })
-            .count();
-        spans.push(Span::styled(
-            format!(" · {done}/{} closed", family.children.len()),
-            Style::default().fg(state_color(StateCategory::Completed)),
-        ));
     }
     Line::from(spans)
 }
@@ -2601,10 +2584,7 @@ fn visible_row_y(area: Rect, logical: u16, scroll: u16) -> Option<u16> {
 }
 
 fn state_is_done(state: &str) -> bool {
-    matches!(
-        StateCategory::of(state),
-        StateCategory::Completed | StateCategory::Removed
-    )
+    StateCategory::of(state).is_done()
 }
 
 /// How strongly a row is painted: finished work fades so open work stands out.
@@ -2685,15 +2665,29 @@ fn overlay_line(line: Line<'_>, selected: bool) -> Line<'_> {
     }
 }
 
+/// What a row knows about itself beyond the work item: how strongly it is
+/// painted, whether it is the signed-in user's, and how far its children have
+/// got.
+#[derive(Clone, Copy)]
+struct RowContext {
+    tone: RowTone,
+    mine: bool,
+    progress: Option<ChildProgress>,
+}
+
 fn table_cell(
     ticket: &Ticket,
     field: SortField,
     now: OffsetDateTime,
     density: RowDensity,
-    tone: RowTone,
-    mine: bool,
+    row: RowContext,
     highlighter: &mut QueryHighlighter,
 ) -> Cell<'static> {
+    let RowContext {
+        tone,
+        mine,
+        progress,
+    } = row;
     let plain = tone.apply(Style::default());
     let line = match field {
         SortField::Type => Line::from(type_badge_spans(&ticket.work_item_type, tone, highlighter)),
@@ -2747,6 +2741,11 @@ fn table_cell(
             highlight_searchable(path_leaf(&ticket.iteration_path), plain, highlighter)
         }
         SortField::Tags => Line::from(tag_badge_spans(&ticket.tags, tone, highlighter)),
+        // A work item with no children shows an empty cell rather than `0/0`:
+        // there is no progress to report on work that was never broken down.
+        SortField::Progress => Line::from(progress.map(ChildProgress::ratio).unwrap_or_default())
+            .right_aligned()
+            .style(progress_style(plain, progress)),
     };
 
     if density == RowDensity::Comfortable && field == SortField::Title {
@@ -3121,6 +3120,47 @@ fn register_edit_field(
         Some(SelectableSurface::Details),
         Some(ScrollSurface::Details),
     ));
+}
+
+/// `Children: 3/7 done  ▆▆▆░░░` — how far a work item's direct children have
+/// got, with a bar a few cells wide beside the ratio.
+///
+/// Nothing here leans on colour: the filled and the empty cells are different
+/// glyphs and a finished parent goes bold as well as green, so the bar reads
+/// the same under NO_COLOR as it does in the colour theme.
+fn child_progress_line(progress: ChildProgress) -> Line<'static> {
+    let mut value = Style::default();
+    if progress.is_complete() {
+        value = value
+            .fg(state_color(StateCategory::Completed))
+            .add_modifier(Modifier::BOLD);
+    }
+    Line::from(vec![
+        Span::styled("Children: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{} done", progress.ratio()), value),
+        Span::raw("  "),
+        Span::styled(progress_bar(progress, PROGRESS_BAR_CELLS), value),
+    ])
+}
+
+/// The bar itself: filled cells for the share that is finished, hollow ones
+/// for the rest.
+fn progress_bar(progress: ChildProgress, width: usize) -> String {
+    let filled = progress.filled_cells(width);
+    let mut bar = "\u{2586}".repeat(filled);
+    bar.push_str(&"\u{2591}".repeat(width.saturating_sub(filled)));
+    bar
+}
+
+/// A finished parent's ratio goes green and bold in the table too, so the
+/// column reads at a glance without anybody comparing the two numbers.
+fn progress_style(plain: Style, progress: Option<ChildProgress>) -> Style {
+    if progress.is_some_and(ChildProgress::is_complete) {
+        return plain
+            .fg(state_color(StateCategory::Completed))
+            .add_modifier(Modifier::BOLD);
+    }
+    plain
 }
 
 fn field_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
@@ -4547,6 +4587,181 @@ mod tests {
             prompt.contains("Enter post"),
             "the footer explains the prompt: {prompt}"
         );
+    }
+
+    fn child_of(child: i64, parent: i64) -> RelationRecord {
+        let key = |id| TicketKey {
+            organization: "demo".into(),
+            id,
+        };
+        RelationRecord {
+            from: key(child),
+            to: key(parent),
+            kind: RelationKind::Parent,
+        }
+    }
+
+    /// An Epic over three issues — one closed, one removed, one still open —
+    /// with a task hanging off the open issue, so the tree carries a parent
+    /// worth a ratio and a leaf worth none.
+    fn progress_tickets() -> Vec<Ticket> {
+        vec![
+            ticket_at(
+                10_001,
+                "Auth rewrite",
+                "Epic",
+                "Active",
+                "2026-01-05T00:00:00Z",
+            ),
+            ticket_at(
+                10_002,
+                "Login form",
+                "Issue",
+                "Closed",
+                "2026-01-04T00:00:00Z",
+            ),
+            ticket_at(10_003, "Logout", "Issue", "Removed", "2026-01-03T00:00:00Z"),
+            ticket_at(
+                10_004,
+                "Session notes",
+                "Issue",
+                "Active",
+                "2026-01-02T00:00:00Z",
+            ),
+            ticket_at(
+                10_005,
+                "Validate email",
+                "Task",
+                "New",
+                "2026-01-01T00:00:00Z",
+            ),
+        ]
+    }
+
+    fn progress_graph() -> TicketGraph {
+        TicketGraph {
+            relations: vec![
+                child_of(10_002, 10_001),
+                child_of(10_003, 10_001),
+                child_of(10_004, 10_001),
+                child_of(10_005, 10_004),
+            ],
+            ..TicketGraph::default()
+        }
+    }
+
+    fn progress_app() -> App {
+        let mut app = App::new(progress_tickets());
+        app.set_workspace_graph(progress_graph());
+        app
+    }
+
+    fn column_index(app: &App, field: SortField) -> usize {
+        app.layout
+            .columns
+            .iter()
+            .position(|column| column.id == field)
+            .expect("the layout holds every column")
+    }
+
+    #[test]
+    fn the_details_header_counts_the_children_and_a_childless_one_says_nothing() {
+        let mut app = progress_app();
+        assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
+
+        let epic = render_text(130, 30, &mut app);
+        assert!(epic.contains("Children: 2/3 done"), "{epic}");
+        assert!(
+            epic.contains("▆▆▆▆░░"),
+            "the bar is two different glyphs, so it reads under NO_COLOR too: {epic}"
+        );
+
+        for _ in 0..4 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(app.selected_ticket().unwrap().key.id, 10_005);
+
+        let leaf = render_text(130, 30, &mut app);
+        assert!(
+            !leaf.contains("Children"),
+            "a work item nobody broke down shows no ratio and no bar: {leaf}"
+        );
+    }
+
+    #[test]
+    fn an_epic_whose_children_have_all_finished_fills_its_bar() {
+        let mut tickets = progress_tickets();
+        tickets[3].state = "Closed".into();
+        let mut app = App::new(tickets);
+        app.set_workspace_graph(progress_graph());
+
+        let text = render_text(130, 30, &mut app);
+        assert!(text.contains("Children: 3/3 done"), "{text}");
+        assert!(
+            text.contains("▆▆▆▆▆▆"),
+            "every child off the board fills the bar: {text}"
+        );
+    }
+
+    #[test]
+    fn the_family_tree_writes_a_parents_ratio_after_its_title_and_leaves_the_rest_bare() {
+        let mut app = progress_app();
+        app.narrow_details = true;
+        app.focus = Focus::Details;
+
+        let text = render_text(60, 30, &mut app);
+        assert!(text.contains("Auth rewrite 2/3"), "{text}");
+        assert!(text.contains("Session notes 0/1"), "{text}");
+        assert!(text.contains("Validate email"), "{text}");
+        assert!(
+            !text.contains("Validate email 0"),
+            "a leaf of the tree trails nothing at all: {text}"
+        );
+        assert!(
+            !text.contains("Login form 0"),
+            "a closed issue with no children of its own trails nothing either: {text}"
+        );
+    }
+
+    #[test]
+    fn the_progress_column_is_hidden_until_the_column_overlay_shows_it() {
+        let mut app = progress_app();
+        // The table on its own, narrowed to the columns under test, so nothing
+        // the details pane says can be mistaken for the column's own output.
+        for field in [
+            SortField::State,
+            SortField::Type,
+            SortField::Priority,
+            SortField::Changed,
+            SortField::Assignee,
+        ] {
+            let index = column_index(&app, field);
+            app.layout.toggle_visible(index);
+        }
+        let progress = column_index(&app, SortField::Progress);
+        assert!(
+            !app.layout.columns[progress].visible,
+            "the column is off until somebody asks for it"
+        );
+
+        let hidden = render_text(60, 20, &mut app);
+        assert!(!hidden.contains("Progress"), "{hidden}");
+        assert!(!hidden.contains("2/3"), "{hidden}");
+
+        app.layout.toggle_visible(progress);
+        let shown = render_text(60, 20, &mut app);
+        assert!(shown.contains("Progress"), "{shown}");
+        assert!(shown.contains("2/3"), "{shown}");
+        assert!(shown.contains("0/1"), "{shown}");
+        assert!(
+            !shown.contains("0/0"),
+            "a work item with no children leaves the cell empty: {shown}"
+        );
+
+        app.layout.toggle_visible(progress);
+        let hidden_again = render_text(60, 20, &mut app);
+        assert!(!hidden_again.contains("Progress"), "{hidden_again}");
+        assert!(!hidden_again.contains("2/3"), "{hidden_again}");
     }
 
     #[test]

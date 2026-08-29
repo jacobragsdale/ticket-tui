@@ -85,6 +85,11 @@ impl Default for TableLayout {
                     visible: false,
                     width: 16,
                 },
+                ColumnConfig {
+                    id: SortField::Progress,
+                    visible: false,
+                    width: 9,
+                },
             ],
             auto_hide: true,
         }
@@ -236,6 +241,38 @@ mod tests {
         assert_eq!(visible[1], SortField::Title);
         assert!(!visible.contains(&SortField::Assignee));
         assert!(!visible.contains(&SortField::Organization));
+    }
+
+    #[test]
+    fn child_progress_is_an_opt_in_column_the_overlay_turns_on_and_off() {
+        let mut layout = TableLayout::default();
+        let index = layout
+            .columns
+            .iter()
+            .position(|column| column.id == SortField::Progress)
+            .expect("the layout offers a Progress column");
+        assert!(
+            !layout.columns[index].visible,
+            "nobody asked for it, so it starts hidden"
+        );
+        assert!(
+            !layout
+                .visible_columns(200)
+                .iter()
+                .any(|column| column.id == SortField::Progress)
+        );
+
+        layout.toggle_visible(index);
+        assert!(layout.columns[index].visible);
+        assert!(
+            layout
+                .visible_columns(200)
+                .iter()
+                .any(|column| column.id == SortField::Progress)
+        );
+
+        layout.toggle_visible(index);
+        assert!(!layout.columns[index].visible);
     }
 
     #[test]
