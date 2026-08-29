@@ -9,12 +9,12 @@ use directories::ProjectDirs;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::model::{
-    CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateCatalog, StateCategory,
-    StateOption, Ticket, TicketGraph, TicketKey,
+    CommentRecord, HistoryRecord, Identity, RelationKind, RelationRecord, StateCatalog,
+    StateCategory, StateOption, Ticket, TicketGraph, TicketKey,
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -33,6 +33,7 @@ DROP TABLE IF EXISTS work_item_relations;
 DROP TABLE IF EXISTS work_item_comments;
 DROP TABLE IF EXISTS work_item_history;
 DROP TABLE IF EXISTS work_item_type_states;
+DROP TABLE IF EXISTS identities;
 DROP TABLE IF EXISTS sync_meta;
 CREATE TABLE work_items (
     organization   TEXT NOT NULL,
@@ -92,15 +93,19 @@ CREATE TABLE work_item_type_states (
     position       INTEGER NOT NULL,
     PRIMARY KEY (work_item_type, name)
 );
+CREATE TABLE identities (
+    display_name TEXT PRIMARY KEY,
+    unique_name  TEXT
+);
 CREATE TABLE sync_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 ";
 
-/// `sync_meta` and `work_item_type_states` are deliberately absent: they
-/// describe the sync and the project's process, not the work items a pull
-/// replaces.
+/// `sync_meta`, `work_item_type_states`, and `identities` are deliberately
+/// absent: they describe the sync, the project's process, and the people in it,
+/// not the work items a pull replaces.
 const CLEAR_CACHE: &str = "DELETE FROM work_items;
 DELETE FROM work_item_relations;
 DELETE FROM work_item_comments;
@@ -307,6 +312,36 @@ impl SqliteTicketRepository {
             catalog.insert(work_item_type, states);
         }
         Ok(catalog)
+    }
+
+    /// Records the people the project's teams hold, so the assignee picker can
+    /// offer somebody who has never been assigned a work item. The list is
+    /// written whole, so somebody who left the project stops being offered.
+    pub fn replace_identities(&mut self, identities: &[Identity]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM identities", [])?;
+        for identity in identities {
+            transaction.execute(
+                "INSERT OR REPLACE INTO identities (display_name, unique_name)
+                 VALUES (?1, ?2)",
+                params![identity.display_name, identity.unique_name],
+            )?;
+        }
+        transaction
+            .commit()
+            .context("failed to store the project's identities")
+    }
+
+    /// Everybody the last identity fetch found, by display name.
+    pub fn load_identities(&self) -> Result<Vec<Identity>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT display_name, unique_name FROM identities ORDER BY display_name")?;
+        let rows = statement.query_map([], |row| {
+            Ok(Identity::new(row.get::<_, String>(0)?, row.get(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load identities")
     }
 
     /// Replaces the cached work items and their graph with a freshly pulled set.

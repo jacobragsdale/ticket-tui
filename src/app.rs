@@ -21,8 +21,9 @@ use crate::filter::{
     FacetValue, FilterField, FilterToken, ParsedQuery, facet_values, format_query, parse_query,
 };
 use crate::model::{
-    CommentRecord, FamilySnapshot, FamilyTreeEntry, HistoryRecord, RelationRecord, SortDirection,
-    SortField, StateCatalog, StateOption, Ticket, TicketGraph, TicketKey, compare_tickets,
+    CommentRecord, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity, RelationRecord,
+    SortDirection, SortField, StateCatalog, StateOption, Ticket, TicketGraph, TicketKey,
+    compare_tickets,
 };
 pub use crate::model::{RowDensity, SearchOrder};
 use crate::pointer::{
@@ -55,6 +56,8 @@ pub enum AppMode {
     PriorityPicker,
     /// A single-line field editor, for the Title and Tags rows of the Edit menu.
     Prompt,
+    /// The people the selected work item can be assigned to, filtered by typing.
+    AssigneePicker,
 }
 
 /// Percentage of the workspace given to the tickets pane when the panes sit
@@ -100,6 +103,10 @@ pub enum AppAction {
     Sync,
     /// Write one field of one work item back to Azure DevOps.
     Edit(EditRequest),
+    /// Read the project's team members, so the assignee picker can offer
+    /// somebody with no work item in the database yet. Asked for once a
+    /// session, when that picker first opens; the picker does not wait on it.
+    FetchIdentities,
     OpenUrl(String),
     Copy {
         text: String,
@@ -270,6 +277,77 @@ impl PromptField {
     }
 }
 
+/// What the assignee picker calls nobody at all, and the row that unassigns.
+pub const UNASSIGNED_LABEL: &str = "Unassigned";
+
+/// One row of the assignee picker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssigneeCandidate {
+    /// The name the row shows and the Assignee cell reads after the write.
+    pub display: String,
+    /// The sign-in address a write is best addressed to, when one is known.
+    pub unique: Option<String>,
+    /// Whether choosing this row takes the work item off whoever holds it.
+    pub unassigned: bool,
+    /// Whether this is the signed-in user, which the row says out loud.
+    pub me: bool,
+}
+
+impl AssigneeCandidate {
+    /// Whether this row is who the work item is assigned to already, which the
+    /// picker marks and `Enter` treats as a no-op.
+    #[must_use]
+    pub fn is_current(&self, current: Option<&str>) -> bool {
+        match current {
+            Some(name) => !self.unassigned && same_name(&self.display, name),
+            None => self.unassigned,
+        }
+    }
+}
+
+/// The assignee picker: everybody worth offering, filtered by whatever has been
+/// typed. Built when it opens, so it never waits for the network.
+#[derive(Clone, Debug, Default)]
+pub struct AssigneePicker {
+    /// Every candidate, in the order they were gathered.
+    pub candidates: Vec<AssigneeCandidate>,
+    pub query: TextInput,
+    /// The cursor, counted over the candidates the query left showing.
+    pub index: usize,
+    pub scroll: ScrollState,
+    /// Who holds the work item now, which `Enter` treats as a no-op.
+    pub current: Option<String>,
+    /// The work item the picker was opened for, shown in its title.
+    pub id: i64,
+}
+
+/// Azure DevOps echoes display names back with inconsistent casing and spacing,
+/// so two names are the same person when they are the same after both.
+#[must_use]
+fn same_name(left: &str, right: &str) -> bool {
+    left.trim().to_lowercase() == right.trim().to_lowercase()
+}
+
+/// Whether one of the people already gathered is this one, so nobody is
+/// offered twice under a different spelling.
+#[must_use]
+fn names_someone_listed(candidates: &[AssigneeCandidate], name: &str) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| !candidate.unassigned && same_name(&candidate.display, name))
+}
+
+/// Whether every character typed appears in `haystack` in that order, ignoring
+/// case: `jr` finds `Jacob Ragsdale`, and so does `ragsd`.
+#[must_use]
+fn fuzzy_contains(haystack: &str, query: &str) -> bool {
+    let mut remaining = haystack.chars().flat_map(char::to_lowercase);
+    query
+        .chars()
+        .flat_map(char::to_lowercase)
+        .all(|wanted| remaining.any(|found| found == wanted))
+}
+
 /// A single-line field editor, prefilled with what the work item says now. The
 /// Title and Tags rows of the Edit menu both open one.
 #[derive(Clone, Debug)]
@@ -397,6 +475,7 @@ pub struct App {
     pub edit_menu: EditMenu,
     pub state_picker: StatePicker,
     pub priority_picker: PriorityPicker,
+    pub assignee_picker: AssigneePicker,
     /// The open single-line field editor, if there is one.
     pub prompt: Option<TextPrompt>,
     bookmarks: HashSet<TicketKey>,
@@ -431,6 +510,13 @@ pub struct App {
     /// Display name of the signed-in Azure DevOps user, so their own work
     /// items can stand out. `None` until a sync records one.
     me: Option<String>,
+    /// The people the project's teams hold, as the last identity fetch cached
+    /// them. The assignee picker offers these alongside everybody the rows
+    /// already name, and reads their addresses out of here.
+    identities: Vec<Identity>,
+    /// Whether the team members have been asked for this session, so opening
+    /// the picker a second time costs nothing.
+    identities_requested: bool,
 }
 
 /// Compact relative wording shared by the freshness and sync labels.
@@ -498,6 +584,7 @@ impl App {
             edit_menu: EditMenu::default(),
             state_picker: StatePicker::default(),
             priority_picker: PriorityPicker::default(),
+            assignee_picker: AssigneePicker::default(),
             prompt: None,
             bookmarks: HashSet::new(),
             selected_keys: HashSet::new(),
@@ -518,6 +605,8 @@ impl App {
             synced_at: None,
             sync_error: None,
             me: None,
+            identities: Vec::new(),
+            identities_requested: false,
         };
         app.show_all(None);
         app
@@ -712,6 +801,58 @@ impl App {
                 .eq(assignee.trim().chars().flat_map(char::to_lowercase)),
             _ => false,
         }
+    }
+
+    /// The people a previous session cached, read out of the database as the
+    /// TUI opens so the first assignee picker of the run is already complete.
+    pub fn set_identities(&mut self, identities: Vec<Identity>) {
+        self.identities = identities;
+    }
+
+    #[must_use]
+    pub fn identities(&self) -> &[Identity] {
+        &self.identities
+    }
+
+    /// Folds the project's team members into the people the picker offers, and
+    /// into an open picker, so a list that opened without them fills in where
+    /// it stands rather than closing and reopening. A name already held keeps
+    /// its place and only gains an address it was missing.
+    pub fn merge_identities(&mut self, identities: Vec<Identity>) {
+        if identities.is_empty() {
+            return;
+        }
+        for identity in identities {
+            match self
+                .identities
+                .iter_mut()
+                .find(|known| same_name(&known.display_name, &identity.display_name))
+            {
+                Some(known) if known.unique_name.is_none() => {
+                    known.unique_name = identity.unique_name;
+                }
+                Some(_) => {}
+                None => self.identities.push(identity),
+            }
+        }
+        if self.mode != AppMode::AssigneePicker {
+            return;
+        }
+        let focused = self
+            .assignee_matches()
+            .get(self.assignee_picker.index)
+            .map(|candidate| candidate.display.clone());
+        self.assignee_picker.candidates = self.assignee_candidates();
+        let matches = self.assignee_matches();
+        let index = focused
+            .and_then(|display| {
+                matches
+                    .iter()
+                    .position(|candidate| candidate.display == display)
+            })
+            .unwrap_or(self.assignee_picker.index)
+            .min(matches.len().saturating_sub(1));
+        self.focus_assignee(index);
     }
 
     #[must_use]
@@ -1156,6 +1297,7 @@ impl App {
                     prompt.input.paste(pasted, false);
                 }
             }
+            Some(TextEditor::Assignee) => self.assignee_picker.query.paste(pasted, false),
             None => {}
         }
     }
@@ -1203,6 +1345,7 @@ impl App {
             AppMode::Palette => Some(TextEditor::Palette),
             AppMode::Views if self.views_overlay.naming.is_some() => Some(TextEditor::ViewName),
             AppMode::Prompt => Some(TextEditor::Prompt),
+            AppMode::AssigneePicker => Some(TextEditor::Assignee),
             _ => None,
         }
     }
@@ -1231,6 +1374,7 @@ impl App {
             ScrollSurface::EditMenu => self.edit_menu.scroll,
             ScrollSurface::StatePicker => self.state_picker.scroll,
             ScrollSurface::PriorityPicker => self.priority_picker.scroll,
+            ScrollSurface::AssigneePicker => self.assignee_picker.scroll,
         }
     }
 
@@ -1251,6 +1395,7 @@ impl App {
             ScrollSurface::EditMenu => &mut self.edit_menu.scroll,
             ScrollSurface::StatePicker => &mut self.state_picker.scroll,
             ScrollSurface::PriorityPicker => &mut self.priority_picker.scroll,
+            ScrollSurface::AssigneePicker => &mut self.assignee_picker.scroll,
         }
     }
 
@@ -1353,6 +1498,7 @@ impl App {
             AppMode::StatePicker => self.handle_state_picker_key(key),
             AppMode::PriorityPicker => self.handle_priority_picker_key(key),
             AppMode::Prompt => self.handle_prompt_key(key),
+            AppMode::AssigneePicker => self.handle_assignee_picker_key(key),
         }
     }
 
@@ -1796,6 +1942,13 @@ impl App {
                 self.priority_picker.index = index;
                 return self.choose_priority(index);
             }
+            PointerTarget::AssigneeOption { index } => {
+                self.assignee_picker.index = index;
+                return self.choose_assignee(index);
+            }
+            PointerTarget::AssigneeQuery => {
+                self.place_caret(TextEditor::Assignee, column, row);
+            }
             PointerTarget::PromptInput => {
                 self.place_caret(TextEditor::Prompt, column, row);
             }
@@ -1866,9 +2019,10 @@ impl App {
             .hit_regions
             .selectable(match editor {
                 TextEditor::Search => SelectableSurface::Search,
-                TextEditor::Palette | TextEditor::ViewName | TextEditor::Prompt => {
-                    SelectableSurface::Overlay
-                }
+                TextEditor::Palette
+                | TextEditor::ViewName
+                | TextEditor::Prompt
+                | TextEditor::Assignee => SelectableSurface::Overlay,
             })
             .and_then(|snapshot| snapshot.pos_at(column, row))
             .or_else(|| {
@@ -1894,6 +2048,7 @@ impl App {
                     prompt.input.set_cursor(index);
                 }
             }
+            TextEditor::Assignee => self.assignee_picker.query.set_cursor(index),
         }
     }
 
@@ -2600,6 +2755,184 @@ impl App {
         }
     }
 
+    /// Who the assignee picker offers, in the order it lists them: nobody, the
+    /// signed-in user, everybody the database has ever seen a work item
+    /// assigned to, and then the rest of the project's teams. Nobody appears
+    /// twice, so a team member already holding work keeps their earlier place.
+    #[must_use]
+    fn assignee_candidates(&self) -> Vec<AssigneeCandidate> {
+        let mut candidates = vec![AssigneeCandidate {
+            display: UNASSIGNED_LABEL.to_owned(),
+            unique: None,
+            unassigned: true,
+            me: false,
+        }];
+        if let Some(me) = self
+            .me
+            .as_deref()
+            .map(str::trim)
+            .filter(|me| !me.is_empty())
+        {
+            candidates.push(self.candidate_for(me, true));
+        }
+        let mut assigned: Vec<&str> = self
+            .tickets
+            .iter()
+            .filter_map(|ticket| ticket.assigned_to.as_deref())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        assigned.sort_by_key(|name| name.to_lowercase());
+        for name in assigned {
+            if !names_someone_listed(&candidates, name) {
+                candidates.push(self.candidate_for(name, false));
+            }
+        }
+        for identity in &self.identities {
+            if !names_someone_listed(&candidates, &identity.display_name) {
+                candidates.push(AssigneeCandidate {
+                    display: identity.display_name.clone(),
+                    unique: identity.unique_name.clone(),
+                    unassigned: false,
+                    me: false,
+                });
+            }
+        }
+        candidates
+    }
+
+    /// One candidate for a name the rows carry, with the sign-in address filled
+    /// in from the cached identities when they know one.
+    fn candidate_for(&self, display: &str, me: bool) -> AssigneeCandidate {
+        AssigneeCandidate {
+            display: display.to_owned(),
+            unique: self
+                .identities
+                .iter()
+                .find(|identity| same_name(&identity.display_name, display))
+                .and_then(|identity| identity.unique_name.clone()),
+            unassigned: false,
+            me,
+        }
+    }
+
+    /// The candidates whatever has been typed leaves showing, which is what the
+    /// picker draws and what its cursor counts over.
+    #[must_use]
+    pub fn assignee_matches(&self) -> Vec<AssigneeCandidate> {
+        let query = self.assignee_picker.query.text().trim().to_owned();
+        self.assignee_picker
+            .candidates
+            .iter()
+            .filter(|candidate| {
+                query.is_empty()
+                    || fuzzy_contains(&candidate.display, &query)
+                    || candidate
+                        .unique
+                        .as_deref()
+                        .is_some_and(|unique| fuzzy_contains(unique, &query))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// `a`, and the Edit menu's Assignee row: everybody worth offering, with
+    /// whoever holds the work item under the cursor. The list is built from
+    /// what is already in memory, so the picker opens at once; the project's
+    /// teams are asked for the first time it is opened and merged in when they
+    /// arrive.
+    fn open_assignee_picker(&mut self) -> AppAction {
+        let Some(ticket) = self.selected_ticket() else {
+            self.set_error("No work item is selected");
+            return AppAction::None;
+        };
+        let current = ticket.assigned_to.clone();
+        let id = ticket.key.id;
+        let candidates = self.assignee_candidates();
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.is_current(current.as_deref()))
+            .unwrap_or_default();
+        self.assignee_picker = AssigneePicker {
+            candidates,
+            query: TextInput::default(),
+            index,
+            scroll: ScrollState::default(),
+            current,
+            id,
+        };
+        self.assignee_picker.scroll.ensure_visible(index);
+        self.mode = AppMode::AssigneePicker;
+        if self.identities_requested {
+            AppAction::None
+        } else {
+            self.identities_requested = true;
+            AppAction::FetchIdentities
+        }
+    }
+
+    fn handle_assignee_picker_key(&mut self, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => self.mode = AppMode::Browse,
+            KeyCode::Up => self.move_assignee_selection(-1),
+            KeyCode::Down => self.move_assignee_selection(1),
+            KeyCode::PageUp => self.move_assignee_selection(-5),
+            KeyCode::PageDown => self.move_assignee_selection(5),
+            KeyCode::Enter => return self.choose_assignee(self.assignee_picker.index),
+            // Everything else is typing: Home, End, and the editing keys all
+            // belong to the filter field, the way they do in the palette.
+            _ => {
+                let before = self.assignee_picker.query.text().to_owned();
+                self.assignee_picker.query.handle_key(key);
+                if self.assignee_picker.query.text() != before {
+                    self.assignee_picker.index = 0;
+                    self.assignee_picker.scroll.scroll_to(0);
+                }
+            }
+        }
+        AppAction::None
+    }
+
+    fn move_assignee_selection(&mut self, delta: isize) {
+        let count = self.assignee_matches().len();
+        if count == 0 {
+            self.assignee_picker.index = 0;
+            return;
+        }
+        let index = self
+            .assignee_picker
+            .index
+            .saturating_add_signed(delta)
+            .min(count - 1);
+        self.focus_assignee(index);
+    }
+
+    fn focus_assignee(&mut self, index: usize) {
+        self.assignee_picker.index = index;
+        self.assignee_picker.scroll.ensure_visible(index);
+    }
+
+    /// Confirms one candidate. Whoever holds the work item already is a no-op,
+    /// and `Unassigned` takes the field off it rather than writing an empty
+    /// identity, so the Assignee cell empties.
+    fn choose_assignee(&mut self, index: usize) -> AppAction {
+        let Some(candidate) = self.assignee_matches().get(index).cloned() else {
+            self.mode = AppMode::Browse;
+            return AppAction::None;
+        };
+        self.mode = AppMode::Browse;
+        if candidate.is_current(self.assignee_picker.current.as_deref()) {
+            return AppAction::None;
+        }
+        if candidate.unassigned {
+            return self.edit_selected(FieldEdit::unassign());
+        }
+        self.edit_selected(FieldEdit::assignee(
+            &candidate.display,
+            candidate.unique.as_deref(),
+        ))
+    }
+
     /// The Edit menu's Title and Tags rows: a single-line field prefilled with
     /// what the work item says now, edited with the same keys as the
     /// named-view editor.
@@ -2865,6 +3198,7 @@ impl App {
                 self.open_prompt(PromptField::Tags);
                 AppAction::None
             }
+            CommandId::EditAssignee => self.open_assignee_picker(),
             CommandId::SaveView => {
                 self.open_views();
                 self.views_overlay.naming =
@@ -3229,6 +3563,7 @@ const fn mode_name(mode: AppMode) -> &'static str {
         AppMode::StatePicker => "state-picker",
         AppMode::PriorityPicker => "priority-picker",
         AppMode::Prompt => "prompt",
+        AppMode::AssigneePicker => "assignee-picker",
     }
 }
 
@@ -4166,7 +4501,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.label)
                 .collect::<Vec<_>>(),
-            ["State", "Title", "Priority", "Tags"],
+            ["State", "Title", "Priority", "Tags", "Assignee"],
             "later field editors append their own row"
         );
         assert_eq!(app.edit_menu.index, 0);
@@ -4474,6 +4809,240 @@ mod tests {
             state_names(&app.states_for("Task")),
             ["Doing"],
             "a type without cached states still falls back"
+        );
+    }
+
+    /// An editable app whose rows name three different people, with the
+    /// signed-in user holding none of them.
+    fn assignee_app() -> App {
+        let mut alpha = ticket(1, "Alpha", "2026-01-01T00:00:00Z");
+        alpha.assigned_to = Some("Priya Nair".into());
+        let mut beta = ticket(2, "Beta", "2026-02-01T00:00:00Z");
+        beta.assigned_to = None;
+        let mut gamma = ticket(3, "Gamma", "2026-03-01T00:00:00Z");
+        gamma.assigned_to = Some("Avery Chen".into());
+        let mut app = App::new(vec![alpha, beta, gamma]);
+        app.enable_sync();
+        app.set_table_viewport(3);
+        app.set_me(Some("Jacob Ragsdale".into()));
+        app
+    }
+
+    fn candidate_names(app: &App) -> Vec<String> {
+        app.assignee_matches()
+            .into_iter()
+            .map(|candidate| candidate.display)
+            .collect()
+    }
+
+    fn type_query(app: &mut App, text: &str) {
+        for character in text.chars() {
+            press(app, KeyCode::Char(character));
+        }
+    }
+
+    #[test]
+    fn the_assignee_picker_lists_nobody_then_me_then_the_database_and_starts_on_the_current_one() {
+        let mut app = assignee_app();
+
+        assert_eq!(
+            press(&mut app, KeyCode::Char('a')),
+            AppAction::FetchIdentities,
+            "the first open asks for the project's teams"
+        );
+        assert_eq!(app.mode, AppMode::AssigneePicker);
+        assert_eq!(
+            candidate_names(&app),
+            ["Unassigned", "Jacob Ragsdale", "Avery Chen", "Priya Nair"],
+            "nobody, then me, then everybody the rows name, sorted"
+        );
+        assert!(
+            app.assignee_matches()[1].me,
+            "the signed-in user is marked as such"
+        );
+        assert_eq!(
+            app.assignee_picker.index, 2,
+            "the picker opens on whoever holds the work item"
+        );
+        assert_eq!(app.assignee_picker.id, 3, "it names the selected row");
+
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(
+            press(&mut app, KeyCode::Char('a')),
+            AppAction::None,
+            "the teams are asked for once a session"
+        );
+    }
+
+    #[test]
+    fn typing_filters_the_assignee_picker_and_enter_assigns_who_is_left() {
+        let mut app = assignee_app();
+        app.set_identities(vec![Identity::new(
+            "Jacob Ragsdale",
+            Some("jacob@example.com".into()),
+        )]);
+
+        press(&mut app, KeyCode::Char('a'));
+        type_query(&mut app, "jr");
+        assert_eq!(
+            candidate_names(&app),
+            ["Jacob Ragsdale"],
+            "the filter matches characters in order, not only whole words"
+        );
+        assert_eq!(
+            app.assignee_picker.index, 0,
+            "typing moves to the first hit"
+        );
+
+        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+            panic!("choosing somebody else should dispatch an edit");
+        };
+        assert_eq!(app.mode, AppMode::Browse);
+        assert_eq!(request.key.id, 3);
+        assert_eq!(
+            request.document(),
+            vec![
+                serde_json::json!({"op": "test", "path": "/rev", "value": 1}),
+                serde_json::json!({
+                    "op": "add",
+                    "path": "/fields/System.AssignedTo",
+                    "value": "jacob@example.com",
+                }),
+            ],
+            "the write carries the address when the picker knows one"
+        );
+        assert_eq!(
+            app.selected_ticket()
+                .and_then(|ticket| ticket.assigned_to.clone()),
+            Some("Jacob Ragsdale".to_owned()),
+            "the cell reads as the display name, not the address"
+        );
+        assert!(app.is_mine(app.selected_ticket().unwrap()));
+    }
+
+    #[test]
+    fn a_person_with_no_address_is_written_by_name_and_unassigned_removes_the_field() {
+        let mut app = assignee_app();
+
+        press(&mut app, KeyCode::Char('a'));
+        type_query(&mut app, "priya");
+        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+            panic!("choosing somebody else should dispatch an edit");
+        };
+        assert_eq!(
+            request.edit.patch(),
+            vec![serde_json::json!({
+                "op": "add",
+                "path": "/fields/System.AssignedTo",
+                "value": "Priya Nair",
+            })],
+            "a name the database only ever saw is sent as itself"
+        );
+
+        let mut app = assignee_app();
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+            panic!("Unassigned should dispatch an edit");
+        };
+        assert_eq!(
+            request.edit.patch(),
+            vec![serde_json::json!({"op": "remove", "path": "/fields/System.AssignedTo"})],
+            "nobody is written by taking the field off the work item"
+        );
+        assert_eq!(
+            app.selected_ticket()
+                .and_then(|ticket| ticket.assigned_to.clone()),
+            None,
+            "the Assignee cell empties at once"
+        );
+    }
+
+    #[test]
+    fn choosing_the_current_assignee_or_pressing_escape_writes_nothing() {
+        let mut app = assignee_app();
+
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            AppAction::None,
+            "whoever holds it already is a no-op"
+        );
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(!app.edits_pending());
+        assert_eq!(app.notification(), None, "a no-op closes silently");
+
+        // The same again for a work item nobody holds, where Unassigned is the
+        // row the picker opens on.
+        app.select_row(1);
+        assert_eq!(
+            app.selected_ticket()
+                .and_then(|ticket| ticket.assigned_to.clone()),
+            None
+        );
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.assignee_picker.index, 0);
+        assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
+        assert!(!app.edits_pending());
+        assert_eq!(app.notification(), None);
+
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
+        assert_eq!(app.mode, AppMode::Browse);
+        assert!(!app.edits_pending());
+    }
+
+    #[test]
+    fn team_members_land_in_an_open_picker_without_moving_the_cursor() {
+        let mut app = assignee_app();
+
+        press(&mut app, KeyCode::Char('a'));
+        let focused = app.assignee_matches()[app.assignee_picker.index]
+            .display
+            .clone();
+        assert_eq!(focused, "Avery Chen");
+
+        app.merge_identities(vec![
+            Identity::new("Avery Chen", Some("avery@example.com".into())),
+            Identity::new("Dana Okafor", Some("dana@example.com".into())),
+        ]);
+
+        assert_eq!(
+            candidate_names(&app),
+            [
+                "Unassigned",
+                "Jacob Ragsdale",
+                "Avery Chen",
+                "Priya Nair",
+                "Dana Okafor"
+            ],
+            "a team member nobody holds work for is appended after the database's"
+        );
+        assert_eq!(
+            app.assignee_matches()[app.assignee_picker.index].display,
+            focused,
+            "the cursor stays on the person it was on"
+        );
+        assert_eq!(
+            app.assignee_matches()[2].unique.as_deref(),
+            Some("avery@example.com"),
+            "somebody already listed gains the address the teams knew"
+        );
+
+        type_query(&mut app, "dana");
+        let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
+            panic!("a merged-in team member should be choosable");
+        };
+        assert_eq!(
+            request.edit.patch(),
+            vec![serde_json::json!({
+                "op": "add",
+                "path": "/fields/System.AssignedTo",
+                "value": "dana@example.com",
+            })]
         );
     }
 
