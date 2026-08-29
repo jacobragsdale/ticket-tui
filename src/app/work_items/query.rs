@@ -49,8 +49,8 @@ impl WorkItemsScreen {
     }
 
     #[must_use]
-    pub fn parsed_query(&self) -> ParsedQuery {
-        parse_query(self.query.text())
+    pub fn parsed_query(&self) -> ParsedQuery<WorkItemSchema> {
+        parse_query::<WorkItemSchema>(self.query.text())
     }
 
     /// The filters the table actually applies: the query's own, and while
@@ -66,7 +66,7 @@ impl WorkItemsScreen {
     /// work while the toggle stays on, and makes `state:@open` mean what it
     /// says rather than being applied twice.
     #[must_use]
-    fn effective_filters(&self) -> FilterSet {
+    fn effective_filters(&self) -> FilterSet<WorkItemSchema> {
         let mut filters = self.parsed_query().filters;
         if self.hides_finished(&filters) {
             filters.insert(FilterField::State, Sentinel::Open.as_value());
@@ -92,15 +92,19 @@ impl WorkItemsScreen {
     }
 
     #[must_use]
-    pub fn filter_tokens(&self) -> Vec<FilterToken> {
+    pub fn filter_tokens(&self) -> Vec<FilterToken<WorkItemSchema>> {
         self.parsed_query().filters.tokens()
     }
 
+    /// The chips the bar draws: every token whose field is not already a facet
+    /// pill, each with its place in [`Self::filter_tokens`] so a chip's `×`
+    /// can name it without the pointer target naming a field.
     #[must_use]
-    pub fn overflow_filter_tokens(&self) -> Vec<FilterToken> {
+    pub fn overflow_filter_tokens(&self) -> Vec<(usize, FilterToken<WorkItemSchema>)> {
         self.filter_tokens()
             .into_iter()
-            .filter(|token| match token {
+            .enumerate()
+            .filter(|(_, token)| match token {
                 FilterToken::Bookmarked => true,
                 FilterToken::Field { field, .. } => !field.on_bar(),
             })
@@ -585,7 +589,12 @@ impl WorkItemsScreen {
         self.toggle_filter(shell, field, &value);
     }
 
-    pub(super) fn remove_filter_token(&mut self, shell: &mut Shell, token: FilterToken) {
+    /// Takes one filter off, by its place in [`Self::filter_tokens`] — which is
+    /// the index a chip's `×` carries.
+    pub(super) fn remove_filter_token(&mut self, shell: &mut Shell, index: usize) {
+        let Some(token) = self.filter_tokens().into_iter().nth(index) else {
+            return;
+        };
         let mut parsed = self.parsed_query();
         match token {
             FilterToken::Bookmarked => parsed.filters.bookmarked = false,

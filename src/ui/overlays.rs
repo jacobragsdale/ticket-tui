@@ -198,7 +198,7 @@ pub(super) fn render_chips(
         screen
             .overflow_filter_tokens()
             .into_iter()
-            .map(|token| (token.chip_label(), PointerTarget::RemoveChip(token))),
+            .map(|(index, token)| (token.chip_label(), PointerTarget::RemoveChip { index })),
     );
     for (text, target) in chips {
         let label = format!(" {text} × ");
@@ -245,7 +245,7 @@ pub(super) fn render_facet_bar(
         let rect = Rect::new(x, area.y, width, 1);
         shell.hit_regions.push(region(
             rect,
-            PointerTarget::FacetPill(FacetTarget::Field(*field)),
+            PointerTarget::FacetPill(FacetTarget::Field(field.key())),
             PointerLayer::Base,
             None,
             None,
@@ -278,7 +278,10 @@ pub(super) fn render_facet_bar(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-pub(super) fn facet_pill_label(field: FilterField, filters: &crate::filter::FilterSet) -> String {
+pub(super) fn facet_pill_label(
+    field: FilterField,
+    filters: &crate::filter::FilterSet<WorkItemSchema>,
+) -> String {
     let selected = filters.selected_values(field);
     match selected.as_slice() {
         [] => format!(" {} ▾ ", field.label()),
@@ -426,7 +429,9 @@ pub(super) fn render_facet_menu(
         return;
     };
     let facets = screen.facets_for(shell, field);
-    let pill = shell.hit_regions.facet_pill(FacetTarget::Field(field));
+    let pill = shell
+        .hit_regions
+        .facet_pill(FacetTarget::Field(field.key()));
     let width = 36.min(frame.area().width.saturating_sub(2)).max(20);
     let height = u16::try_from(facets.len().saturating_add(2))
         .unwrap_or(u16::MAX)

@@ -158,8 +158,8 @@ fn a_facet_toggle_rewrites_the_query_and_removing_the_chip_clears_it() {
     app.work_items.toggle_current_facet(&mut app.shell);
 
     assert!(app.work_items.query().contains("state:"));
-    let token = app.work_items.filter_tokens().pop().unwrap();
-    app.work_items.remove_filter_token(&mut app.shell, token);
+    let last = app.work_items.filter_tokens().len() - 1;
+    app.work_items.remove_filter_token(&mut app.shell, last);
     assert!(app.work_items.query().is_empty());
 }
 

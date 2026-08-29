@@ -11,7 +11,7 @@ fn facet_pills_open_their_menu_and_the_filter_overlay_maps_scrolled_clicks() {
     let pill = app
         .shell
         .hit_regions
-        .facet_pill(FacetTarget::Field(FilterField::Type))
+        .facet_pill(FacetTarget::Field(FilterField::Type.key()))
         .expect("type pill should be clickable");
     click(&mut app, pill.x, pill.y);
     assert_eq!(app.work_items.mode, WorkItemMode::Facets);

@@ -101,7 +101,7 @@ impl WorkItemsScreen {
         self.hides_finished(&self.parsed_query().filters)
     }
 
-    pub(super) fn hides_finished(&self, filters: &FilterSet) -> bool {
+    pub(super) fn hides_finished(&self, filters: &FilterSet<WorkItemSchema>) -> bool {
         !self.show_finished && filters.selected_count(FilterField::State) == 0
     }
 
@@ -626,7 +626,7 @@ impl WorkItemsScreen {
             }
         };
         let leaf = path_leaf(&summary.iteration).to_owned();
-        let mut filters = FilterSet::default();
+        let mut filters = FilterSet::<WorkItemSchema>::default();
         filters.insert(FilterField::Iteration, summary.iteration.clone());
         if let Some(assignee) = assignee.clone() {
             filters.insert(FilterField::Assignee, assignee);

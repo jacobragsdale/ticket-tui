@@ -3,6 +3,145 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::model::{StateCategory, Ticket, path_leaf, same_text};
 use crate::timestamp::Timestamp;
 
+/// What one screen's filter grammar is: the fields it offers, and how to read
+/// them off one of its rows. The grammar itself — quoting, date comparisons,
+/// sentinels, facet counting — is written once against this.
+pub trait FilterSchema: Clone + Copy + std::fmt::Debug + Default + Eq + 'static {
+    /// The fields this screen filters on.
+    type Field: Copy + std::fmt::Debug + Eq + Ord + std::hash::Hash + 'static;
+
+    /// What a filter is tested against: a work item here, a pull request or a
+    /// pipeline run on the tabs that follow.
+    type Row;
+
+    /// Every field, in the order chips and the Filters overlay list them.
+    fn all() -> &'static [Self::Field];
+
+    /// The fields the facet bar shows before `More`.
+    fn bar() -> &'static [Self::Field];
+
+    /// The field a `name:` in the search box asks for, including any spelling
+    /// the screen also accepts.
+    fn parse(name: &str) -> Option<Self::Field>;
+
+    /// How the field is written in a query.
+    fn key(field: Self::Field) -> &'static str;
+
+    /// How it is written in the overlay.
+    fn label(field: Self::Field) -> &'static str;
+
+    /// Whether the field is compared as a date rather than drawn from a list
+    /// of values.
+    fn is_date(field: Self::Field) -> bool;
+
+    /// The values one row carries for a field: usually one, several for a
+    /// field like tags, none for a date.
+    fn values(field: Self::Field, row: &Self::Row) -> Vec<String>;
+
+    /// The instant a date field compares against, and `None` for the rest.
+    fn date_value(field: Self::Field, row: &Self::Row) -> Option<Timestamp>;
+
+    /// The sentinel a value asks for on a field, if that field has one.
+    fn sentinel(field: Self::Field, value: &str) -> Option<Sentinel>;
+
+    /// Whether a row satisfies a sentinel. Each screen decides what `@me`
+    /// means on it: whoever a work item is assigned to, or whoever raised a
+    /// pull request.
+    fn matches_sentinel(sentinel: Sentinel, row: &Self::Row, context: &MatchContext) -> bool;
+}
+
+/// The work items screen's grammar, which is the one the CLI reads too.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WorkItemSchema;
+
+impl FilterSchema for WorkItemSchema {
+    type Field = FilterField;
+    type Row = Ticket;
+
+    fn all() -> &'static [Self::Field] {
+        &FilterField::ALL
+    }
+
+    fn bar() -> &'static [Self::Field] {
+        &FilterField::BAR
+    }
+
+    fn parse(name: &str) -> Option<Self::Field> {
+        FilterField::parse(name)
+    }
+
+    fn key(field: Self::Field) -> &'static str {
+        field.key()
+    }
+
+    fn label(field: Self::Field) -> &'static str {
+        field.label()
+    }
+
+    fn is_date(field: Self::Field) -> bool {
+        field.is_date()
+    }
+
+    fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
+        match field {
+            FilterField::State => vec![row.state.clone()],
+            FilterField::Type => vec![row.work_item_type.clone()],
+            FilterField::Assignee => vec![
+                row.assigned_to
+                    .clone()
+                    .unwrap_or_else(|| "Unassigned".into()),
+            ],
+            FilterField::Priority => vec![
+                row.priority
+                    .map_or_else(|| "—".into(), |priority| priority.to_string()),
+            ],
+            FilterField::Project => vec![row.project.clone()],
+            FilterField::Area => vec![row.area_path.clone()],
+            FilterField::Iteration => vec![row.iteration_path.clone()],
+            FilterField::Tags => row.tags.clone(),
+            // Dates are compared rather than enumerated: `field_matches`
+            // answers for them before reaching here, and the overlay offers
+            // presets.
+            FilterField::Changed | FilterField::Created => Vec::new(),
+        }
+    }
+
+    fn date_value(field: Self::Field, row: &Self::Row) -> Option<Timestamp> {
+        match field {
+            FilterField::Changed => Some(row.changed_at),
+            FilterField::Created => Some(row.created_at),
+            _ => None,
+        }
+    }
+
+    fn sentinel(field: Self::Field, value: &str) -> Option<Sentinel> {
+        let name = value.strip_prefix('@')?.to_ascii_lowercase();
+        match (field, name.as_str()) {
+            (FilterField::Assignee, "me") => Some(Sentinel::Me),
+            (FilterField::Assignee, "none") => Some(Sentinel::Nobody),
+            (FilterField::Iteration, "current") => Some(Sentinel::CurrentIteration),
+            (FilterField::State, "open") => Some(Sentinel::Open),
+            _ => None,
+        }
+    }
+
+    fn matches_sentinel(sentinel: Sentinel, row: &Self::Row, context: &MatchContext) -> bool {
+        match sentinel {
+            Sentinel::Me => context.me.as_deref().is_some_and(|me| {
+                row.assigned_to
+                    .as_deref()
+                    .is_some_and(|assignee| same_text(assignee, me))
+            }),
+            Sentinel::Nobody => row.assigned_to.is_none(),
+            Sentinel::CurrentIteration => context
+                .current_iteration
+                .as_deref()
+                .is_some_and(|iteration| same_text(&row.iteration_path, iteration)),
+            Sentinel::Open => !StateCategory::of(&row.state).is_done(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum FilterField {
     State,
@@ -199,7 +338,11 @@ fn parse_age(value: &str) -> Option<i64> {
 
 /// A value written with a leading `@`, standing for something only the running
 /// app knows: who is signed in, which sprint contains today, whether a state
-/// counts as finished.
+/// counts as finished. Which fields carry which sentinel, and what satisfies
+/// one, is each schema's [`FilterSchema::sentinel`] and
+/// [`FilterSchema::matches_sentinel`]; one the context cannot fill in — nobody
+/// signed in, no sprint scheduled — matches nothing rather than everything, so
+/// a query never quietly widens to the whole project.
 ///
 /// A sentinel is stored in the query exactly as it was typed and read at match
 /// time, so a view saved as `assignee:@me` still means whoever is signed in
@@ -220,22 +363,6 @@ pub enum Sentinel {
 }
 
 impl Sentinel {
-    /// The sentinel a value asks for on a given field. A sentinel written on a
-    /// field that has none — `state:@me` — is nothing special: it stays an
-    /// ordinary value, and so matches the states literally named that, of
-    /// which there are none.
-    #[must_use]
-    pub fn parse(field: FilterField, value: &str) -> Option<Self> {
-        let name = value.strip_prefix('@')?.to_ascii_lowercase();
-        match (field, name.as_str()) {
-            (FilterField::Assignee, "me") => Some(Self::Me),
-            (FilterField::Assignee, "none") => Some(Self::Nobody),
-            (FilterField::Iteration, "current") => Some(Self::CurrentIteration),
-            (FilterField::State, "open") => Some(Self::Open),
-            _ => None,
-        }
-    }
-
     /// How the sentinel is written in a query, which is how a rule the app
     /// applies on its own — hiding finished work — is spelled in the grammar
     /// the search box already reads.
@@ -246,26 +373,6 @@ impl Sentinel {
             Self::Nobody => "@none",
             Self::CurrentIteration => "@current",
             Self::Open => "@open",
-        }
-    }
-
-    /// Whether a ticket satisfies the sentinel. One the context cannot fill in
-    /// — nobody signed in, no sprint scheduled — matches nothing rather than
-    /// everything, so a query never quietly widens to the whole project.
-    fn matches(self, ticket: &Ticket, context: &MatchContext) -> bool {
-        match self {
-            Self::Me => context.me.as_deref().is_some_and(|me| {
-                ticket
-                    .assigned_to
-                    .as_deref()
-                    .is_some_and(|assignee| same_text(assignee, me))
-            }),
-            Self::Nobody => ticket.assigned_to.is_none(),
-            Self::CurrentIteration => context
-                .current_iteration
-                .as_deref()
-                .is_some_and(|iteration| same_text(&ticket.iteration_path, iteration)),
-            Self::Open => !StateCategory::of(&ticket.state).is_done(),
         }
     }
 }
@@ -368,45 +475,58 @@ pub fn days_untouched(ticket: &Ticket, now: Timestamp) -> i64 {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FacetTarget {
-    Field(FilterField),
+    /// A field's pill, named by [`FilterSchema::key`] so the target does not
+    /// have to know whose field it is.
+    Field(&'static str),
     More,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum FilterToken {
-    Field { field: FilterField, value: String },
+pub enum FilterToken<S: FilterSchema> {
+    Field { field: S::Field, value: String },
     Bookmarked,
 }
 
-impl FilterToken {
+impl<S: FilterSchema> FilterToken<S> {
     #[must_use]
     pub fn chip_label(&self) -> String {
         match self {
-            Self::Field { field, value } => format!("{}:{value}", field.key()),
+            Self::Field { field, value } => format!("{}:{value}", S::key(*field)),
             Self::Bookmarked => "is:bookmarked".into(),
         }
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct FilterSet {
-    values: BTreeMap<FilterField, BTreeSet<String>>,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FilterSet<S: FilterSchema> {
+    values: BTreeMap<S::Field, BTreeSet<String>>,
     pub bookmarked: bool,
 }
 
-impl FilterSet {
+/// An empty set, whatever the fields are: the derive would ask the field type
+/// for a default it has no reason to have.
+impl<S: FilterSchema> Default for FilterSet<S> {
+    fn default() -> Self {
+        Self {
+            values: BTreeMap::new(),
+            bookmarked: false,
+        }
+    }
+}
+
+impl<S: FilterSchema> FilterSet<S> {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         !self.bookmarked && self.values.values().all(BTreeSet::is_empty)
     }
 
     #[must_use]
-    pub fn selected_count(&self, field: FilterField) -> usize {
+    pub fn selected_count(&self, field: S::Field) -> usize {
         self.values.get(&field).map_or(0, BTreeSet::len)
     }
 
     #[must_use]
-    pub fn selected_values(&self, field: FilterField) -> Vec<String> {
+    pub fn selected_values(&self, field: S::Field) -> Vec<String> {
         self.values
             .get(&field)
             .map(|values| values.iter().cloned().collect())
@@ -414,13 +534,13 @@ impl FilterSet {
     }
 
     #[must_use]
-    pub fn contains(&self, field: FilterField, value: &str) -> bool {
+    pub fn contains(&self, field: S::Field, value: &str) -> bool {
         self.values
             .get(&field)
             .is_some_and(|values| values.iter().any(|entry| entry.eq_ignore_ascii_case(value)))
     }
 
-    pub fn insert(&mut self, field: FilterField, value: impl Into<String>) {
+    pub fn insert(&mut self, field: S::Field, value: impl Into<String>) {
         let value = value.into();
         if value.is_empty() {
             return;
@@ -431,7 +551,7 @@ impl FilterSet {
         self.values.entry(field).or_default().insert(value);
     }
 
-    pub fn remove(&mut self, field: FilterField, value: &str) {
+    pub fn remove(&mut self, field: S::Field, value: &str) {
         if let Some(values) = self.values.get_mut(&field) {
             values.retain(|entry| !entry.eq_ignore_ascii_case(value));
             if values.is_empty() {
@@ -440,7 +560,7 @@ impl FilterSet {
         }
     }
 
-    pub fn toggle(&mut self, field: FilterField, value: &str) {
+    pub fn toggle(&mut self, field: S::Field, value: &str) {
         if self.contains(field, value) {
             self.remove(field, value);
         } else {
@@ -449,12 +569,12 @@ impl FilterSet {
     }
 
     #[must_use]
-    pub fn tokens(&self) -> Vec<FilterToken> {
+    pub fn tokens(&self) -> Vec<FilterToken<S>> {
         let mut tokens = Vec::new();
         if self.bookmarked {
             tokens.push(FilterToken::Bookmarked);
         }
-        for field in FilterField::ALL {
+        for field in S::all().iter().copied() {
             if let Some(values) = self.values.get(&field) {
                 for value in values {
                     tokens.push(FilterToken::Field {
@@ -467,35 +587,44 @@ impl FilterSet {
         tokens
     }
 
-    /// Whether a ticket passes every field of the query, read against the
+    /// Whether a row passes every field of the query, read against the
     /// current instant and against nobody in particular.
     #[must_use]
-    pub fn matches(&self, ticket: &Ticket, is_bookmarked: bool) -> bool {
-        self.matches_in(ticket, is_bookmarked, &MatchContext::now())
+    pub fn matches(&self, row: &S::Row, is_bookmarked: bool) -> bool {
+        self.matches_in(row, is_bookmarked, &MatchContext::now())
     }
 
     /// `matches` with everything a sentinel needs to stand for something: the
     /// clock, the signed-in name, and the sprint containing today.
     #[must_use]
-    pub fn matches_in(&self, ticket: &Ticket, is_bookmarked: bool, context: &MatchContext) -> bool {
+    pub fn matches_in(&self, row: &S::Row, is_bookmarked: bool, context: &MatchContext) -> bool {
         if self.bookmarked && !is_bookmarked {
             return false;
         }
         self.values.iter().all(|(field, values)| {
             values
                 .iter()
-                .any(|value| field_matches(*field, ticket, value, context))
+                .any(|value| field_matches::<S>(*field, row, value, context))
         })
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ParsedQuery {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParsedQuery<S: FilterSchema> {
     pub fuzzy: String,
-    pub filters: FilterSet,
+    pub filters: FilterSet<S>,
 }
 
-impl ParsedQuery {
+impl<S: FilterSchema> Default for ParsedQuery<S> {
+    fn default() -> Self {
+        Self {
+            fuzzy: String::new(),
+            filters: FilterSet::default(),
+        }
+    }
+}
+
+impl<S: FilterSchema> ParsedQuery<S> {
     #[must_use]
     pub fn is_active(&self) -> bool {
         !self.fuzzy.is_empty() || !self.filters.is_empty()
@@ -503,16 +632,16 @@ impl ParsedQuery {
 }
 
 #[must_use]
-pub fn parse_query(input: &str) -> ParsedQuery {
-    let mut filters = FilterSet::default();
+pub fn parse_query<S: FilterSchema>(input: &str) -> ParsedQuery<S> {
+    let mut filters = FilterSet::<S>::default();
     let mut fuzzy = Vec::new();
     let mut rest = input.trim_start();
     while !rest.is_empty() {
-        if let Some(remaining) = take_special_filter(rest, &mut filters) {
+        if let Some(remaining) = take_special_filter::<S>(rest, &mut filters) {
             rest = remaining.trim_start();
             continue;
         }
-        if let Some((field, value, remaining)) = take_field_filter(rest) {
+        if let Some((field, value, remaining)) = take_field_filter::<S>(rest) {
             filters.insert(field, value);
             rest = remaining.trim_start();
             continue;
@@ -530,14 +659,14 @@ pub fn parse_query(input: &str) -> ParsedQuery {
 }
 
 #[must_use]
-pub fn format_query(filters: &FilterSet, fuzzy: &str) -> String {
+pub fn format_query<S: FilterSchema>(filters: &FilterSet<S>, fuzzy: &str) -> String {
     let mut parts: Vec<String> = filters
         .tokens()
         .into_iter()
         .map(|token| match token {
             FilterToken::Bookmarked => "is:bookmarked".into(),
             FilterToken::Field { field, value } => {
-                format!("{}:{}", field.key(), quote_if_needed(&value))
+                format!("{}:{}", S::key(field), quote_if_needed(&value))
             }
         })
         .collect();
@@ -556,22 +685,22 @@ pub struct FacetValue {
 }
 
 #[must_use]
-pub fn facet_values(
-    tickets: &[Ticket],
-    filters: &FilterSet,
-    field: FilterField,
-    bookmarked: impl Fn(&Ticket) -> bool,
+pub fn facet_values<S: FilterSchema>(
+    rows: &[S::Row],
+    filters: &FilterSet<S>,
+    field: S::Field,
+    bookmarked: impl Fn(&S::Row) -> bool,
     context: &MatchContext,
 ) -> Vec<FacetValue> {
-    if field.is_date() {
-        return date_facets(tickets, filters, field, bookmarked, context);
+    if S::is_date(field) {
+        return date_facets::<S>(rows, filters, field, bookmarked, context);
     }
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for ticket in tickets {
-        if !matches_excluding(ticket, filters, field, bookmarked(ticket), context) {
+    for ticket in rows {
+        if !matches_excluding::<S>(ticket, filters, field, bookmarked(ticket), context) {
             continue;
         }
-        for value in field_values(field, ticket) {
+        for value in S::values(field, ticket) {
             *counts.entry(value).or_default() += 1;
         }
     }
@@ -599,11 +728,11 @@ pub fn facet_values(
 /// keep their written order rather than sorting by count, so the windows read
 /// shortest first. Counts are of the tickets the rest of the query leaves,
 /// which is how the enumerated facets count too.
-fn date_facets(
-    tickets: &[Ticket],
-    filters: &FilterSet,
-    field: FilterField,
-    bookmarked: impl Fn(&Ticket) -> bool,
+fn date_facets<S: FilterSchema>(
+    rows: &[S::Row],
+    filters: &FilterSet<S>,
+    field: S::Field,
+    bookmarked: impl Fn(&S::Row) -> bool,
     context: &MatchContext,
 ) -> Vec<FacetValue> {
     let mut values: Vec<String> = DATE_PRESETS
@@ -618,9 +747,9 @@ fn date_facets(
             values.push(selected);
         }
     }
-    let remaining: Vec<&Ticket> = tickets
+    let remaining: Vec<&S::Row> = rows
         .iter()
-        .filter(|ticket| matches_excluding(ticket, filters, field, bookmarked(ticket), context))
+        .filter(|row| matches_excluding::<S>(row, filters, field, bookmarked(row), context))
         .collect();
     values
         .into_iter()
@@ -628,17 +757,17 @@ fn date_facets(
             selected: filters.contains(field, &value),
             count: remaining
                 .iter()
-                .filter(|ticket| field_matches(field, ticket, &value, context))
+                .filter(|row| field_matches::<S>(field, row, &value, context))
                 .count(),
             value,
         })
         .collect()
 }
 
-fn matches_excluding(
-    ticket: &Ticket,
-    filters: &FilterSet,
-    excluded: FilterField,
+fn matches_excluding<S: FilterSchema>(
+    row: &S::Row,
+    filters: &FilterSet<S>,
+    excluded: S::Field,
     is_bookmarked: bool,
     context: &MatchContext,
 ) -> bool {
@@ -649,68 +778,36 @@ fn matches_excluding(
         *field == excluded
             || values
                 .iter()
-                .any(|value| field_matches(*field, ticket, value, context))
+                .any(|value| field_matches::<S>(*field, row, value, context))
     })
 }
 
-fn field_matches(
-    field: FilterField,
-    ticket: &Ticket,
+fn field_matches<S: FilterSchema>(
+    field: S::Field,
+    row: &S::Row,
     needle: &str,
     context: &MatchContext,
 ) -> bool {
-    if let Some(instant) = date_value(field, ticket) {
+    if let Some(instant) = S::date_value(field, row) {
         return DatePredicate::parse(needle)
             .is_some_and(|predicate| predicate.matches(instant, context.now));
     }
-    if let Some(sentinel) = Sentinel::parse(field, needle) {
-        return sentinel.matches(ticket, context);
+    if let Some(sentinel) = S::sentinel(field, needle) {
+        return S::matches_sentinel(sentinel, row, context);
     }
-    field_values(field, ticket)
+    S::values(field, row)
         .iter()
         .any(|value| value.eq_ignore_ascii_case(needle) || path_segment_matches(value, needle))
-}
-
-/// The instant a date field compares against, and `None` for every field whose
-/// values are text.
-fn date_value(field: FilterField, ticket: &Ticket) -> Option<Timestamp> {
-    match field {
-        FilterField::Changed => Some(ticket.changed_at),
-        FilterField::Created => Some(ticket.created_at),
-        _ => None,
-    }
 }
 
 fn path_segment_matches(value: &str, needle: &str) -> bool {
     path_leaf(value).eq_ignore_ascii_case(needle)
 }
 
-fn field_values(field: FilterField, ticket: &Ticket) -> Vec<String> {
-    match field {
-        FilterField::State => vec![ticket.state.clone()],
-        FilterField::Type => vec![ticket.work_item_type.clone()],
-        FilterField::Assignee => vec![
-            ticket
-                .assigned_to
-                .clone()
-                .unwrap_or_else(|| "Unassigned".into()),
-        ],
-        FilterField::Priority => vec![
-            ticket
-                .priority
-                .map_or_else(|| "—".into(), |priority| priority.to_string()),
-        ],
-        FilterField::Project => vec![ticket.project.clone()],
-        FilterField::Area => vec![ticket.area_path.clone()],
-        FilterField::Iteration => vec![ticket.iteration_path.clone()],
-        FilterField::Tags => ticket.tags.clone(),
-        // Dates are compared rather than enumerated: `field_matches` answers
-        // for them before reaching here, and the overlay offers presets.
-        FilterField::Changed | FilterField::Created => Vec::new(),
-    }
-}
-
-fn take_special_filter<'a>(input: &'a str, filters: &mut FilterSet) -> Option<&'a str> {
+fn take_special_filter<'a, S: FilterSchema>(
+    input: &'a str,
+    filters: &mut FilterSet<S>,
+) -> Option<&'a str> {
     let (key, after_colon) = take_key(input)?;
     if !key.eq_ignore_ascii_case("is") {
         return None;
@@ -724,14 +821,14 @@ fn take_special_filter<'a>(input: &'a str, filters: &mut FilterSet) -> Option<&'
     }
 }
 
-fn take_field_filter(input: &str) -> Option<(FilterField, String, &str)> {
+fn take_field_filter<S: FilterSchema>(input: &str) -> Option<(S::Field, String, &str)> {
     let (key, after_colon) = take_key(input)?;
-    let field = FilterField::parse(key)?;
+    let field = S::parse(key)?;
     let (value, rest) = take_value(after_colon)?;
     if value.is_empty() {
         return None;
     }
-    if field.is_date() && DatePredicate::parse(&value).is_none() {
+    if S::is_date(field) && DatePredicate::parse(&value).is_none() {
         return None;
     }
     Some((field, value, rest))
@@ -872,18 +969,19 @@ mod tests {
 
     #[test]
     fn the_query_grammar_parses_filters_and_formats_them_back() {
-        let parsed = parse_query("state:active type:bug assignee:\"Avery Chen\" search");
+        let parsed =
+            parse_query::<WorkItemSchema>("state:active type:bug assignee:\"Avery Chen\" search");
 
         assert_eq!(parsed.fuzzy, "search");
         assert!(parsed.filters.contains(FilterField::State, "active"));
         assert!(parsed.filters.contains(FilterField::Type, "bug"));
         assert!(parsed.filters.contains(FilterField::Assignee, "Avery Chen"));
 
-        let unknown = parse_query("foo:bar state:new");
+        let unknown = parse_query::<WorkItemSchema>("foo:bar state:new");
         assert_eq!(unknown.fuzzy, "foo:bar");
         assert!(unknown.filters.contains(FilterField::State, "new"));
 
-        let bookmarked = parse_query("is:bookmarked priority:1");
+        let bookmarked = parse_query::<WorkItemSchema>("is:bookmarked priority:1");
         assert!(bookmarked.filters.bookmarked);
         assert_eq!(
             format_query(&bookmarked.filters, "alpha"),
@@ -905,11 +1003,11 @@ mod tests {
             "Atlas\\Sprint1",
             "Atlas\\Sprint1\\",
         ] {
-            let mut filters = FilterSet::default();
+            let mut filters = FilterSet::<WorkItemSchema>::default();
             filters.insert(FilterField::Iteration, value.to_owned());
 
             let written = format_query(&filters, "");
-            let read = parse_query(&written);
+            let read = parse_query::<WorkItemSchema>(&written);
 
             assert_eq!(
                 read.filters, filters,
@@ -927,7 +1025,7 @@ mod tests {
             "iteration:\"Atlas\\Sprint 1\"",
             "iteration:\"Atlas\\\\Sprint 1\"",
         ] {
-            let parsed = parse_query(typed);
+            let parsed = parse_query::<WorkItemSchema>(typed);
             assert!(
                 parsed
                     .filters
@@ -939,12 +1037,12 @@ mod tests {
         }
 
         // The quote character keeps its escape, so a value can still hold one.
-        let quoted = parse_query("state:\"say \\\"when\\\"\"");
+        let quoted = parse_query::<WorkItemSchema>("state:\"say \\\"when\\\"\"");
         assert!(quoted.filters.contains(FilterField::State, "say \"when\""));
 
         // A quote that never closes is not a quoted value at all, and the bare
         // reader takes it as written.
-        let unterminated = parse_query("state:\"Atlas\\Sprint");
+        let unterminated = parse_query::<WorkItemSchema>("state:\"Atlas\\Sprint");
         assert!(
             unterminated
                 .filters
@@ -954,7 +1052,10 @@ mod tests {
         );
 
         // take_term shares the reader, so a fuzzy term behaves the same way.
-        assert_eq!(parse_query("\"Atlas\\Sprint 1\"").fuzzy, "Atlas\\Sprint 1");
+        assert_eq!(
+            parse_query::<WorkItemSchema>("\"Atlas\\Sprint 1\"").fuzzy,
+            "Atlas\\Sprint 1"
+        );
     }
 
     #[test]
@@ -969,9 +1070,9 @@ mod tests {
         let context = MatchContext::at(now);
 
         // The facet lists the full path, which is what a toggle writes.
-        let facets = facet_values(
+        let facets = facet_values::<WorkItemSchema>(
             &tickets,
-            &FilterSet::default(),
+            &FilterSet::<WorkItemSchema>::default(),
             FilterField::Iteration,
             |_| false,
             &context,
@@ -979,9 +1080,9 @@ mod tests {
         let paths: Vec<&str> = facets.iter().map(|facet| facet.value.as_str()).collect();
         assert_eq!(paths, ["Atlas\\Sprint 1", "Atlas\\Sprint 2"]);
 
-        let mut filters = FilterSet::default();
+        let mut filters = FilterSet::<WorkItemSchema>::default();
         filters.toggle(FilterField::Iteration, "Atlas\\Sprint 1");
-        let reread = parse_query(&format_query(&filters, "")).filters;
+        let reread = parse_query::<WorkItemSchema>(&format_query(&filters, "")).filters;
 
         assert!(
             reread.matches_in(&here, false, &MatchContext::at(now)),
@@ -995,7 +1096,7 @@ mod tests {
 
     #[test]
     fn same_field_values_are_or_and_different_fields_are_and() {
-        let parsed = parse_query("state:active state:new type:bug");
+        let parsed = parse_query::<WorkItemSchema>("state:active state:new type:bug");
         let active = ticket("Active", "Bug", Some("Avery"), "rust");
         let news = ticket("New", "Bug", Some("Avery"), "rust");
         let task = ticket("Active", "Task", Some("Avery"), "rust");
@@ -1007,7 +1108,7 @@ mod tests {
 
     #[test]
     fn unassigned_and_path_segments_and_tags_match() {
-        let parsed = parse_query("assignee:unassigned area:Platform tag:rust");
+        let parsed = parse_query::<WorkItemSchema>("assignee:unassigned area:Platform tag:rust");
         let matching = ticket("Active", "Bug", None, "rust");
         let other = ticket("Active", "Bug", Some("Avery"), "docs");
 
@@ -1022,8 +1123,8 @@ mod tests {
             ticket("Active", "Task", Some("Avery"), "rust"),
             ticket("New", "Bug", Some("Avery"), "rust"),
         ];
-        let filters = parse_query("type:bug").filters;
-        let facets = facet_values(
+        let filters = parse_query::<WorkItemSchema>("type:bug").filters;
+        let facets = facet_values::<WorkItemSchema>(
             &tickets,
             &filters,
             FilterField::Type,
@@ -1086,19 +1187,19 @@ mod tests {
         let august = dated("2026-08-01T00:00:01Z", "2026-08-29T00:00:00Z");
         let july = dated("2026-07-30T00:00:00Z", "2026-08-29T00:00:00Z");
 
-        let after = parse_query("created:>2026-08-01").filters;
+        let after = parse_query::<WorkItemSchema>("created:>2026-08-01").filters;
         assert!(after.matches_in(&august, false, &MatchContext::at(now)));
         assert!(!after.matches_in(&july, false, &MatchContext::at(now)));
 
-        let before = parse_query("created:<2026-08-01").filters;
+        let before = parse_query::<WorkItemSchema>("created:<2026-08-01").filters;
         assert!(!before.matches_in(&august, false, &MatchContext::at(now)));
         assert!(before.matches_in(&july, false, &MatchContext::at(now)));
     }
 
     #[test]
     fn relative_date_filters_are_measured_from_the_instant_they_are_matched_against() {
-        let today = parse_query("changed:<24h").filters;
-        let stale = parse_query("changed:>14d").filters;
+        let today = parse_query::<WorkItemSchema>("changed:<24h").filters;
+        let stale = parse_query::<WorkItemSchema>("changed:>14d").filters;
         let ticket = dated("2026-01-01T00:00:00Z", "2026-08-29T09:00:00Z");
 
         let same_day = ts("2026-08-29T12:00:00Z");
@@ -1158,8 +1259,8 @@ mod tests {
             dated("2026-01-01T00:00:00Z", "2026-08-14T12:00:00Z"),
             dated("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"),
         ];
-        let age_only = parse_query("changed:>14d").filters;
-        let whole = parse_query(&stale_query(14)).filters;
+        let age_only = parse_query::<WorkItemSchema>("changed:>14d").filters;
+        let whole = parse_query::<WorkItemSchema>(&stale_query(14)).filters;
 
         for item in &items {
             assert_eq!(
@@ -1218,7 +1319,7 @@ mod tests {
     #[test]
     fn several_date_values_in_one_field_or_together() {
         let now = ts("2026-08-29T12:00:00Z");
-        let filters = parse_query("changed:<24h changed:>14d").filters;
+        let filters = parse_query::<WorkItemSchema>("changed:<24h changed:>14d").filters;
         let fresh = dated("2026-01-01T00:00:00Z", "2026-08-29T11:00:00Z");
         let stale = dated("2026-01-01T00:00:00Z", "2026-08-01T00:00:00Z");
         let middling = dated("2026-01-01T00:00:00Z", "2026-08-25T00:00:00Z");
@@ -1230,7 +1331,7 @@ mod tests {
 
     #[test]
     fn date_chips_read_as_typed_and_round_trip_through_the_query_text() {
-        let parsed = parse_query("changed:<7d created:>2026-08-01 rust");
+        let parsed = parse_query::<WorkItemSchema>("changed:<7d created:>2026-08-01 rust");
         let labels: Vec<String> = parsed
             .filters
             .tokens()
@@ -1242,12 +1343,12 @@ mod tests {
 
         let formatted = format_query(&parsed.filters, &parsed.fuzzy);
         assert_eq!(formatted, "changed:<7d created:>2026-08-01 rust");
-        assert_eq!(parse_query(&formatted), parsed);
+        assert_eq!(parse_query::<WorkItemSchema>(&formatted), parsed);
     }
 
     #[test]
     fn a_date_value_that_is_not_a_comparison_stays_fuzzy_text() {
-        let parsed = parse_query("changed:soon state:active");
+        let parsed = parse_query::<WorkItemSchema>("changed:soon state:active");
 
         assert_eq!(parsed.fuzzy, "changed:soon");
         assert!(
@@ -1266,8 +1367,8 @@ mod tests {
             dated("2026-08-28T00:00:00Z", "2026-08-29T09:00:00Z"),
             dated("2026-01-01T00:00:00Z", "2026-08-01T00:00:00Z"),
         ];
-        let filters = parse_query("changed:>14d").filters;
-        let facets = facet_values(
+        let filters = parse_query::<WorkItemSchema>("changed:>14d").filters;
+        let facets = facet_values::<WorkItemSchema>(
             &tickets,
             &filters,
             FilterField::Changed,
@@ -1290,7 +1391,7 @@ mod tests {
     #[test]
     fn the_me_sentinel_stands_for_whoever_the_context_is_signed_in_as() {
         let now = ts("2026-08-29T12:00:00Z");
-        let filters = parse_query("assignee:@me").filters;
+        let filters = parse_query::<WorkItemSchema>("assignee:@me").filters;
         let mine = ticket("Active", "Bug", Some("  avery CHEN "), "rust");
         let theirs = ticket("Active", "Bug", Some("Jordan Patel"), "rust");
         let nobodys = ticket("Active", "Bug", None, "rust");
@@ -1314,7 +1415,7 @@ mod tests {
     #[test]
     fn the_me_sentinel_follows_the_name_it_is_handed_rather_than_the_one_it_was_saved_beside() {
         let now = ts("2026-08-29T12:00:00Z");
-        let filters = parse_query("assignee:@me").filters;
+        let filters = parse_query::<WorkItemSchema>("assignee:@me").filters;
         let jordans = ticket("Active", "Bug", Some("Jordan Patel"), "rust");
 
         assert!(!filters.matches_in(
@@ -1335,7 +1436,7 @@ mod tests {
     #[test]
     fn the_none_sentinel_keeps_only_the_work_nobody_owns() {
         let now = ts("2026-08-29T12:00:00Z");
-        let filters = parse_query("assignee:@none").filters;
+        let filters = parse_query::<WorkItemSchema>("assignee:@none").filters;
         let context = MatchContext::at(now).with_me(Some("Avery Chen".into()));
 
         assert!(filters.matches_in(&ticket("Active", "Bug", None, "rust"), false, &context));
@@ -1349,7 +1450,7 @@ mod tests {
     #[test]
     fn the_current_sentinel_follows_the_sprint_the_context_names() {
         let now = ts("2026-08-29T12:00:00Z");
-        let filters = parse_query("iteration:@current").filters;
+        let filters = parse_query::<WorkItemSchema>("iteration:@current").filters;
         let sprint_one = ticket("Active", "Bug", Some("Avery"), "rust");
         let sprint_two = Ticket {
             iteration_path: "Atlas\\Sprint 2".into(),
@@ -1377,7 +1478,7 @@ mod tests {
     #[test]
     fn the_open_sentinel_reads_the_state_category_rather_than_the_state_name() {
         let now = ts("2026-08-29T12:00:00Z");
-        let filters = parse_query("state:@open").filters;
+        let filters = parse_query::<WorkItemSchema>("state:@open").filters;
         let context = MatchContext::at(now);
         let in_state = |state: &str| {
             filters.matches_in(
@@ -1406,16 +1507,19 @@ mod tests {
         let context = MatchContext::at(now).with_me(Some("Avery Chen".into()));
         let subject = ticket("Active", "Bug", Some("Avery Chen"), "rust");
 
-        assert_eq!(Sentinel::parse(FilterField::Type, "@me"), None);
+        assert_eq!(WorkItemSchema::sentinel(FilterField::Type, "@me"), None);
         assert!(
-            !parse_query("type:@me")
+            !parse_query::<WorkItemSchema>("type:@me")
                 .filters
                 .matches_in(&subject, false, &context),
             "no work item type is named @me"
         );
-        assert_eq!(Sentinel::parse(FilterField::Assignee, "@nobody"), None);
         assert_eq!(
-            Sentinel::parse(FilterField::Assignee, "@ME"),
+            WorkItemSchema::sentinel(FilterField::Assignee, "@nobody"),
+            None
+        );
+        assert_eq!(
+            WorkItemSchema::sentinel(FilterField::Assignee, "@ME"),
             Some(Sentinel::Me),
             "a sentinel is read without regard to case"
         );
@@ -1423,7 +1527,9 @@ mod tests {
 
     #[test]
     fn sentinel_chips_read_as_typed_and_round_trip_through_the_query_text() {
-        let parsed = parse_query("assignee:@me iteration:@current state:@open changed:>14d rust");
+        let parsed = parse_query::<WorkItemSchema>(
+            "assignee:@me iteration:@current state:@open changed:>14d rust",
+        );
         let labels: Vec<String> = parsed
             .filters
             .tokens()
@@ -1446,7 +1552,7 @@ mod tests {
             formatted,
             "state:@open assignee:@me iteration:@current changed:>14d rust"
         );
-        assert_eq!(parse_query(&formatted), parsed);
+        assert_eq!(parse_query::<WorkItemSchema>(&formatted), parsed);
     }
 
     #[test]
@@ -1457,8 +1563,8 @@ mod tests {
             ticket("Active", "Task", Some("Avery Chen"), "rust"),
             ticket("Active", "Bug", Some("Jordan Patel"), "rust"),
         ];
-        let filters = parse_query("assignee:@me").filters;
-        let facets = facet_values(
+        let filters = parse_query::<WorkItemSchema>("assignee:@me").filters;
+        let facets = facet_values::<WorkItemSchema>(
             &tickets,
             &filters,
             FilterField::Type,
@@ -1474,5 +1580,208 @@ mod tests {
         };
         assert_eq!(count("Bug"), 1, "Jordan's bug is not mine");
         assert_eq!(count("Task"), 1);
+    }
+}
+
+#[cfg(test)]
+mod second_schema_tests {
+    use super::*;
+
+    /// A screen that is not the work items one: its own fields, its own rows,
+    /// and `@me` meaning whoever raised the pull request. It is the shape
+    /// Epic 658's tab will bring.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct PullRequestSchema;
+
+    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    enum PullRequestField {
+        Repo,
+        Author,
+        Reviewer,
+        Created,
+    }
+
+    struct PullRequest {
+        repo: &'static str,
+        author: &'static str,
+        reviewers: Vec<&'static str>,
+        created_at: Timestamp,
+    }
+
+    impl FilterSchema for PullRequestSchema {
+        type Field = PullRequestField;
+        type Row = PullRequest;
+
+        fn all() -> &'static [Self::Field] {
+            &[
+                PullRequestField::Repo,
+                PullRequestField::Author,
+                PullRequestField::Reviewer,
+                PullRequestField::Created,
+            ]
+        }
+
+        fn bar() -> &'static [Self::Field] {
+            &[PullRequestField::Repo, PullRequestField::Author]
+        }
+
+        fn parse(name: &str) -> Option<Self::Field> {
+            match name.to_ascii_lowercase().as_str() {
+                "repo" | "repository" => Some(PullRequestField::Repo),
+                "author" => Some(PullRequestField::Author),
+                "reviewer" => Some(PullRequestField::Reviewer),
+                "created" => Some(PullRequestField::Created),
+                _ => None,
+            }
+        }
+
+        fn key(field: Self::Field) -> &'static str {
+            match field {
+                PullRequestField::Repo => "repo",
+                PullRequestField::Author => "author",
+                PullRequestField::Reviewer => "reviewer",
+                PullRequestField::Created => "created",
+            }
+        }
+
+        fn label(field: Self::Field) -> &'static str {
+            match field {
+                PullRequestField::Repo => "Repository",
+                PullRequestField::Author => "Author",
+                PullRequestField::Reviewer => "Reviewer",
+                PullRequestField::Created => "Created",
+            }
+        }
+
+        fn is_date(field: Self::Field) -> bool {
+            matches!(field, PullRequestField::Created)
+        }
+
+        fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
+            match field {
+                PullRequestField::Repo => vec![row.repo.to_owned()],
+                PullRequestField::Author => vec![row.author.to_owned()],
+                PullRequestField::Reviewer => row
+                    .reviewers
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect(),
+                PullRequestField::Created => Vec::new(),
+            }
+        }
+
+        fn date_value(field: Self::Field, row: &Self::Row) -> Option<Timestamp> {
+            matches!(field, PullRequestField::Created).then_some(row.created_at)
+        }
+
+        fn sentinel(field: Self::Field, value: &str) -> Option<Sentinel> {
+            let name = value.strip_prefix('@')?.to_ascii_lowercase();
+            match (field, name.as_str()) {
+                (PullRequestField::Author, "me") => Some(Sentinel::Me),
+                _ => None,
+            }
+        }
+
+        fn matches_sentinel(sentinel: Sentinel, row: &Self::Row, context: &MatchContext) -> bool {
+            match sentinel {
+                Sentinel::Me => context
+                    .me
+                    .as_deref()
+                    .is_some_and(|me| same_text(row.author, me)),
+                _ => false,
+            }
+        }
+    }
+
+    fn pull_requests() -> Vec<PullRequest> {
+        vec![
+            PullRequest {
+                repo: "ticket-tui",
+                author: "Jacob Ragsdale",
+                reviewers: vec!["Avery"],
+                created_at: crate::timestamp::ts("2026-08-20T00:00:00Z"),
+            },
+            PullRequest {
+                repo: "ticket-tui",
+                author: "Avery",
+                reviewers: vec!["Jacob Ragsdale", "Sam"],
+                created_at: crate::timestamp::ts("2026-01-02T00:00:00Z"),
+            },
+            PullRequest {
+                repo: "skillbook",
+                author: "Sam",
+                reviewers: vec![],
+                created_at: crate::timestamp::ts("2026-08-28T00:00:00Z"),
+            },
+        ]
+    }
+
+    #[test]
+    fn a_second_schema_parses_matches_facets_and_formats_its_own_fields() {
+        let rows = pull_requests();
+        let context = MatchContext::at(crate::timestamp::ts("2026-08-29T00:00:00Z"))
+            .with_me(Some("Jacob Ragsdale".into()));
+
+        let parsed = parse_query::<PullRequestSchema>("repo:ticket-tui author:@me needs review");
+        assert_eq!(
+            parsed.fuzzy, "needs review",
+            "the words are still the words"
+        );
+        assert!(
+            parsed
+                .filters
+                .contains(PullRequestField::Repo, "ticket-tui"),
+            "and this screen's names are its fields"
+        );
+
+        let matched: Vec<&str> = rows
+            .iter()
+            .filter(|row| parsed.filters.matches_in(row, false, &context))
+            .map(|row| row.author)
+            .collect();
+        assert_eq!(
+            matched,
+            ["Jacob Ragsdale"],
+            "@me is whoever raised it on this screen"
+        );
+
+        let facets = facet_values::<PullRequestSchema>(
+            &rows,
+            &FilterSet::<PullRequestSchema>::default(),
+            PullRequestField::Reviewer,
+            |_| false,
+            &context,
+        );
+        let counted: Vec<(&str, usize)> = facets
+            .iter()
+            .map(|facet| (facet.value.as_str(), facet.count))
+            .collect();
+        assert_eq!(
+            counted,
+            [("Avery", 1), ("Jacob Ragsdale", 1), ("Sam", 1)],
+            "a field with several values per row counts every one of them"
+        );
+
+        let dates = facet_values::<PullRequestSchema>(
+            &rows,
+            &FilterSet::<PullRequestSchema>::default(),
+            PullRequestField::Created,
+            |_| false,
+            &context,
+        );
+        assert_eq!(
+            dates
+                .iter()
+                .find(|facet| facet.value == "<7d")
+                .map(|facet| facet.count),
+            Some(1),
+            "the date presets come free with the grammar"
+        );
+
+        assert_eq!(
+            format_query(&parsed.filters, &parsed.fuzzy),
+            "repo:ticket-tui author:@me needs review",
+            "and the query round-trips through this screen's keys"
+        );
     }
 }

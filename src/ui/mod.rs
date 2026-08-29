@@ -16,7 +16,7 @@ use crate::app::{
     UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
 };
 use crate::command::{COMMANDS, key_label_for};
-use crate::filter::{FacetTarget, FilterField};
+use crate::filter::{FacetTarget, FilterField, WorkItemSchema};
 use crate::model::{
     FamilySnapshot, FamilyTreeEntry, HistoryRecord, SortDirection, SortField, StateCategory,
     Ticket, TicketKey, path_leaf,

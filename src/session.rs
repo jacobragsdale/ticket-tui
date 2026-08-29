@@ -160,14 +160,14 @@ mod tests {
     use super::*;
     use crate::columns::ColumnLayout;
     use crate::columns::TableLayout;
-    use crate::filter::{FilterField, FilterSet, format_query, parse_query};
+    use crate::filter::{FilterField, FilterSet, WorkItemSchema, format_query, parse_query};
     use tempfile::tempdir;
 
     #[test]
     fn a_query_holding_a_full_iteration_path_survives_a_restart() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tickets.session.json");
-        let mut filters = FilterSet::default();
+        let mut filters = FilterSet::<WorkItemSchema>::default();
         filters.insert(FilterField::Iteration, "Atlas\\Sprint 1");
         let query = format_query(&filters, "");
         let mut session = Session {
@@ -191,7 +191,7 @@ mod tests {
         for stored in [&loaded.query, &loaded.views[0].query] {
             assert_eq!(stored, &query, "the query text came back as it was written");
             assert!(
-                parse_query(stored)
+                parse_query::<WorkItemSchema>(stored)
                     .filters
                     .contains(FilterField::Iteration, "Atlas\\Sprint 1"),
                 "the path still selects its own rows: {stored}"

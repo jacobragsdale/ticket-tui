@@ -290,7 +290,10 @@ impl WorkItemsScreen {
             }
             PointerTarget::FacetPill(target) => match target {
                 FacetTarget::More => self.open_filters(),
-                FacetTarget::Field(field) => {
+                FacetTarget::Field(key) => {
+                    let Some(field) = FilterField::parse(key) else {
+                        return AppAction::None;
+                    };
                     let index = FilterField::BAR
                         .iter()
                         .position(|entry| *entry == field)
@@ -307,7 +310,7 @@ impl WorkItemsScreen {
                     self.mode = WorkItemMode::Browse;
                 }
             }
-            PointerTarget::RemoveChip(token) => self.remove_filter_token(shell, token),
+            PointerTarget::RemoveChip { index } => self.remove_filter_token(shell, index),
             PointerTarget::ShowFinished => self.set_show_finished(shell, true),
             PointerTarget::SortChoose(field) => {
                 self.toggle_sort(shell, field);

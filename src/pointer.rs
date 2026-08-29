@@ -1,6 +1,6 @@
 use ratatui::layout::Rect;
 
-use crate::filter::{FacetTarget, FilterToken};
+use crate::filter::FacetTarget;
 use crate::model::{SortDirection, SortField, TicketKey};
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -133,7 +133,11 @@ pub enum PointerTarget {
         index: usize,
     },
     DismissFacet,
-    RemoveChip(FilterToken),
+    /// The `×` on one chip, counted over the chips the screen listed. An index
+    /// rather than the token itself: a target cannot name one screen's fields.
+    RemoveChip {
+        index: usize,
+    },
     /// The `×` on the chip saying finished work is being left out.
     ShowFinished,
     SortChoose(SortField),

@@ -25,7 +25,7 @@ use crate::export;
 pub use crate::filter::FacetTarget;
 use crate::filter::{
     FacetValue, FilterField, FilterSet, FilterToken, MatchContext, ParsedQuery, Sentinel,
-    days_untouched, facet_values, format_query, is_stale, parse_query, stale_query,
+    WorkItemSchema, days_untouched, facet_values, format_query, is_stale, parse_query, stale_query,
 };
 use crate::model::{
     CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord, Identity,

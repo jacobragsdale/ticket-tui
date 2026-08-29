@@ -20,7 +20,7 @@ use crate::azure::{self, AzureClient, AzureConfig};
 use crate::classification::{self, NodeKind};
 use crate::db::{self, SqliteTicketRepository, default_database_path};
 use crate::edit::{FieldEdit, normalize_tags, revision_test};
-use crate::filter::{FilterField, MatchContext, ParsedQuery, parse_query};
+use crate::filter::{FilterField, MatchContext, ParsedQuery, WorkItemSchema, parse_query};
 use crate::markdown;
 use crate::model::{CommentRecord, Identity, Ticket, TicketKey};
 use crate::search;
@@ -295,7 +295,7 @@ fn select(
     let Some(query) = query else {
         return Ok(by_recency(tickets));
     };
-    let parsed = parse_query(query);
+    let parsed = parse_query::<WorkItemSchema>(query);
     refuse_unresolvable_sentinels(&parsed, context, tree)?;
     let matching: Vec<Ticket> = tickets
         .into_iter()
@@ -364,7 +364,7 @@ enum IterationTree {
 /// saying rather than answering with a blank list: the TUI can show the query
 /// beside its chips, but a pipe cannot.
 fn refuse_unresolvable_sentinels(
-    parsed: &ParsedQuery,
+    parsed: &ParsedQuery<WorkItemSchema>,
     context: &MatchContext,
     tree: IterationTree,
 ) -> Result<()> {
