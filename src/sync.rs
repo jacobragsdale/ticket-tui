@@ -18,8 +18,8 @@ use crate::classification::ClassificationNode;
 use crate::db::{self, SqliteTicketRepository};
 use crate::edit::{EditApplied, EditRejection, EditRequest};
 use crate::model::{
-    CommentRecord, DetailsUpdate, Identity, RelationKind, RelationRecord, Repo, StateCatalog,
-    StateOption, Ticket, TicketGraph, TicketKey, WorkItemDetails,
+    CommentRecord, DetailsUpdate, Identity, Pipeline, RelationKind, RelationRecord, Repo, Run,
+    StateCatalog, StateOption, Ticket, TicketGraph, TicketKey, WorkItemDetails,
 };
 use crate::search::SearchDocuments;
 use crate::timestamp::Timestamp;
@@ -229,16 +229,49 @@ pub enum SyncMode {
 /// it stored; an incremental one counts what actually moved, which on a quiet
 /// project is usually a handful or none.
 #[must_use]
-pub fn pull_summary(mode: SyncMode, count: usize, repos: usize) -> String {
-    let repos = match repos {
-        0 => String::new(),
-        1 => ", 1 repo".to_owned(),
-        repos => format!(", {repos} repos"),
-    };
+pub fn pull_summary(mode: SyncMode, count: usize, extras: PulledExtras) -> String {
+    let extras = extras.wording();
     match mode {
-        SyncMode::Full => format!("Synced {count} work items{repos}"),
-        SyncMode::Incremental if count == 1 => format!("Synced 1 change{repos}"),
-        SyncMode::Incremental => format!("Synced {count} changes{repos}"),
+        SyncMode::Full => format!("Synced {count} work items{extras}"),
+        SyncMode::Incremental if count == 1 => format!("Synced 1 change{extras}"),
+        SyncMode::Incremental => format!("Synced {count} changes{extras}"),
+    }
+}
+
+/// What a pull brought down beside the work items, for the wording. Each is
+/// named only when there is one, so a project with no pipelines never reads
+/// `0 pipelines`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PulledExtras {
+    pub repos: usize,
+    pub pipelines: usize,
+    pub runs: usize,
+}
+
+impl PulledExtras {
+    /// What the snapshot a pull answered with holds.
+    #[must_use]
+    pub fn of(snapshot: &Snapshot) -> Self {
+        Self {
+            repos: snapshot.repos.len(),
+            pipelines: snapshot.pipelines.len(),
+            runs: snapshot.runs.len(),
+        }
+    }
+
+    fn wording(self) -> String {
+        [
+            (self.repos, "repo", "repos"),
+            (self.pipelines, "pipeline", "pipelines"),
+            (self.runs, "run", "runs"),
+        ]
+        .into_iter()
+        .filter(|(count, _, _)| *count > 0)
+        .map(|(count, one, many)| {
+            let noun = if count == 1 { one } else { many };
+            format!(", {count} {noun}")
+        })
+        .collect()
     }
 }
 
@@ -256,6 +289,9 @@ pub struct Snapshot {
     /// The project's Git repositories, which every tab reads to turn a
     /// repository GUID into a name. Empty until a pull has fetched them.
     pub repos: Vec<Repo>,
+    /// The project's pipelines and the newest window of their runs.
+    pub pipelines: Vec<Pipeline>,
+    pub runs: Vec<Run>,
 }
 
 impl Snapshot {
@@ -273,6 +309,8 @@ impl Snapshot {
             graph,
             states: StateCatalog::default(),
             repos: Vec::new(),
+            pipelines: Vec::new(),
+            runs: Vec::new(),
         }
     }
 
@@ -311,6 +349,24 @@ impl Snapshot {
     pub fn repo_count(&self) -> usize {
         self.repos.len()
     }
+
+    /// The pipelines and runs read alongside these rows.
+    #[must_use]
+    pub fn with_pipelines(mut self, pipelines: Vec<Pipeline>, runs: Vec<Run>) -> Self {
+        self.pipelines = pipelines;
+        self.runs = runs;
+        self
+    }
+
+    #[must_use]
+    pub fn pipelines(&self) -> &[Pipeline] {
+        &self.pipelines
+    }
+
+    #[must_use]
+    pub fn runs(&self) -> &[Run] {
+        &self.runs
+    }
 }
 
 /// How one request ended.
@@ -319,7 +375,10 @@ pub enum SyncOutcome {
     /// Work items already written to SQLite and read back from it, so memory
     /// and the database hold the same rows.
     Pulled {
-        snapshot: Snapshot,
+        /// Boxed: a snapshot carries the whole project — rows, graph, states,
+        /// repositories, pipelines and runs — and every other outcome is a
+        /// few words.
+        snapshot: Box<Snapshot>,
         mode: SyncMode,
         /// Work items stored, for a full pull; work items changed or removed,
         /// for an incremental one.
@@ -364,6 +423,14 @@ pub trait WorkItemSource {
     /// answers with none rather than failing the pull.
     fn repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
         Ok((Vec::new(), None))
+    }
+    /// The project's build definitions, and the newest window of runs. Two
+    /// requests, made on every pull; a source with neither answers with none.
+    fn pipelines(&self) -> Result<Vec<Pipeline>> {
+        Ok(Vec::new())
+    }
+    fn runs(&self) -> Result<Vec<Run>> {
+        Ok(Vec::new())
     }
     /// Write one work item with a JSON Patch document, answering with the copy
     /// the server stored.
@@ -450,6 +517,14 @@ impl WorkItemSource for AzureClient {
 
     fn repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
         self.fetch_repositories()
+    }
+
+    fn pipelines(&self) -> Result<Vec<Pipeline>> {
+        self.fetch_pipelines()
+    }
+
+    fn runs(&self) -> Result<Vec<Run>> {
+        self.fetch_runs()
     }
 
     fn pull_changed_since(&self, watermark: Timestamp) -> Result<SyncBatch> {
@@ -1191,8 +1266,9 @@ impl Worker {
         }
         self.cache_type_states(&types, events)?;
         self.sync_repos(events)?;
+        self.sync_pipelines(events)?;
         Ok(SyncOutcome::Pulled {
-            snapshot: self.reload()?,
+            snapshot: Box::new(self.reload()?),
             mode: SyncMode::Full,
             count,
         })
@@ -1234,11 +1310,12 @@ impl Worker {
         // The repositories come down with every pull, and a project whose work
         // items and repositories are both untouched writes nothing at all.
         let repos_changed = self.sync_repos(events)?;
-        if count == 0 && !repos_changed {
+        let pipelines_changed = self.sync_pipelines(events)?;
+        if count == 0 && !repos_changed && !pipelines_changed {
             return Ok(SyncOutcome::Unchanged);
         }
         Ok(SyncOutcome::Pulled {
-            snapshot: self.reload()?,
+            snapshot: Box::new(self.reload()?),
             mode: SyncMode::Incremental,
             count,
         })
@@ -1262,6 +1339,23 @@ impl Worker {
         Ok(written)
     }
 
+    /// Reads the project's pipelines and the newest window of runs, storing
+    /// each only when it differs from what is on file. The window is what
+    /// prunes the runs table: it holds exactly what one query answers with.
+    /// Answers whether anything was written.
+    fn sync_pipelines(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
+        let Ok(pipelines) = self.source(events)?.pipelines() else {
+            return Ok(false);
+        };
+        let Ok(runs) = self.source(events)?.runs() else {
+            return Ok(false);
+        };
+        let repository = self.repository()?;
+        let stored_pipelines = repository.replace_pipelines(&pipelines)?;
+        let stored_runs = repository.replace_runs(&runs)?;
+        Ok(stored_pipelines || stored_runs)
+    }
+
     /// The rows, their graph, and the states they allow, all out of the same
     /// read, so what the main thread shows is what the database holds.
     fn reload(&mut self) -> Result<Snapshot> {
@@ -1270,9 +1364,12 @@ impl Worker {
         let graph = repository.load_graph()?;
         let states = repository.load_type_states()?;
         let repos = repository.load_repos()?;
+        let pipelines = repository.load_pipelines()?;
+        let runs = repository.load_runs()?;
         Ok(Snapshot::with_graph(tickets, graph)
             .with_states(states)
-            .with_repos(repos))
+            .with_repos(repos)
+            .with_pipelines(pipelines, runs))
     }
 
     /// The work item types in a batch whose states nobody has read yet, in the
@@ -1478,6 +1575,8 @@ impl SyncScheduler {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::{RunResult, RunStatus};
+
     use super::*;
     use crate::azure::{RequestRejected, Throttled};
     use crate::classification::NodeKind;
@@ -1592,6 +1691,10 @@ mod tests {
         scope: Option<SyncScope>,
         /// The repositories this source lists, and the project GUID they carry.
         repos: Arc<Mutex<Vec<Repo>>>,
+        /// The pipelines and runs it lists, and how often they were asked for.
+        pipelines: Arc<Mutex<Vec<Pipeline>>>,
+        runs: Arc<Mutex<Vec<Run>>>,
+        pipeline_requests: Arc<Mutex<usize>>,
         project_id: Option<String>,
         /// How many times the repositories were asked for.
         repo_requests: Arc<Mutex<usize>>,
@@ -1743,6 +1846,15 @@ mod tests {
         fn repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
             *self.repo_requests.lock().unwrap() += 1;
             Ok((self.repos.lock().unwrap().clone(), self.project_id.clone()))
+        }
+
+        fn pipelines(&self) -> Result<Vec<Pipeline>> {
+            *self.pipeline_requests.lock().unwrap() += 1;
+            Ok(self.pipelines.lock().unwrap().clone())
+        }
+
+        fn runs(&self) -> Result<Vec<Run>> {
+            Ok(self.runs.lock().unwrap().clone())
         }
 
         fn patch_work_item(
@@ -2345,6 +2457,115 @@ mod tests {
             signature,
             "and an idle project leaves the file alone"
         );
+    }
+
+    fn pipeline(id: i64, name: &str) -> Pipeline {
+        Pipeline {
+            id,
+            name: name.to_owned(),
+            folder: "\\".into(),
+            repo_id: Some("aaa-111".into()),
+            default_branch: Some("refs/heads/main".into()),
+            url: format!("https://dev.azure.com/demo/atlas/_build?definitionId={id}"),
+            queue_status: "enabled".into(),
+        }
+    }
+
+    fn run(id: i64, pipeline_id: i64, status: RunStatus, result: Option<RunResult>) -> Run {
+        Run {
+            id,
+            pipeline_id,
+            build_number: format!("20260829.{id}"),
+            status,
+            result,
+            source_branch: "refs/heads/main".into(),
+            source_version: "abc1234".into(),
+            requested_for: Some("Jacob Ragsdale".into()),
+            reason: "individualCI".into(),
+            pr_id: None,
+            queue_time: Some(crate::timestamp::ts("2026-08-29T10:00:00Z")),
+            start_time: Some(crate::timestamp::ts("2026-08-29T10:00:05Z")),
+            finish_time: None,
+            url: format!("https://dev.azure.com/demo/atlas/_build/results?buildId={id}"),
+        }
+    }
+
+    #[test]
+    fn a_pull_stores_the_pipelines_and_the_run_window_and_follows_a_run_that_moves() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let pipelines = Arc::new(Mutex::new(vec![pipeline(1, "ticket-tui CI")]));
+        let runs = Arc::new(Mutex::new(vec![
+            run(9, 1, RunStatus::InProgress, None),
+            run(8, 1, RunStatus::Completed, Some(RunResult::Succeeded)),
+        ]));
+        let source = FakeSource {
+            pipelines: Arc::clone(&pipelines),
+            runs: Arc::clone(&runs),
+            ..FakeSource::with(vec![
+                Ok(SyncBatch {
+                    tickets: vec![ticket(1, "Existing")],
+                    relations: Vec::new(),
+                }),
+                Ok(SyncBatch {
+                    tickets: Vec::new(),
+                    relations: Vec::new(),
+                }),
+                Ok(SyncBatch {
+                    tickets: Vec::new(),
+                    relations: Vec::new(),
+                }),
+            ])
+        };
+        let requests = Arc::clone(&source.pipeline_requests);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let SyncOutcome::Pulled { snapshot, .. } = pulled(&handle) else {
+            panic!("expected a pull");
+        };
+        assert_eq!(snapshot.pipelines().len(), 1);
+        assert_eq!(
+            snapshot.runs().iter().map(|run| run.id).collect::<Vec<_>>(),
+            [9, 8],
+            "the newest run leads"
+        );
+
+        // The run that was going has finished, and an older one has fallen out
+        // of the window the query answers with.
+        *runs.lock().unwrap() = vec![
+            run(10, 1, RunStatus::InProgress, None),
+            run(9, 1, RunStatus::Completed, Some(RunResult::Failed)),
+        ];
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let SyncOutcome::Pulled {
+            snapshot, count, ..
+        } = pulled(&handle)
+        else {
+            panic!("a run that moved is something to write, even with no work items");
+        };
+        assert_eq!(count, 0, "no work item changed");
+        assert_eq!(
+            snapshot
+                .runs()
+                .iter()
+                .map(|run| (run.id, run.status, run.result))
+                .collect::<Vec<_>>(),
+            [
+                (10, RunStatus::InProgress, None),
+                (9, RunStatus::Completed, Some(RunResult::Failed)),
+            ],
+            "the moved run is followed and the one past the window is pruned"
+        );
+
+        let signature = crate::db::data_signature(&path);
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        assert!(
+            matches!(pulled(&handle), SyncOutcome::Unchanged),
+            "and an idle project writes nothing"
+        );
+        assert_eq!(crate::db::data_signature(&path), signature);
+        assert_eq!(*requests.lock().unwrap(), 3, "asked once per pull");
     }
 
     #[test]

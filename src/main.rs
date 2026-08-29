@@ -29,8 +29,8 @@ use ticket_tui::markdown;
 use ticket_tui::model::{Ticket, TicketKey};
 use ticket_tui::session;
 use ticket_tui::sync::{
-    self, AzureConnector, DetailsOutcome, PullOrigin, ReparentRejection, SyncEvent, SyncHandle,
-    SyncMode, SyncOutcome, SyncRequest, SyncScheduler,
+    self, AzureConnector, DetailsOutcome, PullOrigin, PulledExtras, ReparentRejection, SyncEvent,
+    SyncHandle, SyncMode, SyncOutcome, SyncRequest, SyncScheduler,
 };
 use ticket_tui::timestamp::Timestamp;
 use url::Url;
@@ -137,8 +137,8 @@ impl DetailsEngine {
 
 impl SyncRuntime {
     /// What a pull the user asked for reports, and where it pulled from.
-    fn status_for(&self, mode: SyncMode, count: usize, repos: usize) -> String {
-        let synced = sync::pull_summary(mode, count, repos);
+    fn status_for(&self, mode: SyncMode, count: usize, extras: PulledExtras) -> String {
+        let synced = sync::pull_summary(mode, count, extras);
         self.config.as_ref().map_or_else(
             || synced.clone(),
             |config| format!("{synced} from {}/{}", config.organization, config.project),
@@ -968,13 +968,14 @@ fn poll_sync(
                         mode,
                         count,
                     } => {
-                        let repos = snapshot.repo_count();
+                        let extras = PulledExtras::of(&snapshot);
                         app.work_items
-                            .replace_prepared_tickets(&mut app.shell, snapshot);
+                            .replace_prepared_tickets(&mut app.shell, *snapshot);
                         app.shell.finish_sync();
                         stamp_database(app, repository);
                         if origin == PullOrigin::User {
-                            app.shell.set_status(runtime.status_for(mode, count, repos));
+                            app.shell
+                                .set_status(runtime.status_for(mode, count, extras));
                         }
                     }
                     // Nothing moved in Azure DevOps, so nothing was written and
@@ -1352,7 +1353,7 @@ mod tests {
         CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateOption, Ticket,
         TicketGraph, TicketKey, WorkItemDetails,
     };
-    use ticket_tui::sync::{SourceConnector, WorkItemSource};
+    use ticket_tui::sync::{PulledExtras, SourceConnector, WorkItemSource};
     use ticket_tui::timestamp::Timestamp;
 
     /// A launcher that never opens anything, for the tests that only need
@@ -2008,17 +2009,25 @@ mod tests {
         );
 
         assert_eq!(
-            runtime.status_for(SyncMode::Incremental, 1, 0),
+            runtime.status_for(SyncMode::Incremental, 1, PulledExtras::default()),
             "Synced 1 change from example-org/atlas"
         );
         assert_eq!(
-            runtime.status_for(SyncMode::Incremental, 3, 0),
+            runtime.status_for(SyncMode::Incremental, 3, PulledExtras::default()),
             "Synced 3 changes from example-org/atlas"
         );
         assert_eq!(
-            runtime.status_for(SyncMode::Full, 52, 4),
-            "Synced 52 work items, 4 repos from example-org/atlas",
-            "a full pull counts the repositories it brought down with the rows"
+            runtime.status_for(
+                SyncMode::Full,
+                52,
+                PulledExtras {
+                    repos: 4,
+                    pipelines: 1,
+                    runs: 137,
+                }
+            ),
+            "Synced 52 work items, 4 repos, 1 pipeline, 137 runs from example-org/atlas",
+            "a full pull counts everything it brought down with the rows"
         );
     }
 

@@ -10,12 +10,13 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::classification::{ClassificationNode, NodeKind};
 use crate::model::{
-    CommentRecord, DetailsUpdate, HistoryRecord, Identity, RelationKind, RelationRecord, Repo,
-    StateCatalog, StateCategory, StateOption, Ticket, TicketGraph, TicketKey,
+    CommentRecord, DetailsUpdate, HistoryRecord, Identity, Pipeline, RelationKind, RelationRecord,
+    Repo, Run, RunResult, RunStatus, StateCatalog, StateCategory, StateOption, Ticket, TicketGraph,
+    TicketKey,
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -66,6 +67,8 @@ DROP TABLE IF EXISTS work_item_types;
 DROP TABLE IF EXISTS identities;
 DROP TABLE IF EXISTS classification_nodes;
 DROP TABLE IF EXISTS repos;
+DROP TABLE IF EXISTS pipelines;
+DROP TABLE IF EXISTS runs;
 DROP TABLE IF EXISTS sync_meta;
 CREATE TABLE work_items (
     organization   TEXT NOT NULL,
@@ -155,6 +158,32 @@ CREATE TABLE repos (
     is_disabled    INTEGER NOT NULL,
     size           INTEGER
 );
+CREATE TABLE pipelines (
+    id             INTEGER PRIMARY KEY,
+    name           TEXT NOT NULL,
+    folder         TEXT NOT NULL,
+    repo_id        TEXT,
+    default_branch TEXT,
+    url            TEXT NOT NULL,
+    queue_status   TEXT NOT NULL
+);
+CREATE TABLE runs (
+    id             INTEGER PRIMARY KEY,
+    pipeline_id    INTEGER NOT NULL,
+    build_number   TEXT NOT NULL,
+    status         TEXT NOT NULL,
+    result         TEXT,
+    source_branch  TEXT NOT NULL,
+    source_version TEXT NOT NULL,
+    requested_for  TEXT,
+    reason         TEXT NOT NULL,
+    pr_id          INTEGER,
+    queue_time     TEXT,
+    start_time     TEXT,
+    finish_time    TEXT,
+    url            TEXT NOT NULL
+);
+CREATE INDEX runs_by_pipeline ON runs (pipeline_id, queue_time DESC);
 CREATE TABLE sync_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -468,6 +497,141 @@ impl SqliteTicketRepository {
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to load repositories")
+    }
+
+    /// Replaces the project's pipelines with what the pull found, and answers
+    /// whether anything changed.
+    pub fn replace_pipelines(&mut self, pipelines: &[Pipeline]) -> Result<bool> {
+        let mut pipelines = pipelines.to_vec();
+        pipelines.sort_by_key(|pipeline| pipeline.id);
+        if self.load_pipelines()? == pipelines {
+            return Ok(false);
+        }
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM pipelines", [])?;
+        for pipeline in &pipelines {
+            transaction.execute(
+                "INSERT OR REPLACE INTO pipelines
+                 (id, name, folder, repo_id, default_branch, url, queue_status)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    pipeline.id,
+                    pipeline.name,
+                    pipeline.folder,
+                    pipeline.repo_id,
+                    pipeline.default_branch,
+                    pipeline.url,
+                    pipeline.queue_status,
+                ],
+            )?;
+        }
+        transaction
+            .commit()
+            .context("failed to store the project's pipelines")?;
+        Ok(true)
+    }
+
+    /// The project's pipelines, by id.
+    pub fn load_pipelines(&self) -> Result<Vec<Pipeline>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, name, folder, repo_id, default_branch, url, queue_status
+             FROM pipelines ORDER BY id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(Pipeline {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                folder: row.get(2)?,
+                repo_id: row.get(3)?,
+                default_branch: row.get(4)?,
+                url: row.get(5)?,
+                queue_status: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load pipelines")
+    }
+
+    /// Replaces the stored runs with the window the pull brought back, which
+    /// is what prunes everything older than it: the table never grows past
+    /// what one query answers with. Answers whether anything changed.
+    pub fn replace_runs(&mut self, runs: &[Run]) -> Result<bool> {
+        let mut runs = runs.to_vec();
+        runs.sort_by_key(|run| std::cmp::Reverse(run.id));
+        if self.load_runs()? == runs {
+            return Ok(false);
+        }
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM runs", [])?;
+        for run in &runs {
+            transaction.execute(
+                "INSERT OR REPLACE INTO runs
+                 (id, pipeline_id, build_number, status, result, source_branch, source_version,
+                  requested_for, reason, pr_id, queue_time, start_time, finish_time, url)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    run.id,
+                    run.pipeline_id,
+                    run.build_number,
+                    run.status.as_str(),
+                    run.result.map(RunResult::as_str),
+                    run.source_branch,
+                    run.source_version,
+                    run.requested_for,
+                    run.reason,
+                    run.pr_id,
+                    run.queue_time.map(|time| time.to_rfc3339()),
+                    run.start_time.map(|time| time.to_rfc3339()),
+                    run.finish_time.map(|time| time.to_rfc3339()),
+                    run.url,
+                ],
+            )?;
+        }
+        transaction
+            .commit()
+            .context("failed to store the project's pipeline runs")?;
+        Ok(true)
+    }
+
+    /// The stored runs, newest first.
+    pub fn load_runs(&self) -> Result<Vec<Run>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, pipeline_id, build_number, status, result, source_branch, source_version,
+                    requested_for, reason, pr_id, queue_time, start_time, finish_time, url
+             FROM runs ORDER BY id DESC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(Run {
+                id: row.get(0)?,
+                pipeline_id: row.get(1)?,
+                build_number: row.get(2)?,
+                status: RunStatus::parse(&row.get::<_, String>(3)?),
+                result: row
+                    .get::<_, Option<String>>(4)?
+                    .as_deref()
+                    .and_then(RunResult::parse),
+                source_branch: row.get(5)?,
+                source_version: row.get(6)?,
+                requested_for: row.get(7)?,
+                reason: row.get(8)?,
+                pr_id: row.get(9)?,
+                queue_time: row
+                    .get::<_, Option<String>>(10)?
+                    .as_deref()
+                    .and_then(|raw| Timestamp::parse(raw).ok()),
+                start_time: row
+                    .get::<_, Option<String>>(11)?
+                    .as_deref()
+                    .and_then(|raw| Timestamp::parse(raw).ok()),
+                finish_time: row
+                    .get::<_, Option<String>>(12)?
+                    .as_deref()
+                    .and_then(|raw| Timestamp::parse(raw).ok()),
+                url: row.get(13)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load pipeline runs")
     }
 
     /// Everybody the last identity fetch found, by display name.

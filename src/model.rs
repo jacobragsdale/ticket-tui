@@ -254,6 +254,120 @@ pub struct Repo {
     pub size: Option<i64>,
 }
 
+/// One build definition — a pipeline — as the Pipelines tab lists it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Pipeline {
+    pub id: i64,
+    pub name: String,
+    /// The folder it is filed under, `\\` for the root, as Azure DevOps spells it.
+    pub folder: String,
+    /// The repository it builds, by GUID, and `None` for one that names no
+    /// repository this project holds.
+    pub repo_id: Option<String>,
+    pub default_branch: Option<String>,
+    pub url: String,
+    /// `enabled`, `paused` or `disabled`, as the queue reports it.
+    pub queue_status: String,
+}
+
+/// Where a run has got to. Azure DevOps spells these in camelCase; they are
+/// stored as it spells them so an unknown one still round-trips.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RunStatus {
+    #[default]
+    NotStarted,
+    InProgress,
+    Completed,
+    Cancelling,
+    Postponed,
+}
+
+impl RunStatus {
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        match raw.to_ascii_lowercase().as_str() {
+            "inprogress" => Self::InProgress,
+            "completed" => Self::Completed,
+            "cancelling" => Self::Cancelling,
+            "postponed" => Self::Postponed,
+            _ => Self::NotStarted,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotStarted => "notStarted",
+            Self::InProgress => "inProgress",
+            Self::Completed => "completed",
+            Self::Cancelling => "cancelling",
+            Self::Postponed => "postponed",
+        }
+    }
+
+    /// Whether the run is still going, which is what the watcher polls and
+    /// what the tab bar counts.
+    #[must_use]
+    pub const fn is_live(self) -> bool {
+        matches!(self, Self::InProgress | Self::Cancelling | Self::NotStarted)
+    }
+}
+
+/// How a finished run turned out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunResult {
+    Succeeded,
+    PartiallySucceeded,
+    Failed,
+    Canceled,
+}
+
+impl RunResult {
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(match raw.to_ascii_lowercase().as_str() {
+            "succeeded" => Self::Succeeded,
+            "partiallysucceeded" => Self::PartiallySucceeded,
+            "failed" => Self::Failed,
+            "canceled" | "cancelled" => Self::Canceled,
+            _ => return None,
+        })
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::PartiallySucceeded => "partiallySucceeded",
+            Self::Failed => "failed",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+/// One run of a pipeline.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Run {
+    pub id: i64,
+    pub pipeline_id: i64,
+    /// `20260829.4`, which is what the run is called everywhere.
+    pub build_number: String,
+    pub status: RunStatus,
+    pub result: Option<RunResult>,
+    /// The full ref, `refs/heads/main`, as stored.
+    pub source_branch: String,
+    pub source_version: String,
+    pub requested_for: Option<String>,
+    /// `manual`, `individualCI`, `pullRequest`, and the rest, as reported.
+    pub reason: String,
+    /// The pull request a `pullRequest` run was raised for.
+    pub pr_id: Option<i64>,
+    pub queue_time: Option<Timestamp>,
+    pub start_time: Option<Timestamp>,
+    pub finish_time: Option<Timestamp>,
+    pub url: String,
+}
+
 /// Somewhere worth going, wherever it lives. The shell resolves one by
 /// switching to the tab that holds it and asking that screen to select it, so
 /// a work item's pull request and a run's branch are one keystroke apart.

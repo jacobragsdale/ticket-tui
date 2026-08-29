@@ -16,8 +16,8 @@ use url::Url;
 use crate::classification::{self, ClassificationNode};
 use crate::html::html_to_text;
 use crate::model::{
-    CommentRecord, HistoryRecord, Identity, RelationKind, RelationRecord, Repo, StateCategory,
-    StateOption, Ticket, TicketKey, WorkItemDetails,
+    CommentRecord, HistoryRecord, Identity, Pipeline, RelationKind, RelationRecord, Repo, Run,
+    RunResult, RunStatus, StateCategory, StateOption, Ticket, TicketKey, WorkItemDetails,
 };
 use crate::timestamp::Timestamp;
 
@@ -605,6 +605,34 @@ impl AzureClient {
         Ok(parse_repositories(&response, &self.config.project))
     }
 
+    /// The project's build definitions. `includeAllProperties` is what carries
+    /// the repository and the default branch, which the Pipelines tab needs to
+    /// say what a pipeline builds.
+    pub fn fetch_pipelines(&self) -> Result<Vec<Pipeline>> {
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "build",
+            "definitions",
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&format!(
+            "includeAllProperties=true&api-version={API_VERSION}"
+        )));
+        Ok(parse_pipelines(&self.get(url.as_str())?))
+    }
+
+    /// The newest runs in the project, whatever pipeline they belong to. One
+    /// window, newest first, which is also what prunes the stored table.
+    pub fn fetch_runs(&self) -> Result<Vec<Run>> {
+        let segments = [self.config.project.as_str(), "_apis", "build", "builds"];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&format!(
+            "$top={RUN_WINDOW}&queryOrder=queueTimeDescending&api-version={API_VERSION}"
+        )));
+        Ok(parse_runs(&self.get(url.as_str())?))
+    }
+
     /// The teams hang off `_apis/projects` rather than off the project. `tail`
     /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {
@@ -745,6 +773,84 @@ enum Request<'a> {
 }
 
 /// The query every plain endpoint takes: the API version and nothing else.
+/// How many runs one pull brings back. The stored table is exactly this
+/// window, so it never grows.
+const RUN_WINDOW: usize = 200;
+
+fn parse_pipelines(response: &Value) -> Vec<Pipeline> {
+    response["value"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| {
+            Some(Pipeline {
+                id: entry["id"].as_i64()?,
+                name: entry["name"].as_str()?.to_owned(),
+                folder: entry["path"].as_str().unwrap_or("\\").to_owned(),
+                repo_id: entry["repository"]["id"].as_str().map(str::to_owned),
+                default_branch: entry["repository"]["defaultBranch"]
+                    .as_str()
+                    .map(str::to_owned),
+                url: entry["_links"]["web"]["href"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                queue_status: entry["queueStatus"]
+                    .as_str()
+                    .unwrap_or("enabled")
+                    .to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn parse_runs(response: &Value) -> Vec<Run> {
+    response["value"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| {
+            let time = |key: &str| {
+                entry[key]
+                    .as_str()
+                    .and_then(|raw| Timestamp::parse(raw).ok())
+            };
+            Some(Run {
+                id: entry["id"].as_i64()?,
+                pipeline_id: entry["definition"]["id"].as_i64()?,
+                build_number: entry["buildNumber"].as_str().unwrap_or_default().to_owned(),
+                status: RunStatus::parse(entry["status"].as_str().unwrap_or_default()),
+                result: entry["result"].as_str().and_then(RunResult::parse),
+                source_branch: entry["sourceBranch"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                source_version: entry["sourceVersion"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                requested_for: entry["requestedFor"]["displayName"]
+                    .as_str()
+                    .map(str::to_owned),
+                reason: entry["reason"].as_str().unwrap_or_default().to_owned(),
+                // Azure DevOps reports the pull request number as a string.
+                pr_id: entry["triggerInfo"]["pr.number"]
+                    .as_str()
+                    .and_then(|raw| raw.parse().ok()),
+                queue_time: time("queueTime"),
+                start_time: time("startTime"),
+                finish_time: time("finishTime"),
+                url: entry["_links"]["web"]["href"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        })
+        .collect()
+}
+
 /// The repositories in a `GET .../_apis/git/repositories` response, and the
 /// project GUID they all carry. A repository the response cannot be read as is
 /// left out rather than sinking the pull.

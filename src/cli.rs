@@ -235,8 +235,10 @@ fn sync_report(outcome: &SyncOutcome, config: &AzureConfig) -> Result<String> {
             mode,
             count,
             snapshot,
-        } => sync::pull_summary(*mode, *count, snapshot.repo_count()),
-        SyncOutcome::Unchanged => sync::pull_summary(SyncMode::Incremental, 0, 0),
+        } => sync::pull_summary(*mode, *count, sync::PulledExtras::of(snapshot)),
+        SyncOutcome::Unchanged => {
+            sync::pull_summary(SyncMode::Incremental, 0, sync::PulledExtras::default())
+        }
         SyncOutcome::Failed(message) => bail!("{message}"),
         SyncOutcome::Throttled { retry_after } => bail!(
             "Azure DevOps is throttling requests; try again in {}s",
@@ -1657,10 +1659,10 @@ mod tests {
         assert_eq!(
             sync_report(
                 &SyncOutcome::Pulled {
-                    snapshot: crate::app::Snapshot::with_graph(
+                    snapshot: Box::new(crate::app::Snapshot::with_graph(
                         Vec::new(),
                         crate::model::TicketGraph::default(),
-                    ),
+                    )),
                     mode: SyncMode::Full,
                     count: 59,
                 },
