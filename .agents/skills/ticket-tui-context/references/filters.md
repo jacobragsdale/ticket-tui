@@ -44,6 +44,34 @@ character:
 ticket-tui list --query 'state:"To Do" area:"development\\Platform"'
 ```
 
+## Sentinels
+
+Four values are written with a leading `@` and stand for something resolved
+when the query runs, not when it was written — so a saved query follows the
+person and the calendar instead of freezing them.
+
+| Value | Stands for |
+|---|---|
+| `assignee:@me` | The display name the last sync recorded, or `TICKET_TUI_ME` |
+| `assignee:@none` | Unassigned work |
+| `iteration:@current` | The iteration whose dates contain today |
+| `state:@open` | Any state that is not `Done` or `Removed` |
+
+A sentinel written on a field that has none — `state:@me` — is not an error; it
+is an ordinary value that matches nothing.
+
+`@me` and `@current` need something the run may not have. In the TUI they match
+nothing and the chips still show what you typed. From the command line that
+would read exactly like an empty backlog, so `list` refuses instead:
+
+```console
+$ ticket-tui list --query 'assignee:@me'
+no signed-in name to resolve @me; run `ticket-tui sync` once or set TICKET_TUI_ME
+```
+
+`@current` reads the cached iteration tree, which a sync fills. A project with
+no sprint scheduled around today is refused the same way.
+
 ## `changed:` and `created:`
 
 These take a comparison rather than a value, because a date has no enumerable

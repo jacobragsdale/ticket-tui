@@ -17,13 +17,15 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::azure::{self, AzureClient, AzureConfig};
+use crate::classification::{self, NodeKind};
 use crate::db::{self, SqliteTicketRepository, default_database_path};
 use crate::edit::{FieldEdit, normalize_tags, revision_test};
-use crate::filter::{FilterField, ParsedQuery, parse_query};
+use crate::filter::{FilterField, MatchContext, ParsedQuery, parse_query};
 use crate::markdown;
 use crate::model::{CommentRecord, Identity, Ticket, TicketKey};
 use crate::search;
 use crate::sync::{self, AzureConnector, SyncMode, SyncOutcome, WorkItemSource};
+use crate::timestamp::Timestamp;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -274,7 +276,8 @@ fn run_list(database: &Path, query: Option<&str>, json: bool) -> Result<()> {
         repository.meta(db::ME_DISPLAY_NAME_KEY)?,
         std::env::var("TICKET_TUI_ME").ok(),
     );
-    let rows = select(repository.load_all()?, query, me.as_deref())?;
+    let (context, tree) = match_context(&repository, me)?;
+    let rows = select(repository.load_all()?, query, &context, tree)?;
     emit(&if json {
         let rows: Vec<TicketJson<'_>> = rows.iter().map(TicketJson::row).collect();
         to_json(&rows)?
@@ -288,16 +291,22 @@ fn run_list(database: &Path, query: Option<&str>, json: bool) -> Result<()> {
 /// invocation twice running answers in the same order. The grammar is the
 /// TUI's own: `field:value` pairs narrow, and whatever is left over is matched
 /// fuzzily and orders the rows by how well it matched.
-fn select(tickets: Vec<Ticket>, query: Option<&str>, me: Option<&str>) -> Result<Vec<Ticket>> {
+fn select(
+    tickets: Vec<Ticket>,
+    query: Option<&str>,
+    context: &MatchContext,
+    tree: IterationTree,
+) -> Result<Vec<Ticket>> {
     let Some(query) = query else {
         return Ok(by_recency(tickets));
     };
-    let parsed = resolve_query(parse_query(query), me)?;
+    let parsed = parse_query(query);
+    refuse_unresolvable_sentinels(&parsed, context, tree)?;
     let matching: Vec<Ticket> = tickets
         .into_iter()
         // Nothing is bookmarked out here: bookmarks live in the TUI's session
         // file, which a one-shot read has no business reaching into.
-        .filter(|ticket| parsed.filters.matches(ticket, false))
+        .filter(|ticket| parsed.filters.matches_in(ticket, false, context))
         .collect();
     if parsed.fuzzy.is_empty() {
         return Ok(by_recency(matching));
@@ -320,20 +329,69 @@ fn by_recency(mut tickets: Vec<Ticket>) -> Vec<Ticket> {
     tickets
 }
 
-/// Puts a name to `assignee:@me`, which the filter grammar itself knows
-/// nothing about: the query is rewritten before it runs, so the same spelling
-/// works from the command line and in the TUI's search box. A run with nobody
-/// signed in says so rather than quietly matching every work item.
-fn resolve_query(mut parsed: ParsedQuery, me: Option<&str>) -> Result<ParsedQuery> {
-    if !parsed.filters.contains(FilterField::Assignee, "@me") {
-        return Ok(parsed);
+/// What the query's sentinels stand for out here: the name the last sync
+/// recorded (or `TICKET_TUI_ME`) for `assignee:@me`, and the sprint containing
+/// today for `iteration:@current`, read from the same cached trees the TUI's
+/// pickers use. Built the same way `App::match_context` builds it, so a query
+/// means the same thing from the command line as it does in the search box.
+fn match_context(
+    repository: &SqliteTicketRepository,
+    me: Option<String>,
+) -> Result<(MatchContext, IterationTree)> {
+    let today = Timestamp::now().date();
+    let nodes = repository.load_classification_nodes()?;
+    let tree = if nodes.iter().any(|node| node.kind == NodeKind::Iteration) {
+        IterationTree::Cached
+    } else {
+        IterationTree::Unread
+    };
+    let current_iteration =
+        classification::current_iteration(&nodes, today).map(|node| node.path.clone());
+    Ok((
+        MatchContext::now()
+            .with_me(me)
+            .with_current_iteration(current_iteration),
+        tree,
+    ))
+}
+
+/// Whether a run has the iteration tree to resolve `@current` against, which is
+/// what separates "nobody has pulled it yet" from "no sprint is scheduled
+/// around today" when the sentinel comes up empty.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IterationTree {
+    Cached,
+    Unread,
+}
+
+/// A sentinel the context cannot fill in matches nothing, which from a
+/// one-shot command reads exactly like an empty backlog. Out here that is worth
+/// saying rather than answering with a blank list: the TUI can show the query
+/// beside its chips, but a pipe cannot.
+fn refuse_unresolvable_sentinels(
+    parsed: &ParsedQuery,
+    context: &MatchContext,
+    tree: IterationTree,
+) -> Result<()> {
+    if context.me.is_none() && parsed.filters.contains(FilterField::Assignee, "@me") {
+        bail!("no signed-in name to resolve @me; run `ticket-tui sync` once or set TICKET_TUI_ME");
     }
-    let me = me.context(
-        "no signed-in name to resolve @me; run `ticket-tui sync` once or set TICKET_TUI_ME",
-    )?;
-    parsed.filters.remove(FilterField::Assignee, "@me");
-    parsed.filters.insert(FilterField::Assignee, me);
-    Ok(parsed)
+    if context.current_iteration.is_none()
+        && parsed.filters.contains(FilterField::Iteration, "@current")
+    {
+        match tree {
+            IterationTree::Unread => bail!(
+                "no iteration tree to resolve iteration:@current against; run `ticket-tui sync` once"
+            ),
+            // The tree is here and still nothing contains today, which on a
+            // project whose sprints carry no dates is every day: say which of
+            // the two it is rather than sending them back to `sync`.
+            IterationTree::Cached => bail!(
+                "no sprint's dates contain today, so iteration:@current names nothing; give the iteration start and finish dates in Azure DevOps, or name the sprint"
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// Writes the fields the invocation named, all in one document, and stores the
@@ -1133,8 +1191,10 @@ mod tests {
         let newer = ticket(2, "Sync watermark", "Doing", Some("Jacob Ragsdale"));
         let done = ticket(3, "Details pane", "Done", Some("Avery Chen"));
         let tickets = vec![older, newer, done];
+        let nobody = MatchContext::now();
+        let signed_in = MatchContext::now().with_me(Some("Jacob Ragsdale".into()));
 
-        let all = select(tickets.clone(), None, None).unwrap();
+        let all = select(tickets.clone(), None, &nobody, IterationTree::Cached).unwrap();
         assert_eq!(
             all.iter().map(|ticket| ticket.key.id).collect::<Vec<_>>(),
             vec![3, 2, 1],
@@ -1142,7 +1202,13 @@ mod tests {
              newer id first when two changed in the same second"
         );
 
-        let doing = select(tickets.clone(), Some("state:doing"), None).unwrap();
+        let doing = select(
+            tickets.clone(),
+            Some("state:doing"),
+            &nobody,
+            IterationTree::Cached,
+        )
+        .unwrap();
         assert_eq!(
             doing.iter().map(|ticket| ticket.key.id).collect::<Vec<_>>(),
             vec![2, 1],
@@ -1152,7 +1218,8 @@ mod tests {
         let mine = select(
             tickets.clone(),
             Some("state:doing assignee:@me"),
-            Some("Jacob Ragsdale"),
+            &signed_in,
+            IterationTree::Cached,
         )
         .unwrap();
         assert_eq!(
@@ -1161,17 +1228,72 @@ mod tests {
             "@me is the name the last sync recorded"
         );
 
-        let nobody = select(tickets.clone(), Some("assignee:@me"), None).unwrap_err();
-        assert!(
-            format!("{nobody:#}").contains("TICKET_TUI_ME"),
-            "a run with nobody signed in says so rather than matching everything: {nobody:#}"
-        );
-
-        let fuzzy = select(tickets, Some("state:doing dispatcher"), None).unwrap();
+        let fuzzy = select(
+            tickets,
+            Some("state:doing dispatcher"),
+            &nobody,
+            IterationTree::Cached,
+        )
+        .unwrap();
         assert_eq!(
             fuzzy.iter().map(|ticket| ticket.key.id).collect::<Vec<_>>(),
             vec![1],
             "whatever is left over after the field filters is matched fuzzily"
+        );
+    }
+
+    #[test]
+    fn a_sentinel_the_run_cannot_resolve_is_said_rather_than_answered_with_nothing() {
+        let tickets = vec![ticket(1, "Edit dispatcher", "Doing", Some("Avery Chen"))];
+
+        let unsigned = select(
+            tickets.clone(),
+            Some("assignee:@me"),
+            &MatchContext::now(),
+            IterationTree::Cached,
+        )
+        .expect_err("@me with nobody signed in has no answer to give");
+        assert!(
+            format!("{unsigned:#}").contains("TICKET_TUI_ME"),
+            "a run with nobody signed in says so rather than matching everything: {unsigned:#}"
+        );
+
+        let undated = select(
+            tickets.clone(),
+            Some("iteration:@current"),
+            &MatchContext::now(),
+            IterationTree::Cached,
+        )
+        .expect_err("@current with no sprint around today has no answer to give");
+        assert!(
+            format!("{undated:#}").contains("dates contain today"),
+            "a cached tree with no sprint around today names the dates as the cause \
+             rather than sending them back to sync: {undated:#}"
+        );
+
+        let unread = select(
+            tickets.clone(),
+            Some("iteration:@current"),
+            &MatchContext::now(),
+            IterationTree::Unread,
+        )
+        .expect_err("@current with no tree to read has no answer to give");
+        assert!(
+            format!("{unread:#}").contains("ticket-tui sync"),
+            "a tree nobody has pulled yet sends them to sync instead: {unread:#}"
+        );
+
+        let scheduled = select(
+            tickets,
+            Some("iteration:@current"),
+            &MatchContext::now().with_current_iteration(Some("Atlas\\Sprint 1".into())),
+            IterationTree::Cached,
+        )
+        .unwrap();
+        assert_eq!(
+            scheduled.len(),
+            1,
+            "and it resolves to the sprint the cached tree puts today in"
         );
     }
 

@@ -410,6 +410,13 @@ pub fn pull_once(
     let mut worker = Worker::new(database, connector);
     worker.force_full = full;
     let outcome = worker.pull(&events);
+    // The TUI reads the iteration and area trees lazily, the first time a
+    // picker opens. A one-shot pull has no picker to wait for and no next
+    // session to leave them to, so it takes them now: they are two small reads,
+    // and without them `iteration:@current` out here has no sprint to name.
+    if matches!(outcome, SyncOutcome::Pulled { .. } | SyncOutcome::Unchanged) {
+        worker.classification_nodes(&events);
+    }
     drop(events);
     for event in received {
         if let SyncEvent::DisplayName(name) = event
