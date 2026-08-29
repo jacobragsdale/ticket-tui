@@ -107,6 +107,7 @@ pub enum PointerTarget {
     ScrollbarThumb {
         surface: ScrollSurface,
     },
+    PaneDivider,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -326,6 +327,7 @@ pub enum DragKind {
         surface: ScrollSurface,
         grab: i16,
     },
+    Divider,
 }
 
 #[derive(Clone, Debug)]

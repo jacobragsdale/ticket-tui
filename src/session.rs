@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::{RowDensity, SearchOrder, SortDirection, SortField, TicketKey};
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
     #[serde(default)]
     pub query: String,
@@ -32,6 +32,41 @@ pub struct Session {
     pub active_view: Option<String>,
     #[serde(default)]
     pub selected: Option<SessionKey>,
+    #[serde(default = "wide_split")]
+    pub pane_split_wide: u16,
+    #[serde(default = "stacked_split")]
+    pub pane_split_stacked: u16,
+}
+
+/// Sessions written before the divider was draggable carry no split, so both
+/// fields fall back to the built-in layout.
+const fn wide_split() -> u16 {
+    crate::app::DEFAULT_PANE_SPLIT_WIDE
+}
+
+const fn stacked_split() -> u16 {
+    crate::app::DEFAULT_PANE_SPLIT_STACKED
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            sort_field: SortField::default(),
+            sort_direction: SortDirection::default(),
+            search_order: SearchOrder::default(),
+            row_density: RowDensity::default(),
+            columns: Vec::new(),
+            auto_hide: None,
+            bookmarks: Vec::new(),
+            recent: Vec::new(),
+            views: Vec::new(),
+            active_view: None,
+            selected: None,
+            pane_split_wide: wide_split(),
+            pane_split_stacked: stacked_split(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -138,6 +173,8 @@ mod tests {
             query: "state:active".into(),
             sort_field: SortField::Title,
             sort_direction: SortDirection::Ascending,
+            pane_split_wide: 70,
+            pane_split_stacked: 44,
             ..Session::default()
         };
         session.bookmarks.push(SessionKey {
@@ -165,6 +202,8 @@ mod tests {
         assert_eq!(stored["search_order"], "relevance");
         assert_eq!(stored["row_density"], "compact");
         assert_eq!(stored["views"][0]["columns"][0]["id"], "id");
+        assert_eq!(stored["pane_split_wide"], 70);
+        assert_eq!(stored["pane_split_stacked"], 44);
 
         assert_eq!(loaded.query, "state:active");
         assert_eq!(loaded.sort_field, SortField::Title);
@@ -176,6 +215,8 @@ mod tests {
             loaded.views[0].columns.len(),
             TableLayout::default().columns.len()
         );
+        assert_eq!(loaded.pane_split_wide, 70);
+        assert_eq!(loaded.pane_split_stacked, 44);
     }
 
     #[test]
@@ -207,6 +248,11 @@ mod tests {
         assert_eq!(loaded.search_order, SearchOrder::Field);
         assert_eq!(loaded.row_density, RowDensity::Comfortable);
         assert_eq!(loaded.auto_hide, Some(false));
+        assert_eq!(
+            (loaded.pane_split_wide, loaded.pane_split_stacked),
+            (62, 56),
+            "a session written before the divider moved keeps the built-in split"
+        );
         let ids: Vec<_> = loaded.columns.iter().map(|column| column.id).collect();
         assert_eq!(ids, vec![SortField::Id, SortField::Title]);
     }

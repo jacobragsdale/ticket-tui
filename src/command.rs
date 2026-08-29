@@ -25,6 +25,7 @@ pub enum CommandId {
     SaveView,
     DatabaseInfo,
     Quit,
+    ResetPaneSplit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,7 +35,7 @@ pub struct Command {
     pub hint: &'static str,
 }
 
-pub const COMMANDS: [Command; 25] = [
+pub const COMMANDS: [Command; 26] = [
     Command {
         id: CommandId::Filters,
         title: "Open filter bar",
@@ -159,6 +160,11 @@ pub const COMMANDS: [Command; 25] = [
         id: CommandId::Quit,
         title: "Quit",
         hint: "q",
+    },
+    Command {
+        id: CommandId::ResetPaneSplit,
+        title: "Reset pane split",
+        hint: "",
     },
 ];
 
