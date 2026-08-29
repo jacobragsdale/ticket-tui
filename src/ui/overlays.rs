@@ -82,7 +82,8 @@ pub(super) fn render_help_popup(
     shell: &mut Shell,
 ) {
     let height = frame.area().height.saturating_sub(2).min(18);
-    let area = centered_rect(frame.area(), 62, height);
+    // Wide enough that a command's title and help sit on one row.
+    let area = centered_rect(frame.area(), 78, height);
     frame.render_widget(Clear, area);
     let mut lines = vec![
         Line::styled("Navigation", Style::default().add_modifier(Modifier::BOLD)),

@@ -149,3 +149,40 @@ fn a_pull_request_follows_its_work_items_by_name_and_its_build_run() {
         .find_target(|target| matches!(target, PointerTarget::Follow(Jump::Run(_))));
     assert!(build.is_some(), "the build line is a jump too");
 }
+
+#[test]
+fn the_buttons_under_the_details_pane_are_the_keys_they_name() {
+    let mut app = pull_requests_app();
+    tab_text(160, 50, &mut app);
+    let selected = app
+        .pull_requests
+        .selected(&app.shell)
+        .expect("a pull request under the cursor")
+        .request
+        .id;
+
+    let approve = target_rect(&app, |target| {
+        matches!(
+            target,
+            PointerTarget::RunCommand(crate::command::CommandId::ApprovePr)
+        )
+    });
+    let action = click(&mut app, approve.x + 2, approve.y);
+    assert!(
+        matches!(action, crate::app::AppAction::VotePullRequest { id, vote: 10, .. } if id == selected),
+        "the button votes on the pull request under the cursor, got {action:?}"
+    );
+
+    let abandon = target_rect(&app, |target| {
+        matches!(
+            target,
+            PointerTarget::RunCommand(crate::command::CommandId::AbandonPr)
+        )
+    });
+    click(&mut app, abandon.x + 2, abandon.y);
+    assert_eq!(
+        app.pull_requests.mode,
+        crate::app::pull_requests::PrMode::ConfirmAbandon,
+        "and asks once more, the way the key does"
+    );
+}

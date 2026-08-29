@@ -169,24 +169,66 @@ impl Default for PipelinesScreen {
 }
 
 impl PipelinesScreen {
-    /// What the last pull found. The screen keeps its cursor where it was, by
-    /// row, so a pull under a running list does not move it.
+    /// What the last pull found. The cursor stays on the pipeline or run it
+    /// was on, wherever that now sorts, so a pull under a running list does
+    /// not move the hand. What the watcher had that the pull did not — a run
+    /// newer than the pull's window, or one further along than the file
+    /// says — is kept.
     pub fn set_pipelines(&mut self, pipelines: Vec<Pipeline>, runs: Vec<Run>, shell: &Shell) {
+        let selected_pipeline = self
+            .visible_pipelines(shell)
+            .get(self.pipeline_cursor.index)
+            .map(|row| row.pipeline.id);
+        let selected_run = match self.level {
+            Level::Runs(_) => self.selected_run(shell).map(|row| row.run.id),
+            Level::Pipelines => None,
+        };
         self.repo_names = shell
             .repos()
             .iter()
             .map(|repo| (repo.id.clone(), repo.name.clone()))
             .collect();
         self.pipelines = pipelines;
-        self.runs = runs;
-        self.clamp_cursors();
+        let mut merged = runs;
+        let newest_stored = merged.iter().map(|run| run.id).max().unwrap_or_default();
+        for held in std::mem::take(&mut self.runs) {
+            match merged.iter_mut().find(|run| run.id == held.id) {
+                // The watcher read it later than the pull did: a run that has
+                // stopped is not put back in motion by an older read.
+                Some(incoming) => {
+                    if !held.status.is_live() && incoming.status.is_live() {
+                        *incoming = held;
+                    }
+                }
+                None if held.id > newest_stored => merged.push(held),
+                None => {}
+            }
+        }
+        merged.sort_by_key(|run| std::cmp::Reverse(run.id));
+        self.runs = merged;
+        let pipelines = self.visible_pipelines(shell);
+        match selected_pipeline
+            .and_then(|id| pipelines.iter().position(|row| row.pipeline.id == id))
+        {
+            Some(index) => self.pipeline_cursor.focus(index),
+            None => self.pipeline_cursor.clamp(pipelines.len()),
+        }
+        let runs = self.visible_runs(shell);
+        match selected_run.and_then(|id| runs.iter().position(|row| row.run.id == id)) {
+            Some(index) => self.run_cursor.focus(index),
+            None => self.run_cursor.clamp(runs.len()),
+        }
     }
 
     /// Folds in what the watcher has seen. A run already on file is updated
     /// where it stands, so the cursor does not move under the user; one
     /// nobody has seen before joins the list. Nothing here touches SQLite:
     /// the next pull is what persists any of it.
-    pub fn merge_live_runs(&mut self, live: Vec<Run>) {
+    pub fn merge_live_runs(&mut self, live: Vec<Run>, shell: &Shell) {
+        let selected = match self.level {
+            Level::Runs(_) => self.selected_run(shell).map(|row| row.run.id),
+            Level::Pipelines => None,
+        };
         for run in live {
             if let Some(held) = self.runs.iter_mut().find(|held| held.id == run.id) {
                 *held = run;
@@ -195,6 +237,15 @@ impl PipelinesScreen {
             }
         }
         self.runs.sort_by_key(|run| std::cmp::Reverse(run.id));
+        // A run that joined the top of the list must not push the hand onto a
+        // different row.
+        if let Some(index) = selected.and_then(|id| {
+            self.visible_runs(shell)
+                .iter()
+                .position(|row| row.run.id == id)
+        }) {
+            self.run_cursor.focus(index);
+        }
     }
 
     /// What the watcher answered with for one run. Kept whole: a timeline is
@@ -714,11 +765,6 @@ impl PipelinesScreen {
         }
     }
 
-    fn clamp_cursors(&mut self) {
-        let pipelines = self.pipelines.len();
-        self.pipeline_cursor.clamp(pipelines);
-    }
-
     /// The cursor of whichever level is showing.
     pub const fn cursor_mut(&mut self) -> &mut ListCursor {
         match self.level {
@@ -856,27 +902,13 @@ impl Screen for PipelinesScreen {
                 let count = self.row_count(shell);
                 self.cursor_mut().move_by(isize::MAX, count);
             }
-            KeyCode::Enter => {
+            // Going down into a pipeline's runs; on the runs already, Enter
+            // has nowhere further to go and leaves the cursor alone.
+            KeyCode::Enter if self.level == Level::Pipelines => {
                 self.open_runs(shell);
                 self.sync_focus(shell);
             }
             KeyCode::Backspace | KeyCode::Char('h') => self.close_runs(),
-            KeyCode::Char('t') => return self.open_branch_picker(shell),
-            KeyCode::Char('A') => return self.open_approvals(),
-            KeyCode::Char('x') => self.confirm_cancel(shell),
-            KeyCode::Char('R') => return self.retry_run(shell),
-            KeyCode::Char('W') => {
-                if let Some((run, watching)) = self.toggle_watch(shell) {
-                    let word = if watching {
-                        "Watching"
-                    } else {
-                        "Stopped watching"
-                    };
-                    shell.set_status(format!("{word} run {run}"));
-                } else {
-                    shell.set_error("No run to watch here");
-                }
-            }
             KeyCode::Esc if !self.query().is_empty() => {
                 self.query_mut().clear();
                 self.cursor_mut().reset();
@@ -946,9 +978,10 @@ impl Screen for PipelinesScreen {
                 return self.open_in_browser(shell);
             }
             PointerTarget::SortHeader(key) => self.toggle_sort(key),
-            // The branch picker's own rows and filter field.
             // A reference in the details pane is the shell's to follow.
             PointerTarget::Follow(jump) => return AppAction::Follow(jump),
+            // The details pane's buttons stand for the keys they name.
+            PointerTarget::RunCommand(id) => return self.run_command(shell, id),
             PointerTarget::ApprovalRow { index } => {
                 self.approval_cursor.focus(index);
             }
@@ -1025,12 +1058,27 @@ impl Screen for PipelinesScreen {
     fn select(&mut self, shell: &mut Shell, jump: &Jump) -> bool {
         match jump {
             Jump::Pipeline(id) => {
-                let Some(index) = self
-                    .visible_pipelines(shell)
-                    .iter()
-                    .position(|row| row.pipeline.id == *id)
-                else {
+                if !self.pipelines.iter().any(|pipeline| pipeline.id == *id) {
                     return false;
+                }
+                let position = |screen: &Self| {
+                    screen
+                        .visible_pipelines(shell)
+                        .iter()
+                        .position(|row| row.pipeline.id == *id)
+                };
+                let index = match position(self) {
+                    Some(index) => index,
+                    // On file but filtered out: the reference wins over the
+                    // query, which is cleared rather than reported as a
+                    // missing row.
+                    None => {
+                        self.pipeline_query.clear();
+                        match position(self) {
+                            Some(index) => index,
+                            None => return false,
+                        }
+                    }
                 };
                 self.close_runs();
                 self.pipeline_cursor.focus(index);
@@ -1041,12 +1089,24 @@ impl Screen for PipelinesScreen {
                     return false;
                 };
                 self.level = Level::Runs(run.pipeline_id);
-                let index = self
-                    .visible_runs(shell)
-                    .iter()
-                    .position(|row| row.run.id == *id)
-                    .unwrap_or_default();
+                let position = |screen: &Self| {
+                    screen
+                        .visible_runs(shell)
+                        .iter()
+                        .position(|row| row.run.id == *id)
+                };
+                let index = match position(self) {
+                    Some(index) => index,
+                    None => {
+                        self.run_query.clear();
+                        match position(self) {
+                            Some(index) => index,
+                            None => return false,
+                        }
+                    }
+                };
                 self.run_cursor.focus(index);
+                self.focus_run(Some(*id));
                 true
             }
             _ => false,
@@ -1115,8 +1175,12 @@ impl Screen for PipelinesScreen {
             (PipelineMode::ConfirmCancel, _) => "x cancel the run  Esc leave it",
             (PipelineMode::Approvals, _) => "↑↓ choose  a approve  x reject  Esc close",
             (PipelineMode::ApprovalComment, _) => "Type a word  Enter send  Esc back",
-            (_, Level::Pipelines) => "↑↓/jk move  Enter runs  / search  o open  ? help  q quit",
-            (_, Level::Runs(_)) => "↑↓/jk move  Backspace/h back  / search  o open  ? help  q quit",
+            (_, Level::Pipelines) => {
+                "↑↓/jk move  Enter runs  t run  W watch  A approvals  / search  o open  ? help"
+            }
+            (_, Level::Runs(_)) => {
+                "↑↓/jk move  h back  x cancel  R retry  W watch  A approvals  o open  ? help"
+            }
         }
     }
 
@@ -1215,20 +1279,49 @@ impl PipelinesScreen {
     /// The global keys a list screen answers: search, open, sync, quit and the
     /// cross-tab history. The rest arrive with the tickets that need them.
     fn handle_command_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
-        match command_for_key(key, TabId::Pipelines) {
-            Some(CommandId::Search) => {
-                self.mode = PipelineMode::Search;
-                AppAction::None
-            }
-            Some(CommandId::Open) => self.open_in_browser(shell),
-            Some(CommandId::Sync) => AppAction::Sync,
-            Some(CommandId::HistoryBack) => AppAction::HistoryBack,
-            Some(CommandId::HistoryForward) => AppAction::HistoryForward,
-            Some(CommandId::Quit) => {
-                shell.should_quit = true;
-                AppAction::None
-            }
-            _ => AppAction::None,
+        command_for_key(key, TabId::Pipelines)
+            .map_or(AppAction::None, |id| self.run_command(shell, id))
+    }
+
+    /// One command, whether a key, a button in the details pane, or the
+    /// palette asked for it.
+    pub fn run_command(&mut self, shell: &mut Shell, id: CommandId) -> AppAction {
+        match id {
+            CommandId::Search => self.mode = PipelineMode::Search,
+            CommandId::Open => return self.open_in_browser(shell),
+            CommandId::Sync => return AppAction::Sync,
+            CommandId::HistoryBack => return AppAction::HistoryBack,
+            CommandId::HistoryForward => return AppAction::HistoryForward,
+            CommandId::RunPipeline => return self.open_branch_picker(shell),
+            CommandId::Approvals => return self.open_approvals(),
+            CommandId::CancelRun => self.confirm_cancel(shell),
+            CommandId::RetryRun => return self.retry_run(shell),
+            CommandId::WatchRun => self.watch_selected(shell),
+            CommandId::Quit => shell.should_quit = true,
+            _ => {}
+        }
+        AppAction::None
+    }
+
+    /// `W`: follows the run under the cursor, or stops following it. A run
+    /// that has already stopped is refused rather than announced as finished
+    /// the moment it is watched.
+    fn watch_selected(&mut self, shell: &mut Shell) {
+        let Some(row) = self.selected_run(shell) else {
+            shell.set_error("No run to watch here");
+            return;
+        };
+        if !row.run.status.is_live() && !self.is_watched(row.run.id) {
+            shell.set_error(format!("{} has already finished", row.run.build_number));
+            return;
+        }
+        if let Some((run, watching)) = self.toggle_watch(shell) {
+            let word = if watching {
+                "Watching"
+            } else {
+                "Stopped watching"
+            };
+            shell.set_status(format!("{word} run {run}"));
         }
     }
 }
@@ -1350,7 +1443,7 @@ impl PipelinesScreen {
         let id = run.id;
         let number = run.build_number.clone();
         let pipeline = run.pipeline_id;
-        self.merge_live_runs(vec![run]);
+        self.merge_live_runs(vec![run], shell);
         self.level = Level::Runs(pipeline);
         self.run_cursor.reset();
         self.watch_run(id);
@@ -1380,6 +1473,13 @@ impl PipelinesScreen {
         };
         if row.run.status.is_live() {
             shell.set_error(format!("{} is still going", row.run.build_number));
+            return AppAction::None;
+        }
+        if matches!(row.run.result, Some(crate::model::RunResult::Succeeded)) {
+            shell.set_error(format!(
+                "{} succeeded \u{2014} nothing to retry; t runs it again",
+                row.run.build_number
+            ));
             return AppAction::None;
         }
         shell.set_status(format!("Retrying {}\u{2026}", row.run.build_number));

@@ -1701,9 +1701,17 @@ impl Worker {
             let held = stored.iter().find(|held| held.id == request.id);
             // What was read before is kept unless the pull request has moved,
             // which is what keeps the per-request reads down to what changed.
+            // A build the policy is still deciding is a reason to look again:
+            // the Build column would otherwise read `queued` for ever on a
+            // pull request nobody pushes to.
             let unchanged = held.is_some_and(|held| {
                 held.last_merge_source_commit == request.last_merge_source_commit
                     && held.reviewer_signature() == request.reviewer_signature()
+                    && !(held.status == crate::model::PrStatus::Active
+                        && held
+                            .build
+                            .as_ref()
+                            .is_some_and(|build| build_undecided(&build.status)))
             });
             if unchanged {
                 if let Some(held) = held {
@@ -1835,6 +1843,15 @@ impl Worker {
             .as_mut()
             .expect("the database was just opened"))
     }
+}
+
+/// Whether a policy build is still being decided, as the evaluation reports
+/// it: anything short of `approved` or `rejected`.
+fn build_undecided(status: &str) -> bool {
+    !matches!(
+        status.to_ascii_lowercase().as_str(),
+        "approved" | "rejected" | "broken"
+    )
 }
 
 /// When the next background pull is due, and whether one is already running.
@@ -3104,6 +3121,16 @@ mod tests {
                 SyncEvent::DisplayName(_) => continue,
                 other => panic!("expected a run event, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn a_policy_build_still_being_decided_is_a_reason_to_read_the_pull_request_again() {
+        for status in ["queued", "running", "Queued", "notApplicable", ""] {
+            assert!(build_undecided(status), "{status}");
+        }
+        for status in ["approved", "Approved", "rejected", "broken"] {
+            assert!(!build_undecided(status), "{status}");
         }
     }
 

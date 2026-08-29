@@ -204,3 +204,121 @@ fn a_jump_to_a_run_opens_its_pipelines_runs_and_settles_on_it() {
         "a run nothing holds says so"
     );
 }
+
+fn key(app: &mut App, code: KeyCode) -> crate::app::AppAction {
+    app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+#[test]
+fn enter_on_the_runs_level_leaves_the_cursor_where_it_is() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.pipelines.level(), Level::Runs(1));
+    key(&mut app, KeyCode::Char('j'));
+    let before = app.pipelines.selected_run(&app.shell).map(|row| row.run.id);
+    assert_eq!(before, Some(13));
+
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.pipelines.level(), Level::Runs(1));
+    assert_eq!(
+        app.pipelines.selected_run(&app.shell).map(|row| row.run.id),
+        before,
+        "there is nothing further down to open, so nothing moves"
+    );
+}
+
+#[test]
+fn a_pull_keeps_what_the_watcher_knew_and_the_cursor_on_the_same_run() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.pipelines.selected_run(&app.shell).map(|row| row.run.id),
+        Some(13)
+    );
+    // The watcher sees a run the file has not got, and sees 14 finish.
+    let shell = &app.shell;
+    app.pipelines.merge_live_runs(
+        vec![
+            run(15, 1, RunStatus::InProgress, None),
+            run(14, 1, RunStatus::Completed, Some(RunResult::Succeeded)),
+        ],
+        shell,
+    );
+
+    // The pull's window still reads 14 as going and knows nothing of 15.
+    let pipelines = vec![
+        pipeline(1, "ticket-tui CI", "\\"),
+        pipeline(2, "nightly", "\\scheduled"),
+    ];
+    let runs = vec![
+        run(14, 1, RunStatus::InProgress, None),
+        run(13, 1, RunStatus::Completed, Some(RunResult::Failed)),
+        run(12, 1, RunStatus::Completed, Some(RunResult::Succeeded)),
+        run(11, 2, RunStatus::Completed, Some(RunResult::Canceled)),
+    ];
+    let shell = &app.shell;
+    app.pipelines.set_pipelines(pipelines, runs, shell);
+
+    let rows = app.pipelines.visible_runs(&app.shell);
+    assert_eq!(
+        rows.iter().map(|row| row.run.id).collect::<Vec<_>>(),
+        vec![15, 14, 13, 12],
+        "the run newer than the pull's window is kept"
+    );
+    assert_eq!(
+        rows[1].run.status,
+        RunStatus::Completed,
+        "and an older read does not put a finished run back in motion"
+    );
+    assert_eq!(
+        app.pipelines.selected_run(&app.shell).map(|row| row.run.id),
+        Some(13),
+        "the cursor stays on the run it was on, one row down"
+    );
+}
+
+#[test]
+fn retry_is_refused_on_a_success_and_a_watch_on_a_run_that_has_finished() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    key(&mut app, KeyCode::Enter);
+    key(&mut app, KeyCode::Char('j'));
+    key(&mut app, KeyCode::Char('j'));
+    assert_eq!(
+        app.pipelines.selected_run(&app.shell).map(|row| row.run.id),
+        Some(12),
+        "the run that succeeded"
+    );
+
+    assert_eq!(
+        key(&mut app, KeyCode::Char('R')),
+        crate::app::AppAction::None
+    );
+    assert!(
+        app.shell
+            .notification()
+            .is_some_and(|(text, _)| text.contains("nothing to retry")),
+        "{:?}",
+        app.shell.notification()
+    );
+    key(&mut app, KeyCode::Char('W'));
+    assert!(
+        app.shell
+            .notification()
+            .is_some_and(|(text, _)| text.contains("already finished")),
+        "{:?}",
+        app.shell.notification()
+    );
+    assert!(app.pipelines.watched_runs().is_empty());
+
+    key(&mut app, KeyCode::Home);
+    key(&mut app, KeyCode::Char('W'));
+    assert_eq!(
+        app.pipelines.watched_runs(),
+        vec![14],
+        "a run that is going can be watched"
+    );
+}

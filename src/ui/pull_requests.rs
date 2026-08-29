@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::app::pull_requests::{PrColumn, PrMode, PrRow, PullRequestsScreen};
+use crate::command::CommandId;
 use crate::model::{Jump, PrStatus};
 use crate::ui::details::section_line;
 use crate::ui::table::{TableSpec, render_list_table, table_geometry};
@@ -462,34 +463,75 @@ fn render_details(
     )));
     lines.push(Line::from(format!("  Merge: {}", row.request.merge_status)));
     lines.push(Line::from(""));
-    lines.push(Line::from(
-        [
-            "[Approve]",
-            "[Suggest]",
-            "[Wait]",
-            "[Reject]",
+    let buttons: [(&str, PointerTarget); 6] = [
+        ("[Approve]", PointerTarget::RunCommand(CommandId::ApprovePr)),
+        ("[Suggest]", PointerTarget::RunCommand(CommandId::SuggestPr)),
+        ("[Wait]", PointerTarget::RunCommand(CommandId::WaitPr)),
+        ("[Reject]", PointerTarget::RunCommand(CommandId::RejectPr)),
+        (
             "[Complete]",
-            "[Abandon]",
-        ]
-        .into_iter()
-        .map(|button| Span::styled(format!(" {button} "), Style::default().fg(theme().muted)))
-        .collect::<Vec<_>>(),
+            PointerTarget::RunCommand(CommandId::CompletePr),
+        ),
+        ("[Abandon]", PointerTarget::RunCommand(CommandId::AbandonPr)),
+    ];
+    let buttons_index = lines.len();
+    lines.push(Line::from(
+        buttons
+            .iter()
+            .map(|(button, _)| {
+                Span::styled(format!(" {button} "), Style::default().fg(theme().muted))
+            })
+            .collect::<Vec<_>>(),
     ));
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
-    for (index, (_, jump)) in jumps.iter().enumerate() {
-        let y = inner
-            .y
-            .saturating_add(u16::try_from(jump_start + index).unwrap_or(u16::MAX));
-        if y >= inner.y.saturating_add(inner.height) {
-            break;
-        }
-        shell.hit_regions.push(region(
-            Rect::new(inner.x, y, inner.width, 1),
-            PointerTarget::Follow(jump.clone()),
+    // A title or a comment wraps, so every target is placed by the row its
+    // line landed on rather than by the line's index; and the pane scrolls,
+    // because a discussion can be longer than the terminal.
+    let (rows, total) = wrapped_rows(&lines, inner.width);
+    screen
+        .details
+        .set_viewport(usize::from(inner.height), total);
+    let offset = screen.details.offset;
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0)),
+        inner,
+    );
+    shell.hit_regions.push(region(
+        inner,
+        PointerTarget::FocusDetails,
+        PointerLayer::Base,
+        Some(SelectableSurface::Details),
+        Some(ScrollSurface::Details),
+    ));
+    if total > usize::from(inner.height) {
+        render_scrollbar(
+            frame,
             PointerLayer::Base,
-            None,
-            None,
-        ));
+            shell,
+            inner,
+            ScrollSurface::Details,
+            ScrollState {
+                offset,
+                content: total,
+                viewport: usize::from(inner.height),
+            },
+        );
+    }
+    for (index, (_, jump)) in jumps.iter().enumerate() {
+        if let Some(y) = row_on_screen(inner, &rows, jump_start + index, offset) {
+            shell.hit_regions.push(region(
+                Rect::new(inner.x, y, inner.width, 1),
+                PointerTarget::Follow(jump.clone()),
+                PointerLayer::Base,
+                None,
+                None,
+            ));
+        }
+    }
+    // The buttons stand for the keys they name, so clicking one is the key.
+    if let Some(y) = row_on_screen(inner, &rows, buttons_index, offset) {
+        register_buttons(shell, inner, y, PointerLayer::Base, &buttons);
     }
 }
 

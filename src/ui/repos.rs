@@ -280,15 +280,15 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
         });
     }
     lines.push(Line::from(""));
-    let controls: Vec<(&str, CommandId)> = if row.local.is_some() {
+    let controls: Vec<(&str, PointerTarget)> = if row.local.is_some() {
         vec![
-            ("[Fetch]", CommandId::FetchRepo),
-            ("[Pull]", CommandId::PullRepo),
+            ("[Fetch]", PointerTarget::RunCommand(CommandId::FetchRepo)),
+            ("[Pull]", PointerTarget::RunCommand(CommandId::PullRepo)),
         ]
     } else {
-        vec![("[Clone]", CommandId::CloneRepo)]
+        vec![("[Clone]", PointerTarget::RunCommand(CommandId::CloneRepo))]
     };
-    let buttons_row = inner.y + u16::try_from(lines.len()).unwrap_or(u16::MAX);
+    let buttons_index = lines.len();
     lines.push(Line::from(
         controls
             .iter()
@@ -297,55 +297,68 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
             })
             .collect::<Vec<_>>(),
     ));
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // A URL wraps in a pane this narrow, so every target below it is placed
+    // by the row its line landed on rather than by the line's index.
+    let (rows, total) = wrapped_rows(&lines, inner.width);
+    screen
+        .details
+        .set_viewport(usize::from(inner.height), total);
+    let offset = screen.details.offset;
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((u16::try_from(offset).unwrap_or(u16::MAX), 0)),
+        inner,
+    );
+    // The pane itself: the wheel scrolls it, a click gives it the focus.
+    shell.hit_regions.push(region(
+        inner,
+        PointerTarget::FocusDetails,
+        PointerLayer::Base,
+        Some(SelectableSurface::Details),
+        Some(ScrollSurface::Details),
+    ));
+    if total > usize::from(inner.height) {
+        render_scrollbar(
+            frame,
+            PointerLayer::Base,
+            shell,
+            inner,
+            ScrollSurface::Details,
+            ScrollState {
+                offset,
+                content: total,
+                viewport: usize::from(inner.height),
+            },
+        );
+    }
 
     // Every URL line copies what it says.
     for (index, (_, url)) in urls.iter().enumerate() {
-        let y = inner
-            .y
-            .saturating_add(u16::try_from(url_start + index).unwrap_or(u16::MAX));
-        if y >= inner.y.saturating_add(inner.height) {
-            break;
-        }
-        shell.hit_regions.push(region(
-            Rect::new(inner.x, y, inner.width, 1),
-            PointerTarget::CopyText(url.clone()),
-            PointerLayer::Base,
-            None,
-            None,
-        ));
-    }
-    for (index, (_, jump)) in jumps.iter().enumerate() {
-        let y = inner
-            .y
-            .saturating_add(u16::try_from(jump_start + index).unwrap_or(u16::MAX));
-        if y >= inner.y.saturating_add(inner.height) {
-            break;
-        }
-        shell.hit_regions.push(region(
-            Rect::new(inner.x, y, inner.width, 1),
-            PointerTarget::Follow(jump.clone()),
-            PointerLayer::Base,
-            None,
-            None,
-        ));
-    }
-    // The buttons stand for the keys they name, so clicking one is the key.
-    let mut x = inner.x;
-    for (button, command) in &controls {
-        let width = u16::try_from(button.chars().count() + 2).unwrap_or(u16::MAX);
-        if buttons_row < inner.y.saturating_add(inner.height)
-            && x.saturating_add(width) <= inner.x.saturating_add(inner.width)
-        {
+        if let Some(y) = row_on_screen(inner, &rows, url_start + index, offset) {
             shell.hit_regions.push(region(
-                Rect::new(x, buttons_row, width, 1),
-                PointerTarget::RunCommand(*command),
+                Rect::new(inner.x, y, inner.width, 1),
+                PointerTarget::CopyText(url.clone()),
                 PointerLayer::Base,
                 None,
                 None,
             ));
         }
-        x = x.saturating_add(width);
+    }
+    for (index, (_, jump)) in jumps.iter().enumerate() {
+        if let Some(y) = row_on_screen(inner, &rows, jump_start + index, offset) {
+            shell.hit_regions.push(region(
+                Rect::new(inner.x, y, inner.width, 1),
+                PointerTarget::Follow(jump.clone()),
+                PointerLayer::Base,
+                None,
+                None,
+            ));
+        }
+    }
+    // The buttons stand for the keys they name, so clicking one is the key.
+    if let Some(y) = row_on_screen(inner, &rows, buttons_index, offset) {
+        register_buttons(shell, inner, y, PointerLayer::Base, &controls);
     }
 }
 

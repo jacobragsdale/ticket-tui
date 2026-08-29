@@ -503,7 +503,8 @@ fn a_watched_run_finishing_is_reported_while_another_tab_is_showing() {
     app.shell
         .set_status("\u{2713} Build 20260829.14 succeeded \u{00b7} 4m 12s".to_owned());
     app.pipelines.unwatch_run(finished.id);
-    app.pipelines.merge_live_runs(vec![finished]);
+    let shell = &app.shell;
+    app.pipelines.merge_live_runs(vec![finished], shell);
 
     let (message, level) = app.shell.notification().expect("the toast is up");
     assert_eq!(
@@ -754,7 +755,8 @@ fn a_runs_details_follow_its_repository_its_pull_request_and_the_work_items_it_b
     raised.repo_id = "aaa-111".into();
     let shell = &app.shell;
     app.pull_requests.set_pull_requests(vec![raised], shell);
-    app.pipelines.merge_live_runs(vec![from_pr]);
+    let shell = &app.shell;
+    app.pipelines.merge_live_runs(vec![from_pr], shell);
     app.pipelines.pipeline_cursor.focus(0);
     app.pipelines.open_runs(&app.shell);
     app.pipelines.run_cursor.focus(0);

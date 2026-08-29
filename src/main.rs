@@ -1209,7 +1209,7 @@ fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     while let Some(event) = watcher.try_event() {
         redraw = true;
         match event {
-            WatchEvent::LiveRuns(runs) => app.pipelines.merge_live_runs(runs),
+            WatchEvent::LiveRuns(runs) => app.pipelines.merge_live_runs(runs, &app.shell),
             WatchEvent::Approvals(approvals) => app.pipelines.set_approvals(approvals),
             WatchEvent::RunWorkItems { run_id, work_items } => {
                 app.pipelines.set_run_work_items(run_id, work_items);
@@ -1226,7 +1226,7 @@ fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                     app.shell.set_news(summary);
                 }
                 app.pipelines.unwatch_run(run.id);
-                app.pipelines.merge_live_runs(vec![run]);
+                app.pipelines.merge_live_runs(vec![run], &app.shell);
             }
             WatchEvent::Timeline { run_id, records } => {
                 app.pipelines.set_timeline(run_id, records);

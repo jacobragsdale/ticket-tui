@@ -455,3 +455,58 @@ fn a_completed_pull_request_leaves_the_active_view() {
             .is_some_and(|(message, _)| message.contains("completed")),
     );
 }
+
+#[test]
+fn a_pull_keeps_the_cursor_on_the_same_pull_request_and_a_jump_beats_the_query() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    let index = app
+        .pull_requests
+        .visible(&app.shell)
+        .iter()
+        .position(|row| row.request.id == 12)
+        .expect("!12 is on the table");
+    app.pull_requests.cursor.focus(index);
+
+    // A newer pull request arrives at the top of the queue.
+    let mut requests: Vec<PullRequest> = app
+        .pull_requests
+        .visible(&app.shell)
+        .into_iter()
+        .map(|row| row.request)
+        .collect();
+    requests.push(pull_request(14, "Newest of all", "Sam", PrStatus::Active));
+    let shell = &app.shell;
+    app.pull_requests.set_pull_requests(requests, shell);
+    assert_eq!(
+        app.pull_requests
+            .selected(&app.shell)
+            .map(|row| row.request.id),
+        Some(12),
+        "the hand stays on the pull request it was on, one row down"
+    );
+
+    // A view that leaves !11 off the table does not stop a reference to it.
+    app.pull_requests.apply_view("Mine");
+    assert!(
+        app.pull_requests
+            .visible(&app.shell)
+            .iter()
+            .all(|row| row.request.id != 11),
+        "the view hides it"
+    );
+    assert!(app.follow(&crate::app::Jump::PullRequest {
+        repo: "ticket-tui".into(),
+        id: 11,
+    }));
+    assert_eq!(
+        app.pull_requests
+            .selected(&app.shell)
+            .map(|row| row.request.id),
+        Some(11)
+    );
+    assert!(
+        app.pull_requests.query().is_empty() && app.pull_requests.active_view.is_none(),
+        "the query is cleared rather than the reference refused"
+    );
+}

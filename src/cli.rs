@@ -1595,6 +1595,18 @@ fn run_pr_vote(cli: &Cli, database: &Path, id: i64, word: &str) -> Result<()> {
         .find(|held| held.id == reviewer)
     {
         existing.vote = vote;
+    } else {
+        // The endpoint adds a voter who was not a reviewer, so the stored
+        // copy does too, under the name the sync recorded for them.
+        request.reviewers.push(crate::model::PrReviewer {
+            id: reviewer,
+            display_name: repository
+                .meta(db::ME_DISPLAY_NAME_KEY)?
+                .unwrap_or_else(|| "me".to_owned()),
+            unique_name: None,
+            vote,
+            is_required: false,
+        });
     }
     store_pull_request(&mut repository, request)?;
     emit(&format!("!{id} vote: {word}"));
@@ -1838,7 +1850,10 @@ fn wait_for_run(source: &dyn PipelineSource, id: i64, rest: &dyn Fn(Duration)) -
 
 /// Prints one node's log, and keeps printing while `follow` and the node is
 /// still writing. With no node named it takes the deepest one running, which
-/// is what the tab's own log pane shows.
+/// is what the tab's own log pane shows — and, while following, moves on to
+/// the next node as each finishes, so `--follow` reads the whole run rather
+/// than its first task. A run that has not written anything yet is waited
+/// for rather than refused: one just queued has no timeline at all.
 fn print_log(
     source: &dyn PipelineSource,
     run_id: i64,
@@ -1847,6 +1862,9 @@ fn print_log(
     rest: &dyn Fn(Duration),
 ) -> Result<()> {
     let mut from_line = 0;
+    // The log being printed, so a move to the next node starts it from the top
+    // and says whose it is.
+    let mut printing: Option<i64> = None;
     loop {
         let timeline = source.timeline(run_id)?;
         let record = match node {
@@ -1854,11 +1872,22 @@ fn print_log(
                 .iter()
                 .find(|record| same_text(&record.name, name))
                 .with_context(|| format!("run {run_id} has no node called {name}"))?,
-            None => timeline
-                .iter()
-                .rfind(|record| record.log_id.is_some() && record.state.is_live())
-                .or_else(|| timeline.iter().rfind(|record| record.log_id.is_some()))
-                .with_context(|| format!("run {run_id} has written no log yet"))?,
+            None => {
+                let chosen = timeline
+                    .iter()
+                    .rfind(|record| record.log_id.is_some() && record.state.is_live())
+                    .or_else(|| timeline.iter().rfind(|record| record.log_id.is_some()));
+                match chosen {
+                    Some(record) => record,
+                    None if follow && timeline.iter().all(|record| record.state.is_live())
+                        || (follow && timeline.is_empty()) =>
+                    {
+                        rest(LOG_CADENCE);
+                        continue;
+                    }
+                    None => bail!("run {run_id} has written no log yet"),
+                }
+            }
         };
         let Some(log_id) = record.log_id else {
             if !follow {
@@ -1867,12 +1896,30 @@ fn print_log(
             rest(LOG_CADENCE);
             continue;
         };
+        if printing != Some(log_id) {
+            if node.is_none() && printing.is_some() {
+                emit(&format!("--- {}", record.name));
+            }
+            printing = Some(log_id);
+            from_line = 0;
+        }
         for line in source.log_lines(run_id, log_id, from_line)? {
             emit(&line);
             from_line += 1;
         }
-        if !follow || !record.state.is_live() {
+        if !follow {
             return Ok(());
+        }
+        if !record.state.is_live() {
+            // A named node is done when it is done; an unnamed one hands over
+            // to whatever is running next, until nothing is.
+            let more_to_come = node.is_none()
+                && timeline
+                    .iter()
+                    .any(|record| record.state.is_live() && record.log_id.is_some());
+            if !more_to_come {
+                return Ok(());
+            }
         }
         rest(source.throttled_for().unwrap_or(LOG_CADENCE));
     }
@@ -3725,6 +3772,48 @@ mod tests {
             refused.to_string().contains("no node called Deploy"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn following_with_no_node_named_waits_for_the_first_log_and_moves_on_to_the_next() {
+        use crate::model::RunStatus;
+
+        let mut deploy_running = scripted_node("Deploy", RunStatus::InProgress);
+        deploy_running.log_id = Some(8);
+        let mut deploy_done = scripted_node("Deploy", RunStatus::Completed);
+        deploy_done.log_id = Some(8);
+        let source = ScriptedRuns::new(
+            Vec::new(),
+            vec![
+                // Just queued: nothing has written anything yet.
+                Vec::new(),
+                vec![scripted_node("Build", RunStatus::InProgress)],
+                vec![scripted_node("Build", RunStatus::Completed), deploy_running],
+                vec![scripted_node("Build", RunStatus::Completed), deploy_done],
+            ],
+            vec![
+                vec!["building".to_owned()],
+                vec!["building".to_owned()],
+                vec!["deploying".to_owned()],
+                vec!["deploying".to_owned()],
+            ],
+        );
+        let rested = Arc::new(Mutex::new(0usize));
+        let counter = Arc::clone(&rested);
+        let rest = move |_: Duration| *rested.lock().unwrap() += 1;
+
+        print_log(&source, 14, None, true, &rest).expect("a run with no log yet is waited for");
+
+        assert_eq!(
+            *counter.lock().unwrap(),
+            3,
+            "one wait for the first log, one while Build ran, one while Deploy ran"
+        );
+
+        // Without --follow, a run that has written nothing is said, not waited on.
+        let source = ScriptedRuns::new(Vec::new(), vec![Vec::new()], Vec::new());
+        let refused = print_log(&source, 14, None, false, &|_| ()).unwrap_err();
+        assert!(refused.to_string().contains("no log yet"), "{refused}");
     }
 
     #[test]

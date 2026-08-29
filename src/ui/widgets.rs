@@ -75,6 +75,68 @@ pub(super) fn render_query_field(
     frame.set_cursor_position((cursor_x, area.y));
 }
 
+/// The row each line starts on once the paragraph has wrapped to `width`,
+/// and how many rows the whole thing takes. A hit region has to be placed by
+/// this rather than by the line's index: a long URL or title takes more than
+/// one row and pushes everything under it down.
+pub(super) fn wrapped_rows(lines: &[Line<'_>], width: u16) -> (Vec<usize>, usize) {
+    let mut rows = Vec::with_capacity(lines.len());
+    let mut row = 0;
+    for line in lines {
+        rows.push(row);
+        row += Paragraph::new(line.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            .max(1);
+    }
+    (rows, row)
+}
+
+/// The screen row one wrapped line lands on, once the pane has scrolled by
+/// `offset`, or nothing when it is off the pane.
+pub(super) fn row_on_screen(
+    inner: Rect,
+    rows: &[usize],
+    index: usize,
+    offset: usize,
+) -> Option<u16> {
+    let row = rows.get(index)?.checked_sub(offset)?;
+    if row >= usize::from(inner.height) {
+        return None;
+    }
+    Some(
+        inner
+            .y
+            .saturating_add(u16::try_from(row).unwrap_or(u16::MAX)),
+    )
+}
+
+/// One click target per button on one row. Each is as wide as the pane
+/// paints it: the label with a space either side.
+pub(super) fn register_buttons(
+    shell: &mut Shell,
+    inner: Rect,
+    y: u16,
+    layer: PointerLayer,
+    buttons: &[(&str, PointerTarget)],
+) {
+    let mut x = inner.x;
+    for (label, target) in buttons {
+        let width = u16::try_from(label.chars().count() + 2).unwrap_or(u16::MAX);
+        if x.saturating_add(width) > inner.x.saturating_add(inner.width) {
+            break;
+        }
+        shell.hit_regions.push(region(
+            Rect::new(x, y, width, 1),
+            target.clone(),
+            layer,
+            None,
+            None,
+        ));
+        x = x.saturating_add(width);
+    }
+}
+
 pub(super) fn render_control(
     frame: &mut Frame<'_>,
     shell: &mut Shell,

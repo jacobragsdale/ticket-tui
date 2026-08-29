@@ -58,8 +58,9 @@ use table::{
     tag_badge_spans, type_badge_spans,
 };
 use widgets::{
-    capture_selectable, paint_hover, paint_selection, register_close_button, render_control,
-    render_modal_frame, render_query_field, render_scrollbar,
+    capture_selectable, paint_hover, paint_selection, register_buttons, register_close_button,
+    render_control, render_modal_frame, render_query_field, render_scrollbar, row_on_screen,
+    wrapped_rows,
 };
 
 const WIDE_BREAKPOINT: u16 = 110;

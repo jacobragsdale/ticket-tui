@@ -116,16 +116,29 @@ impl Default for PullRequestsScreen {
 }
 
 impl PullRequestsScreen {
-    /// What the last pull found.
+    /// What the last pull found. The cursor stays on the pull request it was
+    /// on, wherever that now sorts: a pull under a review queue must not move
+    /// the hand to a different pull request.
     pub fn set_pull_requests(&mut self, requests: Vec<PullRequest>, shell: &Shell) {
+        let selected = self.selected(shell).map(|row| row.request.id);
         self.repo_names = shell
             .repos()
             .iter()
             .map(|repo| (repo.id.clone(), repo.name.clone()))
             .collect();
         self.requests = requests;
-        self.cursor.clamp(self.requests.len());
         self.to_review = self.to_review(shell);
+        self.settle_cursor(shell, selected);
+    }
+
+    /// Puts the cursor back on one pull request, or clamps it when that one
+    /// is no longer on the table.
+    fn settle_cursor(&mut self, shell: &Shell, id: Option<i64>) {
+        let rows = self.visible(shell);
+        match id.and_then(|id| rows.iter().position(|row| row.request.id == id)) {
+            Some(index) => self.cursor.focus(index),
+            None => self.cursor.clamp(rows.len()),
+        }
     }
 
     #[must_use]
@@ -743,25 +756,35 @@ impl PullRequestsScreen {
     }
 
     fn handle_command_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
-        match command_for_key(key, TabId::PullRequests) {
-            Some(CommandId::Search) => {
-                self.mode = PrMode::Search;
-                AppAction::None
-            }
-            Some(CommandId::Open) => self.open_in_browser(shell),
-            Some(CommandId::Sync) => AppAction::Sync,
-            Some(CommandId::HistoryBack) => AppAction::HistoryBack,
-            Some(CommandId::HistoryForward) => AppAction::HistoryForward,
-            Some(CommandId::ToggleFinished) => {
+        command_for_key(key, TabId::PullRequests)
+            .map_or(AppAction::None, |id| self.run_command(shell, id))
+    }
+
+    /// One command, whether a key, a button in the details pane, or the
+    /// palette asked for it.
+    pub fn run_command(&mut self, shell: &mut Shell, id: CommandId) -> AppAction {
+        match id {
+            CommandId::Search => self.mode = PrMode::Search,
+            CommandId::Open => return self.open_in_browser(shell),
+            CommandId::Sync => return AppAction::Sync,
+            CommandId::HistoryBack => return AppAction::HistoryBack,
+            CommandId::HistoryForward => return AppAction::HistoryForward,
+            CommandId::ApprovePr => return self.vote(shell, 10),
+            CommandId::SuggestPr => return self.vote(shell, 5),
+            CommandId::WaitPr => return self.vote(shell, -5),
+            CommandId::RejectPr => return self.vote(shell, -10),
+            CommandId::UndoVote => return self.undo_vote(shell),
+            CommandId::CompletePr => self.open_complete(shell),
+            CommandId::AbandonPr => self.confirm_abandon(shell),
+            CommandId::AutoCompletePr => return self.toggle_auto_complete(shell),
+            CommandId::CommentPr => self.open_comment(shell),
+            CommandId::ToggleClosedPrs | CommandId::ToggleFinished => {
                 self.show_closed = !self.show_closed;
-                AppAction::None
             }
-            Some(CommandId::Quit) => {
-                shell.should_quit = true;
-                AppAction::None
-            }
-            _ => AppAction::None,
+            CommandId::Quit => shell.should_quit = true,
+            _ => {}
         }
+        AppAction::None
     }
 }
 
@@ -797,15 +820,6 @@ impl Screen for PullRequestsScreen {
                 self.cursor.move_by(isize::MAX, count);
             }
             KeyCode::Tab => shell.focus = Focus::Details,
-            KeyCode::Char('a') => return self.vote(shell, 10),
-            KeyCode::Char('A') => return self.vote(shell, 5),
-            KeyCode::Char('w') => return self.vote(shell, -5),
-            KeyCode::Char('x') => return self.vote(shell, -10),
-            KeyCode::Char('u') => return self.undo_vote(shell),
-            KeyCode::Char('C') => self.open_complete(shell),
-            KeyCode::Char('X') => self.confirm_abandon(shell),
-            KeyCode::Char('t') => return self.toggle_auto_complete(shell),
-            KeyCode::Char('n') => self.open_comment(shell),
             KeyCode::Esc if !self.query.is_empty() => {
                 self.query.clear();
                 self.active_view = None;
@@ -845,7 +859,10 @@ impl Screen for PullRequestsScreen {
                 return self.open_in_browser(shell);
             }
             PointerTarget::SortHeader(key) => self.toggle_sort(key),
+            PointerTarget::FocusDetails => shell.focus = Focus::Details,
             PointerTarget::Follow(jump) => return AppAction::Follow(jump),
+            // The details pane's buttons stand for the keys they name.
+            PointerTarget::RunCommand(id) => return self.run_command(shell, id),
             PointerTarget::ShowFinished => self.show_closed = true,
             PointerTarget::SearchField => {
                 self.mode = PrMode::Search;
@@ -899,20 +916,31 @@ impl Screen for PullRequestsScreen {
         let Jump::PullRequest { id, .. } = jump else {
             return false;
         };
+        let Some(request) = self.requests.iter().find(|request| request.id == *id) else {
+            return false;
+        };
         // A closed pull request is worth landing on even while they are hidden.
-        if self
-            .requests
-            .iter()
-            .any(|request| request.id == *id && request.status.is_closed())
-        {
+        if request.status.is_closed() {
             self.show_closed = true;
         }
-        let Some(index) = self
-            .visible(shell)
-            .iter()
-            .position(|row| row.request.id == *id)
-        else {
-            return false;
+        let position = |screen: &Self| {
+            screen
+                .visible(shell)
+                .iter()
+                .position(|row| row.request.id == *id)
+        };
+        let index = match position(self) {
+            Some(index) => index,
+            // On file but filtered out: the reference wins over the query,
+            // which is cleared rather than reported as a missing row.
+            None => {
+                self.query.clear();
+                self.active_view = None;
+                match position(self) {
+                    Some(index) => index,
+                    None => return false,
+                }
+            }
         };
         self.cursor.focus(index);
         true
@@ -961,7 +989,7 @@ impl Screen for PullRequestsScreen {
             PrMode::ConfirmAbandon => "X abandon it  Esc leave it",
             PrMode::Comment => "Type a line  Enter post  Esc cancel",
             PrMode::Browse => {
-                "↑↓/jk move  a/A/w/x vote  n comment  C complete  X abandon  t auto  o open"
+                "↑↓/jk move  a/A/w/x vote  u undo  n comment  C complete  X abandon  t auto  o open  ? help"
             }
         }
     }

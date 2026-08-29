@@ -49,6 +49,24 @@ pub enum CommandId {
     CloneRepo,
     FetchRepo,
     PullRepo,
+    /// The Pull requests tab's verbs: the four votes and their undo, and
+    /// the three ways a pull request is closed or set to close itself.
+    ApprovePr,
+    SuggestPr,
+    WaitPr,
+    RejectPr,
+    UndoVote,
+    CompletePr,
+    AbandonPr,
+    AutoCompletePr,
+    CommentPr,
+    ToggleClosedPrs,
+    /// The Pipelines tab's verbs.
+    RunPipeline,
+    CancelRun,
+    RetryRun,
+    WatchRun,
+    Approvals,
     SaveView,
     SprintSummary,
     DatabaseInfo,
@@ -219,6 +237,111 @@ pub const COMMANDS: &[Command] = &[
         keys: &[key('P')],
         help: "Fast-forward only",
         scope: Scope::Tab(TabId::Repos),
+    },
+    Command {
+        id: CommandId::ApprovePr,
+        title: "Approve",
+        keys: &[key('a')],
+        help: "Vote on the pull request",
+        scope: Scope::Tab(TabId::PullRequests),
+    },
+    Command {
+        id: CommandId::SuggestPr,
+        title: "Approve with suggestions",
+        keys: &[key('A')],
+        help: "",
+        scope: Scope::Tab(TabId::PullRequests),
+    },
+    Command {
+        id: CommandId::WaitPr,
+        title: "Wait for author",
+        keys: &[key('w')],
+        help: "",
+        scope: Scope::Tab(TabId::PullRequests),
+    },
+    Command {
+        id: CommandId::RejectPr,
+        title: "Reject",
+        keys: &[key('x')],
+        help: "",
+        scope: Scope::Tab(TabId::PullRequests),
+    },
+    Command {
+        id: CommandId::UndoVote,
+        title: "Undo last vote",
+        keys: &[key('u')],
+        help: "Put the previous vote back",
+        scope: Scope::Tab(TabId::PullRequests),
+    },
+    Command {
+        id: CommandId::CompletePr,
+        title: "Complete",
+        keys: &[key('C')],
+        help: "Merge it, after a short form",
+        scope: Scope::Tab(TabId::PullRequests),
+    },
+    Command {
+        id: CommandId::AbandonPr,
+        title: "Abandon",
+        keys: &[key('X')],
+        help: "Asks once more",
+        scope: Scope::Tab(TabId::PullRequests),
+    },
+    Command {
+        id: CommandId::AutoCompletePr,
+        title: "Toggle auto-complete",
+        keys: &[key('t')],
+        help: "Complete when the policies pass",
+        scope: Scope::Tab(TabId::PullRequests),
+    },
+    Command {
+        id: CommandId::CommentPr,
+        title: "Comment",
+        keys: &[key('n')],
+        help: "One line, as a new thread",
+        scope: Scope::Tab(TabId::PullRequests),
+    },
+    Command {
+        id: CommandId::ToggleClosedPrs,
+        title: "Show or hide closed pull requests",
+        keys: &[],
+        help: "Completed and abandoned",
+        scope: Scope::Tab(TabId::PullRequests),
+    },
+    Command {
+        id: CommandId::RunPipeline,
+        title: "Run pipeline",
+        keys: &[key('t')],
+        help: "Pick a branch and start it",
+        scope: Scope::Tab(TabId::Pipelines),
+    },
+    Command {
+        id: CommandId::CancelRun,
+        title: "Cancel run",
+        keys: &[key('x')],
+        help: "Asks once more",
+        scope: Scope::Tab(TabId::Pipelines),
+    },
+    Command {
+        id: CommandId::RetryRun,
+        title: "Retry failed jobs",
+        keys: &[key('R')],
+        help: "On a run that failed or was canceled",
+        scope: Scope::Tab(TabId::Pipelines),
+    },
+    Command {
+        id: CommandId::WatchRun,
+        title: "Watch run",
+        keys: &[key('W')],
+        help: "Say when it stops, on any tab",
+        scope: Scope::Tab(TabId::Pipelines),
+    },
+    Command {
+        id: CommandId::Approvals,
+        title: "Approvals",
+        keys: &[key('A')],
+        help: "What is waiting on a person",
+        scope: Scope::Tab(TabId::Pipelines),
     },
     Command {
         id: CommandId::EditTitle,
@@ -807,7 +930,13 @@ mod tests {
 
     #[test]
     fn bound_commands_have_labels_and_unique_keys() {
-        let mut bound: Vec<Key> = Vec::new();
+        // A key may mean one thing on one tab and another on the next; it
+        // may not mean two things anywhere a person could press it.
+        let overlaps = |left: Scope, right: Scope| match (left, right) {
+            (Scope::Global, _) | (_, Scope::Global) => true,
+            (Scope::Tab(a), Scope::Tab(b)) => a == b,
+        };
+        let mut bound: Vec<(Key, Scope)> = Vec::new();
         for command in COMMANDS {
             if command.keys.is_empty() {
                 assert!(command.key_label().is_empty(), "{:?}", command.id);
@@ -816,8 +945,15 @@ mod tests {
             assert!(!command.key_label().is_empty(), "{:?}", command.id);
             for key in command.keys {
                 assert!(!key.label().is_empty(), "{:?}", command.id);
-                assert!(!bound.contains(key), "duplicate binding {}", key.label());
-                bound.push(*key);
+                assert!(
+                    !bound
+                        .iter()
+                        .any(|(held, scope)| held == key && overlaps(*scope, command.scope)),
+                    "duplicate binding {} for {:?}",
+                    key.label(),
+                    command.id
+                );
+                bound.push((*key, command.scope));
             }
         }
 

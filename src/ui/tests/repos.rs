@@ -147,3 +147,33 @@ fn the_repos_tab_reads_at_every_breakpoint() {
         assert!(text.contains("ticket-tui"), "{width} columns: {text}");
     }
 }
+
+#[test]
+fn the_clone_button_is_where_it_is_painted_even_when_a_url_wraps() {
+    let mut app = repos_app();
+    // home-server, which is not on this machine.
+    app.repos.cursor.focus(1);
+    // A pane narrow enough that the URLs above the button wrap.
+    let mut terminal = Terminal::new(TestBackend::new(110, 44)).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let painted = find_buffer_text_in(
+        terminal.backend().buffer(),
+        Rect::new(0, 0, 110, 44),
+        "[Clone]",
+    )
+    .expect("the button is painted");
+    let button = target_rect(&app, |target| {
+        matches!(
+            target,
+            PointerTarget::RunCommand(crate::command::CommandId::CloneRepo)
+        )
+    });
+    assert_eq!(
+        button.y, painted.1,
+        "the click target is on the row the button is on"
+    );
+    assert!(
+        button.x <= painted.0 && painted.0 < button.x + button.width,
+        "and covers it: {button:?} vs {painted:?}"
+    );
+}

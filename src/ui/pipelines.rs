@@ -6,6 +6,7 @@ use crate::app::pipelines::rows::{duration_label, run_glyph};
 use crate::app::pipelines::{
     Level, PipelineColumn, PipelineMode, PipelineRow, PipelinesScreen, RunColumn, RunRow,
 };
+use crate::command::CommandId;
 use crate::model::{Jump, RunResult, RunStatus, TimelineKind, TimelineRecord};
 use crate::ui::details::section_line;
 use crate::ui::table::{TableSpec, render_list_table, table_geometry};
@@ -527,6 +528,11 @@ fn render_run_details(
         ),
         Line::from(""),
     ];
+    let buttons: [(&str, PointerTarget); 2] = [
+        ("[Cancel]", PointerTarget::RunCommand(CommandId::CancelRun)),
+        ("[Retry]", PointerTarget::RunCommand(CommandId::RetryRun)),
+    ];
+    let buttons_index = lines.len();
     lines.push(Line::from(vec![
         Span::styled(" [Cancel] ", Style::default().fg(theme().muted)),
         Span::styled(" [Retry] ", Style::default().fg(theme().muted)),
@@ -565,38 +571,37 @@ fn render_run_details(
         now,
         shell.focus == Focus::Details,
     ));
+    // A pipeline name or a work-item line wraps, so every target is placed
+    // by the row its line landed on rather than by the line's index.
+    let (rows, _) = wrapped_rows(&lines, inner.width);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // The buttons stand for the keys they name, so clicking one is the key.
+    if let Some(y) = row_on_screen(inner, &rows, buttons_index, 0) {
+        register_buttons(shell, inner, y, PointerLayer::Base, &buttons);
+    }
     // One hit region per reference, so a click follows it.
     for (index, (_, jump)) in jumps.iter().enumerate() {
-        let y = inner
-            .y
-            .saturating_add(u16::try_from(jump_start + index).unwrap_or(u16::MAX));
-        if y >= inner.y.saturating_add(inner.height) {
-            break;
+        if let Some(y) = row_on_screen(inner, &rows, jump_start + index, 0) {
+            shell.hit_regions.push(region(
+                Rect::new(inner.x, y, inner.width, 1),
+                PointerTarget::Follow(jump.clone()),
+                PointerLayer::Base,
+                None,
+                None,
+            ));
         }
-        shell.hit_regions.push(region(
-            Rect::new(inner.x, y, inner.width, 1),
-            PointerTarget::Follow(jump.clone()),
-            PointerLayer::Base,
-            None,
-            None,
-        ));
     }
     // One hit region per node, so a click picks the node the log follows.
     for index in 0..timeline.len() {
-        let y = inner
-            .y
-            .saturating_add(u16::try_from(tree_start + index).unwrap_or(u16::MAX));
-        if y >= inner.y.saturating_add(inner.height) {
-            break;
+        if let Some(y) = row_on_screen(inner, &rows, tree_start + index, 0) {
+            shell.hit_regions.push(region(
+                Rect::new(inner.x, y, inner.width, 1),
+                PointerTarget::TreeRow { index },
+                PointerLayer::Base,
+                None,
+                None,
+            ));
         }
-        shell.hit_regions.push(region(
-            Rect::new(inner.x, y, inner.width, 1),
-            PointerTarget::TreeRow { index },
-            PointerLayer::Base,
-            None,
-            None,
-        ));
     }
 }
 

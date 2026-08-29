@@ -839,7 +839,25 @@ impl WorkItemsScreen {
             CommandId::HistoryBack => AppAction::HistoryBack,
             CommandId::HistoryForward => AppAction::HistoryForward,
             // The Repos tab's own; the palette does not offer them here.
-            CommandId::CloneRepo | CommandId::FetchRepo | CommandId::PullRepo => AppAction::None,
+            // Another tab's verbs: nothing to do with a work item.
+            CommandId::CloneRepo
+            | CommandId::FetchRepo
+            | CommandId::PullRepo
+            | CommandId::ApprovePr
+            | CommandId::SuggestPr
+            | CommandId::WaitPr
+            | CommandId::RejectPr
+            | CommandId::UndoVote
+            | CommandId::CompletePr
+            | CommandId::AbandonPr
+            | CommandId::AutoCompletePr
+            | CommandId::CommentPr
+            | CommandId::ToggleClosedPrs
+            | CommandId::RunPipeline
+            | CommandId::CancelRun
+            | CommandId::RetryRun
+            | CommandId::WatchRun
+            | CommandId::Approvals => AppAction::None,
             CommandId::SprintSummary => {
                 self.open_sprint_summary();
                 AppAction::None

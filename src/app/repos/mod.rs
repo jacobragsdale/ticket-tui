@@ -83,9 +83,15 @@ impl Default for ReposScreen {
 
 impl ReposScreen {
     /// What the last pull found, and what the other tabs have against each.
+    /// The cursor stays on the repository it was on.
     pub fn set_repos(&mut self, shell: &Shell) {
+        let selected = self.selected(shell).map(|row| row.repo.id);
         self.repos = shell.repos().to_vec();
-        self.cursor.clamp(self.repos.len());
+        let rows = self.visible(shell);
+        match selected.and_then(|id| rows.iter().position(|row| row.repo.id == id)) {
+            Some(index) => self.cursor.focus(index),
+            None => self.cursor.clamp(rows.len()),
+        }
     }
 
     /// The pull requests and pipelines each repository has, from the snapshot
@@ -421,25 +427,26 @@ impl ReposScreen {
     }
 
     fn handle_command_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
-        match command_for_key(key, TabId::Repos) {
-            Some(CommandId::Search) => {
-                self.mode = RepoMode::Search;
-                AppAction::None
-            }
-            Some(CommandId::Open) => self.open_in_browser(shell),
-            Some(CommandId::CopyUrl | CommandId::CopyId) => self.copy_ssh_url(shell),
-            Some(CommandId::CloneRepo) => self.clone_selected(shell),
-            Some(CommandId::FetchRepo) => self.git_selected(shell, false),
-            Some(CommandId::PullRepo) => self.git_selected(shell, true),
-            Some(CommandId::Sync) => AppAction::Sync,
-            Some(CommandId::HistoryBack) => AppAction::HistoryBack,
-            Some(CommandId::HistoryForward) => AppAction::HistoryForward,
-            Some(CommandId::Quit) => {
-                shell.should_quit = true;
-                AppAction::None
-            }
-            _ => AppAction::None,
+        command_for_key(key, TabId::Repos).map_or(AppAction::None, |id| self.run_command(shell, id))
+    }
+
+    /// One command, whether a key, a button in the details pane, or the
+    /// palette asked for it.
+    pub fn run_command(&mut self, shell: &mut Shell, id: CommandId) -> AppAction {
+        match id {
+            CommandId::Search => self.mode = RepoMode::Search,
+            CommandId::Open => return self.open_in_browser(shell),
+            CommandId::CopyUrl | CommandId::CopyId => return self.copy_ssh_url(shell),
+            CommandId::CloneRepo => return self.clone_selected(shell),
+            CommandId::FetchRepo => return self.git_selected(shell, false),
+            CommandId::PullRepo => return self.git_selected(shell, true),
+            CommandId::Sync => return AppAction::Sync,
+            CommandId::HistoryBack => return AppAction::HistoryBack,
+            CommandId::HistoryForward => return AppAction::HistoryForward,
+            CommandId::Quit => shell.should_quit = true,
+            _ => {}
         }
+        AppAction::None
     }
 }
 
@@ -584,14 +591,9 @@ impl Screen for ReposScreen {
                 return self.open_in_browser(shell);
             }
             PointerTarget::SortHeader(key) => self.toggle_sort(key),
+            PointerTarget::FocusDetails => shell.focus = Focus::Details,
             // The details pane's buttons stand for the keys they name.
-            PointerTarget::RunCommand(CommandId::CloneRepo) => return self.clone_selected(shell),
-            PointerTarget::RunCommand(CommandId::FetchRepo) => {
-                return self.git_selected(shell, false);
-            }
-            PointerTarget::RunCommand(CommandId::PullRepo) => {
-                return self.git_selected(shell, true);
-            }
+            PointerTarget::RunCommand(id) => return self.run_command(shell, id),
             // A click both settles the pane's cursor on the line and follows
             // it, so `[` back and `Enter` again land where the eye did.
             PointerTarget::Follow(jump) => {
@@ -652,12 +654,29 @@ impl Screen for ReposScreen {
         let Jump::Repo(name) = jump else {
             return false;
         };
-        let Some(index) = self
-            .visible(shell)
+        if !self
+            .repos
             .iter()
-            .position(|row| row.repo.name.eq_ignore_ascii_case(name))
-        else {
+            .any(|repo| repo.name.eq_ignore_ascii_case(name))
+        {
             return false;
+        }
+        let position = |screen: &Self| {
+            screen
+                .visible(shell)
+                .iter()
+                .position(|row| row.repo.name.eq_ignore_ascii_case(name))
+        };
+        let index = match position(self) {
+            Some(index) => index,
+            // On file but filtered out: the reference wins over the query.
+            None => {
+                self.query.clear();
+                match position(self) {
+                    Some(index) => index,
+                    None => return false,
+                }
+            }
         };
         self.cursor.focus(index);
         true
@@ -695,7 +714,7 @@ impl Screen for ReposScreen {
         match self.mode {
             RepoMode::Search => "←→ cursor  Ctrl-W delete word  Ctrl-U clear  Enter/Esc finish",
             RepoMode::Browse => {
-                "↑↓/jk move  C clone  G fetch  P pull  o open  Tab details  Enter follow  q quit"
+                "↑↓/jk move  C clone  G fetch  P pull  o open  Tab details  Enter follow  ? help"
             }
         }
     }
