@@ -211,7 +211,6 @@ impl WorkItemsScreen {
             PointerTarget::ClearQuery => self.set_query(shell, String::new()),
             PointerTarget::OpenPalette => return self.run_command(shell, CommandId::Palette),
             PointerTarget::OpenHelp => return self.run_command(shell, CommandId::Help),
-            PointerTarget::CopyActions => self.open_copy_actions(shell),
             PointerTarget::CloseOverlay => self.close_overlay(shell),
             PointerTarget::NarrowTickets => {
                 shell.narrow_details = false;

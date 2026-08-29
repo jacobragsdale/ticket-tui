@@ -13,10 +13,7 @@ pub(super) fn render_details(
     shell: &mut Shell,
     area: Rect,
 ) {
-    let mut block = focused_block(" Details ", shell.focus.is_details_pane());
-    if area.width >= 24 {
-        block = block.title(Line::from("[Copy]").right_aligned());
-    }
+    let block = focused_block(" Details ", shell.focus.is_details_pane());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     shell.hit_regions.push(region(
@@ -26,20 +23,6 @@ pub(super) fn render_details(
         Some(SelectableSurface::Details),
         Some(ScrollSurface::Details),
     ));
-    if area.width >= 24 {
-        shell.hit_regions.push(region(
-            Rect::new(
-                area.x.saturating_add(area.width.saturating_sub(8)),
-                area.y,
-                6,
-                1,
-            ),
-            PointerTarget::CopyActions,
-            PointerLayer::Base,
-            None,
-            None,
-        ));
-    }
 
     let Some(ticket) = screen.selected_ticket().cloned() else {
         // Nothing scrollable this frame; keep the measured height.

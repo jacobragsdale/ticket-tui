@@ -280,16 +280,6 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
         app.work_items
             .is_row_selected(&app.work_items.selected_ticket().unwrap().key)
     );
-
-    let (x, y) = app
-        .shell
-        .hit_regions
-        .find_target(|target| matches!(target, PointerTarget::CopyActions))
-        .map(|region| (region.rect.x, region.rect.y))
-        .expect("details copy");
-    click(&mut app, x, y);
-    assert_eq!(app.work_items.mode, WorkItemMode::Palette);
-    assert_eq!(app.work_items.palette.query.text(), "copy");
 }
 
 fn divider(app: &App) -> Rect {

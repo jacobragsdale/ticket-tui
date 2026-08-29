@@ -15,11 +15,6 @@ impl WorkItemsScreen {
         self.selected_keys.contains(key)
     }
 
-    pub(super) fn open_copy_actions(&mut self, shell: &mut Shell) {
-        self.run_command(shell, CommandId::Palette);
-        self.palette.query = TextInput::new("copy");
-    }
-
     pub(super) fn toggle_bookmark(&mut self, shell: &mut Shell) {
         let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
             return;

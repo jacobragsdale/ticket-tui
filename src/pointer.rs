@@ -104,7 +104,6 @@ pub enum PointerTarget {
     ClearQuery,
     OpenPalette,
     OpenHelp,
-    CopyActions,
     CloseOverlay,
     NarrowTickets,
     NarrowDetails,
