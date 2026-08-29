@@ -96,7 +96,12 @@ impl FilterSchema for PipelineSchema {
         None
     }
 
-    fn matches_sentinel(_sentinel: Sentinel, _row: &Self::Row, _context: &MatchContext) -> bool {
+    fn matches_sentinel(
+        _field: Self::Field,
+        _sentinel: Sentinel,
+        _row: &Self::Row,
+        _context: &MatchContext,
+    ) -> bool {
         false
     }
 }
@@ -195,7 +200,12 @@ impl FilterSchema for RunSchema {
         }
     }
 
-    fn matches_sentinel(sentinel: Sentinel, row: &Self::Row, context: &MatchContext) -> bool {
+    fn matches_sentinel(
+        _field: Self::Field,
+        sentinel: Sentinel,
+        row: &Self::Row,
+        context: &MatchContext,
+    ) -> bool {
         match sentinel {
             Sentinel::Me => context.me.as_deref().is_some_and(|me| {
                 row.run

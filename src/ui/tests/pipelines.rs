@@ -743,6 +743,17 @@ fn a_runs_details_follow_its_repository_its_pull_request_and_the_work_items_it_b
     let mut from_pr = run(15, 1, RunStatus::Completed, Some(RunResult::Succeeded));
     from_pr.pr_id = Some(42);
     from_pr.reason = "pullRequest".into();
+    // The pull request the run was raised for has to be on file for the jump
+    // to land on it, the way a work item does.
+    let mut raised = crate::app::pull_requests::tests::pull_request(
+        42,
+        "The one this run is for",
+        "Avery",
+        crate::model::PrStatus::Active,
+    );
+    raised.repo_id = "aaa-111".into();
+    let shell = &app.shell;
+    app.pull_requests.set_pull_requests(vec![raised], shell);
     app.pipelines.merge_live_runs(vec![from_pr]);
     app.pipelines.pipeline_cursor.focus(0);
     app.pipelines.open_runs(&app.shell);

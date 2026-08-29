@@ -44,10 +44,16 @@ pub trait FilterSchema: Clone + Copy + std::fmt::Debug + Default + Eq + 'static 
     /// The sentinel a value asks for on a field, if that field has one.
     fn sentinel(field: Self::Field, value: &str) -> Option<Sentinel>;
 
-    /// Whether a row satisfies a sentinel. Each screen decides what `@me`
-    /// means on it: whoever a work item is assigned to, or whoever raised a
-    /// pull request.
-    fn matches_sentinel(sentinel: Sentinel, row: &Self::Row, context: &MatchContext) -> bool;
+    /// Whether a row satisfies a sentinel on one field. Each screen decides
+    /// what `@me` means, and the field is part of that: on pull requests
+    /// `author:@me` and `reviewer:@me` are the same sentinel asking two
+    /// different questions.
+    fn matches_sentinel(
+        field: Self::Field,
+        sentinel: Sentinel,
+        row: &Self::Row,
+        context: &MatchContext,
+    ) -> bool;
 }
 
 /// The work items screen's grammar, which is the one the CLI reads too.
@@ -126,7 +132,12 @@ impl FilterSchema for WorkItemSchema {
         }
     }
 
-    fn matches_sentinel(sentinel: Sentinel, row: &Self::Row, context: &MatchContext) -> bool {
+    fn matches_sentinel(
+        _field: Self::Field,
+        sentinel: Sentinel,
+        row: &Self::Row,
+        context: &MatchContext,
+    ) -> bool {
         match sentinel {
             Sentinel::Me => context.me.as_deref().is_some_and(|me| {
                 row.assigned_to
@@ -825,7 +836,7 @@ fn field_matches<S: FilterSchema>(
             .is_some_and(|predicate| predicate.matches(instant, context.now));
     }
     if let Some(sentinel) = S::sentinel(field, needle) {
-        return S::matches_sentinel(sentinel, row, context);
+        return S::matches_sentinel(field, sentinel, row, context);
     }
     S::values(field, row)
         .iter()
@@ -1714,7 +1725,12 @@ mod second_schema_tests {
             }
         }
 
-        fn matches_sentinel(sentinel: Sentinel, row: &Self::Row, context: &MatchContext) -> bool {
+        fn matches_sentinel(
+            _field: Self::Field,
+            sentinel: Sentinel,
+            row: &Self::Row,
+            context: &MatchContext,
+        ) -> bool {
             match sentinel {
                 Sentinel::Me => context
                     .me

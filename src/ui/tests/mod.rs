@@ -4,6 +4,7 @@ mod details;
 mod overlays;
 mod pickers;
 mod pipelines;
+mod pull_requests;
 mod table;
 mod tabs;
 mod widgets;

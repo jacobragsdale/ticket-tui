@@ -50,6 +50,7 @@ use crate::timestamp::Timestamp;
 pub mod cursor;
 pub mod pipelines;
 mod placeholder;
+pub mod pull_requests;
 mod screen;
 pub mod shell;
 pub mod work_items;
@@ -57,6 +58,7 @@ pub mod work_items;
 pub use cursor::ListCursor;
 pub use pipelines::PipelinesScreen;
 pub use placeholder::PlaceholderScreen;
+pub use pull_requests::PullRequestsScreen;
 pub use screen::{Screen, TabId};
 pub use shell::{
     DEFAULT_PANE_SPLIT_STACKED, DEFAULT_PANE_SPLIT_WIDE, DividerOrientation, Focus,
@@ -201,7 +203,7 @@ pub struct App {
     pub tab: TabId,
     pub work_items: WorkItemsScreen,
     pub repos: PlaceholderScreen,
-    pub pull_requests: PlaceholderScreen,
+    pub pull_requests: PullRequestsScreen,
     pub pipelines: PipelinesScreen,
 }
 
@@ -215,7 +217,7 @@ impl App {
             tab: TabId::WorkItems,
             work_items,
             repos: PlaceholderScreen::new(TabId::Repos, "#669"),
-            pull_requests: PlaceholderScreen::new(TabId::PullRequests, "#674"),
+            pull_requests: PullRequestsScreen::default(),
             pipelines: PipelinesScreen::default(),
         }
     }
@@ -334,9 +336,12 @@ impl App {
     pub fn apply_snapshot(&mut self, snapshot: Snapshot) {
         let pipelines = snapshot.pipelines.clone();
         let runs = snapshot.runs.clone();
+        let pull_requests = snapshot.pull_requests.clone();
         self.work_items
             .replace_prepared_tickets(&mut self.shell, snapshot);
         self.pipelines.set_pipelines(pipelines, runs, &self.shell);
+        self.pull_requests
+            .set_pull_requests(pull_requests, &self.shell);
     }
 
     /// The whole session: which tab was showing, each tab's slice, and what

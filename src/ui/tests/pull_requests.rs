@@ -1,0 +1,115 @@
+use super::*;
+use crate::app::TabId;
+use crate::app::pull_requests::tests::pull_requests_app;
+
+fn tab_text(width: u16, height: u16, app: &mut App) -> String {
+    app.select_tab(TabId::PullRequests);
+    render_text(width, height, app)
+}
+
+#[test]
+fn the_table_draws_a_row_per_pull_request_with_its_votes_and_build() {
+    let mut app = pull_requests_app();
+    let text = tab_text(200, 24, &mut app);
+
+    assert!(text.contains("Pull requests 3"), "{text}");
+    assert!(
+        text.contains("!11"),
+        "the id reads as a pull request: {text}"
+    );
+    assert!(text.contains("Split the files"), "{text}");
+    assert!(text.contains("feature/tabs \u{2192} main"), "{text}");
+    assert!(
+        text.contains("[draft]"),
+        "a draft says so after its title: {text}"
+    );
+    assert!(
+        text.contains("\u{26a0} conflicts"),
+        "a merge that cannot happen is what the Build column says: {text}"
+    );
+    assert!(
+        text.contains("Closed hidden (1)"),
+        "the chip says what is being left out: {text}"
+    );
+}
+
+#[test]
+fn the_details_pane_carries_every_section_the_epic_asks_for() {
+    let mut app = pull_requests_app();
+    tab_text(160, 50, &mut app);
+    // The one with reviewers, a work item and a build on it.
+    app.pull_requests.cursor.focus(2);
+    let text = render_text(160, 50, &mut app);
+
+    assert!(text.contains("Active"), "{text}");
+    assert!(
+        text.contains("What it does and why"),
+        "the description is rendered as text: {text}"
+    );
+    assert!(text.contains("Reviewers"), "{text}");
+    assert!(text.contains("required"), "{text}");
+    assert!(
+        text.contains("no vote") || text.contains("approved"),
+        "{text}"
+    );
+    assert!(text.contains("Related"), "{text}");
+    assert!(text.contains("Completion"), "{text}");
+    assert!(text.contains("Auto-complete: off"), "{text}");
+    assert!(
+        text.contains("[Approve]") && text.contains("[Abandon]"),
+        "every button is drawn, muted until its ticket: {text}"
+    );
+}
+
+#[test]
+fn clicking_a_row_moves_the_cursor_and_the_chip_puts_the_closed_ones_back() {
+    let mut app = pull_requests_app();
+    tab_text(150, 24, &mut app);
+
+    let row = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::TableRow { index: 1 }))
+        .expect("every row is clickable")
+        .rect;
+    click(&mut app, row.x + 20, row.y);
+    assert_eq!(app.pull_requests.cursor.index, 1);
+
+    let chip = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::ShowFinished))
+        .expect("the chip is clickable")
+        .rect;
+    click(&mut app, chip.x + 2, chip.y);
+    assert_eq!(app.pull_requests.visible(&app.shell).len(), 4);
+}
+
+#[test]
+fn the_tab_badge_counts_what_is_waiting_on_my_review() {
+    let mut app = pull_requests_app();
+    let text = tab_text(150, 24, &mut app);
+    let bar = text.lines().next().expect("the tab bar");
+    assert!(
+        bar.contains("3 Pull requests 1"),
+        "the badge is the review queue: {bar}"
+    );
+}
+
+#[test]
+fn the_details_pane_follows_a_pull_request_to_its_work_items() {
+    let mut app = pull_requests_app();
+    tab_text(160, 50, &mut app);
+    app.pull_requests.cursor.focus(2);
+    render_text(160, 50, &mut app);
+    let work_items = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::Follow(Jump::WorkItems(_))))
+        .expect("the work items line is a jump")
+        .rect;
+
+    click(&mut app, work_items.x + 16, work_items.y);
+    assert_eq!(app.tab, TabId::WorkItems);
+    assert_eq!(app.work_items.query(), "id:10001");
+}

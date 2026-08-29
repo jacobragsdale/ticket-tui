@@ -33,6 +33,7 @@ mod details;
 mod overlays;
 mod pickers;
 pub(crate) mod pipelines;
+pub(crate) mod pull_requests;
 mod table;
 #[cfg(test)]
 mod tests;

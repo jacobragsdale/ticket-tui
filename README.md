@@ -934,6 +934,29 @@ follows on `Enter` or a click; one this database does not hold says so rather
 than opening an empty screen. The walk is remembered in the session file, and a
 file written before the tabs becomes the first cross-tab history.
 
+## Pull requests
+
+Tab `3` is the review queue: `ID · Title · Repo · Source → Target · Author ·
+Votes · Build · Age`. A draft says `[draft]` after its title, the Votes column
+is a run of reviewer glyphs — `✓✓·` is two approved and one not voted, `✗` is
+red — and the Build column carries the branch policy's build, or `⚠ conflicts`
+in red when the merge is blocked, which is the thing to know first. Closed pull
+requests are left off the table behind the same chip finished work items use.
+
+The details pane holds the title and status, the author and both branches, the
+description as text, the Reviewers with each vote and whether it is required, a
+Related section that follows the repository, the work items it closes and the
+build that gates it, the Completion settings, and the buttons `[Approve]
+[Suggest] [Wait] [Reject] [Complete] [Abandon]` — drawn muted until #676 and
+#677 wire them.
+
+Its grammar: `repo:`, `author:` and `reviewer:` (both take `@me`), `vote:`
+(`approved`, `suggestions`, `waiting`, `rejected`, `none`), `status:`,
+`target:`, `source:`, `draft:` and `build:`. Four built-in views open on the
+questions worth asking — **To review** (`reviewer:@me vote:none status:active`),
+**Mine**, **Active** and **Recently closed** — and the tab badge is the To
+review count.
+
 ## Pipelines
 
 Tab `4` lists the project's build definitions: `Pipeline · Folder · Last run ·
