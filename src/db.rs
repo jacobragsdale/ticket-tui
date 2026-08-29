@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::slice;
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, bail};
@@ -16,6 +18,12 @@ const SCHEMA_VERSION: i64 = 7;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
+
+/// `sync_meta` key holding the greatest `System.ChangedDate` the last
+/// successful pull brought back, which is where the next incremental pull
+/// starts asking. It is never a wall clock reading: client clocks skew, Azure
+/// DevOps's own timestamps do not.
+pub const WATERMARK_KEY: &str = "watermark_changed_at";
 
 /// SQLite is a disposable cache of Azure DevOps, so any database that is not at
 /// the current schema version is dropped and recreated instead of migrated.
@@ -364,14 +372,97 @@ impl SqliteTicketRepository {
     /// changed one record, so replacing the whole database would throw away
     /// everything else the last pull brought.
     pub fn upsert(&mut self, ticket: &Ticket, relations: &[RelationRecord]) -> Result<()> {
+        self.write_upserts(slice::from_ref(ticket), relations)
+            .with_context(|| format!("failed to store work item {}", ticket.key.id))
+    }
+
+    /// Writes a batch of work items and the links leading out of them in one
+    /// transaction, leaving every other row alone. This is how an incremental
+    /// pull lands: only what changed is rewritten, so the rows nobody touched
+    /// keep the bytes they already had.
+    pub fn upsert_all(&mut self, tickets: &[Ticket], relations: &[RelationRecord]) -> Result<()> {
+        self.write_upserts(tickets, relations)
+            .with_context(|| format!("failed to store {} changed work items", tickets.len()))
+    }
+
+    /// Every work item type the database already knows the states of, so a pull
+    /// can skip asking Azure DevOps for them again.
+    pub fn cached_state_types(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT DISTINCT work_item_type FROM work_item_type_states")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to load the cached work item types")
+    }
+
+    /// Removes every work item the project no longer lists, along with the
+    /// links, comments, and history hanging off it. `live_ids` is the complete
+    /// id list the project's own query answered with, so a work item moved to
+    /// the recycle bin — which vanishes from WIQL rather than being marked —
+    /// is caught here. Nothing at all is written when nothing is missing, so an
+    /// idle pull leaves the file's signature where it was.
+    pub fn delete_missing(&mut self, live_ids: &[i64]) -> Result<usize> {
+        let live: HashSet<i64> = live_ids.iter().copied().collect();
+        let mut statement = self
+            .connection
+            .prepare("SELECT organization, work_item_id FROM work_items")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let missing: Vec<(String, i64)> = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to list the cached work items")?
+            .into_iter()
+            .filter(|(_, id)| !live.contains(id))
+            .collect();
+        drop(statement);
+        if missing.is_empty() {
+            return Ok(0);
+        }
+
         let transaction = self.connection.transaction()?;
-        insert_ticket(&transaction, ticket)?;
+        for (organization, id) in &missing {
+            transaction.execute(
+                "DELETE FROM work_items WHERE organization = ?1 AND work_item_id = ?2",
+                params![organization, id],
+            )?;
+            // Links in both directions: a relation pointing at a work item that
+            // no longer exists is no more meaningful than one leading out of it.
+            transaction.execute(
+                "DELETE FROM work_item_relations
+                 WHERE organization = ?1 AND (from_id = ?2 OR to_id = ?2)",
+                params![organization, id],
+            )?;
+            transaction.execute(
+                "DELETE FROM work_item_comments WHERE organization = ?1 AND work_item_id = ?2",
+                params![organization, id],
+            )?;
+            transaction.execute(
+                "DELETE FROM work_item_history WHERE organization = ?1 AND work_item_id = ?2",
+                params![organization, id],
+            )?;
+        }
         transaction
-            .execute(
-                "DELETE FROM work_item_relations WHERE organization = ?1 AND from_id = ?2",
-                params![ticket.key.organization, ticket.key.id],
-            )
-            .context("failed to clear the work item's relations")?;
+            .commit()
+            .context("failed to remove the work items the project no longer has")?;
+        Ok(missing.len())
+    }
+
+    /// One transaction holding every work item in `tickets` and the links
+    /// leading out of each of them, replacing whatever those work items linked
+    /// to before.
+    fn write_upserts(&mut self, tickets: &[Ticket], relations: &[RelationRecord]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        for ticket in tickets {
+            insert_ticket(&transaction, ticket)?;
+            transaction
+                .execute(
+                    "DELETE FROM work_item_relations WHERE organization = ?1 AND from_id = ?2",
+                    params![ticket.key.organization, ticket.key.id],
+                )
+                .context("failed to clear the work item's relations")?;
+        }
         for relation in relations {
             transaction.execute(
                 "INSERT OR REPLACE INTO work_item_relations (organization, from_id, to_id, kind)
@@ -384,9 +475,8 @@ impl SqliteTicketRepository {
                 ],
             )?;
         }
-        transaction
-            .commit()
-            .with_context(|| format!("failed to store work item {}", ticket.key.id))
+        transaction.commit()?;
+        Ok(())
     }
 
     fn load_relations(&self) -> Result<Vec<RelationRecord>> {

@@ -118,16 +118,51 @@ The table title carries the sync state — `Syncing…`, `Synced just now`,
 same in the database overlay. A timer pull that keeps failing the same way says
 so only in the title; a pull `r` asked for always reports itself.
 
-Each pull queries every id in the project with WIQL:
+Pulls are incremental. Each one asks for the work items edited since the last
+successful pull, using the watermark that pull left behind:
+
+```sql
+SELECT [System.Id] FROM WorkItems
+WHERE [System.TeamProject] = @project AND [System.ChangedDate] >= '2026-08-28T20:15:03Z'
+ORDER BY [System.Id]
+```
+
+The watermark is the greatest `System.ChangedDate` the last pull actually saw,
+never a wall clock reading: a client whose clock runs fast would otherwise step
+straight past edits it never read. It is stored in the database's `sync_meta`
+table as `watermark_changed_at` and written down to the second, so the
+comparison is inclusive and the work item it came from is read once more rather
+than an edit made in the same second being missed.
+
+Every pull also runs the plain id query:
 
 ```sql
 SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project ORDER BY [System.Id]
 ```
 
-then reads those ids in batches of 200 from `/_apis/wit/workitems` with
-`$expand=relations`, and replaces the cached work items and relations in one
-transaction. A pull that was asked for reports how many work items it synced in
-the status line; a timer pull only updates the table title.
+Deleting a work item is not an edit — it stops being listed — so this is what
+catches one moved to the recycle bin, and the rows it no longer names are
+removed along with their links, comments, and history.
+
+Whatever the changed-since query names is read in batches of 200 from
+`/_apis/wit/workitems` with `$expand=relations` and written in one transaction,
+each work item's own row and outgoing links replaced and everyone else's left
+untouched. The watermark advances only after that batch is committed. When
+nothing changed and nothing was deleted, nothing at all is written: an idle
+project costs exactly two queries a minute, the database's timestamp does not
+move, and no other ticket-tui or agent reading the file reloads for nothing.
+
+A pull runs in full — every work item, replacing the stored rows wholesale —
+when there is no watermark to start from: a fresh database, a database whose
+schema this build rebuilt, or `ticket-tui --sync`, which is the way to rebuild
+one deliberately. A full pull leaves a watermark behind, so the pulls that
+follow it are incremental again.
+
+A pull that `r` asked for reports itself in the status line:
+`Synced 3 changes from <org>/<project>`, `Synced 52 work items from
+<org>/<project>` after a full pull, or `Nothing changed`. A timer pull only
+updates the table title, which still moves to `Synced just now` when the pull
+found nothing.
 
 Fields map onto the cache as follows:
 
@@ -148,9 +183,10 @@ as attachments, are ignored.
 
 The first pull a work item type appears in also reads
 `/_apis/wit/workitemtypes/<type>/states` and stores that type's states in
-`work_item_type_states`, which is what the state picker offers. A type is asked
-about once per run; a request that fails is retried on the next pull and never
-sinks it.
+`work_item_type_states`, which is what the state picker offers. A type the
+database already holds states for is not asked about again, so a run that opens
+a filled database makes no states requests at all; a request that fails is
+retried on the next pull and never sinks it.
 
 The first pull also reads `/_apis/profile/profiles/me` for the signed-in display
 name and stores it in the cache's `sync_meta` table. The profile host is
@@ -160,9 +196,8 @@ colour in the Assignee column and in the details pane. Set `TICKET_TUI_ME` to
 override the stored name, for anyone whose profile name differs from the name
 their work items are assigned to.
 
-Every pull is a full pull; syncing only what changed is planned. Comments and
-revision history are not synced yet: their tables exist and the details pane
-renders them when present, but nothing fills them.
+Comments and revision history are not synced yet: their tables exist and the
+details pane renders them when present, but nothing fills them.
 
 ## Editing
 
@@ -333,8 +368,13 @@ The `work_items` table stores these columns:
 The primary key is `(organization, work_item_id)`. Tags use Azure DevOps-style
 semicolon separation. The `work_item_relations`, `work_item_comments`, and
 `work_item_history` tables hold the graph around each work item. The `sync_meta`
-key/value table describes the sync itself rather than the work items, so a pull
-clears the other tables but leaves it alone; `me_display_name` lives there.
+key/value table describes the sync itself rather than the work items, so a full
+pull clears the other tables but leaves it alone. Two keys live there:
+`me_display_name`, the signed-in display name that marks your own work items,
+and `watermark_changed_at`, the greatest `System.ChangedDate` the last
+successful pull saw, as an RFC 3339 UTC timestamp. That watermark is where the
+next incremental pull starts asking; a database without one is pulled in full
+and left with one.
 
 The `work_item_type_states` table holds what the state picker offers:
 `work_item_type`, `name`, `category` (`Proposed`, `InProgress`, `Resolved`,
@@ -399,8 +439,8 @@ for field-level semantics.
 
 ## Roadmap
 
-Planned work — editing work items, creating them from the TUI, and syncing only
-what changed — is tracked as work items in the same Azure DevOps project
+Planned work — editing work items and creating them from the TUI — is tracked
+as work items in the same Azure DevOps project
 ticket-tui is pointed at. Sync the cache and browse it for the current list.
 
 ## Develop and verify

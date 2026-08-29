@@ -14,9 +14,10 @@ use serde_json::Value;
 
 use crate::app::PreparedTickets;
 use crate::azure::{self, AzureClient, AzureConfig, SyncBatch};
-use crate::db::SqliteTicketRepository;
+use crate::db::{self, SqliteTicketRepository};
 use crate::edit::{EditApplied, EditRejection, EditRequest};
 use crate::model::{RelationRecord, StateOption, Ticket, TicketGraph};
+use crate::timestamp::Timestamp;
 
 /// What asked for a pull. A timer pull is silent unless it fails; a keypress
 /// reports itself either way.
@@ -52,6 +53,18 @@ pub enum SyncEvent {
     Stopped,
 }
 
+/// How much of the project one pull asked Azure DevOps for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SyncMode {
+    /// Every work item, replacing the stored rows wholesale. Used when there is
+    /// no watermark to start from: a fresh file, a rebuilt schema, or
+    /// `ticket-tui --sync`.
+    Full,
+    /// Only the work items edited since the stored watermark, plus whatever the
+    /// project no longer lists.
+    Incremental,
+}
+
 /// How one request ended.
 #[derive(Debug)]
 pub enum SyncOutcome {
@@ -59,15 +72,37 @@ pub enum SyncOutcome {
     /// and the database hold the same rows.
     Pulled {
         prepared: PreparedTickets,
+        mode: SyncMode,
+        /// Work items stored, for a full pull; work items changed or removed,
+        /// for an incremental one.
         count: usize,
     },
+    /// Azure DevOps was reached and had nothing new: the database was not
+    /// written, so the rows already in memory still match it and nothing is
+    /// reloaded. The pull still happened, so the last-synced time moves.
+    Unchanged,
     Failed(String),
+}
+
+/// The greatest `System.ChangedDate` in a batch, which is where the next
+/// incremental pull starts. Taking it from the work items rather than from the
+/// clock is the whole point: a client whose clock runs fast would otherwise
+/// skip past edits it never saw.
+#[must_use]
+pub fn watermark_of(tickets: &[Ticket]) -> Option<Timestamp> {
+    tickets.iter().map(|ticket| ticket.changed_at).max()
 }
 
 /// Where work items come from. `AzureClient` implements it; tests use a fake so
 /// the worker can be exercised without a network.
 pub trait WorkItemSource {
+    /// Every work item in the project.
     fn pull(&self) -> Result<SyncBatch>;
+    /// Only the work items edited at or after `watermark`.
+    fn pull_changed_since(&self, watermark: Timestamp) -> Result<SyncBatch>;
+    /// Every work item id the project still has, which is what tells a pull
+    /// which stored rows have been deleted.
+    fn list_ids(&self) -> Result<Vec<i64>>;
     /// Display name of the signed-in user, used to mark their own work items.
     fn display_name(&self) -> Result<Option<String>>;
     /// Write one work item with a JSON Patch document, answering with the copy
@@ -81,6 +116,14 @@ pub trait WorkItemSource {
 impl WorkItemSource for AzureClient {
     fn pull(&self) -> Result<SyncBatch> {
         self.fetch_all_work_items()
+    }
+
+    fn pull_changed_since(&self, watermark: Timestamp) -> Result<SyncBatch> {
+        self.fetch_changed_work_items(watermark)
+    }
+
+    fn list_ids(&self) -> Result<Vec<i64>> {
+        self.query_ids()
     }
 
     fn display_name(&self) -> Result<Option<String>> {
@@ -177,6 +220,7 @@ fn work(
         source: None,
         repository: None,
         typed_states: HashSet::new(),
+        typed_states_seeded: false,
     };
     while let Ok(request) = requests.recv() {
         let event = match request {
@@ -204,12 +248,15 @@ struct Worker {
     /// Work item types whose states are already cached, so the states endpoint
     /// is asked once per type per run rather than once per pull.
     typed_states: HashSet<String>,
+    /// Whether the types the database already knows about have been folded into
+    /// `typed_states`, which happens on the first pull of the run.
+    typed_states_seeded: bool,
 }
 
 impl Worker {
     fn pull(&mut self, events: &Sender<SyncEvent>) -> SyncOutcome {
         match self.try_pull(events) {
-            Ok((prepared, count)) => SyncOutcome::Pulled { prepared, count },
+            Ok(outcome) => outcome,
             Err(error) => SyncOutcome::Failed(format!("{error:#}")),
         }
     }
@@ -247,31 +294,121 @@ impl Worker {
         })
     }
 
-    fn try_pull(&mut self, events: &Sender<SyncEvent>) -> Result<(PreparedTickets, usize)> {
+    /// A pull starts from the watermark the last one left behind. Without one —
+    /// a fresh file, a schema the current build rebuilt, or a value written by
+    /// something that can no longer be read — there is no safe starting point,
+    /// so everything comes down once and leaves a watermark for next time.
+    fn try_pull(&mut self, events: &Sender<SyncEvent>) -> Result<SyncOutcome> {
+        match self.watermark()? {
+            Some(watermark) => self.pull_changed(watermark, events),
+            None => self.pull_everything(events),
+        }
+    }
+
+    fn watermark(&mut self) -> Result<Option<Timestamp>> {
+        let Some(stored) = self.repository()?.meta(db::WATERMARK_KEY)? else {
+            return Ok(None);
+        };
+        Ok(Timestamp::parse(&stored).ok())
+    }
+
+    /// Replaces every stored work item with a fresh copy of the project.
+    fn pull_everything(&mut self, events: &Sender<SyncEvent>) -> Result<SyncOutcome> {
         let batch = self.source(events)?.pull()?;
         let graph = TicketGraph {
             relations: batch.relations,
             ..TicketGraph::default()
         };
+        let types = self.uncached_types(&batch.tickets)?;
+        let watermark = watermark_of(&batch.tickets);
+        let repository = self.repository()?;
+        let count = repository.replace_all(&batch.tickets, &graph)?;
+        if let Some(watermark) = watermark {
+            repository.set_meta(db::WATERMARK_KEY, &watermark.to_rfc3339())?;
+        }
+        self.cache_type_states(&types, events)?;
+        Ok(SyncOutcome::Pulled {
+            prepared: self.reload()?,
+            mode: SyncMode::Full,
+            count,
+        })
+    }
+
+    /// Reads only what changed since `watermark`, then reconciles deletions
+    /// against the project's own id list. When neither turns anything up the
+    /// database is not touched at all: no write means no new data signature,
+    /// so no other ticket-tui or agent reading the file reloads for nothing.
+    fn pull_changed(
+        &mut self,
+        watermark: Timestamp,
+        events: &Sender<SyncEvent>,
+    ) -> Result<SyncOutcome> {
+        let batch = self.source(events)?.pull_changed_since(watermark)?;
+        let live_ids = self.source(events)?.list_ids()?;
+        let types = self.uncached_types(&batch.tickets)?;
+        // Only ever forward: the query is inclusive and rounded down to the
+        // second, so a boundary work item can come back reading a shade older
+        // than the watermark that asked for it.
+        let next = watermark_of(&batch.tickets).filter(|next| *next > watermark);
+
+        let repository = self.repository()?;
+        if !batch.tickets.is_empty() {
+            repository.upsert_all(&batch.tickets, &batch.relations)?;
+        }
+        let removed = repository.delete_missing(&live_ids)?;
+        let count = batch.tickets.len() + removed;
+        if count == 0 {
+            return Ok(SyncOutcome::Unchanged);
+        }
+        if let Some(next) = next {
+            repository.set_meta(db::WATERMARK_KEY, &next.to_rfc3339())?;
+        }
+        self.cache_type_states(&types, events)?;
+        Ok(SyncOutcome::Pulled {
+            prepared: self.reload()?,
+            mode: SyncMode::Incremental,
+            count,
+        })
+    }
+
+    /// The rows, their graph, and the states they allow, all out of the same
+    /// read, so what the main thread shows is what the database holds.
+    fn reload(&mut self) -> Result<PreparedTickets> {
+        let repository = self.repository()?;
+        let tickets = repository.load_all()?;
+        let graph = repository.load_graph()?;
+        let states = repository.load_type_states()?;
+        Ok(PreparedTickets::with_graph(tickets, graph).with_states(states))
+    }
+
+    /// The work item types in a batch whose states nobody has read yet, in the
+    /// order they first appear.
+    fn uncached_types(&mut self, tickets: &[Ticket]) -> Result<Vec<String>> {
+        self.seed_typed_states()?;
         let mut types: Vec<String> = Vec::new();
-        for ticket in &batch.tickets {
+        for ticket in tickets {
             if !self.typed_states.contains(&ticket.work_item_type)
                 && !types.contains(&ticket.work_item_type)
             {
                 types.push(ticket.work_item_type.clone());
             }
         }
-        let repository = self.repository()?;
-        let count = repository.replace_all(&batch.tickets, &graph)?;
-        self.cache_type_states(&types, events)?;
-        let repository = self.repository()?;
-        let tickets = repository.load_all()?;
-        let graph = repository.load_graph()?;
-        let states = repository.load_type_states()?;
-        Ok((
-            PreparedTickets::with_graph(tickets, graph).with_states(states),
-            count,
-        ))
+        Ok(types)
+    }
+
+    /// Counts every type the database already holds states for as cached. A run
+    /// that opens a filled database therefore asks the states endpoint for
+    /// nothing at all, which is what keeps an idle incremental pull down to its
+    /// two queries.
+    fn seed_typed_states(&mut self) -> Result<()> {
+        if self.typed_states_seeded {
+            return Ok(());
+        }
+        self.typed_states_seeded = true;
+        for work_item_type in self.repository()?.cached_state_types()? {
+            self.typed_states.insert(work_item_type);
+        }
+        Ok(())
     }
 
     /// Reads the states of every work item type this pull saw for the first
@@ -409,7 +546,10 @@ mod tests {
     use super::*;
     use crate::azure::RequestRejected;
     use crate::edit::FieldEdit;
-    use crate::model::{RelationKind, RelationRecord, StateCategory, Ticket, TicketKey};
+    use crate::model::{
+        CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateCategory, Ticket,
+        TicketKey,
+    };
     use crate::timestamp::ts;
     use serde_json::json;
     use std::collections::HashMap;
@@ -448,6 +588,16 @@ mod tests {
     #[derive(Clone, Default)]
     struct FakeSource {
         results: Arc<Mutex<Vec<Result<SyncBatch, String>>>>,
+        /// The ids the project still lists. Unset means every id the fake has
+        /// ever handed out, so nothing looks deleted.
+        live_ids: Arc<Mutex<Option<Vec<i64>>>>,
+        /// Every id handed out, which is what an unset `live_ids` answers with.
+        handed_out: Arc<Mutex<Vec<i64>>>,
+        /// The watermark each incremental pull was asked to start from.
+        watermarks: Arc<Mutex<Vec<Timestamp>>>,
+        /// Requests that would have gone over the wire, one per query and one
+        /// per batch of work items read.
+        requests: Arc<Mutex<usize>>,
         /// The copy a write answers with, and the links that come with it.
         stored: Option<(Ticket, Vec<RelationRecord>)>,
         /// The status and message a write is refused with instead.
@@ -491,15 +641,51 @@ mod tests {
                 .insert(work_item_type.to_owned(), states);
             self
         }
+
+        /// The ids the project still lists, whatever the pulls returned.
+        fn listing(self, ids: Vec<i64>) -> Self {
+            *self.live_ids.lock().unwrap() = Some(ids);
+            self
+        }
+
+        /// One query, plus one read per batch of work items it named.
+        fn take_next_batch(&self) -> Result<SyncBatch> {
+            *self.requests.lock().unwrap() += 1;
+            let batch = match self.results.lock().unwrap().remove(0) {
+                Ok(batch) => batch,
+                Err(message) => return Err(anyhow::anyhow!(message)),
+            };
+            if !batch.tickets.is_empty() {
+                *self.requests.lock().unwrap() += 1;
+            }
+            let mut handed_out = self.handed_out.lock().unwrap();
+            for ticket in &batch.tickets {
+                if !handed_out.contains(&ticket.key.id) {
+                    handed_out.push(ticket.key.id);
+                }
+            }
+            Ok(batch)
+        }
     }
 
     impl WorkItemSource for FakeSource {
         fn pull(&self) -> Result<SyncBatch> {
-            let mut results = self.results.lock().unwrap();
-            match results.remove(0) {
-                Ok(batch) => Ok(batch),
-                Err(message) => Err(anyhow::anyhow!(message)),
-            }
+            self.take_next_batch()
+        }
+
+        fn pull_changed_since(&self, watermark: Timestamp) -> Result<SyncBatch> {
+            self.watermarks.lock().unwrap().push(watermark);
+            self.take_next_batch()
+        }
+
+        fn list_ids(&self) -> Result<Vec<i64>> {
+            *self.requests.lock().unwrap() += 1;
+            Ok(self
+                .live_ids
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| self.handed_out.lock().unwrap().clone()))
         }
 
         fn display_name(&self) -> Result<Option<String>> {
@@ -525,6 +711,7 @@ mod tests {
         }
 
         fn work_item_type_states(&self, work_item_type: &str) -> Result<Vec<StateOption>> {
+            *self.requests.lock().unwrap() += 1;
             self.asked_types
                 .lock()
                 .unwrap()
@@ -556,6 +743,28 @@ mod tests {
             .replace_all(tickets, &TicketGraph::default())
             .unwrap();
         path
+    }
+
+    /// A database a previous pull already left a watermark in, which is what
+    /// makes the next pull incremental.
+    fn watermarked_database(
+        directory: &TempDir,
+        tickets: &[Ticket],
+        graph: &TicketGraph,
+        watermark: &str,
+    ) -> PathBuf {
+        let path = directory.path().join("tickets.sqlite3");
+        let mut repository = SqliteTicketRepository::open(&path).unwrap();
+        repository.replace_all(tickets, graph).unwrap();
+        repository.set_meta(db::WATERMARK_KEY, watermark).unwrap();
+        path
+    }
+
+    fn stored_watermark(path: &PathBuf) -> Option<String> {
+        SqliteTicketRepository::open_existing(path)
+            .unwrap()
+            .meta(db::WATERMARK_KEY)
+            .unwrap()
     }
 
     fn edited(handle: &SyncHandle) -> Result<EditApplied, EditRejection> {
@@ -634,9 +843,19 @@ mod tests {
         );
         let (origin, outcome) = finished(&handle);
         assert_eq!(origin, PullOrigin::Timer);
-        let SyncOutcome::Pulled { prepared, count } = outcome else {
+        let SyncOutcome::Pulled {
+            prepared,
+            mode,
+            count,
+        } = outcome
+        else {
             panic!("expected a successful pull");
         };
+        assert_eq!(
+            mode,
+            SyncMode::Full,
+            "a database with no watermark is filled whole"
+        );
         assert_eq!(count, 2);
         assert_eq!(prepared.ticket_count(), 2);
 
@@ -733,6 +952,220 @@ mod tests {
 
         let stored = SqliteTicketRepository::open_existing(&path).unwrap();
         assert_eq!(stored.load_all().unwrap()[0].title, "Existing");
+    }
+
+    #[test]
+    fn an_incremental_pull_writes_only_what_changed_and_advances_the_watermark() {
+        let directory = tempdir().unwrap();
+        let path = watermarked_database(
+            &directory,
+            &[ticket(1, "One"), ticket(2, "Two"), ticket(3, "Three")],
+            &TicketGraph::default(),
+            "2026-02-01T00:00:00Z",
+        );
+        let mut changed = ticket(2, "Changed in Azure DevOps");
+        changed.state = "Done".into();
+        changed.changed_at = ts("2026-03-05T10:00:00Z");
+        let source = FakeSource::with(vec![Ok(SyncBatch {
+            relations: vec![RelationRecord {
+                from: changed.key.clone(),
+                to: ticket(1, "One").key,
+                kind: RelationKind::Parent,
+            }],
+            tickets: vec![changed.clone()],
+        })])
+        .listing(vec![1, 2, 3]);
+        let watermarks = Arc::clone(&source.watermarks);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        let SyncOutcome::Pulled { mode, count, .. } = pulled(&handle) else {
+            panic!("expected a successful pull");
+        };
+        assert_eq!(mode, SyncMode::Incremental);
+        assert_eq!(count, 1, "one work item moved, so one was transferred");
+        assert_eq!(
+            *watermarks.lock().unwrap(),
+            [ts("2026-02-01T00:00:00Z")],
+            "the pull asked from where the last one stopped"
+        );
+
+        let stored = SqliteTicketRepository::open_existing(&path).unwrap();
+        let mut rows = stored.load_all().unwrap();
+        rows.sort_by_key(|ticket| ticket.key.id);
+        assert_eq!(
+            rows,
+            vec![ticket(1, "One"), changed.clone(), ticket(3, "Three")],
+            "the rows nobody touched are left exactly as they were"
+        );
+        assert_eq!(stored.load_graph().unwrap().relations.len(), 1);
+        assert_eq!(
+            stored_watermark(&path),
+            Some(changed.changed_at.to_rfc3339()),
+            "the watermark is the batch's own greatest ChangedDate, never the clock"
+        );
+    }
+
+    #[test]
+    fn an_idle_pull_asks_twice_writes_nothing_and_reports_that_nothing_changed() {
+        let directory = tempdir().unwrap();
+        let path = watermarked_database(
+            &directory,
+            &[ticket(1, "One"), ticket(2, "Two")],
+            &TicketGraph::default(),
+            "2026-02-01T00:00:00Z",
+        );
+        // The states the picker offers are already stored, so a pull has no
+        // reason to ask Azure DevOps for them a second time. This handle stays
+        // open for the length of the test the way the TUI's own does, so the
+        // write-ahead log is not created and torn down under the measurement.
+        let mut reader = SqliteTicketRepository::open_existing(&path).unwrap();
+        reader
+            .replace_type_states(
+                "Task",
+                &[StateOption::new("Active", StateCategory::InProgress)],
+            )
+            .unwrap();
+        let source = FakeSource::with(vec![Ok(SyncBatch::default())]).listing(vec![1, 2]);
+        let requests = Arc::clone(&source.requests);
+        let asked = Arc::clone(&source.asked_types);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+        let before = crate::db::data_signature(&path);
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        assert!(
+            matches!(pulled(&handle), SyncOutcome::Unchanged),
+            "an unchanged project reports itself rather than a pull of nothing"
+        );
+
+        assert_eq!(
+            crate::db::data_signature(&path),
+            before,
+            "nothing was written, so nobody watching the file reloads"
+        );
+        assert_eq!(
+            *requests.lock().unwrap(),
+            2,
+            "one changed-since query and one id query, and no work items read"
+        );
+        assert!(
+            asked.lock().unwrap().is_empty(),
+            "the states already in the database are not fetched again"
+        );
+        assert_eq!(
+            reader.load_all().unwrap().len(),
+            2,
+            "the rows the pull found nothing to say about are still there"
+        );
+    }
+
+    #[test]
+    fn a_work_item_the_project_stopped_listing_is_deleted_with_everything_on_it() {
+        let directory = tempdir().unwrap();
+        let doomed = ticket(2, "Two").key;
+        let graph = TicketGraph {
+            relations: vec![RelationRecord {
+                from: doomed.clone(),
+                to: ticket(1, "One").key,
+                kind: RelationKind::Parent,
+            }],
+            comments: vec![CommentRecord {
+                ticket: doomed.clone(),
+                comment_id: 5,
+                created_at: ts("2026-02-02T00:00:00Z"),
+                author: Some("Avery Chen".into()),
+                text: "Looks good".into(),
+            }],
+            history: vec![HistoryRecord {
+                ticket: doomed,
+                revision: 1,
+                changed_at: ts("2026-02-02T00:00:00Z"),
+                changed_by: None,
+                field_name: "State".into(),
+                old_value: None,
+                new_value: Some("Active".into()),
+            }],
+        };
+        let path = watermarked_database(
+            &directory,
+            &[ticket(1, "One"), ticket(2, "Two")],
+            &graph,
+            "2026-02-01T00:00:00Z",
+        );
+        let handle = SyncHandle::spawn(
+            path.clone(),
+            Box::new(FakeSource::with(vec![Ok(SyncBatch::default())]).listing(vec![1])),
+        )
+        .unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        let SyncOutcome::Pulled {
+            prepared,
+            mode,
+            count,
+        } = pulled(&handle)
+        else {
+            panic!("expected a successful pull");
+        };
+        assert_eq!(mode, SyncMode::Incremental);
+        assert_eq!(count, 1, "a work item that vanished is a change");
+        assert_eq!(prepared.ticket_count(), 1);
+
+        let stored = SqliteTicketRepository::open_existing(&path).unwrap();
+        assert_eq!(
+            stored
+                .load_all()
+                .unwrap()
+                .iter()
+                .map(|ticket| ticket.key.id)
+                .collect::<Vec<_>>(),
+            [1],
+            "the recycled work item is gone from the table"
+        );
+        assert_eq!(
+            stored.load_graph().unwrap(),
+            TicketGraph::default(),
+            "its links, comments, and history went with it"
+        );
+        assert_eq!(
+            stored_watermark(&path).as_deref(),
+            Some("2026-02-01T00:00:00Z"),
+            "a deletion moves no watermark: no changed date came back"
+        );
+    }
+
+    #[test]
+    fn a_database_with_no_watermark_is_pulled_whole_and_left_with_one() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let mut newest = ticket(7, "Pulled");
+        newest.changed_at = ts("2026-04-01T12:00:00Z");
+        let source = FakeSource::with(vec![Ok(SyncBatch {
+            tickets: vec![ticket(8, "Older"), newest.clone()],
+            relations: Vec::new(),
+        })]);
+        let watermarks = Arc::clone(&source.watermarks);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        let SyncOutcome::Pulled { mode, count, .. } = pulled(&handle) else {
+            panic!("expected a successful pull");
+        };
+        assert_eq!(
+            mode,
+            SyncMode::Full,
+            "with nowhere to start from, everything comes down"
+        );
+        assert_eq!(count, 2);
+        assert!(
+            watermarks.lock().unwrap().is_empty(),
+            "no changed-since query goes out without a watermark"
+        );
+        assert_eq!(
+            stored_watermark(&path),
+            Some(newest.changed_at.to_rfc3339()),
+            "the full pull leaves the watermark the next pull starts from"
+        );
     }
 
     #[test]
