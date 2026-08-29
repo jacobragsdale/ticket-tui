@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 use crate::app::{
     App, AppMode, DividerOrientation, Focus, HitRegions, NotificationLevel, RowDensity, SearchOrder,
 };
-use crate::command::COMMANDS;
+use crate::command::{COMMANDS, EDIT_MENU, key_label_for};
 use crate::filter::{FacetTarget, FilterField};
 use crate::model::{
     FamilySnapshot, FamilyTreeEntry, SortDirection, SortField, StateCategory, Ticket, TicketKey,
@@ -187,6 +187,8 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::Views => render_views_overlay(frame, app),
         AppMode::Info => render_info_overlay(frame, app),
         AppMode::Facets => render_facet_menu(frame, app),
+        AppMode::Edit => render_edit_menu(frame, app),
+        AppMode::StatePicker => render_state_picker(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
 }
@@ -926,6 +928,8 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             }
             AppMode::Views => "↑↓ choose  Enter load  n save  d delete  Esc close",
             AppMode::Info => "Esc/i close",
+            AppMode::Edit => "\u{2191}\u{2193}/jk choose  Enter open  Esc close",
+            AppMode::StatePicker => "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel",
             AppMode::Browse if app.focus == Focus::Family => "↑↓ move  Enter select  Tab details",
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
@@ -1607,6 +1611,92 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
             rows,
             row_hit_width: None,
             target: &|index| PointerTarget::PaletteCommand { index },
+            decorate: None,
+        },
+    );
+}
+
+/// The Edit menu: one row per field editor, each labelled with the field it
+/// changes and the key that opens it directly.
+fn render_edit_menu(frame: &mut Frame<'_>, app: &mut App) {
+    let height = u16::try_from(EDIT_MENU.len().saturating_add(2)).unwrap_or(u16::MAX);
+    let area = centered_rect(frame.area(), 40, height.max(3));
+    frame.render_widget(Clear, area);
+    let inner = render_modal_frame(frame, app, area, " Edit ");
+    let selected = app.edit_menu.index;
+    let rows: Vec<Line> = EDIT_MENU
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let marker = if index == selected { "\u{203a}" } else { " " };
+            Line::from(format!(
+                "{marker} {:<20} {}",
+                entry.label,
+                key_label_for(entry.command)
+            ))
+        })
+        .collect();
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: inner,
+            surface: ScrollSurface::EditMenu,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: true,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::EditMenuRow { index },
+            decorate: None,
+        },
+    );
+}
+
+/// The state picker: every state this work item's type allows, coloured by the
+/// same categories the table's State column uses, with the state it is in
+/// already marked and under the cursor.
+fn render_state_picker(frame: &mut Frame<'_>, app: &mut App) {
+    let options = app.state_picker.options.clone();
+    let current = app.state_picker.current.clone();
+    let height = u16::try_from(options.len().saturating_add(2))
+        .unwrap_or(u16::MAX)
+        .clamp(3, 16);
+    let area = centered_rect(frame.area(), 40, height);
+    frame.render_widget(Clear, area);
+    let title = format!(" State \u{b7} #{} ", app.state_picker.id);
+    let inner = render_modal_frame(frame, app, area, &title);
+    let selected = app.state_picker.index;
+    let rows: Vec<Line> = options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            let marker = if index == selected { "\u{203a}" } else { " " };
+            let here = if option.name == current {
+                "\u{2022}"
+            } else {
+                " "
+            };
+            Line::from(vec![
+                Span::raw(format!("{marker}{here} ")),
+                Span::styled(option.name.clone(), state_category_style(option.category)),
+            ])
+        })
+        .collect();
+    render_list_overlay(
+        frame,
+        app,
+        ListOverlay {
+            area: inner,
+            surface: ScrollSurface::StatePicker,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: true,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::StateOption { index },
             decorate: None,
         },
     );
@@ -2422,8 +2512,15 @@ fn state_color(category: StateCategory) -> Color {
 }
 
 fn state_style(state: &str) -> Style {
+    state_category_style(StateCategory::of(state))
+}
+
+/// The State column's styling for a category Azure DevOps named, rather than
+/// one guessed from the state's own text. Under NO_COLOR every colour is
+/// `Reset`, so the weight carries the distinction on its own.
+fn state_category_style(category: StateCategory) -> Style {
     Style::default()
-        .fg(state_color(StateCategory::of(state)))
+        .fg(state_color(category))
         .add_modifier(Modifier::BOLD)
 }
 
@@ -2874,13 +2971,16 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     use super::*;
     use crate::model::{
-        CommentRecord, HistoryRecord, RelationKind, RelationRecord, TicketGraph, TicketKey,
+        CommentRecord, HistoryRecord, RelationKind, RelationRecord, StateCatalog, StateOption,
+        TicketGraph, TicketKey,
     };
     use crate::pointer::PointerTarget;
 
@@ -3949,6 +4049,96 @@ mod tests {
         click(&mut app, x, y);
         assert!(app.filter_overlay.showing_values);
         assert_eq!(app.filter_overlay.field_index, 2);
+    }
+
+    #[test]
+    fn the_edit_menu_and_the_state_picker_render_their_rows_and_state_colours() {
+        let mut app = App::new(vec![ticket_at(
+            10_001,
+            "Fix ticket search",
+            "Issue",
+            "To Do",
+            "2026-03-03T00:00:00Z",
+        )]);
+        app.enable_sync();
+        let mut catalog = StateCatalog::default();
+        catalog.insert(
+            "Issue",
+            vec![
+                StateOption::new("To Do", StateCategory::Proposed),
+                StateOption::new("Doing", StateCategory::InProgress),
+                StateOption::new("Done", StateCategory::Completed),
+            ],
+        );
+        app.set_state_catalog(catalog);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        let menu = render_text(80, 20, &mut app);
+        assert!(menu.contains("Edit"), "{menu}");
+        assert!(menu.contains("State"), "{menu}");
+        assert!(menu.contains('S'), "the menu names the key that skips it");
+
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::EditMenuRow { index: 0 }))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("the State row should be clickable");
+        assert_eq!(click(&mut app, x, y), crate::app::AppAction::None);
+        assert_eq!(app.mode, AppMode::StatePicker);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let rows: Vec<(u16, u16)> = (0..3)
+            .map(|index| {
+                app.hit_regions
+                    .find_target(|target| {
+                        matches!(target, PointerTarget::StateOption { index: at } if *at == index)
+                    })
+                    .map(|region| (region.rect.x, region.rect.y))
+                    .expect("every state should be clickable")
+            })
+            .collect();
+        // The name starts after the cursor marker and the current-state dot.
+        let colours: Vec<(Color, Modifier)> = rows
+            .iter()
+            .map(|(x, y)| {
+                let (fg, _, modifier) = painted_cell(&terminal, x + 3, *y);
+                (fg, modifier)
+            })
+            .collect();
+        for (index, (fg, modifier)) in colours.iter().enumerate() {
+            assert_eq!(
+                *fg,
+                state_color(
+                    [
+                        StateCategory::Proposed,
+                        StateCategory::InProgress,
+                        StateCategory::Completed,
+                    ][index]
+                ),
+                "state {index} should carry its category colour"
+            );
+            assert!(
+                modifier.contains(Modifier::BOLD),
+                "bold carries the distinction where NO_COLOR leaves no palette"
+            );
+        }
+        if theme() != &Theme::new(true) {
+            assert_distinct_and_legible(&colours.iter().map(|(fg, _)| *fg).collect::<Vec<_>>());
+        }
+
+        let picker = render_text(80, 20, &mut app);
+        assert!(picker.contains("State \u{b7} #10001"), "{picker}");
+        assert!(picker.contains("Doing"), "{picker}");
+
+        // Clicking another state writes it, the same as Enter would.
+        let (x, y) = rows[1];
+        let action = click(&mut app, x, y);
+        let crate::app::AppAction::Edit(request) = action else {
+            panic!("clicking a state should dispatch an edit, got {action:?}");
+        };
+        assert_eq!(request.edit.summary(), "State \u{2192} Doing");
+        assert_eq!(app.mode, AppMode::Browse);
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {

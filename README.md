@@ -146,6 +146,12 @@ Hierarchy links become parent and child relations; related, predecessor,
 successor, and duplicate links are stored as themselves. Other link types, such
 as attachments, are ignored.
 
+The first pull a work item type appears in also reads
+`/_apis/wit/workitemtypes/<type>/states` and stores that type's states in
+`work_item_type_states`, which is what the state picker offers. A type is asked
+about once per run; a request that fails is retried on the next pull and never
+sinks it.
+
 The first pull also reads `/_apis/profile/profiles/me` for the signed-in display
 name and stores it in the cache's `sync_meta` table. The profile host is
 separate from the work-item host, so a failure there is skipped rather than
@@ -195,8 +201,19 @@ on screen over the rows the pull brought. There is no offline queue: without a
 configured organization an edit is refused before anything changes, and an edit
 that cannot be sent is reverted rather than saved for later.
 
-No keypress makes an edit yet; the state picker is the first field to use this
-path.
+`e` opens the Edit menu, which lists the fields that can be changed; `S`
+(capital, because `s` is the sort menu) skips it and opens the state picker
+directly. The picker lists the states the selected work item's type allows,
+coloured by category and with the state it is in already under the cursor.
+`Enter` writes the state chosen down the path above, `Esc` changes nothing, and
+choosing the state it is already in closes without a write. A transition Azure
+DevOps refuses puts the row back and says why.
+
+The picker never waits for the network. It offers the states cached in
+`work_item_type_states` when a pull has fetched them, and otherwise the distinct
+states already in the database for that type, ordered by category — Proposed,
+In Progress, Resolved, Completed, Removed — then by name, so it opens instantly
+on a database that has never reached Azure DevOps.
 
 ## Controls
 
@@ -221,6 +238,8 @@ path.
 | `w` | Show or hide (`Space`), reorder (`J`/`K`), and resize (`<`/`>`) columns |
 | `p` / `:` | Open the command palette |
 | `V` | Open named views; `n` saves, `Enter` loads, `d` deletes |
+| `e` | Open the Edit menu of field editors; `Enter` opens the one chosen |
+| `S` | Change the selected work item's state; `Enter` applies, `Esc` cancels |
 | `m` | Bookmark or unbookmark the selected ticket |
 | `Space` | Toggle ticket multi-select |
 | `y` | Copy selected (or current) ticket IDs |
@@ -317,7 +336,15 @@ semicolon separation. The `work_item_relations`, `work_item_comments`, and
 key/value table describes the sync itself rather than the work items, so a pull
 clears the other tables but leaves it alone; `me_display_name` lives there.
 
-The database carries `PRAGMA user_version = 6`. Because Azure DevOps is the
+The `work_item_type_states` table holds what the state picker offers:
+`work_item_type`, `name`, `category` (`Proposed`, `InProgress`, `Resolved`,
+`Completed`, or `Removed`), and `position`, the order the process template lists
+the state in, keyed on `(work_item_type, name)`. Like `sync_meta` it describes
+the project's process rather than its work items, so a pull leaves it alone; a
+type is rewritten whole when its states are fetched, so a retired state stops
+being offered.
+
+The database carries `PRAGMA user_version = 7`. Because Azure DevOps is the
 record of truth, there are no migrations: a database at any other version has
 its tables dropped and recreated at startup, and a pull runs immediately to
 refill it, whatever `--refresh` says. Deleting the file has the same effect. The

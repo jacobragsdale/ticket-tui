@@ -8,6 +8,8 @@ pub enum CommandId {
     MoreFilters,
     Columns,
     Views,
+    EditMenu,
+    ChangeState,
     Sort,
     Help,
     Sync,
@@ -133,6 +135,18 @@ pub const COMMANDS: &[Command] = &[
         title: "Named views",
         keys: &[key('V')],
         help: "Save and restore",
+    },
+    Command {
+        id: CommandId::EditMenu,
+        title: "Edit\u{2026}",
+        keys: &[key('e')],
+        help: "Change a field",
+    },
+    Command {
+        id: CommandId::ChangeState,
+        title: "Change state",
+        keys: &[key('S')],
+        help: "Move the work item",
     },
     Command {
         id: CommandId::SaveView,
@@ -280,6 +294,32 @@ pub const COMMANDS: &[Command] = &[
     },
 ];
 
+/// One row of the Edit menu: the field it changes, and the command that opens
+/// its editor. Every field editor is one row here, so adding an editor is
+/// adding its command to [`COMMANDS`] and its field to this table.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditMenuEntry {
+    /// The field's name, as the menu lists it.
+    pub label: &'static str,
+    pub command: CommandId,
+}
+
+pub const EDIT_MENU: &[EditMenuEntry] = &[EditMenuEntry {
+    label: "State",
+    command: CommandId::ChangeState,
+}];
+
+/// The bindings one command answers to, for menus that name a command rather
+/// than a key.
+#[must_use]
+pub fn key_label_for(id: CommandId) -> String {
+    COMMANDS
+        .iter()
+        .find(|command| command.id == id)
+        .map(Command::key_label)
+        .unwrap_or_default()
+}
+
 /// crossterm reports SHIFT alongside the uppercase character it produced, so drop
 /// it before comparing a pressed key against the bindings.
 fn normalized_modifiers(event: KeyEvent) -> KeyModifiers {
@@ -372,7 +412,12 @@ mod tests {
         );
         assert_eq!(
             command_for_key(press(KeyCode::Char('S'), KeyModifiers::SHIFT)),
-            None
+            Some(CommandId::ChangeState),
+            "capital S is the state picker; lowercase s stays the sort menu"
+        );
+        assert_eq!(
+            command_for_key(press(KeyCode::Char('e'), KeyModifiers::NONE)),
+            Some(CommandId::EditMenu)
         );
         assert_eq!(
             command_for_key(press(KeyCode::Tab, KeyModifiers::NONE)),

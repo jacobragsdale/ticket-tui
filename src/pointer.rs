@@ -30,6 +30,8 @@ pub enum ScrollSurface {
     Views,
     FacetMenu,
     Sort,
+    EditMenu,
+    StatePicker,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,6 +95,14 @@ pub enum PointerTarget {
     },
     PaletteQuery,
     ViewRow {
+        index: usize,
+    },
+    /// One field editor in the Edit menu.
+    EditMenuRow {
+        index: usize,
+    },
+    /// One state in the state picker.
+    StateOption {
         index: usize,
     },
     SaveView,

@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -85,6 +85,100 @@ impl StateCategory {
             "removed" | "cut" | "rejected" => Self::Removed,
             _ => Self::Unknown,
         }
+    }
+
+    /// The category names Azure DevOps itself uses, in
+    /// `/_apis/wit/workitemtypes/{type}/states` and in the database.
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "proposed" => Self::Proposed,
+            "inprogress" | "in progress" => Self::InProgress,
+            "resolved" => Self::Resolved,
+            "completed" => Self::Completed,
+            "removed" => Self::Removed,
+            _ => Self::Unknown,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proposed => "Proposed",
+            Self::InProgress => "InProgress",
+            Self::Resolved => "Resolved",
+            Self::Completed => "Completed",
+            Self::Removed => "Removed",
+            Self::Unknown => "Unknown",
+        }
+    }
+
+    /// Where the category sits in the order a workflow runs, which is the
+    /// order the state picker falls back to when nothing is cached.
+    #[must_use]
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Proposed => 0,
+            Self::InProgress => 1,
+            Self::Resolved => 2,
+            Self::Completed => 3,
+            Self::Removed => 4,
+            Self::Unknown => 5,
+        }
+    }
+}
+
+/// One state a work item type can be moved to, and the category that colours
+/// it. The order the picker shows is the order Azure DevOps listed them in.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StateOption {
+    pub name: String,
+    pub category: StateCategory,
+}
+
+impl StateOption {
+    /// A state named without a category from Azure DevOps, classified the same
+    /// way the table classifies the state it already holds.
+    #[must_use]
+    pub fn of(name: impl Into<String>) -> Self {
+        let name = name.into();
+        let category = StateCategory::of(&name);
+        Self { name, category }
+    }
+
+    #[must_use]
+    pub fn new(name: impl Into<String>, category: StateCategory) -> Self {
+        Self {
+            name: name.into(),
+            category,
+        }
+    }
+}
+
+/// The states each work item type allows, as Azure DevOps lists them. Empty
+/// until a sync has fetched them, which is why the picker also has a fallback.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StateCatalog {
+    by_type: HashMap<String, Vec<StateOption>>,
+}
+
+impl StateCatalog {
+    pub fn insert(&mut self, work_item_type: impl Into<String>, states: Vec<StateOption>) {
+        self.by_type.insert(work_item_type.into(), states);
+    }
+
+    /// The cached states for one work item type, or nothing when none were
+    /// stored for it.
+    #[must_use]
+    pub fn states_for(&self, work_item_type: &str) -> &[StateOption] {
+        self.by_type
+            .get(work_item_type)
+            .map_or(&[][..], Vec::as_slice)
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_type.is_empty()
     }
 }
 

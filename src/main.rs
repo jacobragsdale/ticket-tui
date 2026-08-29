@@ -131,7 +131,8 @@ impl ReloadEngine {
                     let repository = SqliteTicketRepository::open_existing(&path)?;
                     let tickets = repository.load_all()?;
                     let graph = repository.load_graph()?;
-                    Ok(PreparedTickets::with_graph(tickets, graph))
+                    let states = repository.load_type_states()?;
+                    Ok(PreparedTickets::with_graph(tickets, graph).with_states(states))
                 })()
                 .map_err(|error| format!("{error:#}"));
                 let _ = sender.send(result);
@@ -192,6 +193,7 @@ fn run() -> Result<()> {
     let database_is_empty = tickets.is_empty();
     let mut app = App::new(tickets);
     app.set_workspace_graph(graph);
+    app.set_state_catalog(repository.load_type_states()?);
     app.set_me(resolve_me(
         repository.meta(db::ME_DISPLAY_NAME_KEY)?,
         std::env::var("TICKET_TUI_ME").ok(),
@@ -278,6 +280,22 @@ fn blocking_sync(repository: &mut SqliteTicketRepository, config: &AzureConfig) 
         ..TicketGraph::default()
     };
     let count = repository.replace_all(&batch.tickets, &graph)?;
+    // The state picker reads these from the database, so the pull that fills it
+    // fills them too. A type whose states cannot be read is skipped: the picker
+    // falls back to the states the rows already carry.
+    let mut types: Vec<&str> = Vec::new();
+    for ticket in &batch.tickets {
+        if !types.contains(&ticket.work_item_type.as_str()) {
+            types.push(&ticket.work_item_type);
+        }
+    }
+    for work_item_type in types {
+        if let Ok(states) = client.fetch_work_item_type_states(work_item_type)
+            && !states.is_empty()
+        {
+            repository.replace_type_states(work_item_type, &states)?;
+        }
+    }
     if let Some(display_name) = client.current_user_display_name()? {
         repository.set_meta(db::ME_DISPLAY_NAME_KEY, &display_name)?;
     }
@@ -780,7 +798,7 @@ mod tests {
     use ticket_tui::app::NotificationLevel;
     use ticket_tui::azure::{RequestRejected, SyncBatch};
     use ticket_tui::edit::FieldEdit;
-    use ticket_tui::model::{RelationRecord, Ticket, TicketGraph, TicketKey};
+    use ticket_tui::model::{RelationRecord, StateOption, Ticket, TicketGraph, TicketKey};
     use ticket_tui::sync::{SourceConnector, WorkItemSource};
     use ticket_tui::timestamp::Timestamp;
 
@@ -861,6 +879,12 @@ mod tests {
                 Some(ticket) => Ok((ticket, Vec::new())),
                 None => bail!("the fake source was not given a stored copy"),
             }
+        }
+
+        /// The state picker is fed from the database, so these tests never need
+        /// the endpoint; answering with nothing keeps a pull from asking twice.
+        fn work_item_type_states(&self, _work_item_type: &str) -> Result<Vec<StateOption>> {
+            Ok(Vec::new())
         }
     }
 
