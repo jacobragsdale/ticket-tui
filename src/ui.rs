@@ -142,7 +142,6 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
         AppMode::Palette => render_palette(frame, app),
         AppMode::Views => render_views_overlay(frame, app),
         AppMode::Info => render_info_overlay(frame, app),
-        AppMode::Prompt => render_prompt_overlay(frame, app),
         AppMode::Facets => render_facet_menu(frame, app),
         AppMode::Browse | AppMode::Search => {}
     }
@@ -808,7 +807,6 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             }
             AppMode::Views => "↑↓ choose  Enter load  n save  d delete  Esc close",
             AppMode::Info => "Esc/i close",
-            AppMode::Prompt => "Type a file path  Enter import  Esc cancel",
             AppMode::Browse if app.focus == Focus::Family => "↑↓ move  Enter select  Tab details",
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
@@ -952,7 +950,7 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         Line::from("  Click           Activate buttons, rows, links, headers, and checkboxes"),
         Line::from("  Drag            Select visible text and copy it on release"),
         Line::from("  Scrollbar       Click the track or drag the thumb"),
-        Line::from("  Paste           Insert into search, palette, import, and view-name fields"),
+        Line::from("  Paste           Insert into search, palette, and view-name fields"),
         Line::from(""),
         Line::styled(
             "Press ? or Esc to close",
@@ -1980,13 +1978,8 @@ fn state_is_done(state: &str) -> bool {
 }
 
 fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
-    let area = centered_rect(frame.area(), 62, 11);
+    let area = centered_rect(frame.area(), 62, 10);
     frame.render_widget(Clear, area);
-    let mode = if app.read_only {
-        "read-only"
-    } else {
-        "read-write"
-    };
     let stale = if app.stale { "stale" } else { "current" };
     let path = if app.database_path.as_os_str().is_empty() {
         "(not set)".into()
@@ -1995,7 +1988,6 @@ fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
     };
     let text = Text::from(vec![
         field_line("Path", path),
-        field_line("Mode", mode),
         field_line("Tickets", app.tickets().len().to_string()),
         field_line("Visible", app.visible_count().to_string()),
         field_line("Loaded", app.freshness_label()),
@@ -2016,67 +2008,6 @@ fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
         None,
     ));
     capture_selectable(frame, app, SelectableSurface::Overlay, inner, false);
-}
-
-fn render_prompt_overlay(frame: &mut Frame<'_>, app: &mut App) {
-    let area = centered_rect(frame.area(), 64, 7);
-    frame.render_widget(Clear, area);
-    let title = match app.prompt.as_ref().map(|prompt| prompt.kind) {
-        Some(crate::app::PromptKind::ImportCsv) => " Import CSV ",
-        _ => " Import JSON ",
-    };
-    let inner = render_modal_frame(frame, app, area, title);
-    let buffer = app
-        .prompt
-        .as_ref()
-        .map_or("", |prompt| prompt.buffer.as_str())
-        .to_owned();
-    let cursor = app.prompt.as_ref().map_or(0, |prompt| prompt.cursor);
-    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("Path: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(buffer.clone()),
-        ])),
-        chunks[0],
-    );
-    let field = Rect::new(
-        chunks[0].x.saturating_add(6),
-        chunks[0].y,
-        chunks[0].width.saturating_sub(6),
-        1,
-    );
-    app.hit_regions.push(region(
-        field,
-        PointerTarget::PromptField,
-        PointerLayer::Modal,
-        Some(SelectableSurface::Prompt),
-        None,
-    ));
-    capture_selectable(frame, app, SelectableSurface::Prompt, field, false);
-    let cursor_x = field
-        .x
-        .saturating_add(u16::try_from(cursor).unwrap_or(u16::MAX))
-        .min(field.x.saturating_add(field.width.saturating_sub(1)));
-    frame.set_cursor_position((cursor_x, field.y));
-    render_control(
-        frame,
-        app,
-        Rect::new(chunks[1].x, chunks[1].y, 8, 1),
-        "[Import]",
-        PointerTarget::ImportSubmit,
-        PointerLayer::Modal,
-        !buffer.trim().is_empty(),
-    );
-    render_control(
-        frame,
-        app,
-        Rect::new(chunks[1].x.saturating_add(9), chunks[1].y, 8, 1),
-        "[Cancel]",
-        PointerTarget::ImportCancel,
-        PointerLayer::Modal,
-        true,
-    );
 }
 
 fn overlay_line(text: String, selected: bool) -> Line<'static> {
@@ -2590,7 +2521,6 @@ fn paint_hover(frame: &mut Frame<'_>, app: &App) {
             | PointerTarget::OverlayBody
             | PointerTarget::DismissFacet
             | PointerTarget::PaletteQuery
-            | PointerTarget::PromptField
             | PointerTarget::ViewName
     ) {
         return;

@@ -12,7 +12,6 @@ pub const SCHEMA_VERSION: u8 = 1;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct AgentContext {
     pub database_path: String,
-    pub read_only: bool,
     pub mode: String,
     pub focus: String,
     pub screen: String,
@@ -144,7 +143,6 @@ mod tests {
     fn context(database_path: String) -> AgentContext {
         AgentContext {
             database_path,
-            read_only: false,
             mode: "browse".into(),
             focus: "tickets".into(),
             screen: "workspace".into(),

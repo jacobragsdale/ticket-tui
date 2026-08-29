@@ -17,7 +17,6 @@ pub enum SelectableSurface {
     Details,
     Help,
     Overlay,
-    Prompt,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -37,7 +36,6 @@ pub enum ScrollSurface {
 pub enum TextEditor {
     Search,
     Palette,
-    Prompt,
     ViewName,
 }
 
@@ -101,9 +99,6 @@ pub enum PointerTarget {
     DeleteView,
     ViewName,
     CancelNaming,
-    ImportSubmit,
-    ImportCancel,
-    PromptField,
     OverlayBody,
     ScrollbarTrack {
         surface: ScrollSurface,

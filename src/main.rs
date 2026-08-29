@@ -16,7 +16,6 @@ use crossterm::execute;
 use ticket_tui::agent_context::{self, AgentContext};
 use ticket_tui::app::{App, AppAction, CopiedContent, PointerTarget, PreparedTickets};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
-use ticket_tui::import::{self, ImportFormat};
 use ticket_tui::session;
 use url::Url;
 
@@ -26,12 +25,6 @@ struct Cli {
     /// SQLite database to open instead of the platform data-directory default
     #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
     database: Option<PathBuf>,
-    /// Open the database without migrating, seeding, or journal changes
-    #[arg(long)]
-    read_only: bool,
-    /// Import a local JSON or CSV file before opening the TUI
-    #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
-    import: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -68,7 +61,7 @@ impl AgentContextPublisher {
 }
 
 impl ReloadEngine {
-    fn start(&mut self, path: &Path, read_only: bool) -> Result<bool> {
+    fn start(&mut self, path: &Path) -> Result<bool> {
         if self.receiver.is_some() {
             return Ok(false);
         }
@@ -79,11 +72,7 @@ impl ReloadEngine {
             .name("ticket-reload".into())
             .spawn(move || {
                 let result = (|| -> Result<PreparedTickets> {
-                    let repository = if read_only {
-                        SqliteTicketRepository::open_read_only(&path)?
-                    } else {
-                        SqliteTicketRepository::open(&path)?.repository
-                    };
+                    let repository = SqliteTicketRepository::open(&path)?;
                     let tickets = repository.load_all()?;
                     let graph = repository.load_graph()?;
                     Ok(PreparedTickets::with_graph(tickets, graph))
@@ -117,29 +106,14 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let database_path = cli.database.unwrap_or_else(default_database_path);
-    if cli.read_only && cli.import.is_some() {
-        bail!("--import cannot be used with --read-only");
-    }
-    let (mut repository, seeded_demo_data) = if cli.read_only {
-        (
-            SqliteTicketRepository::open_read_only(&database_path)?,
-            false,
-        )
-    } else {
-        let opened = SqliteTicketRepository::open(&database_path)?;
-        (opened.repository, opened.seeded_demo_data)
-    };
-    if let Some(import_path) = &cli.import {
-        let report = import_file(&mut repository, import_path, import_format(import_path))?;
-        eprintln!("imported {report}");
-    }
+    let repository = SqliteTicketRepository::open(&database_path)?;
     let tickets = repository.load_all()?;
     let graph = repository.load_graph()?;
+    let cache_is_empty = tickets.is_empty();
     let mut app = App::new(tickets);
     app.set_workspace_graph(graph);
     app.configure_database(
         repository.path().to_path_buf(),
-        cli.read_only,
         db::data_signature(repository.path()),
     );
     let session_path = session::path_for(repository.path());
@@ -147,16 +121,11 @@ fn run() -> Result<()> {
         Ok(loaded) => app.restore_session(loaded),
         Err(error) => app.set_error(format!("Could not load session: {error:#}")),
     }
-    if seeded_demo_data {
-        app.set_status(format!(
-            "Created demo database with 500 tickets at {}",
-            repository.path().display()
-        ));
-    } else if cli.read_only {
-        app.set_status(format!("Opened {} read-only", repository.path().display()));
+    if cache_is_empty {
+        app.set_status("Cache is empty; run with --sync to pull work items from Azure DevOps");
     }
     let mut context_publisher = AgentContextPublisher::new(repository.path());
-    let result = run_terminal(&mut app, &mut repository, &mut context_publisher);
+    let result = run_terminal(&mut app, &repository, &mut context_publisher);
     let remove_context = context_publisher.remove();
     if let Err(error) = session::save(&session_path, &app.snapshot_session()) {
         eprintln!("warning: could not save session: {error:#}");
@@ -172,7 +141,7 @@ fn run() -> Result<()> {
 
 fn run_terminal(
     app: &mut App,
-    repository: &mut SqliteTicketRepository,
+    repository: &SqliteTicketRepository,
     context_publisher: &mut AgentContextPublisher,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
@@ -237,7 +206,7 @@ fn run_terminal(
 fn handle_action(
     action: AppAction,
     app: &mut App,
-    repository: &mut SqliteTicketRepository,
+    repository: &SqliteTicketRepository,
     opener: &dyn UrlOpener,
     reloader: &mut ReloadEngine,
 ) {
@@ -256,13 +225,6 @@ fn handle_action(
             Ok(()) => app.set_status(format!("Exported {}", path.display())),
             Err(error) => app.set_error(format!("Could not export {}: {error:#}", path.display())),
         },
-        AppAction::Import { path, format } => match import_file(repository, &path, format) {
-            Ok(summary) => {
-                app.set_status(format!("Imported {summary}"));
-                start_reload(app, repository, reloader, "Reloading imported tickets…");
-            }
-            Err(error) => app.set_error(format!("Import failed: {error:#}")),
-        },
     }
 }
 
@@ -276,7 +238,7 @@ fn start_reload(
     reloader: &mut ReloadEngine,
     message: &str,
 ) {
-    match reloader.start(repository.path(), app.read_only) {
+    match reloader.start(repository.path()) {
         Ok(true) => {
             app.reload_pending = true;
             app.set_status(message);
@@ -298,55 +260,6 @@ fn poll_watch(
     app.mark_stale();
     start_reload(app, repository, reloader, "Database changed; reloading…");
     true
-}
-
-fn import_file(
-    repository: &mut SqliteTicketRepository,
-    path: &Path,
-    format: ImportFormat,
-) -> Result<String> {
-    let raw =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let batch = match format {
-        ImportFormat::Json => import::parse_json(&raw),
-        ImportFormat::Csv => import::parse_csv(&raw),
-    };
-    if batch.tickets.is_empty() {
-        let details = batch
-            .diagnostics
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("; ");
-        bail!(
-            "no valid tickets in {}{}",
-            path.display(),
-            if details.is_empty() {
-                String::new()
-            } else {
-                format!(" ({details})")
-            }
-        );
-    }
-    repository.import_batch(&batch)?;
-    let mut summary = batch.summary();
-    if !batch.diagnostics.is_empty() {
-        let issues: Vec<_> = batch.diagnostics.iter().map(ToString::to_string).collect();
-        summary = format!("{summary}; issues: {}", issues.join("; "));
-    }
-    Ok(summary)
-}
-
-fn import_format(path: &Path) -> ImportFormat {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("csv") => ImportFormat::Csv,
-        _ => ImportFormat::Json,
-    }
 }
 
 fn persist_session(app: &mut App, repository: &SqliteTicketRepository) -> bool {
@@ -474,7 +387,6 @@ fn poll_reload(
             app.replace_prepared_tickets(prepared);
             app.configure_database(
                 repository.path().to_path_buf(),
-                app.read_only,
                 db::data_signature(repository.path()),
             );
             app.set_status(format!("Reloaded {count} tickets"));
@@ -520,8 +432,43 @@ mod tests {
 
     use super::*;
     use tempfile::tempdir;
+    use ticket_tui::model::{Ticket, TicketGraph, TicketKey};
+    use ticket_tui::timestamp::Timestamp;
 
     struct FailingOpener;
+
+    fn ticket(id: i64) -> Ticket {
+        Ticket {
+            key: TicketKey {
+                organization: "example-org".into(),
+                id,
+            },
+            project: "atlas".into(),
+            revision: 1,
+            work_item_type: "Task".into(),
+            title: format!("Ticket {id}"),
+            state: "Active".into(),
+            reason: None,
+            assigned_to: Some("Avery Chen".into()),
+            priority: Some(2),
+            area_path: "Atlas".into(),
+            iteration_path: "Atlas\\Sprint 1".into(),
+            tags: Vec::new(),
+            description: String::new(),
+            created_at: Timestamp::parse("2026-01-01T00:00:00Z").unwrap(),
+            changed_at: Timestamp::parse(&format!("2026-0{id}-01T00:00:00Z")).unwrap(),
+            web_url: format!("https://dev.azure.com/example-org/atlas/_workitems/edit/{id}"),
+        }
+    }
+
+    fn seeded_repository(path: &Path) -> SqliteTicketRepository {
+        let mut repository = SqliteTicketRepository::open(path).unwrap();
+        let tickets: Vec<Ticket> = (1..=3).map(ticket).collect();
+        repository
+            .replace_all(&tickets, &TicketGraph::default())
+            .unwrap();
+        repository
+    }
 
     impl UrlOpener for FailingOpener {
         fn open(&self, _url: &Url) -> Result<()> {
@@ -585,12 +532,11 @@ mod tests {
     fn reload_engine_loads_and_prepares_tickets_in_the_background() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tickets.sqlite3");
-        let opened = SqliteTicketRepository::open(&path).unwrap();
-        drop(opened);
+        drop(seeded_repository(&path));
         let mut reloader = ReloadEngine::default();
 
-        assert!(reloader.start(&path, false).unwrap());
-        assert!(!reloader.start(&path, false).unwrap());
+        assert!(reloader.start(&path).unwrap());
+        assert!(!reloader.start(&path).unwrap());
 
         let deadline = Instant::now() + Duration::from_secs(2);
         let prepared = loop {
@@ -600,16 +546,16 @@ mod tests {
             assert!(Instant::now() < deadline, "reload worker timed out");
             thread::yield_now();
         };
-        assert_eq!(prepared.ticket_count(), 500);
+        assert_eq!(prepared.ticket_count(), 3);
     }
 
     #[test]
     fn view_changes_are_published_to_the_agent_context_file() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("tickets.sqlite3");
-        let repository = SqliteTicketRepository::open(&path).unwrap().repository;
+        let repository = seeded_repository(&path);
         let mut app = App::new(repository.load_all().unwrap());
-        app.configure_database(path.clone(), false, db::data_signature(&path));
+        app.configure_database(path.clone(), db::data_signature(&path));
         app.set_table_viewport(3);
         let mut publisher = AgentContextPublisher::new(&path);
         publisher.publish(&app).unwrap();
