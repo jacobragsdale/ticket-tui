@@ -6,6 +6,15 @@ context path is `tickets.context.json`. The file is written atomically and
 removed on a clean exit, so its absence means no TUI is running — read the
 backlog with `ticket-tui list` instead.
 
+## Contents
+
+- [Top-level fields](#top-level-fields)
+- [Sync fields](#sync-fields)
+- [Pending edit fields](#pending-edit-fields)
+- [Search fields](#search-fields)
+- [Ticket viewport fields](#ticket-viewport-fields)
+- [Reading it](#reading-it)
+
 The file can survive a crash or forced termination. `process_id` is a
 best-effort liveness check, and `updated_at` is the UTC RFC 3339 time of the
 last state change. Neither field is a heartbeat guarantee.
@@ -15,27 +24,42 @@ open the same database they share one context path and the last rendered write
 wins.
 
 This document is the live *view*. It is not the backlog: it carries only the
-rendered viewport and the current selection. For work item data use
+rendered viewport and the current selection of each tab. For the data itself use
 [cli.md](cli.md), and for records the CLI does not print use
 [database.md](database.md).
 
 ## Top-level fields
 
-Current contract: **schema version 2**. A reader that finds another version
+Current contract: **schema version 3**. A reader that finds another version
 should refuse rather than guess. A field may be added to a block within a
 version — `tickets.finished_hidden` was — so a reader should ignore fields it
 does not know rather than refuse them; only removing or reshaping a field
 already documented here bumps the version.
 
+Version 3 describes **all four tabs**, whether or not the user is looking at
+them: `active_tab` says where they are, and the four blocks say what each tab
+holds. Everything version 2 kept at the top level moved under `work_items`
+unchanged.
+
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | integer | Context contract version; currently `2` |
+| `schema_version` | integer | Context contract version; currently `3` |
 | `process_id` | integer | PID of the ticket-tui process that wrote the file |
 | `updated_at` | string | UTC RFC 3339 time of the published state change |
 | `database_path` | string | SQLite database backing the view |
 | `me` | string or null | Signed-in display name recorded by sync, including the background refresh, overridden by `TICKET_TUI_ME`; null when neither is set |
 | `sync` | object | Where the rows are pulled from and how the last pull went |
 | `pending_edits` | pending edit array | Edits sent to Azure DevOps and not answered yet |
+| `active_tab` | string | `work_items`, `repos`, `pull_requests`, or `pipelines` |
+| `work_items` | object | The Work items tab |
+| `repos` | object | The Repos tab |
+| `pull_requests` | object | The Pull requests tab |
+| `pipelines` | object | The Pipelines tab |
+
+### `work_items`
+
+| Field | Type | Meaning |
+|---|---|---|
 | `mode` | string | `browse`, `search`, or the active overlay name |
 | `focus` | string | `tickets`, `family`, or `details` |
 | `screen` | string | `workspace` or the narrow-layout `details` screen |
@@ -47,6 +71,58 @@ already documented here bumps the version.
 | `checked_tickets` | ticket array | Multi-select set used for bulk actions |
 | `family_cursor` | ticket reference or null | Keyboard cursor within the family tree |
 | `details_scroll_line` | integer | Zero-based details-pane scroll line |
+
+### `repos`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `selected` | repo or null | The row the cursor is on |
+| `visible_rows` | repo array | Every row the filter leaves on the table |
+| `workspace` | string or null | Where clones are looked for and made |
+
+A repo carries `id`, `name`, `default_branch`, `is_disabled`, `pull_requests`
+and `pipelines` (how many are open against it), `web_url`, and `local` — null
+for a repository that is not on this machine, otherwise `path`, `branch`,
+`dirty`, `ahead`, `behind`, and `busy` (`cloning`, `fetching`, `pulling`, or
+null).
+
+### `pull_requests`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `selected` | pull request or null | The row the cursor is on, with its details |
+| `visible_rows` | row array | Every row the filter leaves on the table |
+| `to_review_count` | integer | How many are waiting on the signed-in user's vote |
+| `closed_shown` | boolean | Whether closed pull requests are on the table |
+
+A row carries `id`, `repo`, `title`, `author`, `status`, `is_draft`,
+`source_branch`, `target_branch`, `merge_status`, `my_vote` and `web_url`. The
+selected one adds `reviewers` (`name`, `vote`, `is_required`), `work_items`,
+`build` (`status`, `run_id`), `auto_complete`, `thread_count` and
+`unresolved_threads`. Votes are the API's scale: `10` approved, `5` approved
+with suggestions, `0` none, `-5` waiting, `-10` rejected.
+
+### `pipelines`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `level` | string | `pipelines` or `runs` — which list the tab is showing |
+| `selected_pipeline` | pipeline or null | `id`, `name`, `folder`, `repo`, `web_url` |
+| `selected_run` | run or null | The run the details pane is on |
+| `following_log` | object or null | The log being tailed: `run_id`, `log_id`, `node`, `line_count`, `following` |
+| `running` | integer | How many runs are going right now |
+| `watched` | integer array | The runs `w` is following |
+| `pending_approvals` | integer | How many approvals the project is waiting on |
+
+A run carries `id`, `pipeline_id`, `build_number`, `status`, `result`,
+`branch`, `requested_for`, `started_at`, `finished_at`, `web_url`, and `stages`
+— the top level of the timeline only, each with `name`, `state` and `result`.
+The whole tree would be longer than the rest of the document; read it with
+`ticket-tui runs show <id> --json`.
+
+Runs, timelines and logs are live rather than stored, so this block is only as
+current as the watcher's last poll, and it is empty on a run that has never
+opened the tab.
 
 ## Sync fields
 
@@ -106,7 +182,7 @@ for the entry to clear.
 
 ## Search fields
 
-`search.query` preserves the complete user input. `search.fuzzy_text` contains
+These live under `work_items`. `search.query` preserves the complete user input. `search.fuzzy_text` contains
 only free-text terms. `search.filters` contains canonical labels such as
 `state:Active`, `tag:rust`, `changed:<7d`, and `is:bookmarked` — the same
 grammar `ticket-tui list --query` takes, described in [filters.md](filters.md).
@@ -124,6 +200,8 @@ is ordered by (`changed`, `priority`, `id`, `title`, `state`, `type`,
 `compact` or `comfortable`.
 
 ## Ticket viewport fields
+
+All of these live under `work_items`.
 
 `tickets.total_count` is the number of work items loaded from SQLite.
 `tickets.matching_count` is the complete filtered/search result count.
@@ -147,7 +225,12 @@ has no such rule and reads the database directly.
 
 Ticket objects carry `organization`, `project`, `id`, `work_item_type`, `title`,
 `state`, `assigned_to`, `priority`, `tags`, `web_url`, `bookmarked`, and
-`checked`. A family cursor is only a ticket reference, with `organization` and
+`checked`. The selected one also carries `related` when it has artifact links:
+one entry per pull request, commit or build the work item was worked on with,
+each with `kind` (`pull_request`, `commit`, `build`), `name` as Azure DevOps
+labels the link, `repo`, `target` (the id or the commit sha), and `in_database`
+— which is what tells you whether `ticket-tui prs show` or `runs show` will find
+it. The field is left out entirely when there are none. A family cursor is only a ticket reference, with `organization` and
 `id`. For the description, comments, history, or the parent/child graph, take
 the `id` to `ticket-tui show <id>` or to SQLite.
 

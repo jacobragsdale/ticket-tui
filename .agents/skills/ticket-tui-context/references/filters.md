@@ -1,8 +1,24 @@
-# The filter grammar
+# The filter grammars
 
-One grammar serves `ticket-tui list --query`, the TUI's search box, and the
-`search.query` field in the context JSON. It is not WIQL — the global
-`--query WIQL` flag that narrows a *pull* is a different thing entirely.
+One shape, four vocabularies. Work items, repositories, pull requests and runs
+each have their own fields; everything else — how values combine, how they are
+quoted, how sentinels resolve — is the same everywhere, and the same in the
+TUI's search boxes and in the `search.query` field of the context JSON. None of
+it is WIQL: the global `--query WIQL` flag that narrows a *pull* is a different
+thing entirely.
+
+## Contents
+
+- [Work items — `ticket-tui list --query`](#work-items--ticket-tui-list---query)
+- [Sentinels](#sentinels)
+- [`changed:` and `created:`](#changed-and-created)
+- [Ordering](#ordering)
+- [Repositories — `ticket-tui repos list --query`](#repositories--ticket-tui-repos-list---query)
+- [Pull requests — `ticket-tui prs list --query`](#pull-requests--ticket-tui-prs-list---query)
+- [Runs — `ticket-tui runs list --query`](#runs--ticket-tui-runs-list---query)
+
+This page describes the work-item grammar first, because it is the largest, and
+then the three shorter ones. Each is used by the subcommand named beside it.
 
 A query is a sequence of `field:value` pairs and free text. Values in one field
 are ORed, different fields are ANDed, and everything left over is matched
@@ -14,7 +30,7 @@ ticket-tui list --query 'type:Issue tag:agents changed:<7d'
 ticket-tui list --query 'type:Epic sync'          # `sync` is the fuzzy term
 ```
 
-## Fields
+## Work items — `ticket-tui list --query`
 
 | Field | Aliases | Matches |
 |---|---|---|
@@ -29,7 +45,9 @@ ticket-tui list --query 'type:Epic sync'          # `sync` is the fuzzy term
 | `changed:` | `updated:` | A date comparison — see below |
 | `created:` | | A date comparison — see below |
 
-Plus `is:bookmarked` (or `is:bookmark`), which is a TUI-only filter: bookmarks
+Plus `id:` — `id:613 id:614` is those two work items and nothing else, which is
+what a jump from another tab writes into the search box — and
+`is:bookmarked` (or `is:bookmark`), which is a TUI-only filter: bookmarks
 live in the session file, so it matches nothing from `ticket-tui list`.
 
 Comparisons are case-insensitive. `area:` and `iteration:` also match a bare
@@ -116,3 +134,72 @@ descending id — the same order the TUI's table opens on. With a fuzzy term the
 rows come back in relevance order. Fuzzy matching covers id, title, assignee,
 state, type, area, iteration, and tags; it deliberately excludes descriptions,
 so searching for a phrase from a ticket body will not find it.
+
+## Repositories — `ticket-tui repos list --query`
+
+| Field | Matches |
+|---|---|
+| `name:` | The repository's name |
+| `branch:` | Its default branch, with or without `refs/heads/` |
+| `local:` | `cloned`, `missing`, `dirty`, `ahead`, `behind` — what the clone on this machine is |
+| `disabled:` | `yes` or `no` |
+
+Fuzzy text matches the name and the branch.
+
+```console
+ticket-tui repos list --query 'local:dirty'
+ticket-tui repos list --query 'local:missing disabled:no'
+```
+
+`local:` is answered from `git status` in the workspace, so it says nothing at
+all when the workspace does not exist — every repository then reads
+`local:missing`.
+
+## Pull requests — `ticket-tui prs list --query`
+
+| Field | Aliases | Matches |
+|---|---|---|
+| `repo:` | `repository:` | The repository's name |
+| `author:` | `by:` | Who raised it; `@me` resolves |
+| `reviewer:` | | Somebody asked to review it; `@me` resolves |
+| `vote:` | | *Your own* vote: `approved`, `suggestions`, `waiting`, `rejected`, `none` |
+| `status:` | | `active`, `completed`, `abandoned` |
+| `target:` | | The target branch, short or full |
+| `source:` | | The source branch |
+| `draft:` | | `yes` or `no` |
+| `build:` | | What the branch policy's build says: `succeeded`, `running`, `failed`, `none` |
+
+Fuzzy text matches the title, the repository and both branches.
+
+```console
+ticket-tui prs list --query 'reviewer:@me vote:none'     # the review queue
+ticket-tui prs list --query 'author:@me draft:no build:failed'
+ticket-tui prs list --query 'status:completed target:main'
+```
+
+`vote:` is about you, not about the pull request: `vote:none` is one you have
+not voted on, whoever else has. Closed pull requests are in the database only as
+far back as the pull's window reaches, so `status:completed` is recent history
+rather than the whole project's.
+
+## Runs — `ticket-tui runs list --query`
+
+| Field | Matches |
+|---|---|
+| `pipeline:` | The definition's name |
+| `branch:` | The branch it built, short or full |
+| `status:` | `inProgress`, `completed`, `cancelling`, `notStarted`, `postponed` |
+| `result:` | `succeeded`, `failed`, `canceled`, `partiallySucceeded` |
+| `reason:` | Why it ran: `manual`, `individualCI`, `pullRequest`, `schedule` |
+| `by:` | Who set it going; `@me` resolves |
+
+`--pipeline NAME` is the same as `pipeline:NAME` and is there because it is the
+one everybody wants.
+
+```console
+ticket-tui runs list --pipeline 'ticket-tui CI' --query 'result:failed'
+ticket-tui runs list --query 'branch:main by:@me'
+```
+
+A run still going has no result, so `result:failed` never matches one; use
+`status:inProgress` for those.

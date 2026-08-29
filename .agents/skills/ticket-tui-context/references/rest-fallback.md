@@ -6,6 +6,13 @@ For reading and for state, assignee, priority, iteration, area, title, tags,
 description, comments, and creation, [cli.md](cli.md) is faster, carries the
 revision guard, and keeps the local database and any running TUI in step.
 
+## Contents
+
+- [The MSA pass-through header](#the-msa-pass-through-header)
+- [The token](#the-token)
+- [A working request](#a-working-request)
+- [Writes, if you really must](#writes-if-you-really-must)
+
 ## The MSA pass-through header
 
 **This organization is backed by a Microsoft personal account.** Every request
@@ -64,8 +71,32 @@ Shapes ticket-tui uses, for reference:
 | Change fields | `PATCH {org}/_apis/wit/workitems/{id}?api-version=7.1` |
 | Create | `POST {org}/{project}/_apis/wit/workitems/$Issue?$expand=relations&api-version=7.1` |
 | Comments | `{org}/_apis/wit/workItems/{id}/comments?api-version=7.1-preview.4` — still preview on every 7.x |
+| Repositories | `GET {org}/{project}/_apis/git/repositories?api-version=7.1` |
+| Branches | `GET {org}/{project}/_apis/git/repositories/{repo}/refs?filter=heads/&api-version=7.1` |
+| Pull requests | `GET {org}/{project}/_apis/git/pullrequests?searchCriteria.status=active&api-version=7.1` |
+| One pull request | `GET`/`PATCH {org}/{project}/_apis/git/repositories/{repo}/pullrequests/{id}?api-version=7.1` |
+| A vote | `PUT {org}/{project}/_apis/git/repositories/{repo}/pullrequests/{id}/reviewers/{reviewerId}?api-version=7.1` |
+| PR threads | `{org}/{project}/_apis/git/repositories/{repo}/pullrequests/{id}/threads?api-version=7.1` |
+| PR work items | `GET .../pullrequests/{id}/workitems?api-version=7.1` |
+| Build definitions | `GET {org}/{project}/_apis/build/definitions?includeLatestBuilds=true&api-version=7.1` |
+| Builds | `GET {org}/{project}/_apis/build/builds?api-version=7.1` |
+| One build | `GET`/`PATCH {org}/{project}/_apis/build/builds/{id}?api-version=7.1` |
+| Start one | `POST {org}/{project}/_apis/pipelines/{definitionId}/runs?api-version=7.1` |
+| Timeline | `GET {org}/{project}/_apis/build/builds/{id}/timeline?api-version=7.1` |
+| A log | `GET {org}/{project}/_apis/build/builds/{id}/logs/{logId}?api-version=7.1` — plain text, not JSON |
+| Approvals | `GET {org}/{project}/_apis/pipelines/approvals?api-version=7.1-preview.1`, `PATCH` the same to answer |
+| Who am I | `GET https://dev.azure.com/{organization}/_apis/connectionData?api-version=7.1` |
 
-`{org}` is `https://dev.azure.com/<organization>`.
+`{org}` is `https://dev.azure.com/<organization>`; `{repo}` is the repository's
+GUID, which `ticket-tui repos list --json` prints as `id`.
+
+Two things about the pipeline endpoints that cost an hour to find out:
+
+- A timeline record's `log.id` is `0` for a node that wrote nothing — the
+  endpoint exists and answers empty. And the log an agent wants for a job is
+  usually on the **Phase** record above it, not on the Job record itself.
+- The pull-request list does not always carry `_links.web.href`. The browser URL
+  is `{org}/{project}/_git/{repo-name}/pullrequest/{id}`.
 
 ## Writes, if you really must
 

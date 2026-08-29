@@ -6,13 +6,12 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
 
 ## State of `main`
 
-- The four-tab roadmap is nearly done: Epic 656 (#661–#667), #668 (repos sync),
-  Epic 659 (Pipelines, #680–#689), Epic 658 (Pull requests, #674–#679) and Epic
-  657 (Repos, #669–#673) are all closed. **Epic 660 (#690–#694, cross-links and
-  agents) is what is left.** `cargo fmt --check`, `cargo clippy --all-targets
-  --all-features -D warnings`, `cargo test --all-targets` (486 lib + 28 bin
-  tests, and again under `NO_COLOR=1`) and `cargo build --release` are clean.
-- Database schema is `PRAGMA user_version = 16`. A schema bump drops and
+- **The four-tab roadmap is done**: Epics 656 (#661–#667), 657 (#669–#673),
+  658 (#674–#679), 659 (#680–#689) and 660 (#690–#694) are all closed, as is
+  #668. `cargo fmt --check`, `cargo clippy --all-targets --all-features -D
+  warnings`, `cargo test --all-targets` (505 lib + 28 bin tests, and again under
+  `NO_COLOR=1`) and `cargo build --release` are clean.
+- Database schema is `PRAGMA user_version = 17`. A schema bump drops and
   rebuilds rather than migrating, so the first launch of a build that raises it
   does one full pull automatically — and a running `ticket-tui` binary from
   before the bump refuses to open the file until it is rebuilt.
@@ -105,13 +104,17 @@ Manager workflows (Epic 628, closed): built-in views with `@me` / `@none` /
 highlighting sharing #649's predicate (#631), child progress (#648), `changed:`
 and `created:` date filters (#649), finished tickets hidden by default (#652).
 
-The four tabs (Epics 656–659, all closed): the shell split and its shared
+The four tabs (Epics 656–660, all closed): the shell split and its shared
 scaffolding (#661–#667), repos in the pull (#668), Pipelines with the live log
 tail and approvals (#680–#689), Pull requests with votes, complete, abandon,
 auto-complete and one-line comments (#674–#679), and Repos with the workspace
 scan, clone, fetch, pull and cross-tab jumps (#669–#673). Two background
 threads carry the live parts: `watch.rs` for pipelines and `local.rs` for git,
-and neither writes SQLite.
+and neither writes SQLite. Then the cross-links and the agent surface
+(#690–#694): a work item's artifact links, context schema 3 describing all four
+tabs, `repos`/`prs`/`pipelines`/`runs`/`approvals` on the command line with
+`runs wait` and `runs logs --follow` exiting on the build's own result, and the
+skill rewritten around all of it.
 
 Also: the CLI now resolves query sentinels through the same `MatchContext` the
 TUI uses, and refuses one it cannot resolve rather than returning an empty list.
@@ -163,10 +166,11 @@ subcommands and context v3.
 
 ## What is left
 
-**Epic 660 (#690–#694, cross-links and agents)**, in order: #690 artifact links
-and the work-item Related section, #691 agent context v3, #692 CLI repos and
-pull requests, #693 CLI pipelines, runs, logs and approvals, #694 the rewritten
-`ticket-tui-context` skill. Then close the epic.
+Nothing on the four-tab roadmap: Epics 656–660 are all closed. The last slice
+(Epic 660) added the artifact links a work item carries, context schema 3, the
+`repos`/`prs`/`pipelines`/`runs`/`approvals` subcommands, and the rewritten
+`ticket-tui-context` skill in `.agents/skills/`, which is the place to start for
+anything an agent should know about this project.
 
 Three things the finished tabs left behind, all noted on tickets:
 
@@ -178,6 +182,22 @@ Three things the finished tabs left behind, all noted on tickets:
 - The Actions overlay and the command palette are work-items-only too, so the
   Repos tab's git commands are reachable by key and by the details-pane buttons
   but not from a menu (#671, #672).
+
+Four bugs the CLI work turned up in code that had already shipped, all fixed —
+worth knowing about because they share a shape: **the fake source in the tests
+implemented what the real client did not**.
+
+- `AzureClient` never overrode `pull_request_action`, `comment_on_pull_request`
+  or `pull_request_threads`, so completing, abandoning, auto-completing and
+  commenting on a pull request all failed against the real API and the
+  discussion was always empty (#677, #678).
+- A completion never carried `lastMergeSourceCommit`, though the worker's doc
+  comment promised it (#677).
+- The pull-request list endpoint does not always answer with `_links`, so every
+  stored pull request had an empty URL and `o` opened nothing (#674).
+- `parse_timeline` sorted by an `order` field that only ranks siblings, and a
+  job's log lives on the Phase record that gets flattened away — so the tree
+  read out of order and no job had a log (#693).
 
 ## Known data issue, not a code bug
 

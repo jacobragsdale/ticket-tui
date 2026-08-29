@@ -1,4 +1,4 @@
 interface:
   display_name: "ticket-tui"
-  short_description: "Read and change Azure DevOps work items through ticket-tui"
-  default_prompt: "Use $ticket-tui-context to read the backlog, see what the user has selected, and change work items through the ticket-tui subcommands."
+  short_description: "Read and change an Azure DevOps project through ticket-tui"
+  default_prompt: "Use $ticket-tui-context to read the backlog, the pull requests and the pipelines, see what the user is looking at, and change any of them through the ticket-tui subcommands."

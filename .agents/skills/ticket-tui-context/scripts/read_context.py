@@ -1,8 +1,14 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
+# dependencies = []
 # ///
-"""Read and summarize ticket-tui's live agent context."""
+"""Read and summarize ticket-tui's live agent context.
+
+Schema 3 describes all four tabs — work items, repos, pull requests and
+pipelines — whether or not the user is looking at them, so this prints the
+active tab first and then whatever each tab holds.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def default_database_path() -> Path:
@@ -132,51 +138,71 @@ def validate_pending_edit(value: object, field: str) -> None:
 def validate_context(data: dict[str, object]) -> None:
     integer(data.get("schema_version"), "schema_version")
     integer(data.get("process_id"), "process_id")
-    for name in ("updated_at", "database_path", "mode", "focus", "screen"):
+    for name in ("updated_at", "database_path", "active_tab"):
         text(data.get(name), name)
-    for name in ("me", "active_view"):
-        value = data.get(name)
-        if value is not None:
-            text(value, name)
+    me = data.get("me")
+    if me is not None:
+        text(me, "me")
 
     validate_sync(data.get("sync"))
     pending_edits = object_list(data.get("pending_edits"))
     for index, value in enumerate(pending_edits):
         validate_pending_edit(value, f"pending_edits[{index}]")
 
+    validate_work_items(object_mapping(data.get("work_items")))
+    # The other three tabs are shapes this script reads rather than depends on,
+    # so they are checked for their containers and left otherwise open: a field
+    # added to one of them should not stop an agent reading the rest.
+    repos = object_mapping(data.get("repos"))
+    object_list(repos.get("visible_rows"))
+    pull_requests = object_mapping(data.get("pull_requests"))
+    object_list(pull_requests.get("visible_rows"))
+    integer(pull_requests.get("to_review_count"), "pull_requests.to_review_count")
+    pipelines = object_mapping(data.get("pipelines"))
+    text(pipelines.get("level"), "pipelines.level")
+    object_list(pipelines.get("watched"))
+
+
+def validate_work_items(data: dict[str, object]) -> None:
+    for name in ("mode", "focus", "screen"):
+        text(data.get(name), f"work_items.{name}")
+    active_view = data.get("active_view")
+    if active_view is not None:
+        text(active_view, "work_items.active_view")
+
     search = object_mapping(data.get("search"))
     for name in ("query", "fuzzy_text", "order"):
-        text(search.get(name), f"search.{name}")
-    boolean(search.get("pending"), "search.pending")
+        text(search.get(name), f"work_items.search.{name}")
+    boolean(search.get("pending"), "work_items.search.pending")
     filters = object_list(search.get("filters"))
     for index, value in enumerate(filters):
-        text(value, f"search.filters[{index}]")
+        text(value, f"work_items.search.filters[{index}]")
 
     sort = object_mapping(data.get("sort"))
     for name in ("field", "direction", "row_density"):
-        text(sort.get(name), f"sort.{name}")
+        text(sort.get(name), f"work_items.sort.{name}")
 
     tickets = object_mapping(data.get("tickets"))
     for name in ("total_count", "matching_count", "viewport_start", "viewport_size"):
-        integer(tickets.get(name), f"tickets.{name}")
-    boolean(tickets.get("finished_hidden"), "tickets.finished_hidden")
+        integer(tickets.get(name), f"work_items.tickets.{name}")
+    boolean(tickets.get("finished_hidden"), "work_items.tickets.finished_hidden")
     visible_rows = object_list(tickets.get("visible_rows"))
     for index, value in enumerate(visible_rows):
-        validate_ticket(value, f"tickets.visible_rows[{index}]")
+        validate_ticket(value, f"work_items.tickets.visible_rows[{index}]")
 
     selected = data.get("selected_ticket")
     if selected is not None:
-        validate_ticket(selected, "selected_ticket")
+        validate_ticket(selected, "work_items.selected_ticket")
     checked = object_list(data.get("checked_tickets"))
     for index, value in enumerate(checked):
-        validate_ticket(value, f"checked_tickets[{index}]")
+        validate_ticket(value, f"work_items.checked_tickets[{index}]")
 
     family_cursor = data.get("family_cursor")
     if family_cursor is not None:
         cursor = object_mapping(family_cursor)
-        text(cursor.get("organization"), "family_cursor.organization")
-        integer(cursor.get("id"), "family_cursor.id")
-    integer(data.get("details_scroll_line"), "details_scroll_line")
+        text(cursor.get("organization"), "work_items.family_cursor.organization")
+        integer(cursor.get("id"), "work_items.family_cursor.id")
+    integer(data.get("details_scroll_line"), "work_items.details_scroll_line")
 
 
 def ticket_label(value: object) -> str:
@@ -216,14 +242,7 @@ def print_summary(context_path: Path, data: dict[str, object]) -> None:
     print(f"Database: {data.get('database_path', 'unknown')}")
     print(f"Updated: {data.get('updated_at', 'unknown')}")
     print(f"Signed in as: {data.get('me') or '(unknown; @me will not resolve)'}")
-    print(
-        "View: "
-        f"mode={data.get('mode', '?')} "
-        f"focus={data.get('focus', '?')} "
-        f"screen={data.get('screen', '?')}"
-    )
-    if data.get("active_view"):
-        print(f"Named view: {data['active_view']}")
+    print(f"Active tab: {data.get('active_tab', '?')}")
     print(f"Sync: {sync_label(object_mapping(data.get('sync')))}")
 
     pending_edits = object_list(data.get("pending_edits"))
@@ -235,6 +254,36 @@ def print_summary(context_path: Path, data: dict[str, object]) -> None:
                 f"  - #{edit.get('id', '?')} {edit.get('field', '?')} -> "
                 f"{edit.get('value', '?')} (sent {edit.get('since', '?')})"
             )
+
+    print_work_items(object_mapping(data.get("work_items")))
+    print_repos(object_mapping(data.get("repos")))
+    print_pull_requests(object_mapping(data.get("pull_requests")))
+    print_pipelines(object_mapping(data.get("pipelines")))
+
+    if not live:
+        print(
+            "Warning: treat this as the last observed view, not current live state.",
+            file=sys.stderr,
+        )
+    sync = object_mapping(data.get("sync"))
+    if sync.get("offline") or sync.get("last_error"):
+        print(
+            "Warning: the rows are the last synced values, not live Azure DevOps state.",
+            file=sys.stderr,
+        )
+
+
+def print_work_items(data: dict[str, object]) -> None:
+    print("")
+    print("[work items]")
+    print(
+        "View: "
+        f"mode={data.get('mode', '?')} "
+        f"focus={data.get('focus', '?')} "
+        f"screen={data.get('screen', '?')}"
+    )
+    if data.get("active_view"):
+        print(f"Named view: {data['active_view']}")
 
     search = object_mapping(data.get("search"))
     print(f"Query: {search.get('query') or '(none)'}")
@@ -262,7 +311,19 @@ def print_summary(context_path: Path, data: dict[str, object]) -> None:
         f"{tickets.get('matching_count', 0)}/{tickets.get('total_count', 0)} matching "
         f"· viewport={viewport}{finished}"
     )
-    print(f"Selected: {ticket_label(data.get('selected_ticket'))}")
+    selected_value = data.get("selected_ticket")
+    print(f"Selected: {ticket_label(selected_value)}")
+    if selected_value is not None:
+        related = object_list(object_mapping(selected_value).get("related") or [])
+        if related:
+            print(f"Related ({len(related)}):")
+            for value in related:
+                link = object_mapping(value)
+                held = "" if link.get("in_database") else " (not in this database)"
+                print(
+                    f"  - {link.get('kind', '?')} {link.get('target', '?')}"
+                    f"{' in ' + str(link['repo']) if link.get('repo') else ''}{held}"
+                )
 
     checked = object_list(data.get("checked_tickets"))
     print(f"Checked ({len(checked)}):")
@@ -271,7 +332,6 @@ def print_summary(context_path: Path, data: dict[str, object]) -> None:
     if not checked:
         print("  (none)")
 
-    selected_value = data.get("selected_ticket")
     selected = object_mapping(selected_value) if selected_value is not None else {}
     print(f"Visible rows ({len(rows)}):")
     for value in rows:
@@ -290,17 +350,107 @@ def print_summary(context_path: Path, data: dict[str, object]) -> None:
     if not rows:
         print("  (none)")
 
-    if not live:
+
+def local_label(value: object) -> str:
+    if value is None:
+        return "not on this machine"
+    local = object_mapping(value)
+    state = str(local.get("branch", "?"))
+    if local.get("dirty"):
+        state += " dirty"
+    for name, sign in (("ahead", "+"), ("behind", "-")):
+        count = local.get(name) or 0
+        if isinstance(count, int) and count:
+            state += f" {sign}{count}"
+    if local.get("busy"):
+        state += f" ({local['busy']})"
+    return f"{state} at {local.get('path', '?')}"
+
+
+def print_repos(data: dict[str, object]) -> None:
+    rows = object_list(data.get("visible_rows"))
+    print("")
+    print(f"[repos] workspace={data.get('workspace') or '(none)'}")
+    selected = data.get("selected")
+    name = object_mapping(selected).get("name") if selected is not None else None
+    for value in rows:
+        repo = object_mapping(value)
+        marker = ">" if repo.get("name") == name else " "
         print(
-            "Warning: treat this as the last observed view, not current live state.",
-            file=sys.stderr,
+            f" {marker} {repo.get('name', '?')} · {repo.get('default_branch', '?')} · "
+            f"{repo.get('pull_requests', 0)} prs · {repo.get('pipelines', 0)} pipelines · "
+            f"{local_label(repo.get('local'))}"
         )
-    sync = object_mapping(data.get("sync"))
-    if sync.get("offline") or sync.get("last_error"):
+    if not rows:
+        print("  (none)")
+
+
+def print_pull_requests(data: dict[str, object]) -> None:
+    rows = object_list(data.get("visible_rows"))
+    print("")
+    print(
+        f"[pull requests] {data.get('to_review_count', 0)} waiting on your vote"
+        f"{' · closed shown' if data.get('closed_shown') else ''}"
+    )
+    selected = data.get("selected")
+    chosen = object_mapping(selected).get("id") if selected is not None else None
+    for value in rows:
+        request = object_mapping(value)
+        marker = ">" if request.get("id") == chosen else " "
         print(
-            "Warning: the rows are the last synced values, not live Azure DevOps state.",
-            file=sys.stderr,
+            f" {marker} !{request.get('id', '?')} {request.get('status', '?')} · "
+            f"{request.get('repo', '?')} · {request.get('source_branch', '?')} -> "
+            f"{request.get('target_branch', '?')} · {request.get('title', '')}"
         )
+    if not rows:
+        print("  (none)")
+    if selected is not None:
+        request = object_mapping(selected)
+        reviewers = object_list(request.get("reviewers") or [])
+        votes = ", ".join(
+            f"{object_mapping(reviewer).get('name', '?')} {object_mapping(reviewer).get('vote', 0)}"
+            for reviewer in reviewers
+        )
+        print(f"  Reviewers: {votes or '(nobody asked)'}")
+        print(
+            f"  Threads: {request.get('thread_count', 0)}"
+            f" ({request.get('unresolved_threads', 0)} unresolved)"
+        )
+
+
+def print_pipelines(data: dict[str, object]) -> None:
+    print("")
+    print(
+        f"[pipelines] level={data.get('level', '?')} · "
+        f"{data.get('running', 0)} running · "
+        f"{data.get('pending_approvals', 0)} approvals pending"
+    )
+    pipeline = data.get("selected_pipeline")
+    if pipeline is not None:
+        chosen = object_mapping(pipeline)
+        print(f"  Pipeline: {chosen.get('name', '?')} ({chosen.get('id', '?')})")
+    run = data.get("selected_run")
+    if run is not None:
+        chosen = object_mapping(run)
+        print(
+            f"  Run: {chosen.get('id', '?')} {chosen.get('status', '?')}"
+            f"{' ' + str(chosen['result']) if chosen.get('result') else ''} · "
+            f"{chosen.get('build_number', '?')} on {chosen.get('branch', '?')}"
+        )
+        stages = object_list(chosen.get("stages") or [])
+        for value in stages:
+            stage = object_mapping(value)
+            print(f"    {stage.get('state', '?')} {stage.get('name', '?')}")
+    log = data.get("following_log")
+    if log is not None:
+        tail = object_mapping(log)
+        print(
+            f"  Log: {tail.get('node', '?')} · {tail.get('line_count', 0)} lines"
+            f"{' · following' if tail.get('following') else ' · scrolled'}"
+        )
+    watched = object_list(data.get("watched"))
+    if watched:
+        print(f"  Watching: {', '.join(str(run) for run in watched)}")
 
 
 def print_selected_details(database: Path, selected_value: object) -> None:
@@ -407,7 +557,8 @@ def main() -> int:
             return 1
         database = Path(database_value)
         try:
-            print_selected_details(database, data.get("selected_ticket"))
+            work_items = object_mapping(data.get("work_items"))
+            print_selected_details(database, work_items.get("selected_ticket"))
         except (OSError, sqlite3.Error, KeyError) as error:
             print(f"Could not read selected ticket details: {error}", file=sys.stderr)
             return 1
