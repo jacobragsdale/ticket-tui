@@ -460,6 +460,21 @@ impl TicketGraph {
         entries
     }
 
+    /// Files one comment just posted, so the details pane shows it without
+    /// waiting for the next pull. It lands in `created_at` order, and a comment
+    /// already held under the same id is replaced rather than doubled, which is
+    /// what keeps a post that raced a details fetch from reading twice.
+    pub fn add_comment(&mut self, comment: CommentRecord) {
+        self.comments
+            .retain(|held| held.ticket != comment.ticket || held.comment_id != comment.comment_id);
+        let at = self
+            .comments
+            .iter()
+            .position(|held| held.ticket == comment.ticket && held.created_at > comment.created_at)
+            .unwrap_or(self.comments.len());
+        self.comments.insert(at, comment);
+    }
+
     #[must_use]
     pub fn comments_for(&self, key: &TicketKey) -> Vec<&CommentRecord> {
         let mut comments: Vec<_> = self

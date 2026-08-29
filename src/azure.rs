@@ -292,6 +292,22 @@ impl AzureClient {
         })
     }
 
+    /// Leaves one comment on a work item, answering with the record Azure
+    /// DevOps stored — its id, its date, and its author as the server settled
+    /// them. `html` is the comment body as rich text, which
+    /// [`comment_html`] makes out of what was typed; a comment is not a field,
+    /// so this is a plain `POST` rather than a JSON Patch, and carries no
+    /// revision test.
+    pub fn post_comment(&self, id: i64, html: &str) -> Result<CommentRecord> {
+        let key = TicketKey {
+            organization: self.config.organization.clone(),
+            id,
+        };
+        let posted = self.post(&self.comments_url(id, None)?, &json!({ "text": html }))?;
+        parse_comment(&posted, &key)
+            .with_context(|| format!("Azure DevOps stored no readable comment on work item {id}"))
+    }
+
     /// Every comment on one work item, following the continuation token the
     /// endpoint answers with while there is another page.
     fn fetch_comments(&self, key: &TicketKey) -> Result<Vec<CommentRecord>> {
@@ -815,6 +831,20 @@ pub fn parse_work_item(
     Ok((ticket, relations))
 }
 
+/// The rich text one typed comment is posted as. Azure DevOps stores a comment
+/// body as HTML, so the three characters that would otherwise be read as markup
+/// are escaped — `&` first, or it would escape its own replacements — and the
+/// result is wrapped in a paragraph, which is what the browser writes and what
+/// [`html_to_text`] reads back as the line that was typed.
+#[must_use]
+pub fn comment_html(text: &str) -> String {
+    let escaped = text
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    format!("<p>{escaped}</p>")
+}
+
 /// Map one `/_apis/wit/workItems/{id}/comments` page onto comment records.
 /// A comment whose body flattens to nothing is dropped: an author line with
 /// no text under it says less than the space it takes.
@@ -1291,6 +1321,29 @@ mod tests {
             crate::timestamp::ts("2026-08-21T09:30:00Z")
         );
         assert!(parse_comments(&json!({"count": 0}), &key(613)).is_empty());
+    }
+
+    #[test]
+    fn a_typed_comment_is_escaped_into_a_paragraph_and_reads_back_as_itself() {
+        assert_eq!(comment_html("<b>&"), "<p>&lt;b&gt;&amp;</p>");
+        assert_eq!(
+            html_to_text(&comment_html("<b>&")),
+            "<b>&",
+            "what was typed is what the details pane shows again"
+        );
+        assert_eq!(comment_html("Merged into main"), "<p>Merged into main</p>");
+
+        let posted = json!({
+            "id": 42,
+            "createdDate": "2026-03-04T09:15:00Z",
+            "createdBy": {"displayName": "Jacob Ragsdale"},
+            "text": comment_html("blocked on <auth>"),
+        });
+        let stored = parse_comment(&posted, &key(613)).expect("the stored comment reads back");
+        assert_eq!(stored.comment_id, 42);
+        assert_eq!(stored.text, "blocked on <auth>");
+        assert_eq!(stored.author.as_deref(), Some("Jacob Ragsdale"));
+        assert_eq!(stored.ticket, key(613));
     }
 
     #[test]

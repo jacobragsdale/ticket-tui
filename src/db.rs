@@ -417,6 +417,21 @@ impl SqliteTicketRepository {
             .context("failed to store work item comments and history")
     }
 
+    /// Writes one comment somebody just left, on its own, leaving every other
+    /// row alone. `details_rev` is deliberately not moved: the stored details
+    /// are still the ones the last fetch read, so the next fetch is free to
+    /// read the discussion again and settle it against the server.
+    pub fn insert_comment(&mut self, comment: &CommentRecord) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        insert_comment(&transaction, comment)?;
+        transaction.commit().with_context(|| {
+            format!(
+                "failed to store the comment on work item {}",
+                comment.ticket.id
+            )
+        })
+    }
+
     /// The stored revision of one work item, which is the revision a details
     /// fetch records against it. `None` when the row is gone, which is what a
     /// fetch racing a deletion sees.

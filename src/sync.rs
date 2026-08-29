@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 
 use crate::app::PreparedTickets;
@@ -18,8 +18,8 @@ use crate::azure::{self, AzureClient, AzureConfig, SyncBatch};
 use crate::db::{self, SqliteTicketRepository};
 use crate::edit::{EditApplied, EditRejection, EditRequest};
 use crate::model::{
-    DetailsUpdate, Identity, RelationRecord, StateOption, Ticket, TicketGraph, TicketKey,
-    WorkItemDetails,
+    CommentRecord, DetailsUpdate, Identity, RelationRecord, StateOption, Ticket, TicketGraph,
+    TicketKey, WorkItemDetails,
 };
 use crate::timestamp::Timestamp;
 
@@ -45,6 +45,9 @@ pub enum SyncRequest {
     /// Read the project's team members, for the assignee picker. Asked for once
     /// a session, the first time that picker opens.
     Identities,
+    /// Leave one comment on one work item. `text` is what was typed, as plain
+    /// text; the worker turns it into the rich text Azure DevOps stores.
+    Comment { key: TicketKey, text: String },
 }
 
 /// What the sync thread sends back.
@@ -66,6 +69,9 @@ pub enum SyncEvent {
     /// read, which is not worth reporting: the assignee picker already offers
     /// everybody the database has seen.
     Identities(Vec<Identity>),
+    /// One comment landed and is already written to SQLite, or was refused and
+    /// nothing was written at all.
+    Commented(Box<Result<CommentRecord, CommentRejection>>),
     /// The worker thread is gone and no further events will arrive.
     Stopped,
 }
@@ -77,6 +83,14 @@ pub enum SyncEvent {
 pub enum DetailsOutcome {
     Fetched(DetailsUpdate),
     Failed { key: TicketKey, message: String },
+}
+
+/// A comment that never landed. It names the work item it was typed on, so the
+/// row can stop waiting on it, and carries what Azure DevOps said.
+#[derive(Clone, Debug)]
+pub struct CommentRejection {
+    pub key: TicketKey,
+    pub message: String,
 }
 
 /// How much of the project one pull asked Azure DevOps for.
@@ -149,6 +163,13 @@ pub trait WorkItemSource {
     fn team_members(&self) -> Result<Vec<Identity>> {
         Ok(Vec::new())
     }
+    /// Leave one comment on a work item, answering with the record the server
+    /// stored. `html` is the body as rich text. A source that cannot take one
+    /// says so rather than pretending to have posted it, because a comment
+    /// quietly dropped is worse than one refused.
+    fn post_comment(&self, _id: i64, _html: &str) -> Result<CommentRecord> {
+        Err(anyhow!("comments are not supported by this source"))
+    }
 }
 
 impl WorkItemSource for AzureClient {
@@ -182,6 +203,10 @@ impl WorkItemSource for AzureClient {
 
     fn team_members(&self) -> Result<Vec<Identity>> {
         self.fetch_team_members()
+    }
+
+    fn post_comment(&self, id: i64, html: &str) -> Result<CommentRecord> {
+        AzureClient::post_comment(self, id, html)
     }
 }
 
@@ -279,6 +304,9 @@ fn work(
             }
             SyncRequest::Details(key) => SyncEvent::Details(Box::new(worker.details(key, events))),
             SyncRequest::Identities => SyncEvent::Identities(worker.identities(events)),
+            SyncRequest::Comment { key, text } => {
+                SyncEvent::Commented(Box::new(worker.comment(key, &text, events)))
+            }
         };
         if events.send(event).is_err() {
             break;
@@ -418,6 +446,44 @@ impl Worker {
             drop(repository.replace_identities(&members));
         }
         members
+    }
+
+    /// Posts one comment and stores it, answering with the record Azure DevOps
+    /// kept. Nothing is written locally unless the post landed, so a refusal
+    /// leaves the discussion exactly as it was.
+    fn comment(
+        &mut self,
+        key: TicketKey,
+        text: &str,
+        events: &Sender<SyncEvent>,
+    ) -> Result<CommentRecord, CommentRejection> {
+        self.try_comment(&key, text, events)
+            .map_err(|error| CommentRejection {
+                key,
+                message: format!("{error:#}"),
+            })
+    }
+
+    /// The comment lands in its own transaction and moves no `details_rev`:
+    /// the work item's stored details are still whatever the last fetch read,
+    /// so a later fetch is free to read the discussion again and settle it.
+    fn try_comment(
+        &mut self,
+        key: &TicketKey,
+        text: &str,
+        events: &Sender<SyncEvent>,
+    ) -> Result<CommentRecord> {
+        let posted = self
+            .source(events)?
+            .post_comment(key.id, &azure::comment_html(text))?;
+        // The request named the work item, so the row lands on that one
+        // whatever the answer says it is about.
+        let comment = CommentRecord {
+            ticket: key.clone(),
+            ..posted
+        };
+        self.repository()?.insert_comment(&comment)?;
+        Ok(comment)
     }
 
     /// A pull starts from the watermark the last one left behind. Without one —
@@ -749,6 +815,11 @@ mod tests {
         /// The project's team members, or `None` for a source that cannot list
         /// them, which is what the trait's default leaves behind.
         team_members: Option<Vec<Identity>>,
+        /// The comment a post answers with, or `None` to refuse the post the
+        /// way a work item nobody may comment on would.
+        comment: Option<CommentRecord>,
+        /// Every comment body posted, with the work item it was posted on.
+        posted: Arc<Mutex<Vec<(i64, String)>>>,
     }
 
     impl FakeSource {
@@ -786,6 +857,14 @@ mod tests {
         fn with_details(self, id: i64, details: WorkItemDetails) -> Self {
             self.details.lock().unwrap().insert(id, details);
             self
+        }
+
+        /// The record a post answers with, which is what the worker stores.
+        fn commenting(self, comment: CommentRecord) -> Self {
+            Self {
+                comment: Some(comment),
+                ..self
+            }
         }
 
         fn with_team(self, members: Vec<Identity>) -> Self {
@@ -881,6 +960,13 @@ mod tests {
                 .get(work_item_type)
                 .cloned()
                 .with_context(|| format!("no states for {work_item_type}"))
+        }
+
+        fn post_comment(&self, id: i64, html: &str) -> Result<CommentRecord> {
+            self.posted.lock().unwrap().push((id, html.to_owned()));
+            self.comment
+                .clone()
+                .context("HTTP 403: the work item is read only")
         }
 
         /// Two requests over the wire: one page of comments and one of updates.
@@ -1015,6 +1101,41 @@ mod tests {
                 new_value: Some("Doing".into()),
             }],
         }
+    }
+
+    /// How the next comment ended, past the display name the first connect
+    /// reports.
+    fn commented(handle: &SyncHandle) -> Result<CommentRecord, CommentRejection> {
+        loop {
+            match next_event(handle) {
+                SyncEvent::Commented(result) => return *result,
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected a comment to finish, got {other:?}"),
+            }
+        }
+    }
+
+    /// One comment as Azure DevOps hands it back, carrying the id, date, and
+    /// author only the server can give it.
+    fn posted_comment(id: i64, at: &str, text: &str) -> CommentRecord {
+        CommentRecord {
+            ticket: TicketKey {
+                organization: "demo".into(),
+                id: 1,
+            },
+            comment_id: id,
+            created_at: ts(at),
+            author: Some("Jacob Ragsdale".into()),
+            text: text.into(),
+        }
+    }
+
+    fn stored_comments(path: &PathBuf) -> Vec<CommentRecord> {
+        SqliteTicketRepository::open_existing(path)
+            .unwrap()
+            .load_graph()
+            .unwrap()
+            .comments
     }
 
     fn finished(handle: &SyncHandle) -> (PullOrigin, SyncOutcome) {
@@ -1635,13 +1756,139 @@ mod tests {
                     seen.push("edit");
                 }
                 SyncEvent::Finished { .. } => seen.push("pull"),
-                SyncEvent::DisplayName(_) | SyncEvent::Details(_) | SyncEvent::Identities(_) => {
-                    continue;
-                }
+                SyncEvent::DisplayName(_)
+                | SyncEvent::Details(_)
+                | SyncEvent::Identities(_)
+                | SyncEvent::Commented(_) => continue,
                 SyncEvent::Stopped => panic!("the worker stopped early"),
             }
         }
         assert_eq!(seen, ["edit", "pull"], "requests are answered in order");
+    }
+
+    #[test]
+    fn a_comment_is_posted_as_rich_text_and_stored_on_its_own() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource::with(vec![Ok(SyncBatch::default())]).commenting(posted_comment(
+            9,
+            "2026-03-04T09:15:00Z",
+            "blocked on <auth>",
+        ));
+        let posted = Arc::clone(&source.posted);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle
+            .send(SyncRequest::Comment {
+                key: TicketKey {
+                    organization: "demo".into(),
+                    id: 1,
+                },
+                text: "blocked on <auth>".into(),
+            })
+            .unwrap();
+        let comment = commented(&handle).expect("the post was accepted");
+
+        assert_eq!(comment.comment_id, 9);
+        assert_eq!(comment.ticket.id, 1);
+        assert_eq!(
+            posted.lock().unwrap().clone(),
+            vec![(1, "<p>blocked on &lt;auth&gt;</p>".to_owned())],
+            "what was typed goes out escaped, in a paragraph"
+        );
+
+        let stored = stored_comments(&path);
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].text, "blocked on <auth>");
+        assert_eq!(
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .load_all()
+                .unwrap()[0]
+                .details_rev,
+            0,
+            "a comment moves no details revision, so the next fetch still settles it"
+        );
+    }
+
+    #[test]
+    fn a_refused_comment_stores_nothing_and_names_the_work_item() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let handle = SyncHandle::spawn(
+            path.clone(),
+            Box::new(FakeSource::with(vec![Ok(SyncBatch::default())])),
+        )
+        .unwrap();
+
+        handle
+            .send(SyncRequest::Comment {
+                key: TicketKey {
+                    organization: "demo".into(),
+                    id: 1,
+                },
+                text: "blocked on auth".into(),
+            })
+            .unwrap();
+        let rejection = commented(&handle).expect_err("the post was refused");
+
+        assert_eq!(rejection.key.id, 1);
+        assert!(
+            rejection.message.contains("read only"),
+            "{}",
+            rejection.message
+        );
+        assert!(
+            stored_comments(&path).is_empty(),
+            "a refusal writes nothing at all"
+        );
+    }
+
+    #[test]
+    fn a_pull_that_does_not_name_the_work_item_leaves_its_new_comment_alone() {
+        let directory = tempdir().unwrap();
+        let path = watermarked_database(
+            &directory,
+            &[ticket(1, "Commented on"), ticket(2, "Untouched")],
+            &TicketGraph::default(),
+            "2026-02-01T00:00:00Z",
+        );
+        let mut moved = ticket(2, "Untouched");
+        moved.changed_at = ts("2026-04-01T00:00:00Z");
+        let source = FakeSource::with(vec![Ok(SyncBatch {
+            tickets: vec![moved],
+            relations: Vec::new(),
+        })])
+        .listing(vec![1, 2])
+        .commenting(posted_comment(
+            9,
+            "2026-03-04T09:15:00Z",
+            "Merged into main",
+        ));
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle
+            .send(SyncRequest::Comment {
+                key: TicketKey {
+                    organization: "demo".into(),
+                    id: 1,
+                },
+                text: "Merged into main".into(),
+            })
+            .unwrap();
+        commented(&handle).expect("the post was accepted");
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let outcome = pulled(&handle);
+        assert!(
+            matches!(outcome, SyncOutcome::Pulled { count: 1, .. }),
+            "only the other work item moved: {outcome:?}"
+        );
+
+        let stored = stored_comments(&path);
+        assert_eq!(stored.len(), 1, "a pull that skipped #1 kept its comment");
+        assert_eq!(stored[0].ticket.id, 1);
+        assert_eq!(stored[0].text, "Merged into main");
     }
 
     #[test]

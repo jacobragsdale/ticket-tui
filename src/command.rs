@@ -14,6 +14,7 @@ pub enum CommandId {
     EditPriority,
     EditTags,
     EditAssignee,
+    AddComment,
     Sort,
     Help,
     Sync,
@@ -175,6 +176,12 @@ pub const COMMANDS: &[Command] = &[
         title: "Change assignee",
         keys: &[key('a')],
         help: "Pick who owns it",
+    },
+    Command {
+        id: CommandId::AddComment,
+        title: "Add comment",
+        keys: &[],
+        help: "One line on the discussion",
     },
     Command {
         id: CommandId::SaveView,
@@ -352,6 +359,10 @@ pub const EDIT_MENU: &[EditMenuEntry] = &[
     EditMenuEntry {
         label: "Assignee",
         command: CommandId::EditAssignee,
+    },
+    EditMenuEntry {
+        label: "Add comment",
+        command: CommandId::AddComment,
     },
 ];
 

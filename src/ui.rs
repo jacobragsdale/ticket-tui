@@ -1838,8 +1838,9 @@ fn render_assignee_picker(frame: &mut Frame<'_>, app: &mut App) {
     );
 }
 
-/// The title and tags prompt: one line of text prefilled with what the work
-/// item says now, edited with the same keys as the named-view editor.
+/// The single-line prompts: the title and tags fields, prefilled with what the
+/// work item says now, and the comment box, which starts empty. All are edited
+/// with the same keys as the named-view editor.
 fn render_prompt(frame: &mut Frame<'_>, app: &mut App) {
     let Some((field, text, cursor, id)) = app.prompt.as_ref().map(|prompt| {
         (
@@ -1853,7 +1854,7 @@ fn render_prompt(frame: &mut Frame<'_>, app: &mut App) {
     };
     let area = centered_rect(frame.area(), 64, 5);
     frame.render_widget(Clear, area);
-    let title = format!(" {} \u{b7} #{id} ", field.label());
+    let title = format!(" {} ", field.title(id));
     let inner = render_modal_frame(frame, app, area, &title);
     let chunks = Layout::vertical([
         Constraint::Length(1),
@@ -1889,8 +1890,8 @@ fn render_prompt(frame: &mut Frame<'_>, app: &mut App) {
         .saturating_add(u16::try_from(cursor).unwrap_or(u16::MAX))
         .min(editable.x.saturating_add(editable.width.saturating_sub(1)));
     frame.set_cursor_position((cursor_x, editable.y));
-    // A title has to say something; a tag list is allowed to end up empty,
-    // which clears the tags.
+    // A title has to say something and so does a comment; a tag list is allowed
+    // to end up empty, which clears the tags.
     let savable = field == PromptField::Tags || !text.trim().is_empty();
     render_control(
         frame,
@@ -4062,6 +4063,66 @@ mod tests {
         assert!(text.contains("Comments"));
         assert!(text.contains("Looks good"));
         assert!(!text.contains("Relationships"));
+    }
+
+    #[test]
+    fn a_comment_just_posted_shows_at_the_foot_of_the_discussion() {
+        let item = ticket();
+        let mut app = App::new(vec![item.clone()]);
+        app.narrow_details = true;
+        app.focus = Focus::Details;
+        app.set_workspace_graph(TicketGraph {
+            comments: vec![CommentRecord {
+                ticket: item.key.clone(),
+                comment_id: 1,
+                created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
+                author: Some("Avery Chen".into()),
+                text: "Looks good".into(),
+            }],
+            ..TicketGraph::default()
+        });
+
+        app.apply_comment(CommentRecord {
+            ticket: item.key,
+            comment_id: 2,
+            created_at: crate::timestamp::ts("2026-01-04T00:00:00Z"),
+            author: Some("Jacob Ragsdale".into()),
+            text: "Merged into main".into(),
+        });
+
+        let text = render_text(60, 36, &mut app);
+        let earlier = text.find("Looks good").expect("the comment already held");
+        let posted = text
+            .find("Merged into main")
+            .expect("the comment just posted");
+        assert!(
+            earlier < posted,
+            "the new comment reads last, under Comments: {text}"
+        );
+        assert!(text.contains("Jacob Ragsdale"), "{text}");
+    }
+
+    #[test]
+    fn the_comment_prompt_opens_empty_and_names_the_work_item() {
+        let mut app = App::new(vec![ticket()]);
+        app.enable_sync();
+        app.set_table_viewport(1);
+        app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        for _ in 0..5 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.mode, AppMode::Prompt);
+
+        let prompt = render_text(80, 20, &mut app);
+        assert!(prompt.contains("Comment on #10001"), "{prompt}");
+        assert!(prompt.contains("Comment:"), "{prompt}");
+        assert!(prompt.contains("[Save]"), "{prompt}");
+        assert!(prompt.contains("[Cancel]"), "{prompt}");
+        assert!(
+            prompt.contains("Enter post"),
+            "the footer explains the prompt: {prompt}"
+        );
     }
 
     #[test]
