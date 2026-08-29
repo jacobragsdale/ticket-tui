@@ -17,11 +17,13 @@ wins.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | integer | Context contract version; currently `1` |
+| `schema_version` | integer | Context contract version; currently `2` |
 | `process_id` | integer | PID of the ticket-tui process that wrote the file |
 | `updated_at` | string | UTC RFC 3339 time of the published state change |
 | `database_path` | string | SQLite database backing the view |
 | `me` | string or null | Signed-in display name recorded by sync, including the background refresh, overridden by `TICKET_TUI_ME`; null when neither is set |
+| `sync` | object | Where the rows are pulled from and how the last pull went |
+| `pending_edits` | pending edit array | Edits sent to Azure DevOps and not answered yet |
 | `mode` | string | `browse`, `search`, or the active overlay name |
 | `focus` | string | `tickets`, `family`, or `details` |
 | `screen` | string | `workspace` or the narrow-layout `details` screen |
@@ -33,6 +35,52 @@ wins.
 | `checked_tickets` | ticket array | Multi-select set used for bulk actions |
 | `family_cursor` | ticket reference or null | Keyboard cursor within the family tree |
 | `details_scroll_line` | integer | Zero-based details-pane scroll line |
+
+## Sync fields
+
+`sync` describes the freshness of every row in the document. Read it before
+treating a ticket field as current.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `sync.organization` | string or null | Azure DevOps organization the rows are pulled from; null when no project is resolved |
+| `sync.project` | string or null | Azure DevOps project the rows are pulled from |
+| `sync.refresh_seconds` | integer | Seconds between timer pulls; `0` when the timer is off and only the sync key pulls |
+| `sync.in_progress` | boolean | A pull is in flight right now |
+| `sync.last_success_at` | string or null | UTC RFC 3339 time the last pull that reached Azure DevOps finished; null when none has this run |
+| `sync.last_error` | string or null | What the last failed pull said; cleared by the next pull that succeeds |
+| `sync.offline` | boolean | The run has no Azure DevOps project to pull from and never refreshes |
+
+`sync.last_success_at` moves on every pull that reaches Azure DevOps, including
+one that finds nothing new: it says when the rows were last confirmed, not when
+they last changed. It is absent until the first pull of the run lands, so an
+older `updated_at` with no `last_success_at` means nothing has been confirmed
+since the process started.
+
+A run whose sync worker died after starting keeps `sync.offline` false and
+reports itself through `sync.last_error`, so read both.
+
+When `sync.offline` is true, or `sync.last_error` is set, or
+`sync.last_success_at` is far behind `updated_at`, the rows are the last synced
+values rather than live ones. Say so instead of reporting them as current.
+
+## Pending edit fields
+
+`pending_edits` lists the write-through edits the TUI has sent and Azure DevOps
+has not answered. The rows already show these values optimistically, so a field
+named here is a request, not a stored value: it can still be refused and put
+back. An empty array means every visible value is one the server returned.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | integer | Work item the edit is on |
+| `field` | string | Field as the Edit menu names it, such as `State` or `Tags` |
+| `value` | string | Value being written; a cleared field reads `(none)` |
+| `since` | string | UTC RFC 3339 time the edit was sent |
+
+Entries are ordered by work item id, and one work item carries at most one
+pending edit: a second edit of the same row is refused while the first is in
+flight.
 
 ## Search fields
 
@@ -66,6 +114,7 @@ The SQLite database is a durable local copy of one Azure DevOps project, synced
 by running ticket-tui with `--sync` and by the background refresh a running
 ticket-tui performs every 60 seconds by default; Azure DevOps remains the record
 of truth. It can still lag the server by up to one refresh interval, so a work
-item changed in Azure DevOps moments ago may read as its last synced values.
+item changed in Azure DevOps moments ago may read as its last synced values;
+`sync.last_success_at` says how far behind it can be.
 Read it freely; never write to it, because ticket-tui replaces its rows
 wholesale on the next sync.

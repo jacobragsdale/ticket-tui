@@ -34,6 +34,14 @@ are more useful than the compact report.
 
 ## Interpret the result
 
+- `Sync` reports the freshness of every row. Check it before trusting a value:
+  `sync.offline` means the run never refreshes, `sync.last_error` means the last
+  pull failed, and `sync.last_success_at` is when the rows were last confirmed
+  against Azure DevOps. Stale rows are the last synced values, not live ones,
+  and should be described that way.
+- `pending_edits` lists edits sent to Azure DevOps and not answered yet. Those
+  fields are shown optimistically and can still be refused, so report them as in
+  flight rather than as stored values.
 - `Selected` is the ticket driving the details pane.
 - `Checked` is the independent multi-select set used by copy and export actions;
   it can be empty or contain tickets other than the selected ticket.

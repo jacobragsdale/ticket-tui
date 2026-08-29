@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def default_database_path() -> Path:
@@ -111,6 +111,24 @@ def validate_ticket(value: object, field: str) -> None:
     boolean(ticket.get("checked"), f"{field}.checked")
 
 
+def validate_sync(value: object) -> None:
+    sync = object_mapping(value)
+    for name in ("organization", "project", "last_success_at", "last_error"):
+        field = sync.get(name)
+        if field is not None:
+            text(field, f"sync.{name}")
+    integer(sync.get("refresh_seconds"), "sync.refresh_seconds")
+    boolean(sync.get("in_progress"), "sync.in_progress")
+    boolean(sync.get("offline"), "sync.offline")
+
+
+def validate_pending_edit(value: object, field: str) -> None:
+    edit = object_mapping(value)
+    integer(edit.get("id"), f"{field}.id")
+    for name in ("field", "value", "since"):
+        text(edit.get(name), f"{field}.{name}")
+
+
 def validate_context(data: dict[str, object]) -> None:
     integer(data.get("schema_version"), "schema_version")
     integer(data.get("process_id"), "process_id")
@@ -119,6 +137,11 @@ def validate_context(data: dict[str, object]) -> None:
     active_view = data.get("active_view")
     if active_view is not None:
         text(active_view, "active_view")
+
+    validate_sync(data.get("sync"))
+    pending_edits = object_list(data.get("pending_edits"))
+    for index, value in enumerate(pending_edits):
+        validate_pending_edit(value, f"pending_edits[{index}]")
 
     search = object_mapping(data.get("search"))
     for name in ("query", "fuzzy_text", "order"):
@@ -165,6 +188,24 @@ def ticket_label(value: object) -> str:
     return f"{identity} · {suffix}" if suffix else identity
 
 
+def sync_label(sync: dict[str, object]) -> str:
+    project = "/".join(
+        str(sync[name]) for name in ("organization", "project") if sync.get(name)
+    )
+    if sync.get("offline"):
+        state = "offline"
+    elif sync.get("in_progress"):
+        state = "pull in progress"
+    elif sync.get("last_error"):
+        state = f"last pull failed: {sync['last_error']}"
+    else:
+        state = "ok"
+    refresh = sync.get("refresh_seconds") or 0
+    timer = f"every {refresh}s" if refresh else "on request"
+    last = sync.get("last_success_at") or "never this run"
+    return " · ".join(part for part in (project, timer, state, f"synced {last}") if part)
+
+
 def print_summary(context_path: Path, data: dict[str, object]) -> None:
     live = process_is_live(data.get("process_id"))
     status = "live" if live else "stale process"
@@ -179,6 +220,17 @@ def print_summary(context_path: Path, data: dict[str, object]) -> None:
     )
     if data.get("active_view"):
         print(f"Named view: {data['active_view']}")
+    print(f"Sync: {sync_label(object_mapping(data.get('sync')))}")
+
+    pending_edits = object_list(data.get("pending_edits"))
+    if pending_edits:
+        print(f"Pending edits ({len(pending_edits)}), not answered yet:")
+        for value in pending_edits:
+            edit = object_mapping(value)
+            print(
+                f"  - #{edit.get('id', '?')} {edit.get('field', '?')} -> "
+                f"{edit.get('value', '?')} (sent {edit.get('since', '?')})"
+            )
 
     search = object_mapping(data.get("search"))
     print(f"Query: {search.get('query') or '(none)'}")
@@ -236,6 +288,12 @@ def print_summary(context_path: Path, data: dict[str, object]) -> None:
     if not live:
         print(
             "Warning: treat this as the last observed view, not current live state.",
+            file=sys.stderr,
+        )
+    sync = object_mapping(data.get("sync"))
+    if sync.get("offline") or sync.get("last_error"):
+        print(
+            "Warning: the rows are the last synced values, not live Azure DevOps state.",
             file=sys.stderr,
         )
 
