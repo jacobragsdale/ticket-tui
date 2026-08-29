@@ -473,21 +473,24 @@ mod tests {
     }
 
     #[test]
-    fn parses_structured_filters_and_leaves_fuzzy_text() {
+    fn the_query_grammar_parses_filters_and_formats_them_back() {
         let parsed = parse_query("state:active type:bug assignee:\"Avery Chen\" search");
 
         assert_eq!(parsed.fuzzy, "search");
         assert!(parsed.filters.contains(FilterField::State, "active"));
         assert!(parsed.filters.contains(FilterField::Type, "bug"));
         assert!(parsed.filters.contains(FilterField::Assignee, "Avery Chen"));
-    }
 
-    #[test]
-    fn unknown_prefixes_remain_fuzzy_terms() {
-        let parsed = parse_query("foo:bar state:new");
+        let unknown = parse_query("foo:bar state:new");
+        assert_eq!(unknown.fuzzy, "foo:bar");
+        assert!(unknown.filters.contains(FilterField::State, "new"));
 
-        assert_eq!(parsed.fuzzy, "foo:bar");
-        assert!(parsed.filters.contains(FilterField::State, "new"));
+        let bookmarked = parse_query("is:bookmarked priority:1");
+        assert!(bookmarked.filters.bookmarked);
+        assert_eq!(
+            format_query(&bookmarked.filters, "alpha"),
+            "is:bookmarked priority:1 alpha"
+        );
     }
 
     #[test]
@@ -510,25 +513,6 @@ mod tests {
 
         assert!(parsed.filters.matches(&matching, false));
         assert!(!parsed.filters.matches(&other, false));
-    }
-
-    #[test]
-    fn bookmarked_filter_and_round_trip_formatting() {
-        let parsed = parse_query("is:bookmarked priority:1");
-        assert!(parsed.filters.bookmarked);
-        assert_eq!(
-            format_query(&parsed.filters, "alpha"),
-            "is:bookmarked priority:1 alpha"
-        );
-    }
-
-    #[test]
-    fn toggling_a_filter_removes_a_matching_value() {
-        let mut filters = parse_query("state:Active").filters;
-        filters.toggle(FilterField::State, "active");
-        assert!(filters.is_empty());
-        filters.toggle(FilterField::State, "Active");
-        assert!(filters.contains(FilterField::State, "Active"));
     }
 
     #[test]

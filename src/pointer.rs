@@ -634,25 +634,13 @@ mod tests {
             hits.resolve(0, 0).map(|region| &region.target),
             Some(PointerTarget::FocusTickets)
         ));
+        assert!(
+            hits.resolve(9, 9).is_some(),
+            "the far corner is still inside the rect"
+        );
+        assert!(hits.resolve(10, 9).is_none(), "a rect excludes its border");
+        assert!(hits.resolve(9, 10).is_none(), "a rect excludes its border");
         assert!(hits.resolve(20, 20).is_none());
-    }
-
-    #[test]
-    fn borders_are_outside_inner_hit_rects() {
-        let mut hits = HitRegions::default();
-        hits.push(region(
-            rect(1, 1, 8, 5),
-            PointerTarget::SearchField,
-            PointerLayer::Base,
-            Some(SelectableSurface::Search),
-            None,
-        ));
-        assert!(hits.resolve(1, 1).is_some());
-        assert!(hits.resolve(8, 5).is_some());
-        assert!(hits.resolve(0, 1).is_none());
-        assert!(hits.resolve(9, 1).is_none());
-        assert!(hits.resolve(1, 0).is_none());
-        assert!(hits.resolve(1, 6).is_none());
     }
 
     #[test]

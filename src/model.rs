@@ -829,17 +829,14 @@ mod tests {
     }
 
     #[test]
-    fn state_category_maps_every_standard_process_state() {
+    fn state_categories_and_path_leaves_normalize_azure_values() {
         assert_eq!(StateCategory::of("To Do"), StateCategory::Proposed);
         assert_eq!(StateCategory::of("  doing "), StateCategory::InProgress);
         assert_eq!(StateCategory::of("Ready for Test"), StateCategory::Resolved);
         assert_eq!(StateCategory::of("DONE"), StateCategory::Completed);
         assert_eq!(StateCategory::of("Removed"), StateCategory::Removed);
         assert_eq!(StateCategory::of("Needs triage"), StateCategory::Unknown);
-    }
 
-    #[test]
-    fn path_leaf_keeps_only_the_last_segment() {
         assert_eq!(path_leaf("development\\Sprint 1"), "Sprint 1");
         assert_eq!(path_leaf("Atlas/Platform/Web"), "Web");
         assert_eq!(path_leaf("Sprint 1"), "Sprint 1");
@@ -859,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn priority_sorts_missing_values_last_in_both_directions() {
+    fn priority_sorts_missing_values_last_and_title_sort_ignores_case() {
         let present = ticket(1, "Present", Some(2));
         let missing = ticket(2, "Missing", None);
 
@@ -881,16 +878,13 @@ mod tests {
             ),
             Ordering::Less
         );
-    }
 
-    #[test]
-    fn title_sort_is_case_insensitive_and_uses_id_as_tie_breaker() {
         let left = ticket(1, "alpha", Some(1));
         let right = ticket(2, "ALPHA", Some(1));
-
         assert_eq!(
             compare_tickets(&left, &right, SortField::Title, SortDirection::Descending),
-            Ordering::Less
+            Ordering::Less,
+            "equal titles fall back to the id"
         );
     }
 
@@ -930,17 +924,25 @@ mod tests {
     #[test]
     fn family_reads_parent_and_child_edges_in_either_direction() {
         let parent_only = TicketGraph {
-            relations: vec![relation(2, 1, RelationKind::Parent)],
+            relations: vec![
+                relation(2, 1, RelationKind::Parent),
+                relation(3, 2, RelationKind::Parent),
+            ],
             ..TicketGraph::default()
         };
         let child_only = TicketGraph {
-            relations: vec![relation(1, 2, RelationKind::Child)],
+            relations: vec![
+                relation(1, 2, RelationKind::Child),
+                relation(2, 3, RelationKind::Child),
+            ],
             ..TicketGraph::default()
         };
         let both = TicketGraph {
             relations: vec![
                 relation(2, 1, RelationKind::Parent),
                 relation(1, 2, RelationKind::Child),
+                relation(3, 2, RelationKind::Parent),
+                relation(2, 3, RelationKind::Child),
             ],
             ..TicketGraph::default()
         };
@@ -948,8 +950,13 @@ mod tests {
         for graph in [parent_only, child_only, both] {
             let family = graph.family(&key(2));
             assert_eq!(family.ancestors, vec![key(1)]);
-            assert_eq!(family.children, Vec::<TicketKey>::new());
+            assert_eq!(family.children, vec![key(3)]);
             assert_eq!(graph.family(&key(1)).children, vec![key(2)]);
+            assert_eq!(
+                ids_of(&graph.visible_family_tree(&key(2))),
+                vec![1, 2, 3],
+                "either edge direction projects the same tree"
+            );
         }
     }
 
@@ -962,41 +969,6 @@ mod tests {
             .iter()
             .map(|entry| (entry.key.id, entry.prefix.as_str(), entry.is_current))
             .collect()
-    }
-
-    #[test]
-    fn family_tree_nests_current_children_among_siblings() {
-        let graph = TicketGraph {
-            relations: vec![
-                relation(10, 1, RelationKind::Parent),
-                relation(11, 1, RelationKind::Parent),
-                relation(12, 1, RelationKind::Parent),
-                relation(111, 11, RelationKind::Parent),
-                relation(112, 11, RelationKind::Parent),
-            ],
-            ..TicketGraph::default()
-        };
-        let family = graph.family(&key(11));
-        let entries = family.tree_entries();
-
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| (entry.key.id, entry.prefix.as_str(), entry.is_current))
-                .collect::<Vec<_>>(),
-            vec![
-                (1, "  ", false),
-                (10, "  ├─", false),
-                (11, "  ├─", true),
-                (111, "  │ ├─", false),
-                (112, "  │ └─", false),
-                (12, "  └─", false),
-            ]
-        );
-        assert_eq!(
-            family.jump_keys(),
-            vec![key(1), key(10), key(12), key(111), key(112)]
-        );
     }
 
     #[test]
@@ -1023,9 +995,14 @@ mod tests {
                 (111, "  │ ├─", false),
                 (112, "  │ └─", false),
                 (12, "  └─", false),
-            ]
+            ],
+            "the current ticket nests among its siblings"
         );
-        assert_eq!(first, second);
+        assert_eq!(first, second, "rebuilding the tree gives the same rows");
+        assert_eq!(
+            graph.family(&key(11)).jump_keys(),
+            vec![key(1), key(10), key(12), key(111), key(112)]
+        );
     }
 
     #[test]
@@ -1048,24 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_tickets_remain_visible_in_the_expanded_tree() {
-        let graph = TicketGraph {
-            relations: vec![
-                relation(2, 1, RelationKind::Parent),
-                relation(3, 1, RelationKind::Parent),
-            ],
-            ..TicketGraph::default()
-        };
-        let entries = graph.visible_family_tree(&key(2));
-
-        assert_eq!(
-            tree_view(&entries),
-            vec![(1, "  ", false), (2, "  ├─", true), (3, "  └─", false),]
-        );
-    }
-
-    #[test]
-    fn cyclic_relations_omit_the_repeating_edge() {
+    fn cycles_and_the_depth_limit_bound_the_family_tree() {
         let graph = TicketGraph {
             relations: vec![
                 relation(1, 2, RelationKind::Parent),
@@ -1078,24 +1038,25 @@ mod tests {
         let entries = graph.visible_family_tree(&key(1));
 
         assert_eq!(family.ancestors, vec![key(2)]);
-        assert_eq!(ids_of(&entries), vec![2, 1]);
-        assert!(!ids_of(&entries).contains(&9));
+        assert_eq!(
+            ids_of(&entries),
+            vec![2, 1],
+            "the repeating edge is dropped"
+        );
+        assert!(
+            !ids_of(&entries).contains(&9),
+            "non-family links stay out of the tree"
+        );
         assert_eq!(family.other_links, vec![(RelationKind::Related, key(9))]);
         assert_eq!(family.jump_keys().last(), Some(&key(9)));
-    }
 
-    #[test]
-    fn family_tree_stops_at_the_depth_limit() {
-        let relations: Vec<_> = (1..20)
-            .map(|id| relation(id + 1, id, RelationKind::Parent))
-            .collect();
-        let graph = TicketGraph {
-            relations,
+        let deep = TicketGraph {
+            relations: (1..20)
+                .map(|id| relation(id + 1, id, RelationKind::Parent))
+                .collect(),
             ..TicketGraph::default()
         };
-        let current = key(20);
-        let entries = graph.visible_family_tree(&current);
-
+        let entries = deep.visible_family_tree(&key(20));
         assert!(entries.len() <= MAX_ANCESTOR_DEPTH + 1);
         assert_eq!(entries.last().map(|entry| entry.key.id), Some(20));
         assert!(
@@ -1103,54 +1064,5 @@ mod tests {
                 .iter()
                 .all(|entry| entry.prefix.chars().count() < 40)
         );
-    }
-
-    #[test]
-    fn parent_child_and_mirrored_relations_project_the_same_tree() {
-        let parent_only = TicketGraph {
-            relations: vec![
-                relation(2, 1, RelationKind::Parent),
-                relation(3, 2, RelationKind::Parent),
-            ],
-            ..TicketGraph::default()
-        };
-        let child_only = TicketGraph {
-            relations: vec![
-                relation(1, 2, RelationKind::Child),
-                relation(2, 3, RelationKind::Child),
-            ],
-            ..TicketGraph::default()
-        };
-        let both = TicketGraph {
-            relations: vec![
-                relation(2, 1, RelationKind::Parent),
-                relation(1, 2, RelationKind::Child),
-                relation(3, 2, RelationKind::Parent),
-                relation(2, 3, RelationKind::Child),
-            ],
-            ..TicketGraph::default()
-        };
-        let expected = parent_only.visible_family_tree(&key(2));
-        assert_eq!(expected, child_only.visible_family_tree(&key(2)));
-        assert_eq!(expected, both.visible_family_tree(&key(2)));
-        assert_eq!(ids_of(&expected), vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn family_walk_stops_on_cycles_and_keeps_other_links_out_of_the_tree() {
-        let graph = TicketGraph {
-            relations: vec![
-                relation(1, 2, RelationKind::Parent),
-                relation(2, 1, RelationKind::Parent),
-                relation(1, 9, RelationKind::Related),
-            ],
-            ..TicketGraph::default()
-        };
-        let family = graph.family(&key(1));
-
-        assert_eq!(family.ancestors, vec![key(2)]);
-        assert!(!family.tree_entries().iter().any(|entry| entry.key.id == 9));
-        assert_eq!(family.other_links, vec![(RelationKind::Related, key(9))]);
-        assert_eq!(family.jump_keys().last(), Some(&key(9)));
     }
 }

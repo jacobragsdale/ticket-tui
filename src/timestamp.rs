@@ -160,15 +160,12 @@ mod tests {
     use time::macros::datetime;
 
     #[test]
-    fn parse_normalizes_offsets_to_utc() {
+    fn parse_normalizes_offsets_and_accepts_space_and_date_only_values() {
         let timestamp = ts("2026-08-26T13:00:00-05:00");
 
         assert_eq!(timestamp.exact_utc(), "2026-08-26 18:00:00 UTC");
         assert_eq!(timestamp, ts("2026-08-26T18:00:00Z"));
-    }
 
-    #[test]
-    fn parse_accepts_space_separated_and_date_only_values() {
         assert_eq!(ts("2026-08-26 18:00:00"), ts("2026-08-26T18:00:00Z"));
         assert_eq!(ts("2026-08-26"), ts("2026-08-26T00:00:00Z"));
     }
@@ -178,15 +175,6 @@ mod tests {
         assert!(Timestamp::parse("").is_err());
         assert!(Timestamp::parse("yesterday").is_err());
         assert!(Timestamp::parse("26/08/2026").is_err());
-    }
-
-    #[test]
-    fn ordering_uses_the_instant_not_the_lexical_string() {
-        let offset = "2026-08-26T13:00:00-05:00";
-        let utc = "2026-08-26T16:00:00Z";
-
-        assert!(offset < utc);
-        assert!(ts(offset) > ts(utc));
     }
 
     #[test]

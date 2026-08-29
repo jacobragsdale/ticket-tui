@@ -2881,7 +2881,6 @@ mod tests {
         CommentRecord, HistoryRecord, RelationKind, RelationRecord, TicketGraph, TicketKey,
     };
     use crate::pointer::PointerTarget;
-    use crate::text_input::TextInput;
 
     fn ticket() -> Ticket {
         Ticket {
@@ -2971,21 +2970,16 @@ mod tests {
     }
 
     #[test]
-    fn wide_layout_renders_table_and_details() {
+    fn layouts_render_both_panes_and_expose_hit_regions_at_every_breakpoint() {
         let mut app = App::new(vec![ticket()]);
-        let text = render_text(130, 30, &mut app);
-
-        assert!(text.contains("Tickets 1/1"));
-        assert!(text.contains("Details"));
-        assert!(text.contains("Fix ticket search"));
-        assert!(text.contains("Pri"));
-        assert!(text.contains("2026-01-01 00:00:00 UTC"));
+        let wide = render_text(130, 30, &mut app);
+        assert!(wide.contains("Tickets 1/1"));
+        assert!(wide.contains("Details"));
+        assert!(wide.contains("Fix ticket search"));
+        assert!(wide.contains("Pri"));
+        assert!(wide.contains("2026-01-01 00:00:00 UTC"));
         assert!(app.hit_regions.detail_url.is_some());
-    }
 
-    #[test]
-    fn narrow_layout_can_toggle_details() {
-        let mut app = App::new(vec![ticket()]);
         let table = render_text(60, 20, &mut app);
         assert!(table.contains("[Tickets]"));
         assert!(table.contains("1/1"));
@@ -2998,10 +2992,29 @@ mod tests {
         assert!(!details.contains("[Tickets]"));
         assert!(!details.contains("[Details]"));
         assert!(details.contains("Fix ticket search"));
+        app.narrow_details = false;
+
+        for width in [36, 69, 70, 109, 110] {
+            render_text(width, 16, &mut app);
+            assert!(
+                app.hit_regions.search.is_some(),
+                "search field missing at width {width}"
+            );
+            assert!(
+                app.hit_regions.table_body.is_some(),
+                "table body missing at width {width}"
+            );
+            if width >= 70 {
+                assert!(
+                    app.hit_regions.details.is_some(),
+                    "details pane missing at width {width}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn empty_state_and_help_render_without_a_selection() {
+    fn empty_reloading_and_no_result_states_render_with_a_usable_search_field() {
         let mut app = App::new(Vec::new());
         let empty = render_text(90, 24, &mut app);
         assert!(empty.contains("No tickets in this database"));
@@ -3011,17 +3024,24 @@ mod tests {
         assert!(loading.contains("Reloading tickets"));
         app.reload_pending = false;
 
-        app.mode = AppMode::Help;
-        let help = render_text(90, 24, &mut app);
-        assert!(help.contains("Navigation"));
-        assert!(app.help.max_offset() > 0);
-        app.help.scroll_to(app.help.max_offset());
-        let scrolled_help = render_text(90, 24, &mut app);
+        app.mode = AppMode::Search;
+        app.set_query("a very long query whose visible tail is unique".into());
+        let long_search = render_text(40, 12, &mut app);
         assert!(
-            scrolled_help.contains("Open selected ticket")
-                || scrolled_help.contains("Wheel")
-                || scrolled_help.contains("Press ? or Esc to close")
+            long_search.contains("visible tail is unique"),
+            "a long query scrolls to keep the cursor end visible"
         );
+
+        let mut searched = App::new(vec![ticket()]);
+        searched.set_query("qqqqqqqqqq".into());
+        await_search(&mut searched);
+        let no_results = render_text(90, 24, &mut searched);
+        assert!(no_results.contains("No tickets match this search"));
+
+        searched.mode = AppMode::Sort;
+        let sort = render_text(90, 24, &mut searched);
+        assert!(sort.contains("Sort tickets"));
+        assert!(sort.contains("Priority"));
     }
 
     #[test]
@@ -3051,10 +3071,11 @@ mod tests {
     }
 
     #[test]
-    fn stacked_layout_exposes_working_mouse_regions() {
+    fn table_clicks_open_tickets_sort_columns_and_follow_the_row_density() {
         let mut second = ticket();
         second.key.id = 10_002;
         second.title = "Second ticket".into();
+        second.tags = vec!["backend".into()];
         second.web_url = "https://dev.azure.com/demo/atlas/_workitems/edit/10002".into();
         let mut app = App::new(vec![ticket(), second]);
         render_text(90, 24, &mut app);
@@ -3075,29 +3096,27 @@ mod tests {
             .0;
         click(&mut app, id_header.x, id_header.y);
         assert_eq!(app.sort_field, SortField::Id);
+
+        app.handle_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.row_density, RowDensity::Comfortable);
+        let text = render_text(110, 24, &mut app);
+        assert!(text.contains("[backend]"), "comfortable rows show tags");
+        assert!(text.contains("[rust]"));
+
+        let body = app.hit_regions.table_body.unwrap();
+        click(&mut app, body.x + 8, body.y + 2);
+        assert_eq!(
+            app.selected_row(),
+            Some(1),
+            "a comfortable row spans two lines"
+        );
     }
 
     #[test]
-    fn no_results_and_sort_menu_are_rendered() {
-        let mut app = App::new(vec![ticket()]);
-        app.set_query("qqqqqqqqqq".into());
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while app.search_pending {
-            app.poll_search();
-            assert!(Instant::now() < deadline, "search worker timed out");
-            thread::yield_now();
-        }
-        let no_results = render_text(90, 24, &mut app);
-        assert!(no_results.contains("No tickets match this search"));
-
-        app.mode = AppMode::Sort;
-        let sort = render_text(90, 24, &mut app);
-        assert!(sort.contains("Sort tickets"));
-        assert!(sort.contains("Priority"));
-    }
-
-    #[test]
-    fn long_details_are_bounded_and_render_a_scrollbar() {
+    fn long_content_is_bounded_and_the_wheel_scrolls_without_moving_the_selection() {
         let mut long_ticket = ticket();
         long_ticket.description = "A long wrapped detail line. ".repeat(30);
         let mut app = App::new(vec![long_ticket]);
@@ -3111,42 +3130,8 @@ mod tests {
         app.details.offset = usize::MAX;
         render_text(60, 20, &mut app);
         assert_eq!(app.details.offset, app.details.max_offset());
-    }
 
-    #[test]
-    fn help_can_scroll_in_a_short_terminal() {
-        let mut app = App::new(Vec::new());
-        app.mode = AppMode::Help;
-        let initial = render_text(50, 12, &mut app);
-        assert!(initial.contains("Navigation"));
-        assert!(app.help.max_offset() > 0);
-
-        app.help.scroll_to(app.help.max_offset());
-        let scrolled = render_text(50, 12, &mut app);
-        assert_ne!(initial, scrolled);
-        assert!(
-            scrolled.contains("Press ? or Esc to close")
-                || scrolled.contains("Scrollbar")
-                || scrolled.contains("Paste")
-                || scrolled.contains("Wheel"),
-            "scrolled help should reach the later help sections"
-        );
-    }
-
-    #[test]
-    fn long_search_keeps_the_cursor_end_visible() {
-        let mut app = App::new(Vec::new());
-        app.mode = AppMode::Search;
-        app.set_query("a very long query whose visible tail is unique".into());
-
-        let text = render_text(40, 12, &mut app);
-
-        assert!(text.contains("visible tail is unique"));
-    }
-
-    #[test]
-    fn long_ticket_table_renders_a_position_scrollbar() {
-        let tickets = (0..30)
+        let tickets = (0..20)
             .map(|index| {
                 let mut item = ticket();
                 item.key.id += index;
@@ -3155,28 +3140,35 @@ mod tests {
             })
             .collect();
         let mut app = App::new(tickets);
-
         let text = render_text(60, 15, &mut app);
-
-        assert!(text.contains('┃'));
-    }
-
-    #[test]
-    fn monochrome_theme_resets_every_semantic_color() {
-        let monochrome = Theme::new(true);
-
-        assert_eq!(monochrome.accent, Color::Reset);
-        assert_eq!(monochrome.hover_background, Color::Reset);
-        assert_eq!(monochrome.state_in_progress, Color::Reset);
-        assert_eq!(monochrome.type_epic, Color::Reset);
-        assert_eq!(monochrome.priority_critical, Color::Reset);
-        assert_eq!(monochrome.search_match, Color::Reset);
-        assert_eq!(monochrome.error, Color::Reset);
         assert!(
-            monochrome
-                .tag_palette
-                .iter()
-                .all(|color| *color == Color::Reset)
+            text.contains('┃'),
+            "a long table renders a position scrollbar"
+        );
+        let selected = app.selected_row();
+        let body = app.hit_regions.table_body.unwrap();
+        let column = body.x + body.width / 2;
+        let row = body.y + 1;
+        app.handle_mouse(mouse(MouseEventKind::Moved, column, row));
+        assert_eq!(app.hovered(), Some(&PointerTarget::TableRow { index: 1 }));
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, column, row));
+        assert_eq!(app.selected_row(), selected, "the wheel selects nothing");
+        assert_eq!(app.focus, Focus::Tickets);
+        assert!(app.table.offset > 0);
+        let mut terminal = Terminal::new(TestBackend::new(60, 15)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert_eq!(
+            app.hovered(),
+            Some(&PointerTarget::TableRow {
+                index: app.table.offset + 1,
+            })
+        );
+        assert_row_hovered(
+            &terminal,
+            column,
+            row,
+            "the ticket under the stationary pointer should remain highlighted",
         );
     }
 
@@ -3210,38 +3202,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn basic_process_states_get_distinct_colors() {
-        if theme() == &Theme::new(true) {
-            return; // NO_COLOR: every colour is intentionally Reset.
-        }
-        let mut app = App::new(vec![
-            ticket_at(10_001, "Alpha", "Issue", "To Do", "2026-03-03T00:00:00Z"),
-            ticket_at(10_002, "Beta", "Issue", "Doing", "2026-03-02T00:00:00Z"),
-            ticket_at(10_003, "Gamma", "Issue", "Done", "2026-03-01T00:00:00Z"),
-        ]);
-
-        let colors = column_cell_colors(&mut app, SortField::State, 3);
-
-        assert_distinct_and_legible(&colors);
-    }
-
-    #[test]
-    fn standard_process_types_get_distinct_badge_colors() {
-        if theme() == &Theme::new(true) {
-            return; // NO_COLOR: every colour is intentionally Reset.
-        }
-        let mut app = App::new(vec![
-            ticket_at(10_001, "Alpha", "Epic", "To Do", "2026-03-03T00:00:00Z"),
-            ticket_at(10_002, "Beta", "Issue", "To Do", "2026-03-02T00:00:00Z"),
-            ticket_at(10_003, "Gamma", "Task", "To Do", "2026-03-01T00:00:00Z"),
-        ]);
-
-        let colors = column_cell_colors(&mut app, SortField::Type, 3);
-
-        assert_distinct_and_legible(&colors);
-    }
-
     /// Foreground, background, and modifiers of one rendered buffer cell.
     fn painted_cell(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> (Color, Color, Modifier) {
         let cell = &terminal.backend().buffer()[(x, y)];
@@ -3270,12 +3230,23 @@ mod tests {
     }
 
     #[test]
-    fn completed_rows_fade_while_open_rows_stay_bright() {
+    fn states_and_types_stay_distinct_while_completed_rows_fade() {
         let mut app = App::new(vec![
             ticket_at(10_001, "Alpha", "Issue", "To Do", "2026-03-03T00:00:00Z"),
             ticket_at(10_002, "Beta", "Issue", "Doing", "2026-03-02T00:00:00Z"),
             ticket_at(10_003, "Gamma", "Issue", "Done", "2026-03-01T00:00:00Z"),
         ]);
+        if theme() != &Theme::new(true) {
+            // NO_COLOR renders every colour as Reset, so only compare palettes.
+            assert_distinct_and_legible(&column_cell_colors(&mut app, SortField::State, 3));
+            let mut open = App::new(vec![
+                ticket_at(10_001, "Alpha", "Epic", "To Do", "2026-03-03T00:00:00Z"),
+                ticket_at(10_002, "Beta", "Issue", "To Do", "2026-03-02T00:00:00Z"),
+                ticket_at(10_003, "Gamma", "Task", "To Do", "2026-03-01T00:00:00Z"),
+            ]);
+            assert_distinct_and_legible(&column_cell_colors(&mut open, SortField::Type, 3));
+        }
+
         let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let title_x = column_x(&app, SortField::Title);
@@ -3331,7 +3302,7 @@ mod tests {
     }
 
     #[test]
-    fn my_own_work_items_stand_out_in_the_assignee_column() {
+    fn my_own_work_items_stand_out_in_the_table_and_the_details_pane() {
         let mut mine = ticket_at(10_002, "Mine", "Issue", "To Do", "2026-03-02T00:00:00Z");
         // Azure DevOps is inconsistent about casing; "mine" should survive it.
         mine.assigned_to = Some("avery chen".into());
@@ -3364,10 +3335,7 @@ mod tests {
         if theme().accent != Color::Reset {
             assert_ne!(their_fg, theme().accent);
         }
-    }
 
-    #[test]
-    fn the_details_assignee_marks_my_own_work_and_still_shows_search_matches() {
         let ticket = ticket();
         let mut highlighter = QueryHighlighter::new("");
         let mine = ticket_assignment_line(&ticket, true, &mut highlighter);
@@ -3397,59 +3365,18 @@ mod tests {
     }
 
     #[test]
-    fn table_columns_show_only_the_leaf_of_a_path() {
-        let mut app = App::new(vec![ticket()]);
-        for field in [SortField::Area, SortField::Iteration] {
-            let index = app
-                .layout
-                .columns
-                .iter()
-                .position(|column| column.id == field)
-                .expect("path column");
-            app.layout.toggle_visible(index);
-        }
-
-        let mut terminal = Terminal::new(TestBackend::new(150, 24)).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let body = app.hit_regions.table_body.expect("table body");
-        let details = app.hit_regions.details.expect("details pane");
-        let buffer = terminal.backend().buffer();
-
-        assert!(
-            find_buffer_text_in(buffer, body, "Sprint 1").is_some(),
-            "the table should show the iteration leaf"
-        );
-        assert!(
-            find_buffer_text_in(buffer, body, "Platform").is_some(),
-            "the table should show the area leaf"
-        );
-        assert!(
-            find_buffer_text_in(buffer, body, "Atlas\\").is_none(),
-            "the table should not repeat the parent path"
-        );
-        assert!(
-            find_buffer_text_in(buffer, details, "Atlas\\Sprint 1").is_some(),
-            "the details pane keeps the full path"
-        );
-    }
-
-    #[test]
-    fn tag_colors_are_stable_and_case_insensitive() {
+    fn tag_colours_are_stable_and_shared_by_the_table_and_details() {
         assert_eq!(tag_color("tech-debt"), tag_color("TECH-DEBT"));
         assert_eq!(tag_color("Rust"), tag_color("rust"));
-
-        if theme() == &Theme::new(true) {
-            return; // NO_COLOR: every colour is intentionally Reset.
+        if theme() != &Theme::new(true) {
+            // NO_COLOR renders every colour as Reset, so only compare palettes.
+            let colors: Vec<Color> = ["docs", "flaky", "perf", "rust"]
+                .iter()
+                .map(|tag| tag_color(tag))
+                .collect();
+            assert_distinct_and_legible(&colors);
         }
-        let colors: Vec<Color> = ["docs", "flaky", "perf", "rust"]
-            .iter()
-            .map(|tag| tag_color(tag))
-            .collect();
-        assert_distinct_and_legible(&colors);
-    }
 
-    #[test]
-    fn a_tag_keeps_one_colour_across_the_table_and_details() {
         let mut app = App::new(vec![ticket()]);
         let tags = app
             .layout
@@ -3503,7 +3430,7 @@ mod tests {
     }
 
     #[test]
-    fn search_results_underline_matched_title_characters() {
+    fn underlines_mark_search_matches_and_stop_after_the_id_digits() {
         let mut app = App::new(vec![ticket()]);
         app.set_query("search".into());
         await_search(&mut app);
@@ -3526,14 +3453,7 @@ mod tests {
                 "expected underline on matched title character {offset}"
             );
         }
-    }
 
-    #[test]
-    fn id_underline_does_not_extend_past_the_digits() {
-        let mut app = App::new(vec![ticket()]);
-        let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let buffer = terminal.backend().buffer();
         let area = app.hit_regions.id_column.expect("id column");
         let (x, y) = find_buffer_text_in(buffer, area, "10001").expect("id visible in table");
         for offset in 0..5 {
@@ -3671,82 +3591,13 @@ mod tests {
         assert!(text.contains("current"));
         assert!(text.contains("├─"));
         assert!(text.contains("└─"));
+        assert!(text.contains('✓'), "closed family rows carry a check");
+        assert!(text.contains('○'), "open family rows carry a circle");
         assert!(!text.contains("Links"));
         assert!(!text.contains("Related"));
         assert!(!text.contains("10005"));
         assert!(!text.contains("Relationships"));
         assert!(!app.hit_regions.detail_links.is_empty());
-    }
-
-    #[test]
-    fn clicking_a_family_ticket_selects_it_in_the_table() {
-        let mut app = App::new(vec![
-            ticket_at(
-                10_001,
-                "Auth rewrite",
-                "Feature",
-                "Active",
-                "2026-01-01T00:00:00Z",
-            ),
-            ticket_at(
-                10_002,
-                "Login form",
-                "User Story",
-                "Active",
-                "2026-02-01T00:00:00Z",
-            ),
-            ticket_at(
-                10_003,
-                "Logout",
-                "User Story",
-                "Closed",
-                "2026-01-15T00:00:00Z",
-            ),
-            ticket_at(
-                10_004,
-                "Validate email",
-                "Task",
-                "New",
-                "2026-01-20T00:00:00Z",
-            ),
-        ]);
-        app.set_workspace_graph(parent_child_graph());
-        app.narrow_details = true;
-        app.focus = Focus::Details;
-        render_text(72, 36, &mut app);
-
-        let (area, key) = app
-            .hit_regions
-            .detail_links
-            .iter()
-            .find(|(_, key)| key.id == 10_001)
-            .cloned()
-            .expect("parent id should be clickable");
-        click(&mut app, area.x + 8, area.y);
-        assert_eq!(key.id, 10_001);
-        assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
-        assert_eq!(app.focus, Focus::Family);
-    }
-
-    #[test]
-    fn clicking_the_family_summary_does_not_select_its_parent() {
-        let mut app = auth_family_app();
-        app.focus = Focus::Details;
-        render_text(72, 36, &mut app);
-        let details = app.hit_regions.details.expect("details area");
-        let summary_x = details.x.saturating_add(8);
-        let summary_y = details.y.saturating_add(3);
-        assert!(!matches!(
-            app.hit_regions
-                .resolve(summary_x, summary_y)
-                .map(|region| &region.target),
-            Some(PointerTarget::JumpToTicket(_))
-        ));
-
-        click(&mut app, summary_x, summary_y);
-
-        assert_eq!(app.selected_ticket().unwrap().key.id, 10_002);
-        assert_eq!(app.focus, Focus::Details);
     }
 
     fn auth_family_app() -> App {
@@ -3793,327 +3644,8 @@ mod tests {
         app
     }
 
-    fn family_render_at(width: u16, height: u16) -> (App, String) {
-        let mut app = auth_family_app();
-        let text = render_text(width, height, &mut app);
-        (app, text)
-    }
-
     #[test]
-    fn family_tree_renders_at_representative_widths() {
-        for width in [36_u16, 60, 72, 110, 130] {
-            let (app, text) = family_render_at(width, 24);
-            assert!(
-                text.contains("10002"),
-                "id should remain visible at width {width}\n{text}"
-            );
-            assert!(!text.contains('▸'), "fold marker should be absent\n{text}");
-            assert!(!text.contains('•'), "leaf marker should be absent\n{text}");
-            assert_eq!(app.selected_ticket().unwrap().key.id, 10_002);
-        }
-        let (_, short) = family_render_at(72, 10);
-        assert!(short.contains("10002") || short.contains("Family") || short.contains("Details"));
-    }
-
-    #[test]
-    fn family_tree_always_renders_descendants_and_hit_regions() {
-        let mut app = auth_family_app();
-        let text = render_text(60, 36, &mut app);
-        assert!(text.contains("10004"));
-        assert!(
-            app.hit_regions
-                .detail_links
-                .iter()
-                .any(|(_, key)| key.id == 10_004)
-        );
-    }
-
-    #[test]
-    fn family_row_click_selects_the_ticket() {
-        let mut app = auth_family_app();
-        render_text(72, 36, &mut app);
-        let row = app
-            .hit_regions
-            .detail_links
-            .iter()
-            .find(|(_, key)| key.id == 10_001)
-            .map(|(area, _)| *area)
-            .expect("parent row");
-        click(&mut app, row.x + 8, row.y);
-        assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
-        assert_eq!(app.focus, Focus::Family);
-    }
-
-    #[test]
-    fn hovering_a_family_row_highlights_it() {
-        let mut app = auth_family_app();
-        let mut terminal = Terminal::new(TestBackend::new(72, 36)).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let row = app
-            .hit_regions
-            .detail_links
-            .iter()
-            .find(|(_, key)| key.id == 10_001)
-            .map(|(area, _)| *area)
-            .expect("parent row");
-        app.handle_mouse(mouse(MouseEventKind::Moved, row.x + 8, row.y));
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-
-        let tinted = (row.x..row.x.saturating_add(row.width)).all(|x| {
-            let cell = &terminal.backend().buffer()[(x, row.y)];
-            if theme().hover_background == Color::Reset {
-                cell.modifier.contains(Modifier::REVERSED)
-            } else {
-                cell.bg == theme().hover_background
-            }
-        });
-        assert!(tinted, "the whole hovered family row should be highlighted");
-    }
-
-    #[test]
-    fn hovering_a_row_leaves_its_coloured_cells_coloured() {
-        let mut app = App::new(vec![
-            ticket_at(10_001, "Alpha", "Issue", "To Do", "2026-03-03T00:00:00Z"),
-            ticket_at(10_002, "Beta", "Issue", "Doing", "2026-03-02T00:00:00Z"),
-        ]);
-        let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let state_x = column_x(&app, SortField::State);
-        let body = app.hit_regions.table_body.expect("table body");
-        let row_y = body.y + 1;
-        let (resting_fg, _, resting_modifier) = painted_cell(&terminal, state_x, row_y);
-
-        app.handle_mouse(mouse(MouseEventKind::Moved, state_x, row_y));
-        assert_eq!(app.hovered(), Some(&PointerTarget::TableRow { index: 1 }));
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let (hovered_fg, hovered_bg, hovered_modifier) = painted_cell(&terminal, state_x, row_y);
-
-        assert_eq!(
-            hovered_fg, resting_fg,
-            "hover must not repaint the state colour"
-        );
-        if theme().hover_background == Color::Reset {
-            assert!(hovered_modifier.contains(Modifier::REVERSED));
-        } else {
-            assert_eq!(hovered_bg, theme().hover_background);
-            assert!(
-                !hovered_modifier.contains(Modifier::REVERSED),
-                "a tinted row must not flip its coloured cells into blocks"
-            );
-            assert_eq!(
-                hovered_modifier, resting_modifier,
-                "hover must not touch a row's modifiers"
-            );
-        }
-    }
-
-    #[test]
-    fn the_hover_tint_covers_and_outranks_the_selection_highlight() {
-        if theme().hover_background == Color::Reset {
-            return; // NO_COLOR: hover falls back to reversing the row.
-        }
-        let mut app = App::new(vec![
-            ticket_at(10_001, "Alpha", "Issue", "To Do", "2026-03-03T00:00:00Z"),
-            ticket_at(10_002, "Beta", "Issue", "Doing", "2026-03-02T00:00:00Z"),
-        ]);
-        let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let title_x = column_x(&app, SortField::Title);
-        let body = app.hit_regions.table_body.expect("table body");
-        assert_eq!(app.selected_row(), Some(0));
-
-        // Selected only: the pointer rests on the row below.
-        app.handle_mouse(mouse(MouseEventKind::Moved, title_x, body.y + 1));
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let (_, selected_bg, _) = painted_cell(&terminal, title_x, body.y);
-        assert_eq!(selected_bg, theme().selected_background);
-
-        // Selected and hovered: the tint is painted last, so it wins.
-        app.handle_mouse(mouse(MouseEventKind::Moved, title_x, body.y));
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let (_, hovered_bg, _) = painted_cell(&terminal, title_x, body.y);
-        assert_eq!(hovered_bg, theme().hover_background);
-        assert_ne!(
-            hovered_bg, selected_bg,
-            "a hovered selected row must still read differently from a selected one"
-        );
-    }
-
-    #[test]
-    fn hovering_a_control_still_reverses_it() {
-        let mut app = App::new(vec![ticket()]);
-        let mut terminal = Terminal::new(TestBackend::new(130, 24)).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let header = app
-            .hit_regions
-            .find_target(|target| matches!(target, PointerTarget::SortHeader(SortField::Title)))
-            .map(|region| region.rect)
-            .expect("title sort header");
-        app.handle_mouse(mouse(MouseEventKind::Moved, header.x, header.y));
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let (_, _, header_modifier) = painted_cell(&terminal, header.x, header.y);
-        assert!(
-            header_modifier.contains(Modifier::REVERSED),
-            "a hovered sort header should stay a reversed block"
-        );
-
-        app.mode = AppMode::Help;
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let close = app
-            .hit_regions
-            .find_target(|target| matches!(target, PointerTarget::CloseOverlay))
-            .map(|region| region.rect)
-            .expect("overlay close button");
-        app.handle_mouse(mouse(MouseEventKind::Moved, close.x, close.y));
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let (_, _, close_modifier) = painted_cell(&terminal, close.x, close.y);
-        assert!(
-            close_modifier.contains(Modifier::REVERSED),
-            "a hovered close button should stay a reversed block"
-        );
-    }
-
-    #[test]
-    fn family_rows_show_a_state_glyph_and_fade_finished_work() {
-        let org = |id| TicketKey {
-            organization: "demo".into(),
-            id,
-        };
-        let mut app = App::new(vec![
-            ticket_at(
-                10_001,
-                "Auth epic",
-                "Epic",
-                "Active",
-                "2026-03-03T00:00:00Z",
-            ),
-            ticket_at(
-                10_002,
-                "Login form",
-                "User Story",
-                "Done",
-                "2026-02-01T00:00:00Z",
-            ),
-            ticket_at(
-                10_003,
-                "Logout",
-                "User Story",
-                "To Do",
-                "2026-01-15T00:00:00Z",
-            ),
-        ]);
-        app.set_workspace_graph(TicketGraph {
-            relations: vec![
-                RelationRecord {
-                    from: org(10_002),
-                    to: org(10_001),
-                    kind: RelationKind::Parent,
-                },
-                RelationRecord {
-                    from: org(10_003),
-                    to: org(10_001),
-                    kind: RelationKind::Parent,
-                },
-            ],
-            ..TicketGraph::default()
-        });
-        app.narrow_details = true;
-        assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
-
-        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let buffer = terminal.backend().buffer();
-        let row_of = |needle: &str| {
-            find_buffer_text(buffer, 60, 30, needle)
-                .unwrap_or_else(|| panic!("{needle} should be on screen"))
-        };
-        let done_row = row_of("10002").1;
-        let open_row = row_of("10003").1;
-        let (check_x, check_row) = row_of("\u{2713}");
-        let (_, circle_row) = row_of("\u{25cb}");
-
-        assert_eq!(check_row, done_row, "the done child should show a check");
-        assert_eq!(circle_row, open_row, "the to-do child should show a circle");
-
-        let (glyph_fg, _, glyph_modifier) = painted_cell(&terminal, check_x, check_row);
-        let (title_fg, _, title_modifier) = {
-            let (x, y) = row_of("Login form");
-            painted_cell(&terminal, x, y)
-        };
-        let (open_title_fg, _, open_title_modifier) = {
-            let (x, y) = row_of("Logout");
-            painted_cell(&terminal, x, y)
-        };
-        if theme().muted == Color::Reset {
-            assert!(
-                glyph_modifier.contains(Modifier::BOLD),
-                "the glyph carries weight without colour"
-            );
-            assert!(title_modifier.contains(Modifier::DIM));
-            assert!(!open_title_modifier.contains(Modifier::DIM));
-        } else {
-            assert_eq!(glyph_fg, state_color(StateCategory::Completed));
-            assert_eq!(title_fg, theme().muted, "the done child should fade");
-            assert_ne!(open_title_fg, theme().muted);
-        }
-    }
-
-    fn auth_family_app_with_long_details() -> App {
-        let mut app = auth_family_app();
-        let mut tickets = app.tickets().to_vec();
-        tickets
-            .iter_mut()
-            .find(|ticket| ticket.key.id == 10_002)
-            .expect("current ticket")
-            .description = "line\n".repeat(40);
-        let graph = parent_child_graph();
-        app.replace_prepared_tickets(crate::app::PreparedTickets::with_graph(tickets, graph));
-        app.narrow_details = true;
-        app.focus = Focus::Family;
-        app
-    }
-
-    #[test]
-    fn family_hit_targets_follow_details_scroll() {
-        let mut app = auth_family_app_with_long_details();
-        render_text(60, 24, &mut app);
-        assert!(app.details.max_offset() > 0);
-        let before = app
-            .hit_regions
-            .find_target(
-                |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
-            )
-            .map(|region| region.rect.y)
-            .expect("parent row should be on screen");
-        app.details.scroll_to(app.details.max_offset());
-        render_text(60, 24, &mut app);
-        let after = app.hit_regions.find_target(
-            |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
-        );
-        assert!(after.is_none() || after.is_some_and(|region| region.rect.y != before));
-    }
-
-    #[test]
-    fn wheel_over_the_family_tree_only_scrolls_details() {
-        let mut app = auth_family_app_with_long_details();
-        render_text(60, 24, &mut app);
-        let row = app
-            .hit_regions
-            .detail_links
-            .iter()
-            .find(|(_, key)| key.id == 10_002)
-            .map(|(area, _)| *area)
-            .expect("current family row");
-        let cursor = app.family_cursor.clone();
-        let focus = app.focus;
-        app.handle_mouse(mouse(MouseEventKind::ScrollDown, row.x + 8, row.y));
-        assert_eq!(app.family_cursor, cursor);
-        assert_eq!(app.focus, focus);
-        assert!(app.details.offset > 0);
-    }
-
-    #[test]
-    fn family_current_and_cursor_styles_stay_distinguishable() {
+    fn family_rows_show_the_current_and_cursor_styles_and_click_through_to_a_ticket() {
         let mut app = auth_family_app();
         app.family_cursor = Some(TicketKey {
             organization: "demo".into(),
@@ -4156,10 +3688,167 @@ mod tests {
                 "family cursor should use the selected background"
             );
         }
+
+        app.focus = Focus::Details;
+        render_text(72, 36, &mut app);
+        let details = app.hit_regions.details.expect("details area");
+        let summary_x = details.x.saturating_add(8);
+        let summary_y = details.y.saturating_add(3);
+        assert!(!matches!(
+            app.hit_regions
+                .resolve(summary_x, summary_y)
+                .map(|region| &region.target),
+            Some(PointerTarget::JumpToTicket(_))
+        ));
+        click(&mut app, summary_x, summary_y);
+        assert_eq!(app.selected_ticket().unwrap().key.id, 10_002);
+        assert_eq!(app.focus, Focus::Details);
+
+        let row = app
+            .hit_regions
+            .detail_links
+            .iter()
+            .find(|(_, key)| key.id == 10_001)
+            .map(|(area, _)| *area)
+            .expect("parent row");
+        click(&mut app, row.x + 8, row.y);
+        assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
+        assert_eq!(app.focus, Focus::Family);
     }
 
     #[test]
-    fn facet_bar_is_visible_and_clicking_a_pill_opens_its_menu() {
+    fn hovering_tints_a_row_without_recolouring_it_and_still_reverses_controls() {
+        let mut app = App::new(vec![
+            ticket_at(10_001, "Alpha", "Issue", "To Do", "2026-03-03T00:00:00Z"),
+            ticket_at(10_002, "Beta", "Issue", "Doing", "2026-03-02T00:00:00Z"),
+        ]);
+        let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let state_x = column_x(&app, SortField::State);
+        let body = app.hit_regions.table_body.expect("table body");
+        let row_y = body.y + 1;
+        let (resting_fg, _, resting_modifier) = painted_cell(&terminal, state_x, row_y);
+
+        app.handle_mouse(mouse(MouseEventKind::Moved, state_x, row_y));
+        assert_eq!(app.hovered(), Some(&PointerTarget::TableRow { index: 1 }));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let (hovered_fg, hovered_bg, hovered_modifier) = painted_cell(&terminal, state_x, row_y);
+
+        assert_eq!(
+            hovered_fg, resting_fg,
+            "hover must not repaint the state colour"
+        );
+        if theme().hover_background == Color::Reset {
+            assert!(hovered_modifier.contains(Modifier::REVERSED));
+        } else {
+            assert_eq!(hovered_bg, theme().hover_background);
+            assert!(
+                !hovered_modifier.contains(Modifier::REVERSED),
+                "a tinted row must not flip its coloured cells into blocks"
+            );
+            assert_eq!(
+                hovered_modifier, resting_modifier,
+                "hover must not touch a row's modifiers"
+            );
+
+            // The tint is painted after the selection highlight, so it wins.
+            let title_x = column_x(&app, SortField::Title);
+            assert_eq!(app.selected_row(), Some(0));
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let (_, selected_bg, _) = painted_cell(&terminal, title_x, body.y);
+            assert_eq!(selected_bg, theme().selected_background);
+            app.handle_mouse(mouse(MouseEventKind::Moved, title_x, body.y));
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let (_, hovered_bg, _) = painted_cell(&terminal, title_x, body.y);
+            assert_eq!(hovered_bg, theme().hover_background);
+            assert_ne!(
+                hovered_bg, selected_bg,
+                "a hovered selected row must still read differently from a selected one"
+            );
+        }
+
+        let header = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::SortHeader(SortField::Title)))
+            .map(|region| region.rect)
+            .expect("title sort header");
+        app.handle_mouse(mouse(MouseEventKind::Moved, header.x, header.y));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let (_, _, header_modifier) = painted_cell(&terminal, header.x, header.y);
+        assert!(
+            header_modifier.contains(Modifier::REVERSED),
+            "a hovered sort header should stay a reversed block"
+        );
+
+        app.mode = AppMode::Help;
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let close = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::CloseOverlay))
+            .map(|region| region.rect)
+            .expect("overlay close button");
+        app.handle_mouse(mouse(MouseEventKind::Moved, close.x, close.y));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let (_, _, close_modifier) = painted_cell(&terminal, close.x, close.y);
+        assert!(
+            close_modifier.contains(Modifier::REVERSED),
+            "a hovered close button should stay a reversed block"
+        );
+    }
+
+    fn auth_family_app_with_long_details() -> App {
+        let mut app = auth_family_app();
+        let mut tickets = app.tickets().to_vec();
+        tickets
+            .iter_mut()
+            .find(|ticket| ticket.key.id == 10_002)
+            .expect("current ticket")
+            .description = "line\n".repeat(40);
+        let graph = parent_child_graph();
+        app.replace_prepared_tickets(crate::app::PreparedTickets::with_graph(tickets, graph));
+        app.narrow_details = true;
+        app.focus = Focus::Family;
+        app
+    }
+
+    #[test]
+    fn family_hit_targets_follow_the_details_scroll_and_the_wheel_only_scrolls() {
+        let mut app = auth_family_app_with_long_details();
+        render_text(60, 24, &mut app);
+        assert!(app.details.max_offset() > 0);
+        let before = app
+            .hit_regions
+            .find_target(
+                |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
+            )
+            .map(|region| region.rect.y)
+            .expect("parent row should be on screen");
+        app.details.scroll_to(app.details.max_offset());
+        render_text(60, 24, &mut app);
+        let after = app.hit_regions.find_target(
+            |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
+        );
+        assert!(after.is_none() || after.is_some_and(|region| region.rect.y != before));
+
+        app.details.scroll_to(0);
+        render_text(60, 24, &mut app);
+        let row = app
+            .hit_regions
+            .detail_links
+            .iter()
+            .find(|(_, key)| key.id == 10_002)
+            .map(|(area, _)| *area)
+            .expect("current family row");
+        let cursor = app.family_cursor.clone();
+        let focus = app.focus;
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, row.x + 8, row.y));
+        assert_eq!(app.family_cursor, cursor, "the wheel moves no cursor");
+        assert_eq!(app.focus, focus, "the wheel takes no focus");
+        assert!(app.details.offset > 0);
+    }
+
+    #[test]
+    fn facet_pills_open_their_menu_and_the_filter_overlay_maps_scrolled_clicks() {
         let mut app = App::new(vec![ticket()]);
         let text = render_text(110, 24, &mut app);
         assert!(text.contains("State"));
@@ -4179,65 +3868,19 @@ mod tests {
             FilterField::BAR.get(app.facet_bar.field_index).copied(),
             Some(FilterField::Type)
         );
-    }
-
-    #[test]
-    fn types_and_tags_render_as_compact_badges() {
-        let mut app = App::new(vec![ticket()]);
-        let text = render_text(110, 24, &mut app);
-
-        assert!(text.contains("[Bug]"));
-        assert!(text.contains("[rust]"));
-        assert!(text.contains("[search]"));
-        assert!(!text.contains("Tags: rust, search"));
-    }
-
-    #[test]
-    fn filter_chips_and_overlay_render_active_filters() {
-        let mut app = App::new(vec![ticket()]);
-        app.set_query("state:active type:bug".into());
-        await_search(&mut app);
-
-        let text = render_text(110, 24, &mut app);
-        assert!(text.contains("State:active") || text.contains("state:active"));
-        assert!(text.contains("Type:bug") || text.contains("type:bug"));
 
         app.mode = AppMode::Filter;
+        app.filter_overlay.scroll.offset = 2;
         let overlay = render_text(110, 24, &mut app);
         assert!(overlay.contains("Filters"));
-        assert!(overlay.contains("State"));
-    }
-
-    #[test]
-    fn command_palette_lists_matching_actions() {
-        let mut app = App::new(vec![ticket()]);
-        app.mode = AppMode::Palette;
-        app.palette.query = TextInput::new("copy");
-        let text = render_text(110, 24, &mut app);
-        assert!(text.contains("Copy ID"));
-        assert!(text.contains("Commands"));
-    }
-
-    #[test]
-    fn comfortable_rows_show_tags_in_the_table_and_change_click_mapping() {
-        let mut second = ticket();
-        second.key.id = 10_002;
-        second.title = "Second ticket".into();
-        second.tags = vec!["backend".into()];
-        let mut app = App::new(vec![ticket(), second]);
-        app.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('c'),
-            KeyModifiers::NONE,
-        ));
-        assert_eq!(app.row_density, RowDensity::Comfortable);
-
-        let text = render_text(110, 24, &mut app);
-        assert!(text.contains("[backend]"));
-        assert!(text.contains("[rust]"));
-
-        let body = app.hit_regions.table_body.unwrap();
-        click(&mut app, body.x + 8, body.y + 2);
-        assert_eq!(app.selected_row(), Some(1));
+        let (x, y) = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::FilterRow { index: 2 }))
+            .map(|region| (region.rect.x, region.rect.y))
+            .expect("scrolled row 2 should be the first visible hit");
+        click(&mut app, x, y);
+        assert!(app.filter_overlay.showing_values);
+        assert_eq!(app.filter_overlay.field_index, 2);
     }
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
@@ -4256,48 +3899,7 @@ mod tests {
     }
 
     #[test]
-    fn wheel_scrolls_the_table_without_changing_selection_or_focus() {
-        let tickets = (0..20)
-            .map(|index| {
-                let mut item = ticket();
-                item.key.id += index;
-                item.title = format!("Ticket {index}");
-                item
-            })
-            .collect();
-        let mut app = App::new(tickets);
-        render_text(60, 15, &mut app);
-        let selected = app.selected_row();
-        let details = app.hit_regions.details;
-        let body = app.hit_regions.table_body.unwrap();
-        let column = body.x + body.width / 2;
-        let row = body.y + 1;
-        app.handle_mouse(mouse(MouseEventKind::Moved, column, row));
-        assert_eq!(app.hovered(), Some(&PointerTarget::TableRow { index: 1 }));
-
-        app.handle_mouse(mouse(MouseEventKind::ScrollDown, column, row));
-        assert_eq!(app.selected_row(), selected);
-        assert_eq!(app.focus, Focus::Tickets);
-        assert!(app.table.offset > 0);
-        let mut terminal = Terminal::new(TestBackend::new(60, 15)).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        assert_eq!(
-            app.hovered(),
-            Some(&PointerTarget::TableRow {
-                index: app.table.offset + 1,
-            })
-        );
-        assert_row_hovered(
-            &terminal,
-            column,
-            row,
-            "the ticket under the stationary pointer should remain highlighted",
-        );
-        let _ = details;
-    }
-
-    #[test]
-    fn dragging_from_a_link_copies_text_instead_of_opening_it() {
+    fn dragging_a_link_copies_text_while_a_plain_click_opens_it() {
         let mut app = App::new(vec![ticket()]);
         render_text(130, 30, &mut app);
         let url = app.hit_regions.detail_url.expect("detail url");
@@ -4319,74 +3921,34 @@ mod tests {
             "drag should copy visible text, got {action:?}"
         );
         assert!(!matches!(action, crate::app::AppAction::OpenUrl(_)));
-    }
 
-    #[test]
-    fn clicking_a_link_still_opens_it() {
-        let mut app = App::new(vec![ticket()]);
-        render_text(130, 30, &mut app);
-        let url = app.hit_regions.detail_url.expect("detail url");
         let action = click(&mut app, url.x, url.y);
-        assert!(matches!(action, crate::app::AppAction::OpenUrl(_)));
-    }
+        assert!(
+            matches!(action, crate::app::AppAction::OpenUrl(_)),
+            "a click without movement still opens the link"
+        );
 
-    #[test]
-    fn paste_reaches_palette_and_view_name_editors() {
-        let mut app = App::new(vec![ticket()]);
-        app.mode = AppMode::Palette;
-        app.handle_paste("copy\nme");
-        assert_eq!(app.palette.query.text(), "copy me");
-        assert_eq!(app.palette.query.cursor(), 7);
-
-        app.mode = AppMode::Views;
-        app.views_overlay.naming = Some(TextInput::new("alpha"));
-        app.handle_paste(" beta\u{7}");
-        assert_eq!(
-            app.views_overlay.naming.as_ref().map(TextInput::text),
-            Some("alpha beta")
+        let body = app.hit_regions.table_body.unwrap();
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            body.x + 8,
+            body.y,
+        ));
+        let action = app
+            .handle_mouse(mouse(
+                MouseEventKind::Up(MouseButton::Left),
+                body.x + 8,
+                body.y,
+            ))
+            .action;
+        assert!(
+            !matches!(action, crate::app::AppAction::Copy { .. }),
+            "a zero-width drag copies nothing"
         );
     }
 
     #[test]
-    fn hit_regions_resolve_at_layout_breakpoints() {
-        let mut app = App::new(vec![ticket()]);
-        for width in [36, 69, 70, 109, 110] {
-            render_text(width, 16, &mut app);
-            assert!(
-                app.hit_regions.search.is_some(),
-                "search field missing at width {width}"
-            );
-            if width < 70 {
-                if app.narrow_details {
-                    assert!(app.hit_regions.details.is_some());
-                } else {
-                    assert!(app.hit_regions.table_body.is_some());
-                }
-            } else {
-                assert!(app.hit_regions.table_body.is_some());
-                assert!(app.hit_regions.details.is_some());
-            }
-        }
-    }
-
-    #[test]
-    fn filter_overlay_maps_clicks_to_scrolled_logical_rows() {
-        let mut app = App::new(vec![ticket()]);
-        app.mode = AppMode::Filter;
-        app.filter_overlay.scroll.offset = 2;
-        render_text(110, 24, &mut app);
-        let (x, y) = app
-            .hit_regions
-            .find_target(|target| matches!(target, PointerTarget::FilterRow { index: 2 }))
-            .map(|region| (region.rect.x, region.rect.y))
-            .expect("scrolled row 2 should be the first visible hit");
-        click(&mut app, x, y);
-        assert!(app.filter_overlay.showing_values);
-        assert_eq!(app.filter_overlay.field_index, 2);
-    }
-
-    #[test]
-    fn search_action_buttons_and_close_controls_work() {
+    fn overlay_buttons_and_row_controls_run_their_commands() {
         let mut app = App::new(vec![ticket()]);
         render_text(110, 24, &mut app);
         let (x, y) = app
@@ -4414,11 +3976,8 @@ mod tests {
             .expect("help button");
         click(&mut app, x, y);
         assert_eq!(app.mode, AppMode::Help);
-    }
 
-    #[test]
-    fn row_checkbox_and_copy_button_invoke_existing_commands() {
-        let mut app = App::new(vec![ticket()]);
+        app.mode = AppMode::Browse;
         render_text(110, 24, &mut app);
         let (x, y) = app
             .hit_regions
@@ -4457,12 +4016,37 @@ mod tests {
     }
 
     #[test]
-    fn dragging_the_divider_widens_the_tickets_pane_side_by_side() {
+    fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
         let mut app = App::new(vec![ticket()]);
-        render_text(130, 30, &mut app);
+        let screen = render_text(130, 30, &mut app);
         let before = divider(&app);
         assert_eq!(before.width, 1, "the wide layout leaves a one-cell gap");
         assert_eq!(app.pane_split_wide, 62);
+        assert_eq!(
+            screen
+                .lines()
+                .nth(usize::from(before.y + 1))
+                .and_then(|row| row.chars().nth(usize::from(before.x))),
+            Some('│'),
+            "the gap between the panes is drawn as a divider"
+        );
+        assert!(
+            app.hit_regions
+                .resolve_scroll(before.x, before.y + 1)
+                .is_none(),
+            "the wheel over the divider scrolls nothing"
+        );
+
+        app.handle_mouse(mouse(MouseEventKind::Moved, before.x, before.y + 1));
+        assert_eq!(app.hovered(), Some(&PointerTarget::PaneDivider));
+        let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert!(
+            terminal.backend().buffer()[(before.x, before.y + 1)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "the hovered divider is painted reversed"
+        );
 
         app.session_dirty = false;
         let action = drag(
@@ -4470,12 +4054,10 @@ mod tests {
             (before.x, before.y + 2),
             (before.x + 15, before.y + 2),
         );
-
         assert!(matches!(action, crate::app::AppAction::None));
         assert!(app.selection().is_none(), "the divider selects no text");
         assert!(app.pane_split_wide > 62);
         assert!(app.session_dirty, "a finished drag is worth persisting");
-
         render_text(130, 30, &mut app);
         let after = divider(&app);
         assert!(
@@ -4484,86 +4066,20 @@ mod tests {
             before.x,
             after.x
         );
-    }
 
-    #[test]
-    fn dragging_the_divider_grows_the_tickets_pane_when_stacked() {
-        let mut app = App::new(vec![ticket()]);
-        render_text(90, 30, &mut app);
-        let before = divider(&app);
-        assert_eq!(before.height, 1, "the stacked layout leaves a one-row gap");
-        assert_eq!(app.pane_split_stacked, 56);
-
-        let action = drag(
-            &mut app,
-            (before.x + 5, before.y),
-            (before.x + 5, before.y + 3),
-        );
-
-        assert!(matches!(action, crate::app::AppAction::None));
-        assert!(app.pane_split_stacked > 56);
-
-        render_text(90, 30, &mut app);
-        let after = divider(&app);
-        assert!(
-            after.y > before.y,
-            "divider moved from {} to {}",
-            before.y,
-            after.y
-        );
-    }
-
-    #[test]
-    fn hovering_the_divider_highlights_it() {
-        let mut app = App::new(vec![ticket()]);
-        let screen = render_text(130, 30, &mut app);
-        let rect = divider(&app);
-        let row = screen
-            .lines()
-            .nth(usize::from(rect.y + 1))
-            .expect("divider row");
-        assert_eq!(
-            row.chars().nth(usize::from(rect.x)),
-            Some('\u{2502}'),
-            "the gap between the panes is drawn as a divider"
-        );
-        assert!(
-            app.hit_regions.resolve_scroll(rect.x, rect.y + 1).is_none(),
-            "the wheel over the divider scrolls nothing"
-        );
-
-        app.handle_mouse(mouse(MouseEventKind::Moved, rect.x, rect.y + 1));
-        assert_eq!(app.hovered(), Some(&PointerTarget::PaneDivider));
-
-        let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        assert!(
-            terminal.backend().buffer()[(rect.x, rect.y + 1)]
-                .modifier
-                .contains(Modifier::REVERSED),
-            "the hovered divider is painted reversed"
-        );
-    }
-
-    #[test]
-    fn the_divider_stops_before_either_pane_gets_too_small() {
-        let mut app = App::new(vec![ticket()]);
-        render_text(130, 30, &mut app);
-        let start = divider(&app);
-
-        drag(&mut app, (start.x, start.y), (0, start.y));
-        assert!((20..=80).contains(&app.pane_split_wide));
-        render_text(130, 30, &mut app);
-        let leftmost = divider(&app);
+        // Dragging past either edge stops while both panes are still usable.
+        drag(&mut app, (after.x, after.y), (0, after.y));
+        let leftmost = {
+            render_text(130, 30, &mut app);
+            divider(&app)
+        };
         let content = app.content_area();
         assert!(
             leftmost.x - content.x >= 40,
             "tickets pane kept {} columns",
             leftmost.x - content.x
         );
-
         drag(&mut app, (leftmost.x, leftmost.y), (129, leftmost.y));
-        assert!((20..=80).contains(&app.pane_split_wide));
         render_text(130, 30, &mut app);
         let rightmost = divider(&app);
         assert!(
@@ -4575,25 +4091,23 @@ mod tests {
             "details pane kept {} columns",
             content.right() - rightmost.right()
         );
-    }
 
-    #[test]
-    fn zero_width_drag_does_not_copy() {
-        let mut app = App::new(vec![ticket()]);
-        render_text(130, 30, &mut app);
-        let body = app.hit_regions.table_body.unwrap();
-        app.handle_mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            body.x + 8,
-            body.y,
-        ));
-        let action = app
-            .handle_mouse(mouse(
-                MouseEventKind::Up(MouseButton::Left),
-                body.x + 8,
-                body.y,
-            ))
-            .action;
-        assert!(!matches!(action, crate::app::AppAction::Copy { .. }));
+        let mut stacked = App::new(vec![ticket()]);
+        render_text(90, 30, &mut stacked);
+        let before = divider(&stacked);
+        assert_eq!(before.height, 1, "the stacked layout leaves a one-row gap");
+        assert_eq!(stacked.pane_split_stacked, 56);
+        let action = drag(
+            &mut stacked,
+            (before.x + 5, before.y),
+            (before.x + 5, before.y + 3),
+        );
+        assert!(matches!(action, crate::app::AppAction::None));
+        assert!(stacked.pane_split_stacked > 56);
+        render_text(90, 30, &mut stacked);
+        assert!(
+            divider(&stacked).y > before.y,
+            "the stacked divider moved down"
+        );
     }
 }

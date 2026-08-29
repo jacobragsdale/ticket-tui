@@ -180,17 +180,10 @@ mod tests {
     }
 
     #[test]
-    fn context_path_sits_beside_the_database() {
-        assert_eq!(
-            path_for(Path::new("/tmp/demo.sqlite3")),
-            PathBuf::from("/tmp/demo.context.json")
-        );
-    }
-
-    #[test]
     fn save_replaces_a_complete_json_document_and_remove_is_idempotent() {
         let directory = tempdir().unwrap();
-        let path = directory.path().join("tickets.context.json");
+        let path = path_for(&directory.path().join("tickets.sqlite3"));
+        assert_eq!(path, directory.path().join("tickets.context.json"));
         let first = context("first.sqlite3".into());
         save(&path, &first).unwrap();
         let first_json: serde_json::Value =

@@ -137,22 +137,16 @@ mod tests {
     }
 
     #[test]
-    fn copy_helpers_join_selected_tickets() {
+    fn copy_helpers_join_tickets_and_csv_and_json_escape_fields() {
         let ticket = ticket();
         let tickets = [&ticket];
 
         assert_eq!(copy_ids(&tickets), "42\n");
         assert!(copy_markdown_links(&tickets).contains("[Fix, please]("));
         assert!(copy_summaries(&tickets).contains("42 Fix, please"));
-    }
 
-    #[test]
-    fn csv_quotes_commas_and_json_includes_core_fields() {
-        let ticket = ticket();
-        let tickets = [&ticket];
         let csv = export_csv(&tickets);
         let json = export_json(&tickets);
-
         assert!(csv.contains("\"Fix, please\""));
         assert!(json.contains("\"id\": 42"));
         assert!(json.contains("Fix, please"));
