@@ -10,5 +10,6 @@ pub mod model;
 pub mod pointer;
 pub mod search;
 pub mod session;
+pub mod text_input;
 pub mod timestamp;
 pub mod ui;

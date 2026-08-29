@@ -438,37 +438,69 @@ pub fn contains(area: Rect, column: u16, row: u16) -> bool {
         && row < area.y.saturating_add(area.height)
 }
 
-#[must_use]
-pub fn clamp_offset(offset: usize, content: usize, viewport: usize) -> usize {
-    offset.min(content.saturating_sub(viewport))
+/// Scroll bookkeeping for one surface: where it is scrolled to, how much content it
+/// holds, and how much of that content fits on screen.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ScrollState {
+    pub offset: usize,
+    pub content: usize,
+    pub viewport: usize,
 }
 
-#[must_use]
-pub fn scroll_by(offset: usize, delta: i32, content: usize, viewport: usize) -> usize {
-    let next = if delta < 0 {
-        offset.saturating_sub(delta.unsigned_abs() as usize)
-    } else {
-        offset.saturating_add(delta as usize)
-    };
-    clamp_offset(next, content, viewport)
-}
-
-#[must_use]
-pub fn page_step(viewport: usize) -> usize {
-    viewport.saturating_sub(1).max(1)
-}
-
-#[must_use]
-pub fn ensure_index_visible(offset: usize, viewport: usize, index: usize) -> usize {
-    if viewport == 0 {
-        return offset;
+impl ScrollState {
+    #[must_use]
+    pub const fn max_offset(self) -> usize {
+        self.content.saturating_sub(self.viewport)
     }
-    if index < offset {
-        index
-    } else if index >= offset.saturating_add(viewport) {
-        index.saturating_add(1).saturating_sub(viewport)
-    } else {
-        offset
+
+    /// Records the rendered geometry and re-clamps the offset to the new maximum.
+    pub const fn set_viewport(&mut self, viewport: usize, content: usize) {
+        self.viewport = viewport;
+        self.content = content;
+        self.clamp();
+    }
+
+    pub const fn scroll_to(&mut self, offset: usize) {
+        self.offset = offset;
+        self.clamp();
+    }
+
+    /// Scrolls by `delta` rows, clamped to the content, and reports whether the
+    /// offset moved.
+    pub const fn scroll_by(&mut self, delta: i32) -> bool {
+        let before = self.offset;
+        self.offset = if delta < 0 {
+            self.offset.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            self.offset.saturating_add(delta as usize)
+        };
+        self.clamp();
+        self.offset != before
+    }
+
+    /// Scrolls the smallest amount that brings `index` inside the viewport.
+    pub const fn ensure_visible(&mut self, index: usize) {
+        let viewport = if self.viewport == 0 { 1 } else { self.viewport };
+        if index < self.offset {
+            self.offset = index;
+        } else if index >= self.offset.saturating_add(viewport) {
+            self.offset = index.saturating_add(1).saturating_sub(viewport);
+        }
+    }
+
+    /// One screenful minus a row of overlap, as used by PageUp/PageDown and by
+    /// clicks on the scrollbar track.
+    #[must_use]
+    pub const fn page_step(self) -> usize {
+        let step = self.viewport.saturating_sub(1);
+        if step == 0 { 1 } else { step }
+    }
+
+    const fn clamp(&mut self) {
+        let maximum = self.max_offset();
+        if self.offset > maximum {
+            self.offset = maximum;
+        }
     }
 }
 
@@ -640,14 +672,63 @@ mod tests {
     }
 
     #[test]
-    fn scroll_helpers_clamp_and_keep_the_focused_index_visible() {
-        assert_eq!(scroll_by(0, -3, 20, 5), 0);
-        assert_eq!(scroll_by(18, 3, 20, 5), 15);
-        assert_eq!(scroll_by(4, 3, 20, 5), 7);
-        assert_eq!(page_step(10), 9);
-        assert_eq!(ensure_index_visible(5, 4, 3), 3);
-        assert_eq!(ensure_index_visible(5, 4, 10), 7);
-        assert_eq!(ensure_index_visible(5, 4, 6), 5);
+    fn scroll_state_clamps_when_the_viewport_is_measured() {
+        let mut scroll = ScrollState::default();
+        scroll.set_viewport(5, 20);
+        scroll.scroll_to(usize::MAX);
+        assert_eq!(scroll.offset, 15);
+        assert_eq!(scroll.max_offset(), 15);
+
+        scroll.set_viewport(12, 20);
+        assert_eq!(scroll.offset, 8, "a taller viewport pulls the offset back");
+
+        scroll.set_viewport(12, 4);
+        assert_eq!(
+            scroll.offset, 0,
+            "content shorter than the viewport cannot scroll"
+        );
+        assert_eq!(scroll.max_offset(), 0);
+    }
+
+    #[test]
+    fn scroll_state_pages_and_keeps_the_focused_index_visible() {
+        let mut scroll = ScrollState {
+            offset: 0,
+            content: 20,
+            viewport: 5,
+        };
+        assert_eq!(scroll.page_step(), 4);
+        assert!(!scroll.scroll_by(-3), "already at the top");
+        assert!(scroll.scroll_by(4));
+        assert_eq!(scroll.offset, 4);
+        assert!(scroll.scroll_by(30));
+        assert_eq!(scroll.offset, 15, "scrolling stops at the last screenful");
+        assert!(!scroll.scroll_by(1));
+
+        scroll.offset = 5;
+        scroll.viewport = 4;
+        scroll.ensure_visible(3);
+        assert_eq!(
+            scroll.offset, 3,
+            "an index above the window scrolls up to it"
+        );
+        scroll.offset = 5;
+        scroll.ensure_visible(10);
+        assert_eq!(
+            scroll.offset, 7,
+            "an index below the window scrolls just far enough"
+        );
+        scroll.offset = 5;
+        scroll.ensure_visible(6);
+        assert_eq!(
+            scroll.offset, 5,
+            "an index already on screen does not scroll"
+        );
+
+        let mut unmeasured = ScrollState::default();
+        unmeasured.ensure_visible(4);
+        assert_eq!(unmeasured.offset, 4);
+        assert_eq!(unmeasured.page_step(), 1);
     }
 
     #[test]

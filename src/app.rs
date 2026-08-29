@@ -23,12 +23,13 @@ use crate::model::{
 };
 pub use crate::model::{RowDensity, SearchOrder};
 use crate::pointer::{
-    self, DragKind, PointerState, ScrollSurface, SelectableSurface, TextEditor, TextPos,
-    TextSelection,
+    self, DragKind, PointerState, ScrollState, ScrollSurface, SelectableSurface, TextEditor,
+    TextPos, TextSelection,
 };
 pub use crate::pointer::{HitRegions, PointerTarget};
 use crate::search::{SearchDocuments, SearchEngine, SearchMatch};
 use crate::session::{self, NamedView, Session};
+use crate::text_input::TextInput;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AppMode {
@@ -148,46 +149,34 @@ pub struct FilterOverlay {
     pub field_index: usize,
     pub value_index: usize,
     pub showing_values: bool,
-    pub scroll: u16,
-    pub max_scroll: u16,
-    pub viewport: u16,
+    pub scroll: ScrollState,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct FacetBar {
     pub field_index: usize,
     pub value_index: usize,
-    pub scroll: u16,
-    pub max_scroll: u16,
-    pub viewport: u16,
+    pub scroll: ScrollState,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ColumnOverlay {
     pub index: usize,
-    pub scroll: u16,
-    pub max_scroll: u16,
-    pub viewport: u16,
+    pub scroll: ScrollState,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct PaletteState {
-    pub query: String,
-    pub cursor: usize,
+    pub query: TextInput,
     pub selected: usize,
-    pub scroll: u16,
-    pub max_scroll: u16,
-    pub viewport: u16,
+    pub scroll: ScrollState,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct ViewsOverlay {
     pub index: usize,
-    pub naming: Option<String>,
-    pub name_cursor: usize,
-    pub scroll: u16,
-    pub max_scroll: u16,
-    pub viewport: u16,
+    pub naming: Option<TextInput>,
+    pub scroll: ScrollState,
 }
 
 #[derive(Debug)]
@@ -226,8 +215,7 @@ pub struct App {
     search_generation: u64,
     pending_selection: Option<TicketKey>,
     pub search_pending: bool,
-    pub query: String,
-    pub query_cursor: usize,
+    query: TextInput,
     search_history: Vec<String>,
     search_history_index: Option<usize>,
     search_history_draft: String,
@@ -239,17 +227,11 @@ pub struct App {
     pub mode: AppMode,
     pub focus: Focus,
     pub table_state: TableState,
-    pub table_offset: usize,
-    pub table_viewport_rows: usize,
-    pub details_scroll: u16,
-    pub details_max_scroll: u16,
-    pub details_viewport: u16,
+    pub table: ScrollState,
+    pub details: ScrollState,
     pub family_cursor: Option<TicketKey>,
-    pub help_scroll: u16,
-    pub help_max_scroll: u16,
-    pub help_viewport: u16,
-    pub overlay_scroll: u16,
-    pub overlay_max_scroll: u16,
+    pub help: ScrollState,
+    pub sort: ScrollState,
     pub narrow_details: bool,
     pub reload_pending: bool,
     pub should_quit: bool,
@@ -288,8 +270,7 @@ impl App {
             search_generation: 0,
             pending_selection: None,
             search_pending: false,
-            query: String::new(),
-            query_cursor: 0,
+            query: TextInput::default(),
             search_history: Vec::new(),
             search_history_index: None,
             search_history_draft: String::new(),
@@ -301,17 +282,11 @@ impl App {
             mode: AppMode::Browse,
             focus: Focus::Tickets,
             table_state: TableState::default(),
-            table_offset: 0,
-            table_viewport_rows: 0,
-            details_scroll: 0,
-            details_max_scroll: 0,
-            details_viewport: 0,
+            table: ScrollState::default(),
+            details: ScrollState::default(),
             family_cursor: None,
-            help_scroll: 0,
-            help_max_scroll: 0,
-            help_viewport: 0,
-            overlay_scroll: 0,
-            overlay_max_scroll: 0,
+            help: ScrollState::default(),
+            sort: ScrollState::default(),
             narrow_details: false,
             reload_pending: false,
             should_quit: false,
@@ -377,8 +352,8 @@ impl App {
         let parsed = self.parsed_query();
         let visible_rows = self
             .visible_tickets()
-            .skip(self.table_offset)
-            .take(self.table_viewport_rows)
+            .skip(self.table.offset)
+            .take(self.table.viewport)
             .map(|ticket| self.ticket_context(ticket))
             .collect();
         let checked_tickets = self
@@ -399,7 +374,7 @@ impl App {
             .into(),
             active_view: self.active_view.clone(),
             search: SearchContext {
-                query: self.query.clone(),
+                query: self.query.text().to_owned(),
                 fuzzy_text: parsed.fuzzy,
                 filters: parsed
                     .filters
@@ -418,8 +393,8 @@ impl App {
             tickets: TicketsContext {
                 total_count: self.tickets.len(),
                 matching_count: self.visible.len(),
-                viewport_start: self.table_offset,
-                viewport_size: self.table_viewport_rows,
+                viewport_start: self.table.offset,
+                viewport_size: self.table.viewport,
                 visible_rows,
             },
             selected_ticket: self
@@ -430,7 +405,7 @@ impl App {
                 organization: key.organization.clone(),
                 id: key.id,
             }),
-            details_scroll_line: self.details_scroll,
+            details_scroll_line: u16::try_from(self.details.offset).unwrap_or(u16::MAX),
         }
     }
 
@@ -452,8 +427,18 @@ impl App {
     }
 
     #[must_use]
+    pub fn query(&self) -> &str {
+        self.query.text()
+    }
+
+    #[must_use]
+    pub const fn query_cursor(&self) -> usize {
+        self.query.cursor()
+    }
+
+    #[must_use]
     pub fn parsed_query(&self) -> ParsedQuery {
-        parse_query(&self.query)
+        parse_query(self.query.text())
     }
 
     #[must_use]
@@ -508,7 +493,7 @@ impl App {
 
     #[must_use]
     pub fn palette_commands(&self) -> Vec<Command> {
-        matching_commands(&self.palette.query)
+        matching_commands(self.palette.query.text())
     }
 
     #[must_use]
@@ -525,11 +510,6 @@ impl App {
         facet_values(self.tickets(), &filters, self.facet_field(), |ticket| {
             self.bookmarks.contains(&ticket.key)
         })
-    }
-
-    pub fn set_overlay_max_scroll(&mut self, maximum: u16) {
-        self.overlay_max_scroll = maximum;
-        self.overlay_scroll = self.overlay_scroll.min(maximum);
     }
 
     pub fn configure_database(&mut self, path: PathBuf, signature: u128) {
@@ -692,46 +672,63 @@ impl App {
     }
 
     pub fn set_query(&mut self, query: String) {
-        let cursor = query.chars().count();
-        self.set_query_at(query, cursor);
+        if self.query.text() == query {
+            self.query.move_end();
+            return;
+        }
+        self.query.set_text(query);
+        self.after_query_edit();
     }
 
     pub fn handle_paste(&mut self, pasted: &str) {
         match self.active_editor() {
-            Some(TextEditor::Search) => {
-                let pasted = sanitize_multiline(pasted);
-                if pasted.is_empty() {
-                    return;
-                }
-                let byte = byte_index(&self.query, self.query_cursor);
-                let mut query = self.query.clone();
-                query.insert_str(byte, &pasted);
-                let cursor = self.query_cursor + pasted.chars().count();
-                self.set_query_at(query, cursor);
-            }
+            Some(TextEditor::Search) => self.edit_query(|query| query.paste(pasted, true)),
             Some(TextEditor::Palette) => {
-                let pasted = sanitize_multiline(pasted);
-                if pasted.is_empty() {
-                    return;
-                }
-                let byte = byte_index(&self.palette.query, self.palette.cursor);
-                self.palette.query.insert_str(byte, &pasted);
-                self.palette.cursor += pasted.chars().count();
-                self.palette.selected = 0;
-                self.palette.scroll = 0;
+                self.edit_palette_query(|query| query.paste(pasted, true));
             }
             Some(TextEditor::ViewName) => {
                 if let Some(name) = self.views_overlay.naming.as_mut() {
-                    let pasted = sanitize_single_line(pasted);
-                    if pasted.is_empty() {
-                        return;
-                    }
-                    let byte = byte_index(name, self.views_overlay.name_cursor);
-                    name.insert_str(byte, &pasted);
-                    self.views_overlay.name_cursor += pasted.chars().count();
+                    name.paste(pasted, false);
                 }
             }
             None => {}
+        }
+    }
+
+    /// Runs one edit against the search field and re-runs the search when the text
+    /// actually changed; a bare caret move leaves the results alone.
+    fn edit_query(&mut self, edit: impl FnOnce(&mut TextInput)) {
+        let before = self.query.text().to_owned();
+        edit(&mut self.query);
+        if self.query.text() != before {
+            self.after_query_edit();
+        }
+    }
+
+    fn after_query_edit(&mut self) {
+        let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
+        self.search_history_index = None;
+        self.search_history_draft = self.query.text().to_owned();
+        self.session_dirty = true;
+        if self.fuzzy_query().is_empty() {
+            self.search_generation = self.search_generation.wrapping_add(1);
+            self.search_pending = false;
+            self.pending_selection = None;
+            self.show_all(selected.as_ref());
+        } else {
+            self.pending_selection = selected;
+            self.submit_search();
+        }
+    }
+
+    /// Runs one edit against the palette filter and restarts the command list when
+    /// the text changed.
+    fn edit_palette_query(&mut self, edit: impl FnOnce(&mut TextInput)) {
+        let before = self.palette.query.text().to_owned();
+        edit(&mut self.palette.query);
+        if self.palette.query.text() != before {
+            self.palette.selected = 0;
+            self.palette.scroll.scroll_to(0);
         }
     }
 
@@ -744,68 +741,44 @@ impl App {
         }
     }
 
-    pub fn set_details_max_scroll(&mut self, maximum: u16) {
-        self.details_max_scroll = maximum;
-        self.details_scroll = self.details_scroll.min(maximum);
-    }
-
-    pub fn set_details_viewport(&mut self, viewport: u16, content: u16) {
-        self.details_viewport = viewport;
-        let maximum = content.saturating_sub(viewport);
-        self.set_details_max_scroll(maximum);
-    }
-
-    pub fn set_help_max_scroll(&mut self, maximum: u16) {
-        self.help_max_scroll = maximum;
-        self.help_scroll = self.help_scroll.min(maximum);
-    }
-
-    pub fn set_help_viewport(&mut self, viewport: u16, content: u16) {
-        self.help_viewport = viewport;
-        let maximum = content.saturating_sub(viewport);
-        self.set_help_max_scroll(maximum);
-    }
-
     pub fn set_table_viewport(&mut self, rows: usize) {
-        self.table_viewport_rows = rows;
-        self.table_offset = pointer::clamp_offset(self.table_offset, self.visible.len(), rows);
+        self.table.set_viewport(rows, self.visible.len());
     }
 
-    pub fn set_overlay_viewport(&mut self, surface: ScrollSurface, viewport: u16, content: u16) {
-        let max = content.saturating_sub(viewport);
+    /// The scroll bookkeeping for one surface. The table measures its content from
+    /// the visible rows, so that length is refreshed on the way out.
+    #[must_use]
+    pub fn scroll_state(&self, surface: ScrollSurface) -> ScrollState {
         match surface {
-            ScrollSurface::Filter => {
-                self.filter_overlay.viewport = viewport;
-                self.filter_overlay.max_scroll = max;
-                self.filter_overlay.scroll = self.filter_overlay.scroll.min(max);
-                self.overlay_scroll = self.filter_overlay.scroll;
-                self.overlay_max_scroll = max;
-            }
-            ScrollSurface::Columns => {
-                self.column_overlay.viewport = viewport;
-                self.column_overlay.max_scroll = max;
-                self.column_overlay.scroll = self.column_overlay.scroll.min(max);
-            }
-            ScrollSurface::Palette => {
-                self.palette.viewport = viewport;
-                self.palette.max_scroll = max;
-                self.palette.scroll = self.palette.scroll.min(max);
-            }
-            ScrollSurface::Views => {
-                self.views_overlay.viewport = viewport;
-                self.views_overlay.max_scroll = max;
-                self.views_overlay.scroll = self.views_overlay.scroll.min(max);
-            }
-            ScrollSurface::FacetMenu => {
-                self.facet_bar.viewport = viewport;
-                self.facet_bar.max_scroll = max;
-                self.facet_bar.scroll = self.facet_bar.scroll.min(max);
-            }
-            ScrollSurface::Sort => {
-                self.overlay_max_scroll = max;
-                self.overlay_scroll = self.overlay_scroll.min(max);
-            }
-            _ => {}
+            ScrollSurface::Table => ScrollState {
+                content: self.visible.len(),
+                ..self.table
+            },
+            ScrollSurface::Details => self.details,
+            ScrollSurface::Help => self.help,
+            ScrollSurface::Sort => self.sort,
+            ScrollSurface::Filter => self.filter_overlay.scroll,
+            ScrollSurface::Columns => self.column_overlay.scroll,
+            ScrollSurface::Palette => self.palette.scroll,
+            ScrollSurface::Views => self.views_overlay.scroll,
+            ScrollSurface::FacetMenu => self.facet_bar.scroll,
+        }
+    }
+
+    pub fn scroll_state_mut(&mut self, surface: ScrollSurface) -> &mut ScrollState {
+        if matches!(surface, ScrollSurface::Table) {
+            self.table.content = self.visible.len();
+        }
+        match surface {
+            ScrollSurface::Table => &mut self.table,
+            ScrollSurface::Details => &mut self.details,
+            ScrollSurface::Help => &mut self.help,
+            ScrollSurface::Sort => &mut self.sort,
+            ScrollSurface::Filter => &mut self.filter_overlay.scroll,
+            ScrollSurface::Columns => &mut self.column_overlay.scroll,
+            ScrollSurface::Palette => &mut self.palette.scroll,
+            ScrollSurface::Views => &mut self.views_overlay.scroll,
+            ScrollSurface::FacetMenu => &mut self.facet_bar.scroll,
         }
     }
 
@@ -822,28 +795,6 @@ impl App {
     #[must_use]
     pub fn selection(&self) -> Option<TextSelection> {
         self.pointer.selection
-    }
-
-    fn set_query_at(&mut self, query: String, cursor: usize) {
-        if self.query == query {
-            self.query_cursor = cursor.min(query.chars().count());
-            return;
-        }
-        let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
-        self.query = query;
-        self.query_cursor = cursor.min(self.query.chars().count());
-        self.search_history_index = None;
-        self.search_history_draft.clone_from(&self.query);
-        self.session_dirty = true;
-        if self.fuzzy_query().is_empty() {
-            self.search_generation = self.search_generation.wrapping_add(1);
-            self.search_pending = false;
-            self.pending_selection = None;
-            self.show_all(selected.as_ref());
-        } else {
-            self.pending_selection = selected;
-            self.submit_search();
-        }
     }
 
     pub fn set_sort(&mut self, field: SortField, direction: SortDirection) {
@@ -966,7 +917,7 @@ impl App {
                 self.mode = AppMode::Sort;
             }
             KeyCode::Char('?') => {
-                self.help_scroll = 0;
+                self.help.scroll_to(0);
                 self.mode = AppMode::Help;
             }
             KeyCode::Char('r') => return AppAction::Reload,
@@ -1000,12 +951,12 @@ impl App {
             KeyCode::Home => match self.focus {
                 Focus::Tickets => self.select_row(0),
                 Focus::Family => self.move_family_cursor_to_edge(false),
-                Focus::Details => self.details_scroll = 0,
+                Focus::Details => self.details.scroll_to(0),
             },
             KeyCode::End => match self.focus {
                 Focus::Tickets => self.select_row(self.visible.len().saturating_sub(1)),
                 Focus::Family => self.move_family_cursor_to_edge(true),
-                Focus::Details => self.details_scroll = self.details_max_scroll,
+                Focus::Details => self.details.scroll_to(self.details.max_offset()),
             },
             KeyCode::Enter => match self.focus {
                 Focus::Tickets => {}
@@ -1033,20 +984,6 @@ impl App {
     fn handle_search_key(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
             KeyCode::Esc | KeyCode::Enter => self.finish_search(),
-            KeyCode::Left => self.query_cursor = self.query_cursor.saturating_sub(1),
-            KeyCode::Right => {
-                self.query_cursor = (self.query_cursor + 1).min(self.query.chars().count());
-            }
-            KeyCode::Home => self.query_cursor = 0,
-            KeyCode::End => self.query_cursor = self.query.chars().count(),
-            KeyCode::Backspace => self.delete_query_character(true),
-            KeyCode::Delete => self.delete_query_character(false),
-            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.delete_query_word();
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.set_query(String::new());
-            }
             KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.recall_previous_search();
             }
@@ -1055,17 +992,9 @@ impl App {
             }
             KeyCode::Down => self.move_selection(1),
             KeyCode::Up => self.move_selection(-1),
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                let mut query = self.query.clone();
-                let byte = byte_index(&query, self.query_cursor);
-                query.insert(byte, character);
-                self.set_query_at(query, self.query_cursor + 1);
-            }
-            _ => {}
+            _ => self.edit_query(|query| {
+                query.handle_key(key);
+            }),
         }
         AppAction::None
     }
@@ -1102,17 +1031,19 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('?') => self.mode = AppMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
-                self.help_scroll = self.help_scroll.saturating_sub(1);
+                self.help.scroll_by(-1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.help_scroll = self.help_scroll.saturating_add(1).min(self.help_max_scroll);
+                self.help.scroll_by(1);
             }
-            KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(5),
+            KeyCode::PageUp => {
+                self.help.scroll_by(-5);
+            }
             KeyCode::PageDown => {
-                self.help_scroll = self.help_scroll.saturating_add(5).min(self.help_max_scroll);
+                self.help.scroll_by(5);
             }
-            KeyCode::Home => self.help_scroll = 0,
-            KeyCode::End => self.help_scroll = self.help_max_scroll,
+            KeyCode::Home => self.help.scroll_to(0),
+            KeyCode::End => self.help.scroll_to(self.help.max_offset()),
             _ => {}
         }
     }
@@ -1252,7 +1183,7 @@ impl App {
             PointerTarget::ClearQuery => self.set_query(String::new()),
             PointerTarget::OpenPalette => self.open_palette(),
             PointerTarget::OpenHelp => {
-                self.help_scroll = 0;
+                self.help.scroll_to(0);
                 self.mode = AppMode::Help;
             }
             PointerTarget::CopyActions => self.open_copy_actions(),
@@ -1363,8 +1294,7 @@ impl App {
                     self.filter_overlay.field_index = index;
                     self.filter_overlay.showing_values = true;
                     self.filter_overlay.value_index = 0;
-                    self.filter_overlay.scroll = 0;
-                    self.overlay_scroll = 0;
+                    self.filter_overlay.scroll.scroll_to(0);
                 }
             }
             PointerTarget::ColumnToggle { index } => {
@@ -1398,18 +1328,14 @@ impl App {
                         .views_overlay
                         .naming
                         .take()
-                        .map(|name| name.trim().to_owned())
+                        .map(|name| name.text().trim().to_owned())
                         .filter(|name| !name.is_empty())
                     {
                         self.save_view(name);
                     }
                 } else {
-                    self.views_overlay.naming = Some(self.active_view.clone().unwrap_or_default());
-                    self.views_overlay.name_cursor = self
-                        .views_overlay
-                        .naming
-                        .as_ref()
-                        .map_or(0, |name| name.chars().count());
+                    self.views_overlay.naming =
+                        Some(TextInput::new(self.active_view.clone().unwrap_or_default()));
                 }
             }
             PointerTarget::DeleteView => self.delete_view_at(self.views_overlay.index),
@@ -1419,11 +1345,8 @@ impl App {
             PointerTarget::CancelNaming => self.views_overlay.naming = None,
             PointerTarget::OverlayBody => {}
             PointerTarget::ScrollbarTrack { surface, page_down } => {
-                let step = self
-                    .hit_regions
-                    .scroll(surface)
-                    .map(|metrics| pointer::page_step(metrics.viewport) as i32)
-                    .unwrap_or(1);
+                let step =
+                    i32::try_from(self.scroll_state(surface).page_step()).unwrap_or(i32::MAX);
                 self.scroll_surface(surface, if page_down { step } else { -step });
             }
             PointerTarget::ScrollbarThumb { .. } => {}
@@ -1440,8 +1363,7 @@ impl App {
             AppMode::Filter if self.filter_overlay.showing_values => {
                 self.filter_overlay.showing_values = false;
                 self.filter_overlay.value_index = 0;
-                self.filter_overlay.scroll = 0;
-                self.overlay_scroll = 0;
+                self.filter_overlay.scroll.scroll_to(0);
             }
             AppMode::Browse | AppMode::Search => {}
             _ => self.mode = AppMode::Browse,
@@ -1451,8 +1373,7 @@ impl App {
 
     fn open_copy_actions(&mut self) {
         self.open_palette();
-        self.palette.query = "copy".into();
-        self.palette.cursor = 4;
+        self.palette.query = TextInput::new("copy");
     }
 
     fn place_caret(&mut self, editor: TextEditor, column: u16, row: u16) {
@@ -1474,15 +1395,11 @@ impl App {
         };
         let index = snapshot.col;
         match editor {
-            TextEditor::Search => {
-                self.query_cursor = index.min(self.query.chars().count());
-            }
-            TextEditor::Palette => {
-                self.palette.cursor = index.min(self.palette.query.chars().count());
-            }
+            TextEditor::Search => self.query.set_cursor(index),
+            TextEditor::Palette => self.palette.query.set_cursor(index),
             TextEditor::ViewName => {
-                if let Some(name) = self.views_overlay.naming.as_ref() {
-                    self.views_overlay.name_cursor = index.min(name.chars().count());
+                if let Some(name) = self.views_overlay.naming.as_mut() {
+                    name.set_cursor(index);
                 }
             }
         }
@@ -1545,136 +1462,11 @@ impl App {
         let rel = pointer.saturating_sub(track_y).max(0) as usize;
         let offset =
             pointer::offset_from_thumb(rel.min(thumb.travel), thumb.travel, thumb.max_offset);
-        self.set_scroll_offset(surface, offset);
+        self.scroll_state_mut(surface).scroll_to(offset);
     }
 
     fn scroll_surface(&mut self, surface: ScrollSurface, delta: i32) -> bool {
-        let (offset, content, viewport) = match surface {
-            ScrollSurface::Table => (
-                self.table_offset,
-                self.visible.len(),
-                self.table_viewport_rows.max(1),
-            ),
-            ScrollSurface::Details => (
-                usize::from(self.details_scroll),
-                usize::from(
-                    self.details_max_scroll
-                        .saturating_add(self.details_viewport),
-                ),
-                usize::from(self.details_viewport.max(1)),
-            ),
-            ScrollSurface::Help => (
-                usize::from(self.help_scroll),
-                usize::from(self.help_max_scroll.saturating_add(self.help_viewport)),
-                usize::from(self.help_viewport.max(1)),
-            ),
-            ScrollSurface::Filter => (
-                usize::from(self.filter_overlay.scroll),
-                usize::from(
-                    self.filter_overlay
-                        .max_scroll
-                        .saturating_add(self.filter_overlay.viewport),
-                ),
-                usize::from(self.filter_overlay.viewport.max(1)),
-            ),
-            ScrollSurface::Columns => (
-                usize::from(self.column_overlay.scroll),
-                usize::from(
-                    self.column_overlay
-                        .max_scroll
-                        .saturating_add(self.column_overlay.viewport),
-                ),
-                usize::from(self.column_overlay.viewport.max(1)),
-            ),
-            ScrollSurface::Palette => (
-                usize::from(self.palette.scroll),
-                usize::from(
-                    self.palette
-                        .max_scroll
-                        .saturating_add(self.palette.viewport),
-                ),
-                usize::from(self.palette.viewport.max(1)),
-            ),
-            ScrollSurface::Views => (
-                usize::from(self.views_overlay.scroll),
-                usize::from(
-                    self.views_overlay
-                        .max_scroll
-                        .saturating_add(self.views_overlay.viewport),
-                ),
-                usize::from(self.views_overlay.viewport.max(1)),
-            ),
-            ScrollSurface::FacetMenu => (
-                usize::from(self.facet_bar.scroll),
-                usize::from(
-                    self.facet_bar
-                        .max_scroll
-                        .saturating_add(self.facet_bar.viewport),
-                ),
-                usize::from(self.facet_bar.viewport.max(1)),
-            ),
-            ScrollSurface::Sort => (
-                usize::from(self.overlay_scroll),
-                usize::from(self.overlay_max_scroll.saturating_add(1)),
-                1,
-            ),
-        };
-        let next = pointer::scroll_by(offset, delta, content, viewport);
-        if next == offset {
-            return false;
-        }
-        self.set_scroll_offset(surface, next);
-        true
-    }
-
-    fn set_scroll_offset(&mut self, surface: ScrollSurface, offset: usize) {
-        match surface {
-            ScrollSurface::Table => {
-                self.table_offset =
-                    pointer::clamp_offset(offset, self.visible.len(), self.table_viewport_rows);
-            }
-            ScrollSurface::Details => {
-                self.details_scroll = u16::try_from(offset)
-                    .unwrap_or(u16::MAX)
-                    .min(self.details_max_scroll);
-            }
-            ScrollSurface::Help => {
-                self.help_scroll = u16::try_from(offset)
-                    .unwrap_or(u16::MAX)
-                    .min(self.help_max_scroll);
-            }
-            ScrollSurface::Filter => {
-                self.filter_overlay.scroll = u16::try_from(offset)
-                    .unwrap_or(u16::MAX)
-                    .min(self.filter_overlay.max_scroll);
-                self.overlay_scroll = self.filter_overlay.scroll;
-            }
-            ScrollSurface::Columns => {
-                self.column_overlay.scroll = u16::try_from(offset)
-                    .unwrap_or(u16::MAX)
-                    .min(self.column_overlay.max_scroll);
-            }
-            ScrollSurface::Palette => {
-                self.palette.scroll = u16::try_from(offset)
-                    .unwrap_or(u16::MAX)
-                    .min(self.palette.max_scroll);
-            }
-            ScrollSurface::Views => {
-                self.views_overlay.scroll = u16::try_from(offset)
-                    .unwrap_or(u16::MAX)
-                    .min(self.views_overlay.max_scroll);
-            }
-            ScrollSurface::FacetMenu => {
-                self.facet_bar.scroll = u16::try_from(offset)
-                    .unwrap_or(u16::MAX)
-                    .min(self.facet_bar.max_scroll);
-            }
-            ScrollSurface::Sort => {
-                self.overlay_scroll = u16::try_from(offset)
-                    .unwrap_or(u16::MAX)
-                    .min(self.overlay_max_scroll);
-            }
-        }
+        self.scroll_state_mut(surface).scroll_by(delta)
     }
 
     fn move_focused(&mut self, delta: isize) {
@@ -1686,14 +1478,12 @@ impl App {
     }
 
     fn scroll_details(&mut self, delta: isize) {
-        self.details_scroll = if delta.is_negative() {
-            self.details_scroll
-                .saturating_sub(delta.unsigned_abs() as u16)
+        let delta = i32::try_from(delta).unwrap_or(if delta.is_negative() {
+            i32::MIN
         } else {
-            self.details_scroll
-                .saturating_add(delta as u16)
-                .min(self.details_max_scroll)
-        };
+            i32::MAX
+        });
+        self.details.scroll_by(delta);
     }
 
     fn toggle_focus(&mut self) {
@@ -1716,56 +1506,10 @@ impl App {
         }
     }
 
-    fn delete_query_character(&mut self, backwards: bool) {
-        let character_count = self.query.chars().count();
-        let remove_at = if backwards {
-            let Some(index) = self.query_cursor.checked_sub(1) else {
-                return;
-            };
-            index
-        } else {
-            if self.query_cursor >= character_count {
-                return;
-            }
-            self.query_cursor
-        };
-        let start = byte_index(&self.query, remove_at);
-        let end = byte_index(&self.query, remove_at + 1);
-        let mut query = self.query.clone();
-        query.replace_range(start..end, "");
-        self.set_query_at(
-            query,
-            if backwards {
-                remove_at
-            } else {
-                self.query_cursor
-            },
-        );
-    }
-
-    fn delete_query_word(&mut self) {
-        if self.query_cursor == 0 {
-            return;
-        }
-        let characters: Vec<_> = self.query.chars().collect();
-        let mut start = self.query_cursor;
-        while start > 0 && characters[start - 1].is_whitespace() {
-            start -= 1;
-        }
-        while start > 0 && !characters[start - 1].is_whitespace() {
-            start -= 1;
-        }
-        let start_byte = byte_index(&self.query, start);
-        let end_byte = byte_index(&self.query, self.query_cursor);
-        let mut query = self.query.clone();
-        query.replace_range(start_byte..end_byte, "");
-        self.set_query_at(query, start);
-    }
-
     fn begin_search(&mut self) {
-        self.query_cursor = self.query.chars().count();
+        self.query.move_end();
         self.search_history_index = None;
-        self.search_history_draft.clone_from(&self.query);
+        self.search_history_draft = self.query.text().to_owned();
         self.mode = AppMode::Search;
     }
 
@@ -1774,13 +1518,13 @@ impl App {
             && self
                 .search_history
                 .last()
-                .is_none_or(|previous| previous != &self.query)
+                .is_none_or(|previous| previous != self.query.text())
         {
             const HISTORY_LIMIT: usize = 50;
             if self.search_history.len() == HISTORY_LIMIT {
                 self.search_history.remove(0);
             }
-            self.search_history.push(self.query.clone());
+            self.search_history.push(self.query.text().to_owned());
         }
         self.search_history_index = None;
         self.search_history_draft.clear();
@@ -1797,7 +1541,7 @@ impl App {
             |index| index.saturating_sub(1),
         );
         if self.search_history_index.is_none() {
-            self.search_history_draft.clone_from(&self.query);
+            self.search_history_draft = self.query.text().to_owned();
         }
         let draft = self.search_history_draft.clone();
         let query = self.search_history[target].clone();
@@ -1850,17 +1594,13 @@ impl App {
     fn select_row(&mut self, row: usize) {
         if self.visible.is_empty() {
             self.table_state.select(None);
-            self.table_offset = 0;
+            self.table.offset = 0;
         } else {
             let row = row.min(self.visible.len() - 1);
             self.table_state.select(Some(row));
-            self.table_offset = pointer::ensure_index_visible(
-                self.table_offset,
-                self.table_viewport_rows.max(1),
-                row,
-            );
+            self.table.ensure_visible(row);
         }
-        self.details_scroll = 0;
+        self.details.scroll_to(0);
         self.sync_family_state();
     }
 
@@ -1958,9 +1698,9 @@ impl App {
             .select((!self.visible.is_empty()).then_some(row.unwrap_or_default()));
         self.sync_family_state();
         if selected.is_none() || row.is_none() {
-            self.table_offset = 0;
+            self.table.scroll_to(0);
             *self.table_state.offset_mut() = 0;
-            self.details_scroll = 0;
+            self.details.scroll_to(0);
         }
     }
 
@@ -1978,7 +1718,7 @@ impl App {
 
     fn family_page_size(&self) -> isize {
         let visible = self.visible_family_tree().len().max(1);
-        let viewport = usize::from(self.details_viewport.max(1));
+        let viewport = self.details.viewport.max(1);
         isize::try_from(viewport.min(visible)).unwrap_or(1)
     }
 
@@ -2046,30 +1786,28 @@ impl App {
         let Some(index) = tree.iter().position(|entry| entry.key == cursor) else {
             return;
         };
-        let line = u16::try_from(index.saturating_add(1)).unwrap_or(u16::MAX);
-        let viewport = self.details_viewport.max(1);
+        let line = index.saturating_add(1);
+        let viewport = self.details.viewport.max(1);
         if index == 0 {
-            self.details_scroll = 0;
-        } else if line < self.details_scroll {
-            self.details_scroll = line;
-        } else if line >= self.details_scroll.saturating_add(viewport) {
-            self.details_scroll = line
+            self.details.offset = 0;
+        } else if line < self.details.offset {
+            self.details.offset = line;
+        } else if line >= self.details.offset.saturating_add(viewport) {
+            self.details.offset = line
                 .saturating_add(1)
                 .saturating_sub(viewport)
-                .min(self.details_max_scroll);
+                .min(self.details.max_offset());
         }
     }
 
     fn open_filters(&mut self) {
         self.filter_overlay = FilterOverlay::default();
-        self.overlay_scroll = 0;
         self.mode = AppMode::Filter;
     }
 
     fn open_facets(&mut self, field_index: usize) {
         self.facet_bar.field_index = field_index.min(FilterField::BAR.len());
         self.facet_bar.value_index = 0;
-        self.overlay_scroll = 0;
         self.mode = AppMode::Facets;
     }
 
@@ -2087,14 +1825,12 @@ impl App {
                 self.facet_bar.value_index = 0;
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.facet_bar.value_index = self.facet_bar.value_index.saturating_sub(1);
-                self.ensure_facet_visible();
+                self.focus_facet_value(self.facet_bar.value_index.saturating_sub(1));
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let count = self.focused_bar_facets().len();
                 if count > 0 {
-                    self.facet_bar.value_index = (self.facet_bar.value_index + 1).min(count - 1);
-                    self.ensure_facet_visible();
+                    self.focus_facet_value((self.facet_bar.value_index + 1).min(count - 1));
                 }
             }
             KeyCode::Char(' ') | KeyCode::Enter => {
@@ -2108,6 +1844,11 @@ impl App {
         }
     }
 
+    fn focus_facet_value(&mut self, index: usize) {
+        self.facet_bar.value_index = index;
+        self.facet_bar.scroll.ensure_visible(index);
+    }
+
     fn focused_bar_field(&self) -> Option<FilterField> {
         FilterField::BAR.get(self.facet_bar.field_index).copied()
     }
@@ -2115,33 +1856,6 @@ impl App {
     fn focused_bar_facets(&self) -> Vec<FacetValue> {
         self.focused_bar_field()
             .map_or_else(Vec::new, |field| self.facets_for(field))
-    }
-
-    fn ensure_facet_visible(&mut self) {
-        self.facet_bar.scroll = u16::try_from(pointer::ensure_index_visible(
-            usize::from(self.facet_bar.scroll),
-            usize::from(self.facet_bar.viewport.max(1)),
-            self.facet_bar.value_index,
-        ))
-        .unwrap_or(0);
-    }
-
-    fn ensure_column_visible(&mut self) {
-        self.column_overlay.scroll = u16::try_from(pointer::ensure_index_visible(
-            usize::from(self.column_overlay.scroll),
-            usize::from(self.column_overlay.viewport.max(1)),
-            self.column_overlay.index,
-        ))
-        .unwrap_or(0);
-    }
-
-    fn ensure_view_visible(&mut self) {
-        self.views_overlay.scroll = u16::try_from(pointer::ensure_index_visible(
-            usize::from(self.views_overlay.scroll),
-            usize::from(self.views_overlay.viewport.max(1)),
-            self.views_overlay.index,
-        ))
-        .unwrap_or(0);
     }
 
     fn toggle_current_bar_facet(&mut self) {
@@ -2160,19 +1874,16 @@ impl App {
 
     fn open_columns(&mut self) {
         self.column_overlay.index = 0;
-        self.overlay_scroll = 0;
         self.mode = AppMode::Columns;
     }
 
     fn open_palette(&mut self) {
         self.palette = PaletteState::default();
-        self.overlay_scroll = 0;
         self.mode = AppMode::Palette;
     }
 
     fn open_views(&mut self) {
         self.views_overlay = ViewsOverlay::default();
-        self.overlay_scroll = 0;
         self.mode = AppMode::Views;
     }
 
@@ -2181,19 +1892,16 @@ impl App {
             KeyCode::Esc if self.filter_overlay.showing_values => {
                 self.filter_overlay.showing_values = false;
                 self.filter_overlay.value_index = 0;
-                self.overlay_scroll = 0;
             }
             KeyCode::Esc | KeyCode::Char('f') => self.mode = AppMode::Browse,
             KeyCode::Left | KeyCode::Char('h') if self.filter_overlay.showing_values => {
                 self.filter_overlay.showing_values = false;
-                self.overlay_scroll = 0;
             }
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter
                 if !self.filter_overlay.showing_values =>
             {
                 self.filter_overlay.showing_values = true;
                 self.filter_overlay.value_index = 0;
-                self.overlay_scroll = 0;
             }
             KeyCode::Up | KeyCode::Char('k') => self.move_filter_cursor(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_filter_cursor(1),
@@ -2224,13 +1932,7 @@ impl App {
                 .min(FilterField::ALL.len() - 1);
             self.filter_overlay.field_index
         };
-        self.filter_overlay.scroll = u16::try_from(pointer::ensure_index_visible(
-            usize::from(self.filter_overlay.scroll),
-            usize::from(self.filter_overlay.viewport.max(1)),
-            index,
-        ))
-        .unwrap_or(0);
-        self.overlay_scroll = self.filter_overlay.scroll;
+        self.filter_overlay.scroll.ensure_visible(index);
     }
 
     fn toggle_current_facet(&mut self) {
@@ -2259,12 +1961,10 @@ impl App {
         match key.code {
             KeyCode::Esc | KeyCode::Char('w') | KeyCode::Enter => self.mode = AppMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
-                self.column_overlay.index = self.column_overlay.index.saturating_sub(1);
-                self.ensure_column_visible();
+                self.focus_column(self.column_overlay.index.saturating_sub(1));
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                self.column_overlay.index = (self.column_overlay.index + 1).min(last);
-                self.ensure_column_visible();
+                self.focus_column((self.column_overlay.index + 1).min(last));
             }
             KeyCode::Char(' ') => {
                 self.layout.toggle_visible(self.column_overlay.index);
@@ -2290,6 +1990,11 @@ impl App {
         }
     }
 
+    fn focus_column(&mut self, index: usize) {
+        self.column_overlay.index = index;
+        self.column_overlay.scroll.ensure_visible(index);
+    }
+
     fn handle_palette_key(&mut self, key: KeyEvent) -> AppAction {
         match key.code {
             KeyCode::Esc => self.mode = AppMode::Browse,
@@ -2302,44 +2007,9 @@ impl App {
             KeyCode::Up => self.move_palette_selection(-1),
             KeyCode::Down => self.move_palette_selection(1),
             KeyCode::Enter => return self.run_selected_command(),
-            KeyCode::Left => self.palette.cursor = self.palette.cursor.saturating_sub(1),
-            KeyCode::Right => {
-                self.palette.cursor =
-                    (self.palette.cursor + 1).min(self.palette.query.chars().count());
-            }
-            KeyCode::Home => self.palette.cursor = 0,
-            KeyCode::End => self.palette.cursor = self.palette.query.chars().count(),
-            KeyCode::Backspace => {
-                if self.palette.cursor > 0 {
-                    let start = byte_index(&self.palette.query, self.palette.cursor - 1);
-                    let end = byte_index(&self.palette.query, self.palette.cursor);
-                    self.palette.query.replace_range(start..end, "");
-                    self.palette.cursor -= 1;
-                    self.palette.selected = 0;
-                    self.palette.scroll = 0;
-                }
-            }
-            KeyCode::Delete => {
-                if self.palette.cursor < self.palette.query.chars().count() {
-                    let start = byte_index(&self.palette.query, self.palette.cursor);
-                    let end = byte_index(&self.palette.query, self.palette.cursor + 1);
-                    self.palette.query.replace_range(start..end, "");
-                    self.palette.selected = 0;
-                    self.palette.scroll = 0;
-                }
-            }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                let byte = byte_index(&self.palette.query, self.palette.cursor);
-                self.palette.query.insert(byte, character);
-                self.palette.cursor += 1;
-                self.palette.selected = 0;
-                self.palette.scroll = 0;
-            }
-            _ => {}
+            _ => self.edit_palette_query(|query| {
+                query.handle_key(key);
+            }),
         }
         AppAction::None
     }
@@ -2355,12 +2025,7 @@ impl App {
             .selected
             .saturating_add_signed(delta)
             .min(count - 1);
-        self.palette.scroll = u16::try_from(pointer::ensure_index_visible(
-            usize::from(self.palette.scroll),
-            usize::from(self.palette.viewport.max(1)),
-            self.palette.selected,
-        ))
-        .unwrap_or(0);
+        self.palette.scroll.ensure_visible(self.palette.selected);
     }
 
     fn run_selected_command(&mut self) -> AppAction {
@@ -2392,9 +2057,8 @@ impl App {
             }
             CommandId::SaveView => {
                 self.open_views();
-                let name = self.active_view.clone().unwrap_or_default();
-                self.views_overlay.name_cursor = name.chars().count();
-                self.views_overlay.naming = Some(name);
+                self.views_overlay.naming =
+                    Some(TextInput::new(self.active_view.clone().unwrap_or_default()));
                 AppAction::None
             }
             CommandId::Sort => {
@@ -2409,7 +2073,7 @@ impl App {
                 AppAction::None
             }
             CommandId::Help => {
-                self.help_scroll = 0;
+                self.help.scroll_to(0);
                 self.mode = AppMode::Help;
                 AppAction::None
             }
@@ -2478,101 +2142,51 @@ impl App {
             match key.code {
                 KeyCode::Esc => self.views_overlay.naming = None,
                 KeyCode::Enter => {
-                    let name = self
+                    if let Some(name) = self
                         .views_overlay
                         .naming
                         .take()
-                        .unwrap_or_default()
-                        .trim()
-                        .to_owned();
-                    if !name.is_empty() {
+                        .map(|name| name.text().trim().to_owned())
+                        .filter(|name| !name.is_empty())
+                    {
                         self.save_view(name);
                     }
                 }
-                KeyCode::Left => {
-                    self.views_overlay.name_cursor =
-                        self.views_overlay.name_cursor.saturating_sub(1);
-                }
-                KeyCode::Right => {
-                    let len = self
-                        .views_overlay
-                        .naming
-                        .as_ref()
-                        .map_or(0, |name| name.chars().count());
-                    self.views_overlay.name_cursor = (self.views_overlay.name_cursor + 1).min(len);
-                }
-                KeyCode::Home => self.views_overlay.name_cursor = 0,
-                KeyCode::End => {
-                    self.views_overlay.name_cursor = self
-                        .views_overlay
-                        .naming
-                        .as_ref()
-                        .map_or(0, |name| name.chars().count());
-                }
-                KeyCode::Backspace => {
-                    if let Some(name) = self.views_overlay.naming.as_mut()
-                        && self.views_overlay.name_cursor > 0
-                    {
-                        let cursor = self.views_overlay.name_cursor;
-                        let start = byte_index(name, cursor - 1);
-                        let end = byte_index(name, cursor);
-                        name.replace_range(start..end, "");
-                        self.views_overlay.name_cursor = cursor - 1;
-                    }
-                }
-                KeyCode::Delete => {
-                    if let Some(name) = self.views_overlay.naming.as_mut()
-                        && self.views_overlay.name_cursor < name.chars().count()
-                    {
-                        let cursor = self.views_overlay.name_cursor;
-                        let start = byte_index(name, cursor);
-                        let end = byte_index(name, cursor + 1);
-                        name.replace_range(start..end, "");
-                    }
-                }
-                KeyCode::Char(character)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
+                _ => {
                     if let Some(name) = self.views_overlay.naming.as_mut() {
-                        let byte = byte_index(name, self.views_overlay.name_cursor);
-                        name.insert(byte, character);
-                        self.views_overlay.name_cursor += 1;
+                        name.handle_key(key);
                     }
                 }
-                _ => {}
             }
             return AppAction::None;
         }
         match key.code {
             KeyCode::Esc | KeyCode::Char('V') => self.mode = AppMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
-                self.views_overlay.index = self.views_overlay.index.saturating_sub(1);
-                self.ensure_view_visible();
+                self.focus_view(self.views_overlay.index.saturating_sub(1));
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if !self.views.is_empty() {
-                    self.views_overlay.index =
-                        (self.views_overlay.index + 1).min(self.views.len() - 1);
-                    self.ensure_view_visible();
+                    self.focus_view((self.views_overlay.index + 1).min(self.views.len() - 1));
                 }
             }
             KeyCode::Enter => self.apply_view_at(self.views_overlay.index),
-            KeyCode::Char('n') => {
-                self.views_overlay.naming = Some(String::new());
-                self.views_overlay.name_cursor = 0;
-            }
+            KeyCode::Char('n') => self.views_overlay.naming = Some(TextInput::default()),
             KeyCode::Char('d') | KeyCode::Delete => self.delete_view_at(self.views_overlay.index),
             _ => {}
         }
         AppAction::None
     }
 
+    fn focus_view(&mut self, index: usize) {
+        self.views_overlay.index = index;
+        self.views_overlay.scroll.ensure_visible(index);
+    }
+
     fn save_view(&mut self, name: String) {
         let view = NamedView {
             name: name.clone(),
-            query: self.query.clone(),
+            query: self.query.text().to_owned(),
             sort_field: self.sort_field,
             sort_direction: self.sort_direction,
             search_order: self.search_order,
@@ -2727,7 +2341,7 @@ impl App {
 
     pub fn snapshot_session(&self) -> Session {
         Session {
-            query: self.query.clone(),
+            query: self.query.text().to_owned(),
             sort_field: self.sort_field,
             sort_direction: self.sort_direction,
             search_order: self.search_order,
@@ -2792,30 +2406,6 @@ const fn focus_name(focus: Focus) -> &'static str {
         Focus::Family => "family",
         Focus::Details => "details",
     }
-}
-
-fn byte_index(text: &str, character_index: usize) -> usize {
-    text.char_indices()
-        .nth(character_index)
-        .map_or(text.len(), |(index, _)| index)
-}
-
-fn sanitize_multiline(pasted: &str) -> String {
-    pasted
-        .chars()
-        .filter_map(|character| match character {
-            '\r' | '\n' | '\t' => Some(' '),
-            character if character.is_control() => None,
-            character => Some(character),
-        })
-        .collect()
-}
-
-fn sanitize_single_line(pasted: &str) -> String {
-    pasted
-        .chars()
-        .filter(|character| !character.is_control())
-        .collect()
 }
 
 fn clamp_pos_to_snapshot(
@@ -2943,7 +2533,7 @@ mod tests {
             ticket(1, "alpha", "2026-01-01T00:00:00Z"),
             ticket(2, "prefix alpha suffix", "2026-02-01T00:00:00Z"),
         ]);
-        app.query = "alpha".into();
+        app.set_query("alpha".into());
         app.visible = vec![
             SearchMatch {
                 ticket_index: 0,
@@ -2973,7 +2563,7 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
-        assert!(app.query.is_empty());
+        assert!(app.query().is_empty());
         assert_eq!(app.visible_count(), 1);
     }
 
@@ -3002,16 +2592,16 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
-        assert_eq!(app.query, "abc");
-        assert_eq!(app.query_cursor, 2);
+        assert_eq!(app.query(), "abc");
+        assert_eq!(app.query_cursor(), 2);
 
         app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(app.query, "ac");
-        assert_eq!(app.query_cursor, 1);
+        assert_eq!(app.query(), "ac");
+        assert_eq!(app.query_cursor(), 1);
 
         app.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
-        assert_eq!(app.query, "a");
-        assert_eq!(app.query_cursor, 1);
+        assert_eq!(app.query(), "a");
+        assert_eq!(app.query_cursor(), 1);
     }
 
     #[test]
@@ -3021,12 +2611,12 @@ mod tests {
         app.set_query("alpha café".into());
 
         app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
-        assert_eq!(app.query, "alpha ");
-        assert_eq!(app.query_cursor, 6);
+        assert_eq!(app.query(), "alpha ");
+        assert_eq!(app.query_cursor(), 6);
 
         app.handle_paste("tea\nshop\u{7}");
-        assert_eq!(app.query, "alpha tea shop");
-        assert_eq!(app.query_cursor, 14);
+        assert_eq!(app.query(), "alpha tea shop");
+        assert_eq!(app.query_cursor(), 14);
     }
 
     #[test]
@@ -3045,13 +2635,13 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        assert_eq!(app.query, "beta");
+        assert_eq!(app.query(), "beta");
         app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        assert_eq!(app.query, "alpha");
+        assert_eq!(app.query(), "alpha");
         app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert_eq!(app.query, "beta");
+        assert_eq!(app.query(), "beta");
         app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        assert!(app.query.is_empty());
+        assert!(app.query().is_empty());
     }
 
     #[test]
@@ -3064,20 +2654,20 @@ mod tests {
         let mut app = App::new(original.clone());
         app.select_row(1);
         let selected = app.selected_ticket().unwrap().key.clone();
-        app.details_scroll = 3;
-        app.details_max_scroll = 5;
-        app.table_offset = 1;
-        app.table_viewport_rows = 2;
+        app.details.set_viewport(0, 5);
+        app.details.scroll_to(3);
+        app.table.offset = 1;
+        app.table.viewport = 2;
 
         app.set_sort(SortField::Title, SortDirection::Descending);
         assert_eq!(app.selected_ticket().unwrap().key, selected);
-        assert_eq!(app.details_scroll, 3);
-        assert_eq!(app.table_offset, 1);
+        assert_eq!(app.details.offset, 3);
+        assert_eq!(app.table.offset, 1);
 
         app.replace_tickets(original);
         assert_eq!(app.selected_ticket().unwrap().key, selected);
-        assert_eq!(app.details_scroll, 3);
-        assert_eq!(app.table_offset, 1);
+        assert_eq!(app.details.offset, 3);
+        assert_eq!(app.table.offset, 1);
     }
 
     #[test]
@@ -3087,14 +2677,15 @@ mod tests {
             ticket(2, "Beta", "2026-02-01T00:00:00Z"),
         ]);
         app.select_row(1);
-        app.details_scroll = 3;
-        app.table_offset = 1;
+        app.details.set_viewport(0, 5);
+        app.details.scroll_to(3);
+        app.table.offset = 1;
 
         app.replace_tickets(vec![ticket(3, "Gamma", "2026-03-01T00:00:00Z")]);
 
         assert_eq!(app.selected_ticket().unwrap().key.id, 3);
-        assert_eq!(app.details_scroll, 0);
-        assert_eq!(app.table_offset, 0);
+        assert_eq!(app.details.offset, 0);
+        assert_eq!(app.table.offset, 0);
     }
 
     #[test]
@@ -3119,7 +2710,7 @@ mod tests {
         assert_eq!(app.focused_bar_field(), Some(FilterField::State));
 
         app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        assert!(app.query.to_ascii_lowercase().contains("state:"));
+        assert!(app.query().to_ascii_lowercase().contains("state:"));
         assert_eq!(app.visible_count(), 2);
 
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -3149,10 +2740,10 @@ mod tests {
         app.filter_overlay.field_index = 0;
         app.toggle_current_facet();
 
-        assert!(app.query.contains("state:"));
+        assert!(app.query().contains("state:"));
         let token = app.filter_tokens().pop().unwrap();
         app.remove_filter_token(token);
-        assert!(app.query.is_empty());
+        assert!(app.query().is_empty());
     }
 
     #[test]
@@ -3166,7 +2757,7 @@ mod tests {
 
         app.apply_view_at(0);
 
-        assert_eq!(app.query, "state:active");
+        assert_eq!(app.query(), "state:active");
         assert_eq!(app.sort_field, SortField::Title);
         assert_eq!(app.active_view.as_deref(), Some("Active"));
     }
@@ -3197,7 +2788,7 @@ mod tests {
     fn command_palette_runs_density_toggle() {
         let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
         app.open_palette();
-        app.palette.query = "density".into();
+        app.palette.query = TextInput::new("density");
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.row_density, RowDensity::Comfortable);
         assert_eq!(app.mode, AppMode::Browse);
@@ -3220,16 +2811,16 @@ mod tests {
     fn scrolling_is_bounded_to_rendered_content() {
         let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
         app.focus = Focus::Details;
-        app.set_details_max_scroll(4);
+        app.details.set_viewport(0, 4);
 
         app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-        assert_eq!(app.details_scroll, 4);
+        assert_eq!(app.details.offset, 4);
 
         app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        assert_eq!(app.details_scroll, 0);
+        assert_eq!(app.details.offset, 0);
 
         app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        assert_eq!(app.details_scroll, 4);
+        assert_eq!(app.details.offset, 4);
     }
 
     #[test]
@@ -3254,12 +2845,12 @@ mod tests {
     fn help_navigation_clamps_to_rendered_content() {
         let mut app = App::new(Vec::new());
         app.mode = AppMode::Help;
-        app.set_help_max_scroll(3);
+        app.help.set_viewport(0, 3);
 
         app.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
-        assert_eq!(app.help_scroll, 3);
+        assert_eq!(app.help.offset, 3);
         app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        assert_eq!(app.help_scroll, 0);
+        assert_eq!(app.help.offset, 0);
     }
 
     fn family_key(id: i64) -> TicketKey {
@@ -3397,10 +2988,10 @@ mod tests {
         app.visible
             .retain(|entry| app.tickets[entry.ticket_index].key.id != 3);
         app.family_cursor = Some(family_key(3));
-        let query = app.query.clone();
+        let query = app.query().to_owned();
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.selected_ticket().unwrap().key.id, 2);
-        assert_eq!(app.query, query);
+        assert_eq!(app.query(), query);
         assert_eq!(
             app.notification(),
             Some(("3 is hidden by the current search", NotificationLevel::Info))
@@ -3435,12 +3026,12 @@ mod tests {
     fn family_cursor_movement_scrolls_the_details_viewport() {
         let mut app = family_app();
         app.focus = Focus::Family;
-        app.set_details_viewport(2, 20);
+        app.details.set_viewport(2, 20);
 
         press(&mut app, KeyCode::End);
-        assert!(app.details_scroll > 0);
+        assert!(app.details.offset > 0);
         press(&mut app, KeyCode::Home);
-        assert_eq!(app.details_scroll, 0);
+        assert_eq!(app.details.offset, 0);
     }
 
     #[test]

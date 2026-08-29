@@ -191,7 +191,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         block = block.title(Line::from(right_title.clone()).right_aligned());
     }
     let inner = block.inner(area);
-    let clear = if !app.query.is_empty() && inner.width > 4 {
+    let clear = if !app.query().is_empty() && inner.width > 4 {
         3
     } else {
         0
@@ -202,15 +202,15 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         inner.width.saturating_sub(clear),
         inner.height.max(1),
     );
-    let text = if app.query.is_empty() && !active {
+    let text = if app.query().is_empty() && !active {
         Line::styled(
             "Type / to search, or pick State, Type, Tags, or Assignee below",
             Style::default().fg(theme().muted),
         )
     } else {
-        Line::from(app.query.as_str())
+        Line::from(app.query())
     };
-    let cursor_offset = u16::try_from(app.query_cursor).unwrap_or(u16::MAX);
+    let cursor_offset = u16::try_from(app.query_cursor()).unwrap_or(u16::MAX);
     let horizontal_scroll = cursor_offset.saturating_sub(field.width.saturating_sub(1));
     frame.render_widget(
         Paragraph::new(text)
@@ -309,7 +309,7 @@ fn render_content(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let count = app.visible_count();
     let total = app.tickets().len();
-    let ordering = if app.query.is_empty() || app.search_order == SearchOrder::Field {
+    let ordering = if app.query().is_empty() || app.search_order == SearchOrder::Field {
         format!("{} {}", app.sort_field, app.sort_direction.symbol())
     } else {
         format!(
@@ -326,7 +326,7 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ""
     };
     let title = if area.width < NARROW_BREAKPOINT {
-        let short_order = if app.query.is_empty() {
+        let short_order = if app.query().is_empty() {
             app.sort_direction.symbol()
         } else {
             match app.search_order {
@@ -383,7 +383,7 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let body_height = inner.height.saturating_sub(2);
     let visible_rows = usize::from(body_height / row_height).max(1);
     app.set_table_viewport(visible_rows);
-    let offset = app.table_offset;
+    let offset = app.table.offset;
     let selected = app.selected_row();
     let fuzzy = app.fuzzy_query();
     let mut highlighter = QueryHighlighter::new(&fuzzy);
@@ -577,7 +577,9 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     let Some(ticket) = app.selected_ticket().cloned() else {
-        app.set_details_max_scroll(0);
+        // Nothing scrollable this frame; keep the measured height.
+        let viewport = app.details.viewport;
+        app.details.set_viewport(viewport, 0);
         frame.render_widget(
             Paragraph::new("Select a ticket to view details")
                 .style(Style::default().fg(theme().muted)),
@@ -587,7 +589,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     };
 
     let family = app.family_of(&ticket.key);
-    let mut highlighter = QueryHighlighter::new(&app.query);
+    let mut highlighter = QueryHighlighter::new(app.query());
     let title_style = Style::default()
         .fg(theme().text)
         .add_modifier(Modifier::BOLD);
@@ -745,14 +747,12 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .style(Style::default().fg(theme().body));
         let line_count = paragraph.line_count(chunks[2].width);
         let viewport = usize::from(chunks[2].height);
-        app.set_details_viewport(
-            chunks[2].height,
-            u16::try_from(line_count).unwrap_or(u16::MAX),
-        );
-        frame.render_widget(paragraph.scroll((app.details_scroll, 0)), chunks[2]);
-        let scroll = app.details_scroll;
+        app.details.set_viewport(viewport, line_count);
+        let scroll = app.details.offset;
+        let scroll_rows = u16::try_from(scroll).unwrap_or(u16::MAX);
+        frame.render_widget(paragraph.scroll((scroll_rows, 0)), chunks[2]);
         for hit in family_hits {
-            let Some(y) = visible_row_y(chunks[2], hit.line, scroll) else {
+            let Some(y) = visible_row_y(chunks[2], hit.line, scroll_rows) else {
                 continue;
             };
             if hit.jumpable {
@@ -766,7 +766,7 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             }
         }
         for (logical, key) in line_links {
-            if let Some(y) = visible_row_y(chunks[2], logical, scroll) {
+            if let Some(y) = visible_row_y(chunks[2], logical, scroll_rows) {
                 app.hit_regions.push(region(
                     Rect::new(chunks[2].x, y, chunks[2].width.saturating_sub(1), 1),
                     PointerTarget::JumpToTicket(key),
@@ -784,13 +784,15 @@ fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 chunks[2],
                 ScrollSurface::Details,
                 line_count,
-                usize::from(app.details_scroll),
+                scroll,
                 viewport,
             );
         }
         capture_selectable(frame, app, SelectableSurface::Details, inner, overflow);
     } else {
-        app.set_details_max_scroll(0);
+        // Nothing scrollable this frame; keep the measured height.
+        let viewport = app.details.viewport;
+        app.details.set_viewport(viewport, 0);
         capture_selectable(frame, app, SelectableSurface::Details, inner, false);
     }
 }
@@ -828,7 +830,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             AppMode::Browse if app.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
             }
-            AppMode::Browse if !app.query.is_empty() => {
+            AppMode::Browse if !app.query().is_empty() => {
                 "↑↓/jk move  f filters  Esc clear  ? help  q quit"
             }
             AppMode::Browse => {
@@ -974,8 +976,12 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
     let inner = block.inner(area);
     let paragraph = Paragraph::new(help).block(block).wrap(Wrap { trim: false });
     let line_count = paragraph.line_count(area.width);
-    app.set_help_viewport(inner.height, u16::try_from(line_count).unwrap_or(u16::MAX));
-    frame.render_widget(paragraph.scroll((app.help_scroll, 0)), area);
+    app.help.set_viewport(usize::from(inner.height), line_count);
+    let scroll = app.help.offset;
+    frame.render_widget(
+        paragraph.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        area,
+    );
     app.hit_regions.push(region(
         inner,
         PointerTarget::OverlayBody,
@@ -992,7 +998,7 @@ fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
             inner,
             ScrollSurface::Help,
             line_count,
-            usize::from(app.help_scroll),
+            scroll,
             usize::from(inner.height),
         );
     }
@@ -1159,13 +1165,10 @@ fn render_list_overlay(frame: &mut Frame<'_>, app: &mut App, overlay: ListOverla
         decorate,
     } = overlay;
     let content = rows.len();
-    app.set_overlay_viewport(
-        surface,
-        area.height,
-        u16::try_from(content).unwrap_or(u16::MAX),
-    );
-    let scroll = usize::from(overlay_scroll(app, surface));
     let viewport = usize::from(area.height);
+    app.scroll_state_mut(surface)
+        .set_viewport(viewport, content);
+    let scroll = app.scroll_state(surface).offset;
     let lines: Vec<Line<'_>> = rows
         .into_iter()
         .enumerate()
@@ -1196,18 +1199,6 @@ fn render_list_overlay(frame: &mut Frame<'_>, app: &mut App, overlay: ListOverla
     }
     if capture && let Some(surface) = selectable {
         capture_selectable(frame, app, surface, area, overflow);
-    }
-}
-
-fn overlay_scroll(app: &App, surface: ScrollSurface) -> u16 {
-    match surface {
-        ScrollSurface::Filter => app.filter_overlay.scroll,
-        ScrollSurface::Columns => app.column_overlay.scroll,
-        ScrollSurface::Palette => app.palette.scroll,
-        ScrollSurface::Views => app.views_overlay.scroll,
-        ScrollSurface::FacetMenu => app.facet_bar.scroll,
-        ScrollSurface::Sort => app.overlay_scroll,
-        ScrollSurface::Table | ScrollSurface::Details | ScrollSurface::Help => 0,
     }
 }
 
@@ -1469,7 +1460,7 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
     let query = if app.palette.query.is_empty() {
         Line::styled("Filter commands…", Style::default().fg(theme().muted))
     } else {
-        Line::from(app.palette.query.clone())
+        Line::from(app.palette.query.text().to_owned())
     };
     frame.render_widget(
         Paragraph::new(query).style(Style::default().fg(theme().text)),
@@ -1484,7 +1475,7 @@ fn render_palette(frame: &mut Frame<'_>, app: &mut App) {
     ));
     capture_selectable(frame, app, SelectableSurface::Overlay, query_area, false);
     let cursor_x = query_area.x.saturating_add(
-        u16::try_from(app.palette.cursor)
+        u16::try_from(app.palette.query.cursor())
             .unwrap_or(u16::MAX)
             .min(query_area.width.saturating_sub(1)),
     );
@@ -1525,7 +1516,12 @@ fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
         " Views "
     };
     let inner = render_modal_frame(frame, app, area, title);
-    if let Some(name) = app.views_overlay.naming.clone() {
+    if let Some((name, name_cursor)) = app
+        .views_overlay
+        .naming
+        .as_ref()
+        .map(|input| (input.text().to_owned(), input.cursor()))
+    {
         let chunks = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
@@ -1555,7 +1551,7 @@ fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
         capture_selectable(frame, app, SelectableSurface::Overlay, field, false);
         let cursor_x = field
             .x
-            .saturating_add(u16::try_from(app.views_overlay.name_cursor).unwrap_or(u16::MAX))
+            .saturating_add(u16::try_from(name_cursor).unwrap_or(u16::MAX))
             .min(field.x.saturating_add(field.width.saturating_sub(1)));
         frame.set_cursor_position((cursor_x, field.y));
         render_control(
@@ -2597,6 +2593,7 @@ mod tests {
         CommentRecord, HistoryRecord, RelationKind, RelationRecord, TicketGraph, TicketKey,
     };
     use crate::pointer::PointerTarget;
+    use crate::text_input::TextInput;
 
     fn ticket() -> Ticket {
         Ticket {
@@ -2729,8 +2726,8 @@ mod tests {
         app.mode = AppMode::Help;
         let help = render_text(90, 24, &mut app);
         assert!(help.contains("Navigation"));
-        assert!(app.help_max_scroll > 0);
-        app.help_scroll = app.help_max_scroll;
+        assert!(app.help.max_offset() > 0);
+        app.help.scroll_to(app.help.max_offset());
         let scrolled_help = render_text(90, 24, &mut app);
         assert!(
             scrolled_help.contains("Open selected ticket")
@@ -2795,11 +2792,11 @@ mod tests {
 
         let text = render_text(60, 20, &mut app);
 
-        assert!(app.details_max_scroll > 0);
+        assert!(app.details.max_offset() > 0);
         assert!(text.contains('┃'));
-        app.details_scroll = u16::MAX;
+        app.details.offset = usize::MAX;
         render_text(60, 20, &mut app);
-        assert_eq!(app.details_scroll, app.details_max_scroll);
+        assert_eq!(app.details.offset, app.details.max_offset());
     }
 
     #[test]
@@ -2808,9 +2805,9 @@ mod tests {
         app.mode = AppMode::Help;
         let initial = render_text(50, 12, &mut app);
         assert!(initial.contains("Navigation"));
-        assert!(app.help_max_scroll > 0);
+        assert!(app.help.max_offset() > 0);
 
-        app.help_scroll = app.help_max_scroll;
+        app.help.scroll_to(app.help.max_offset());
         let scrolled = render_text(50, 12, &mut app);
         assert_ne!(initial, scrolled);
         assert!(
@@ -3334,7 +3331,7 @@ mod tests {
     fn family_hit_targets_follow_details_scroll() {
         let mut app = auth_family_app_with_long_details();
         render_text(60, 24, &mut app);
-        assert!(app.details_max_scroll > 0);
+        assert!(app.details.max_offset() > 0);
         let before = app
             .hit_regions
             .find_target(
@@ -3342,7 +3339,7 @@ mod tests {
             )
             .map(|region| region.rect.y)
             .expect("parent row should be on screen");
-        app.details_scroll = app.details_max_scroll;
+        app.details.scroll_to(app.details.max_offset());
         render_text(60, 24, &mut app);
         let after = app.hit_regions.find_target(
             |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
@@ -3366,7 +3363,7 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::ScrollDown, row.x + 8, row.y));
         assert_eq!(app.family_cursor, cursor);
         assert_eq!(app.focus, focus);
-        assert!(app.details_scroll > 0);
+        assert!(app.details.offset > 0);
     }
 
     #[test]
@@ -3469,7 +3466,7 @@ mod tests {
     fn command_palette_lists_matching_actions() {
         let mut app = App::new(vec![ticket()]);
         app.mode = AppMode::Palette;
-        app.palette.query = "copy".into();
+        app.palette.query = TextInput::new("copy");
         let text = render_text(110, 24, &mut app);
         assert!(text.contains("Copy ID"));
         assert!(text.contains("Commands"));
@@ -3535,13 +3532,13 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::ScrollDown, column, row));
         assert_eq!(app.selected_row(), selected);
         assert_eq!(app.focus, Focus::Tickets);
-        assert!(app.table_offset > 0);
+        assert!(app.table.offset > 0);
         let mut terminal = Terminal::new(TestBackend::new(60, 15)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         assert_eq!(
             app.hovered(),
             Some(&PointerTarget::TableRow {
-                index: app.table_offset + 1,
+                index: app.table.offset + 1,
             })
         );
         assert!(
@@ -3592,14 +3589,16 @@ mod tests {
         let mut app = App::new(vec![ticket()]);
         app.mode = AppMode::Palette;
         app.handle_paste("copy\nme");
-        assert_eq!(app.palette.query, "copy me");
-        assert_eq!(app.palette.cursor, 7);
+        assert_eq!(app.palette.query.text(), "copy me");
+        assert_eq!(app.palette.query.cursor(), 7);
 
         app.mode = AppMode::Views;
-        app.views_overlay.naming = Some("alpha".into());
-        app.views_overlay.name_cursor = 5;
+        app.views_overlay.naming = Some(TextInput::new("alpha"));
         app.handle_paste(" beta\u{7}");
-        assert_eq!(app.views_overlay.naming.as_deref(), Some("alpha beta"));
+        assert_eq!(
+            app.views_overlay.naming.as_ref().map(TextInput::text),
+            Some("alpha beta")
+        );
     }
 
     #[test]
@@ -3628,7 +3627,7 @@ mod tests {
     fn filter_overlay_maps_clicks_to_scrolled_logical_rows() {
         let mut app = App::new(vec![ticket()]);
         app.mode = AppMode::Filter;
-        app.filter_overlay.scroll = 2;
+        app.filter_overlay.scroll.offset = 2;
         render_text(110, 24, &mut app);
         let (x, y) = app
             .hit_regions
@@ -3690,7 +3689,7 @@ mod tests {
             .expect("details copy");
         click(&mut app, x, y);
         assert_eq!(app.mode, AppMode::Palette);
-        assert_eq!(app.palette.query, "copy");
+        assert_eq!(app.palette.query.text(), "copy");
     }
 
     #[test]
