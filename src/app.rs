@@ -530,6 +530,10 @@ impl Default for NodePicker {
 pub enum FormKind {
     /// The new work item form `n` opens, hanging under nothing in particular.
     NewWorkItem,
+    /// The new child form `N` opens over a work item, carrying the id of the
+    /// work item the new one hangs under. That id is part of the kind, so a
+    /// draft left under one parent never reopens under another.
+    NewChild(i64),
 }
 
 /// Which value one field of a form holds. A form is read back by these rather
@@ -542,6 +546,7 @@ pub enum FormFieldId {
     Title,
     Parent,
     Iteration,
+    Area,
     Assignee,
     Priority,
     Tags,
@@ -553,6 +558,7 @@ pub enum FormFieldId {
 pub enum FormPicker {
     WorkItemType,
     Iteration,
+    Area,
     Assignee,
 }
 
@@ -581,6 +587,9 @@ pub struct FormField {
     pub input: TextInput,
     /// What an empty field says, so a blank row still reads as a field.
     pub placeholder: &'static str,
+    /// What the row reads as, when that is not the value itself: a parent is
+    /// held as the id a create needs and shown as the work item it names.
+    pub display: Option<String>,
 }
 
 impl FormField {
@@ -594,6 +603,7 @@ impl FormField {
             read_only: false,
             input: TextInput::default(),
             placeholder: "",
+            display: None,
         }
     }
 
@@ -635,9 +645,27 @@ impl FormField {
         }
     }
 
+    /// Gives the field a reading of its own, for a value that is not worth
+    /// showing as it is written: `#595` is stored, `#595 Tech debt and
+    /// architecture foundation` is read.
+    #[must_use]
+    pub fn with_display(self, display: impl Into<String>) -> Self {
+        Self {
+            display: Some(display.into()),
+            ..self
+        }
+    }
+
     #[must_use]
     pub fn value(&self) -> &str {
         self.input.text()
+    }
+
+    /// What the row shows, which is the value unless whoever opened the form
+    /// gave the field a reading of its own.
+    #[must_use]
+    pub fn shown(&self) -> &str {
+        self.display.as_deref().unwrap_or_else(|| self.value())
     }
 
     /// Whether the field says nothing, which is what a required field is
@@ -769,6 +797,18 @@ pub struct TypePicker {
 /// What a new work item is filed as unless the Type field says otherwise,
 /// which is what the Basic process calls its everyday unit of work.
 pub const DEFAULT_WORK_ITEM_TYPE: &str = "Issue";
+
+/// The Basic process's breakdown of one type into the type under it, which is
+/// what a project whose own types have not been read yet is assumed to use. A
+/// type this says nothing about has no obvious child.
+#[must_use]
+fn basic_child_work_item_type(parent_type: &str) -> Option<&'static str> {
+    match parent_type {
+        "Epic" => Some("Issue"),
+        "Issue" | "Task" => Some("Task"),
+        _ => None,
+    }
+}
 
 /// What one form field holding a whole number says, or a refusal naming it. An
 /// empty field is no number at all rather than a bad one: both the parent and
@@ -5184,6 +5224,34 @@ impl App {
         self.open_form(form)
     }
 
+    /// Opens the new child form: `N`, the Edit menu's New child row, or the
+    /// palette. Breaking an Epic into Issues or an Issue into Tasks is the
+    /// commonest thing anybody files, and none of it is worth retyping, so the
+    /// form opens with the parent fixed, the type the parent's own type breaks
+    /// down into, and the area and iteration the parent sits in. The draft is
+    /// kept per parent, so a child half typed under one work item is not
+    /// offered under the next.
+    pub fn open_child_form(&mut self) -> AppAction {
+        if self.pending_create.is_some() {
+            self.set_error("A work item is already being created");
+            return AppAction::None;
+        }
+        let Some(parent) = self.selected_ticket() else {
+            self.set_error("No work item is selected");
+            return AppAction::None;
+        };
+        let id = parent.key.id;
+        let kind = FormKind::NewChild(id);
+        let form = self.take_draft(kind).unwrap_or_else(|| {
+            FormOverlay::new(
+                kind,
+                format!("New child of #{id}"),
+                self.create_form_fields(Some(id)),
+            )
+        });
+        self.open_form(form)
+    }
+
     /// Shows one form and asks for whatever it needs that is not in memory yet.
     /// Every form opens this way, so the placement, the cursor, and the single
     /// types fetch a session are the same for all of them.
@@ -5216,37 +5284,86 @@ impl App {
     }
 
     /// The fields of the new work item form, in the order they are filled in.
-    /// The iteration starts where the selected work item sits, falling back to
-    /// the sprint the project is in, because new work almost always joins the
-    /// work beside it. `parent` is filled in by whoever opened the form.
+    /// The area and the iteration start where the work item the form was
+    /// opened over sits, falling back to the sprint the project is in, because
+    /// new work almost always joins the work beside it.
+    ///
+    /// `parent` is filled in by whoever opened the form, and a form that has
+    /// one is a form about that work item: the parent row is fixed and reads
+    /// as the work item rather than as its id, the type is the one the
+    /// parent's own type breaks down into, and the area and the iteration are
+    /// the parent's rather than the selected row's.
     #[must_use]
     fn create_form_fields(&self, parent: Option<i64>) -> Vec<FormField> {
-        let iteration = self
-            .selected_ticket()
+        let parent_ticket = parent.and_then(|id| self.ticket_by_id(id));
+        let inherited = parent_ticket.or_else(|| self.selected_ticket());
+        let iteration = inherited
             .map(|ticket| ticket.iteration_path.clone())
             .or_else(|| self.current_iteration())
             .unwrap_or_default();
+        let area = inherited
+            .map(|ticket| ticket.area_path.clone())
+            .unwrap_or_default();
+        let work_item_type = parent_ticket.map_or_else(
+            || DEFAULT_WORK_ITEM_TYPE.to_owned(),
+            |ticket| self.child_work_item_type(&ticket.work_item_type),
+        );
         let parent_field = FormField::text(FormFieldId::Parent, "Parent")
             .with_placeholder("none — a work item id");
         vec![
             FormField::picker(FormFieldId::Type, "Type", FormPicker::WorkItemType)
                 .required()
-                .with_value(DEFAULT_WORK_ITEM_TYPE),
+                .with_value(work_item_type),
             FormField::text(FormFieldId::Title, "Title")
                 .required()
                 .with_placeholder("what needs doing"),
             match parent {
-                Some(id) => parent_field.with_value(id.to_string()).read_only(),
+                Some(id) => parent_field
+                    .with_value(id.to_string())
+                    .with_display(match parent_ticket {
+                        Some(ticket) => format!("#{id} {}", ticket.title),
+                        None => format!("#{id}"),
+                    })
+                    .read_only(),
                 None => parent_field,
             },
             FormField::picker(FormFieldId::Iteration, "Iteration", FormPicker::Iteration)
                 .with_value(iteration)
+                .with_placeholder("the project root"),
+            FormField::picker(FormFieldId::Area, "Area", FormPicker::Area)
+                .with_value(area)
                 .with_placeholder("the project root"),
             FormField::picker(FormFieldId::Assignee, "Assignee", FormPicker::Assignee)
                 .with_placeholder("nobody"),
             FormField::text(FormFieldId::Priority, "Priority").with_placeholder("unset — 1 to 4"),
             FormField::text(FormFieldId::Tags, "Tags").with_placeholder("semicolon separated"),
         ]
+    }
+
+    /// One work item by the id a form field names, whatever organization it
+    /// came from: a form holds an id and nothing else, and every row on screen
+    /// came from the same project.
+    #[must_use]
+    fn ticket_by_id(&self, id: i64) -> Option<&Ticket> {
+        self.tickets.iter().find(|ticket| ticket.key.id == id)
+    }
+
+    /// What breaking one work item down produces. The project's own process
+    /// answers it where it can — the types come back in the order the process
+    /// lists them, so the one after this is what sits under it — and where it
+    /// cannot, the Basic process's own breakdown does: an Epic into Issues, an
+    /// Issue into Tasks, and a Task into more Tasks. A type with nothing
+    /// obvious under it keeps its own, because a child of the same type is
+    /// always defensible and an empty Type field never is.
+    #[must_use]
+    fn child_work_item_type(&self, parent_type: &str) -> String {
+        self.work_item_types
+            .iter()
+            .position(|name| name == parent_type)
+            .and_then(|at| self.work_item_types.get(at + 1))
+            .cloned()
+            .or_else(|| basic_child_work_item_type(parent_type).map(ToOwned::to_owned))
+            .unwrap_or_else(|| parent_type.to_owned())
     }
 
     fn handle_form_key(&mut self, key: KeyEvent) -> AppAction {
@@ -5313,6 +5430,9 @@ impl App {
                     current
                 };
                 self.show_node_picker(NodeKind::Iteration, current, EditScope::Form(id))
+            }
+            Some(FormPicker::Area) => {
+                self.show_node_picker(NodeKind::Area, current, EditScope::Form(id))
             }
             Some(FormPicker::Assignee) => {
                 let current = (!current.trim().is_empty()).then_some(current);
@@ -5415,6 +5535,10 @@ impl App {
         let iteration = form.value(FormFieldId::Iteration).trim().to_owned();
         if !iteration.is_empty() {
             edits.push(FieldEdit::iteration(&iteration));
+        }
+        let area = form.value(FormFieldId::Area).trim().to_owned();
+        if !area.is_empty() {
+            edits.push(FieldEdit::area(&area));
         }
         let tags = normalize_tags(form.value(FormFieldId::Tags));
         if !tags.is_empty() {
@@ -5797,6 +5921,7 @@ impl App {
                 AppAction::None
             }
             CommandId::NewWorkItem => self.open_create_form(),
+            CommandId::NewChild => self.open_child_form(),
             CommandId::SaveView => {
                 self.open_views();
                 self.views_overlay.naming =
@@ -6391,8 +6516,8 @@ mod tests {
         assert_eq!(app.mode, AppMode::Form);
         let fields = app.form.as_ref().expect("the form is open").fields.len();
         assert_eq!(
-            fields, 7,
-            "type, title, parent, iteration, assignee, priority, tags"
+            fields, 8,
+            "type, title, parent, iteration, area, assignee, priority, tags"
         );
         assert_eq!(app.form.as_ref().unwrap().index, 0);
 
@@ -6543,6 +6668,7 @@ mod tests {
                 crate::edit::set_field(crate::edit::ASSIGNED_TO_FIELD, "avery@example.com"),
                 crate::edit::set_field(crate::edit::PRIORITY_FIELD, 2),
                 crate::edit::set_field(crate::edit::ITERATION_PATH_FIELD, "Atlas\\Sprint 1"),
+                crate::edit::set_field(crate::edit::AREA_PATH_FIELD, "Atlas"),
                 crate::edit::set_field(crate::edit::TAGS_FIELD, "sync; infra"),
             ],
             "the fields travel in the order the form holds them, and only the ones filled in"
@@ -6641,6 +6767,233 @@ mod tests {
             FormFieldId::Title,
             "and the cursor came back with it"
         );
+    }
+
+    #[test]
+    fn the_child_form_files_the_type_the_parents_own_type_breaks_down_into() {
+        for (parent_type, child_type) in [("Epic", "Issue"), ("Issue", "Task"), ("Task", "Task")] {
+            let mut app = parent_app(parent_type);
+            app.set_work_item_types(vec!["Epic".into(), "Issue".into(), "Task".into()]);
+            press(&mut app, KeyCode::Char('N'));
+
+            assert_eq!(
+                app.form
+                    .as_ref()
+                    .expect("the child form is open")
+                    .value(FormFieldId::Type),
+                child_type,
+                "the process lists {child_type} under {parent_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_child_of_a_type_the_process_says_nothing_about_falls_back_to_the_basic_rule() {
+        for (parent_type, child_type) in [
+            ("Epic", "Issue"),
+            ("Issue", "Task"),
+            ("Task", "Task"),
+            ("Bug", "Bug"),
+        ] {
+            let mut app = parent_app(parent_type);
+            press(&mut app, KeyCode::Char('N'));
+
+            assert_eq!(
+                app.form
+                    .as_ref()
+                    .expect("the child form is open")
+                    .value(FormFieldId::Type),
+                child_type,
+                "with no cached types {parent_type} still breaks down into {child_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_child_form_inherits_the_area_and_the_iteration_the_parent_sits_in() {
+        let mut app = parent_app("Epic");
+        press(&mut app, KeyCode::Char('N'));
+
+        let form = app.form.as_ref().expect("the child form is open");
+        assert_eq!(form.value(FormFieldId::Area), "Atlas\\Platform");
+        assert_eq!(form.value(FormFieldId::Iteration), "Atlas\\Sprint 3");
+
+        focus_field(&mut app, FormFieldId::Title);
+        type_text(&mut app, "Break the epic up");
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        let AppAction::Create { patch, .. } = action else {
+            panic!("Ctrl-S files the child");
+        };
+        assert_eq!(
+            patch,
+            vec![
+                crate::edit::set_field(crate::edit::TITLE_FIELD, "Break the epic up"),
+                crate::edit::set_field(crate::edit::ITERATION_PATH_FIELD, "Atlas\\Sprint 3"),
+                crate::edit::set_field(crate::edit::AREA_PATH_FIELD, "Atlas\\Platform"),
+            ],
+            "the two the child inherited travel with it"
+        );
+    }
+
+    #[test]
+    fn the_child_forms_parent_row_names_the_work_item_and_takes_nothing_typed_at_it() {
+        let mut app = parent_app("Epic");
+        press(&mut app, KeyCode::Char('N'));
+        focus_field(&mut app, FormFieldId::Parent);
+        type_text(&mut app, "999");
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            AppAction::None,
+            "and it opens no picker"
+        );
+        assert_eq!(app.mode, AppMode::Form);
+
+        let form = app.form.as_ref().expect("the child form is open");
+        let parent = form
+            .field(FormFieldId::Parent)
+            .expect("the form has a parent row");
+        assert!(parent.read_only, "whoever opened the form filled it in");
+        assert!(!parent.is_typed());
+        assert!(parent.picker_kind().is_none());
+        assert_eq!(parent.value(), "10", "typing left the id where it was");
+        assert_eq!(
+            parent.shown(),
+            "#10 Tech debt and architecture foundation",
+            "the row reads as the work item rather than as a number"
+        );
+        assert_eq!(form.title, "New child of #10");
+    }
+
+    #[test]
+    fn a_draft_of_the_new_work_item_form_never_opens_in_the_child_form_or_the_other_way() {
+        let mut app = parent_app("Epic");
+        press(&mut app, KeyCode::Char('n'));
+        focus_field(&mut app, FormFieldId::Title);
+        type_text(&mut app, "Something loose");
+        press(&mut app, KeyCode::Esc);
+
+        press(&mut app, KeyCode::Char('N'));
+        let form = app.form.as_ref().expect("the child form is open");
+        assert_eq!(form.kind, FormKind::NewChild(10));
+        assert_eq!(
+            form.value(FormFieldId::Title),
+            "",
+            "N opens its own form rather than what n was left holding"
+        );
+
+        focus_field(&mut app, FormFieldId::Title);
+        type_text(&mut app, "Break the epic up");
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('N'));
+        assert_eq!(
+            app.form.as_ref().unwrap().value(FormFieldId::Title),
+            "Break the epic up",
+            "the child's own draft does come back"
+        );
+
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('n'));
+        let form = app.form.as_ref().expect("the new work item form is open");
+        assert_eq!(form.kind, FormKind::NewWorkItem);
+        assert_eq!(
+            form.value(FormFieldId::Title),
+            "",
+            "and n takes nothing back from the child form"
+        );
+    }
+
+    #[test]
+    fn a_child_filed_from_the_form_hangs_under_its_parent_in_the_family_tree() {
+        let mut app = parent_app("Epic");
+        let parent = app.tickets()[0].key.clone();
+        press(&mut app, KeyCode::Char('N'));
+        focus_field(&mut app, FormFieldId::Title);
+        type_text(&mut app, "Break the epic up");
+        let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        let AppAction::Create {
+            work_item_type,
+            parent: under,
+            ..
+        } = action
+        else {
+            panic!("Ctrl-S files the child");
+        };
+        assert_eq!(work_item_type, "Issue");
+        assert_eq!(under, Some(10), "the parent travels as the link it is");
+
+        let child = created(42, "Issue", "Break the epic up");
+        let key = child.key.clone();
+        app.apply_created(
+            child,
+            vec![RelationRecord {
+                from: key.clone(),
+                to: parent.clone(),
+                kind: RelationKind::Parent,
+            }],
+        );
+
+        assert_eq!(
+            app.family_of(&parent).children,
+            vec![key.clone()],
+            "the parent knows its new child at once"
+        );
+        assert_eq!(
+            app.family_of(&key).ancestors,
+            vec![parent.clone()],
+            "and the child knows its parent"
+        );
+        assert_eq!(
+            family_ids(&app.family_of(&parent)),
+            [10, 42],
+            "the parent's tree shows the child under it"
+        );
+        assert_eq!(
+            family_ids(&app.family_of(&key)),
+            [10, 42],
+            "and so does the child's"
+        );
+    }
+
+    #[test]
+    fn the_edit_menus_new_child_row_opens_the_same_form_the_key_does() {
+        let mut app = parent_app("Epic");
+        press(&mut app, KeyCode::Char('e'));
+        for _ in 0..menu_row(CommandId::NewChild) {
+            press(&mut app, KeyCode::Down);
+        }
+        press(&mut app, KeyCode::Enter);
+
+        assert_eq!(app.mode, AppMode::Form);
+        let form = app.form.as_ref().expect("the child form is open");
+        assert_eq!(form.kind, FormKind::NewChild(10));
+        assert_eq!(form.value(FormFieldId::Type), "Issue");
+    }
+
+    /// The work items one family tree draws, in the order it draws them.
+    fn family_ids(family: &FamilySnapshot) -> Vec<i64> {
+        family
+            .tree_entries()
+            .iter()
+            .map(|entry| entry.key.id)
+            .collect()
+    }
+
+    /// An app whose one work item is of the given type, sitting somewhere other
+    /// than the project root, to open the child form over.
+    fn parent_app(work_item_type: &str) -> App {
+        let mut parent = ticket(
+            10,
+            "Tech debt and architecture foundation",
+            "2026-01-01T00:00:00Z",
+        );
+        parent.work_item_type = work_item_type.to_owned();
+        parent.area_path = "Atlas\\Platform".into();
+        parent.iteration_path = "Atlas\\Sprint 3".into();
+        let mut app = App::new(vec![parent]);
+        app.enable_sync();
+        app
     }
 
     #[test]
@@ -8916,9 +9269,10 @@ mod tests {
                 "Iteration",
                 "Area",
                 "Description",
-                "Add comment"
+                "Add comment",
+                "New child"
             ],
-            "later field editors append their own row"
+            "later field editors append their own row above New child"
         );
         assert_eq!(app.edit_menu.index, 0);
 

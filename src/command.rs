@@ -19,6 +19,7 @@ pub enum CommandId {
     EditDescription,
     AddComment,
     NewWorkItem,
+    NewChild,
     UndoEdit,
     Sort,
     Help,
@@ -215,6 +216,12 @@ pub const COMMANDS: &[Command] = &[
         help: "Ctrl-S creates it",
     },
     Command {
+        id: CommandId::NewChild,
+        title: "New child",
+        keys: &[key('N')],
+        help: "Under the selected one",
+    },
+    Command {
         id: CommandId::UndoEdit,
         title: "Undo last edit",
         keys: &[key('u')],
@@ -380,9 +387,11 @@ pub const COMMANDS: &[Command] = &[
     },
 ];
 
-/// One row of the Edit menu: the field it changes, and the command that opens
-/// its editor. Every field editor is one row here, so adding an editor is
-/// adding its command to [`COMMANDS`] and its field to this table.
+/// One row of the Edit menu: what it changes about the work item, and the
+/// command that does it. Every field editor is one row here, so adding an
+/// editor is adding its command to [`COMMANDS`] and its field to this table;
+/// the rows under the fields act on the work item as a whole rather than on
+/// one of its fields.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EditMenuEntry {
     /// The field's name, as the menu lists it.
@@ -426,6 +435,10 @@ pub const EDIT_MENU: &[EditMenuEntry] = &[
     EditMenuEntry {
         label: "Add comment",
         command: CommandId::AddComment,
+    },
+    EditMenuEntry {
+        label: "New child",
+        command: CommandId::NewChild,
     },
 ];
 
@@ -583,6 +596,15 @@ mod tests {
             command_for_key(press(KeyCode::Char('S'), KeyModifiers::SHIFT)),
             Some(CommandId::ChangeState),
             "capital S is the state picker; lowercase s stays the sort menu"
+        );
+        assert_eq!(
+            command_for_key(press(KeyCode::Char('N'), KeyModifiers::SHIFT)),
+            Some(CommandId::NewChild),
+            "capital N files a child; lowercase n stays the new work item form"
+        );
+        assert_eq!(
+            command_for_key(press(KeyCode::Char('n'), KeyModifiers::NONE)),
+            Some(CommandId::NewWorkItem)
         );
         assert_eq!(
             command_for_key(press(KeyCode::Char('e'), KeyModifiers::NONE)),
