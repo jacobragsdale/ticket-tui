@@ -314,19 +314,12 @@ impl WorkItemsScreen {
                     self.filter_overlay.scroll.scroll_to(0);
                 }
             }
-            PointerTarget::ColumnToggle { index } => {
-                self.column_overlay.cursor.focus(index);
-                self.columns_mut().toggle_visible(index);
-                shell.session_dirty = true;
-            }
-            PointerTarget::ColumnMove { index, delta } => {
-                self.column_overlay.cursor.index = self.columns_mut().move_column(index, delta);
-                shell.session_dirty = true;
-            }
-            PointerTarget::ColumnResize { index, delta } => {
-                self.column_overlay.cursor.focus(index);
-                self.columns_mut().resize(index, delta);
-                shell.session_dirty = true;
+            PointerTarget::ColumnToggle { .. }
+            | PointerTarget::ColumnMove { .. }
+            | PointerTarget::ColumnResize { .. } => {
+                let mut layout = std::mem::take(&mut self.layout);
+                self.apply_column_target(shell, &target, &mut layout);
+                self.layout = layout;
             }
             PointerTarget::PaletteCommand { index } => {
                 self.palette.selected = index;

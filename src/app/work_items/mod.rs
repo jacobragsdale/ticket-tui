@@ -148,6 +148,10 @@ const NAMED_BULK_FAILURES: usize = 3;
 pub const PROGRESS_BAR_CELLS: usize = 6;
 
 pub struct WorkItemsScreen {
+    /// Which tab the open palette lists commands for. The palette, like the
+    /// help, the columns editor and the database overlay, is drawn by this
+    /// screen on behalf of whichever tab is showing.
+    pub palette_tab: TabId,
     tickets: Arc<Vec<Ticket>>,
     visible: Vec<SearchMatch>,
     search: SearchEngine,
@@ -305,6 +309,7 @@ impl WorkItemsScreen {
         let prepared = Snapshot::new(tickets);
         let search = SearchEngine::from_documents(prepared.search_documents);
         let mut app = Self {
+            palette_tab: TabId::WorkItems,
             tickets: Arc::new(prepared.tickets),
             visible: Vec::new(),
             search,

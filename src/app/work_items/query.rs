@@ -2,6 +2,7 @@
 //! overlays, the command palette and sorting.
 
 use super::*;
+use crate::columns::ColumnLayout;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SortDraft {
@@ -134,7 +135,25 @@ impl WorkItemsScreen {
         matching_commands(
             self.palette.query.text(),
             !self.show_finished,
-            TabId::WorkItems,
+            self.palette_tab,
+        )
+    }
+
+    /// Opens one of the overlays every tab shares — the help, the palette,
+    /// the columns editor, the database overlay — on behalf of `tab`, which
+    /// is the one showing. The palette lists that tab's commands, and what it
+    /// chooses goes back to that tab as [`AppAction::RunCommand`].
+    pub fn open_shell_overlay(&mut self, shell: &mut Shell, id: CommandId, tab: TabId) {
+        self.run_command(shell, id);
+        self.palette_tab = tab;
+    }
+
+    /// Whether one of those shared overlays is open.
+    #[must_use]
+    pub fn shell_overlay_open(&self) -> bool {
+        matches!(
+            self.mode,
+            WorkItemMode::Help | WorkItemMode::Palette | WorkItemMode::Columns | WorkItemMode::Info
         )
     }
 
@@ -530,6 +549,7 @@ impl WorkItemsScreen {
 
     pub(super) fn open_palette(&mut self) {
         self.palette = PaletteState::default();
+        self.palette_tab = TabId::WorkItems;
         self.mode = WorkItemMode::Palette;
     }
 
@@ -608,7 +628,22 @@ impl WorkItemsScreen {
     }
 
     pub(super) fn handle_columns_key(&mut self, shell: &mut Shell, key: KeyEvent) {
-        let last = self.columns_mut().count().saturating_sub(1);
+        // The editor works on whichever layout it is handed, so the same keys
+        // edit another tab's columns; here that is this screen's own.
+        let mut layout = std::mem::take(&mut self.layout);
+        self.handle_columns_key_on(shell, key, &mut layout);
+        self.layout = layout;
+    }
+
+    /// The columns editor's keys, applied to `layout`: this screen's own, or
+    /// another tab's when the editor was opened there.
+    pub fn handle_columns_key_on(
+        &mut self,
+        shell: &mut Shell,
+        key: KeyEvent,
+        layout: &mut dyn ColumnLayout,
+    ) {
+        let last = layout.count().saturating_sub(1);
         match key.code {
             KeyCode::Esc | KeyCode::Char('w') | KeyCode::Enter => self.mode = WorkItemMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -619,31 +654,57 @@ impl WorkItemsScreen {
             }
             KeyCode::Char(' ') => {
                 let index = self.column_overlay.cursor.index;
-                self.columns_mut().toggle_visible(index);
+                layout.toggle_visible(index);
                 shell.session_dirty = true;
             }
             KeyCode::Char('K') => {
                 let index = self.column_overlay.cursor.index;
-                self.column_overlay.cursor.index = self.columns_mut().move_column(index, -1);
+                self.column_overlay.cursor.index = layout.move_column(index, -1);
                 shell.session_dirty = true;
             }
             KeyCode::Char('J') => {
                 let index = self.column_overlay.cursor.index;
-                self.column_overlay.cursor.index = self.columns_mut().move_column(index, 1);
+                self.column_overlay.cursor.index = layout.move_column(index, 1);
                 shell.session_dirty = true;
             }
             KeyCode::Left | KeyCode::Char('-') | KeyCode::Char('<') => {
                 let index = self.column_overlay.cursor.index;
-                self.columns_mut().resize(index, -1);
+                layout.resize(index, -1);
                 shell.session_dirty = true;
             }
             KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('>') => {
                 let index = self.column_overlay.cursor.index;
-                self.columns_mut().resize(index, 1);
+                layout.resize(index, 1);
                 shell.session_dirty = true;
             }
             _ => {}
         }
+    }
+
+    /// A click on one of the columns editor's rows or controls, applied to
+    /// `layout`. Answers whether the target was one of the editor's.
+    pub fn apply_column_target(
+        &mut self,
+        shell: &mut Shell,
+        target: &PointerTarget,
+        layout: &mut dyn ColumnLayout,
+    ) -> bool {
+        match *target {
+            PointerTarget::ColumnToggle { index } => {
+                self.column_overlay.cursor.focus(index);
+                layout.toggle_visible(index);
+            }
+            PointerTarget::ColumnMove { index, delta } => {
+                self.column_overlay.cursor.index = layout.move_column(index, delta);
+            }
+            PointerTarget::ColumnResize { index, delta } => {
+                self.column_overlay.cursor.focus(index);
+                layout.resize(index, delta);
+            }
+            _ => return false,
+        }
+        shell.session_dirty = true;
+        true
     }
 
     fn focus_column(&mut self, index: usize) {
@@ -689,6 +750,12 @@ impl WorkItemsScreen {
             return AppAction::None;
         };
         self.mode = WorkItemMode::Browse;
+        // A palette opened for another tab hands its choice back to that
+        // tab rather than running it on the work items.
+        if self.palette_tab != TabId::WorkItems {
+            self.palette_tab = TabId::WorkItems;
+            return AppAction::RunCommand(command.id);
+        }
         self.run_command(shell, command.id)
     }
 

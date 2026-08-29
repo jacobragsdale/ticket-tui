@@ -42,10 +42,10 @@ mod widgets;
 
 use details::{assigned_to_me_style, field_line, render_details};
 use overlays::{
-    ListOverlay, link_line, overlay_line, render_chips, render_column_overlay, render_facet_bar,
-    render_facet_menu, render_filter_overlay, render_help_popup, render_info_overlay,
-    render_list_overlay, render_palette, render_sort_popup, render_sprint_overlay,
-    render_views_overlay, terminate_underline,
+    ListOverlay, column_rows, link_line, overlay_line, render_chips, render_column_overlay,
+    render_facet_bar, render_facet_menu, render_filter_overlay, render_help_popup,
+    render_info_overlay, render_list_overlay, render_palette, render_sort_popup,
+    render_sprint_overlay, render_views_overlay, terminate_underline,
 };
 use pickers::{
     render_assignee_picker, render_delete_confirm, render_edit_menu, render_form,
@@ -230,6 +230,31 @@ fn paint(frame: &mut Frame<'_>, app: &mut App) {
     render_tab_bar(frame, &mut app.shell, &tabs, sections[0]);
     let (shell, screen) = app.screen();
     screen.render(frame, shell, sections[1]);
+    if app.shell_overlay_open() {
+        render_shell_overlay(frame, app);
+    }
+}
+
+/// One of the shared overlays, drawn over a tab other than the work items by
+/// the work items screen that drives it. The columns editor shows the columns
+/// of the tab it was opened for.
+fn render_shell_overlay(frame: &mut Frame<'_>, app: &mut App) {
+    let columns = match app.tab {
+        TabId::WorkItems => Vec::new(),
+        TabId::Repos => column_rows(&app.repos.layout),
+        TabId::PullRequests => column_rows(&app.pull_requests.layout),
+        TabId::Pipelines => column_rows(Screen::columns(&app.pipelines)),
+    };
+    let App {
+        shell, work_items, ..
+    } = app;
+    match work_items.mode {
+        WorkItemMode::Help => render_help_popup(frame, work_items, shell),
+        WorkItemMode::Palette => render_palette(frame, work_items, shell),
+        WorkItemMode::Info => render_info_overlay(frame, work_items, shell),
+        WorkItemMode::Columns => render_column_overlay(frame, work_items, shell, &columns),
+        _ => {}
+    }
 }
 
 /// The one row above everything: which tabs there are, which one is showing,
@@ -348,7 +373,10 @@ fn render_pass(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, shell: &mut 
         WorkItemMode::Sort => render_sort_popup(frame, screen, shell),
         WorkItemMode::Help => render_help_popup(frame, screen, shell),
         WorkItemMode::Filter => render_filter_overlay(frame, screen, shell),
-        WorkItemMode::Columns => render_column_overlay(frame, screen, shell),
+        WorkItemMode::Columns => {
+            let columns = column_rows(Screen::columns(screen));
+            render_column_overlay(frame, screen, shell, &columns);
+        }
         WorkItemMode::Palette => render_palette(frame, screen, shell),
         WorkItemMode::Views => render_views_overlay(frame, screen, shell),
         WorkItemMode::Info => render_info_overlay(frame, screen, shell),

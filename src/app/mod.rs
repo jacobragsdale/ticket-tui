@@ -14,7 +14,7 @@ use crate::agent_context::{
     TicketReference, TicketsContext, WorkItemsContext,
 };
 use crate::classification::{self, ClassificationNode, NodeKind};
-use crate::columns::TableLayout;
+use crate::columns::{ColumnLayout, TableLayout};
 use crate::command::{
     Command, CommandId, EDIT_MENU, EditMenuEntry, REMOVE_PARENT_ROW, command_for_key,
     matching_commands,
@@ -81,6 +81,9 @@ pub use work_items::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum AppAction {
     None,
+    /// A command the palette chose for the tab that is showing, which the
+    /// shell hands to that tab's screen.
+    RunCommand(CommandId),
     /// Go where a reference points: the shell switches tabs if it has to and
     /// asks the screen that holds it to select it.
     Follow(Jump),
@@ -226,6 +229,12 @@ pub struct App {
     /// The tab keys `1`–`4` switch between. Every screen keeps its own state
     /// while another is showing.
     pub tab: TabId,
+    /// Which tab one of the shared overlays — help, the palette, the columns
+    /// editor, the database overlay — is open over, when it is open over one
+    /// other than the work items. The work items screen draws and drives
+    /// those overlays; while this is set, every key and click goes to it, and
+    /// what it decides comes back to the tab named here.
+    overlay_for: Option<TabId>,
     pub work_items: WorkItemsScreen,
     pub repos: ReposScreen,
     pub pull_requests: PullRequestsScreen,
@@ -240,6 +249,7 @@ impl App {
         Self {
             shell,
             tab: TabId::WorkItems,
+            overlay_for: None,
             work_items,
             repos: ReposScreen::default(),
             pull_requests: PullRequestsScreen::default(),
@@ -273,9 +283,129 @@ impl App {
         if tab == self.tab {
             return;
         }
+        self.close_shell_overlay();
         let (shell, screen) = self.screen();
         screen.close_overlay(shell);
         self.tab = tab;
+    }
+
+    /// The overlays every tab shares. On the work items they are the screen's
+    /// own; on any other tab the work items screen opens them on that tab's
+    /// behalf.
+    const SHELL_OVERLAYS: [CommandId; 4] = [
+        CommandId::Help,
+        CommandId::Palette,
+        CommandId::Columns,
+        CommandId::DatabaseInfo,
+    ];
+
+    /// Whether one of the shared overlays is open over a tab other than the
+    /// work items, which is when the frame draws it over that tab.
+    #[must_use]
+    pub fn shell_overlay_open(&self) -> bool {
+        self.overlay_for.is_some() && self.work_items.shell_overlay_open()
+    }
+
+    fn close_shell_overlay(&mut self) {
+        if self.overlay_for.take().is_some() && self.work_items.shell_overlay_open() {
+            self.work_items.close_overlay(&mut self.shell);
+        }
+    }
+
+    /// Runs one command on the tab showing: a shared overlay opens over it,
+    /// anything else is the screen's own.
+    fn run_tab_command(&mut self, id: CommandId) -> AppAction {
+        if self.tab != TabId::WorkItems && Self::SHELL_OVERLAYS.contains(&id) {
+            self.work_items
+                .open_shell_overlay(&mut self.shell, id, self.tab);
+            self.overlay_for = Some(self.tab);
+            return AppAction::None;
+        }
+        let action = match self.tab {
+            TabId::WorkItems => self.work_items.run_command(&mut self.shell, id),
+            TabId::Repos => self.repos.run_command(&mut self.shell, id),
+            TabId::PullRequests => self.pull_requests.run_command(&mut self.shell, id),
+            TabId::Pipelines => self.pipelines.run_command(&mut self.shell, id),
+        };
+        self.apply(action)
+    }
+
+    /// One key while a shared overlay is open over another tab: the work
+    /// items screen drives the overlay, and the columns editor edits that
+    /// tab's layout rather than the work items'.
+    fn handle_overlay_key(&mut self, key: KeyEvent) -> AppAction {
+        let action = if self.work_items.mode == WorkItemMode::Columns {
+            let Self {
+                shell,
+                work_items,
+                repos,
+                pull_requests,
+                pipelines,
+                tab,
+                ..
+            } = self;
+            // The work items never get here: their own screen edits its own
+            // columns. The arm only keeps the match exhaustive.
+            let layout: &mut dyn ColumnLayout = match tab {
+                TabId::WorkItems | TabId::Repos => &mut repos.layout,
+                TabId::PullRequests => &mut pull_requests.layout,
+                TabId::Pipelines => pipelines.columns_mut(),
+            };
+            work_items.handle_columns_key_on(shell, key, layout);
+            AppAction::None
+        } else {
+            self.work_items.handle_key(&mut self.shell, key)
+        };
+        if !self.work_items.shell_overlay_open() {
+            self.overlay_for = None;
+        }
+        self.apply(action)
+    }
+
+    /// One click while a shared overlay is open over another tab. Only the
+    /// overlay's own targets count: the tab underneath is not there to be
+    /// clicked through the overlay.
+    fn handle_overlay_mouse(&mut self, mouse: MouseEvent) -> PointerUpdate {
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+            let target = self
+                .shell
+                .hit_regions
+                .resolve(mouse.column, mouse.row)
+                .filter(|region| region.layer != crate::pointer::PointerLayer::Base)
+                .map(|region| region.target.clone());
+            let Some(target) = target else {
+                self.shell.pointer.clear_press();
+                return PointerUpdate::none(false);
+            };
+            if self.work_items.mode == WorkItemMode::Columns {
+                let Self {
+                    shell,
+                    work_items,
+                    repos,
+                    pull_requests,
+                    pipelines,
+                    tab,
+                    ..
+                } = self;
+                let layout: &mut dyn ColumnLayout = match tab {
+                    TabId::WorkItems | TabId::Repos => &mut repos.layout,
+                    TabId::PullRequests => &mut pull_requests.layout,
+                    TabId::Pipelines => pipelines.columns_mut(),
+                };
+                if work_items.apply_column_target(shell, &target, layout) {
+                    shell.pointer.clear_press();
+                    return PointerUpdate::none(true);
+                }
+            }
+        }
+        let update = self.work_items.handle_mouse(&mut self.shell, mouse);
+        if !self.work_items.shell_overlay_open() {
+            self.overlay_for = None;
+        }
+        PointerUpdate {
+            action: self.apply(update.action),
+            redraw: update.redraw,
+        }
     }
 
     /// Goes where a reference points: the tab that holds it comes up, and the
@@ -349,6 +479,7 @@ impl App {
     /// the event loop.
     fn apply(&mut self, action: AppAction) -> AppAction {
         match action {
+            AppAction::RunCommand(id) => self.run_tab_command(id),
             AppAction::Follow(jump) => {
                 self.follow(&jump);
                 AppAction::None
@@ -512,6 +643,9 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
+        if self.shell_overlay_open() {
+            return self.handle_overlay_key(key);
+        }
         // `1`–`4` switch tabs from anywhere the digit is not being typed into
         // something. An overlay is closed on the way out rather than left open
         // behind the tab that comes back.
@@ -523,6 +657,15 @@ impl App {
             self.select_tab(tab);
             return AppAction::None;
         }
+        // The shared overlays open over any tab; the work items screen
+        // answers its own keys, the others hand these four up.
+        if self.tab != TabId::WorkItems
+            && self.screen().1.active_editor().is_none()
+            && let Some(id) = command_for_key(key, self.tab)
+            && Self::SHELL_OVERLAYS.contains(&id)
+        {
+            return self.run_tab_command(id);
+        }
         let (shell, screen) = self.screen();
         let action = screen.handle_key(shell, key);
         self.apply(action)
@@ -532,6 +675,9 @@ impl App {
     /// it answers with is the shell's, not something a screen reports. A click
     /// on the tab bar never reaches a screen — the bar is the shell's.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> PointerUpdate {
+        if self.shell_overlay_open() {
+            return self.handle_overlay_mouse(mouse);
+        }
         if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
             && let Some(region) = self.shell.hit_regions.resolve(mouse.column, mouse.row)
             && let PointerTarget::SelectTab { index } = region.target

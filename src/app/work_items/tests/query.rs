@@ -243,13 +243,28 @@ fn a_key_belonging_to_another_tab_does_nothing_on_this_one() {
             let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
             app.select_tab(TabId::Repos);
             app.handle_key(KeyEvent::new(key.code, key.modifiers));
-            assert_eq!(
-                app.work_items.mode,
-                WorkItemMode::Browse,
-                "{:?} via {} reached the work items screen from another tab",
+            // The four overlays every tab shares are drawn by the work items
+            // screen on the other tab's behalf; nothing else of its reaches it.
+            let shared = matches!(
                 command.id,
-                key.label()
+                CommandId::Help | CommandId::Palette | CommandId::Columns | CommandId::DatabaseInfo
             );
+            if shared {
+                assert!(
+                    app.shell_overlay_open(),
+                    "{:?} via {} opens over the other tab",
+                    command.id,
+                    key.label()
+                );
+            } else {
+                assert_eq!(
+                    app.work_items.mode,
+                    WorkItemMode::Browse,
+                    "{:?} via {} reached the work items screen from another tab",
+                    command.id,
+                    key.label()
+                );
+            }
             assert_eq!(
                 app.tab,
                 TabId::Repos,

@@ -266,3 +266,95 @@ fn a_click_on_the_tab_bar_releases_the_press_it_started_with() {
         crate::pointer::DragKind::None
     ));
 }
+
+#[test]
+fn help_palette_columns_and_database_open_over_every_tab() {
+    let mut app = crate::app::pull_requests::tests::pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+
+    // `?` on the pull requests: the help, listing this tab's own keys.
+    press(&mut app, KeyCode::Char('?'));
+    let text = render_text(120, 40, &mut app);
+    assert!(text.contains(" Help "), "{text}");
+    // The popup is a screenful tall, so the tab's own section is paged to.
+    let mut seen = text;
+    for _ in 0..12 {
+        if seen.contains("Approve with suggestions") {
+            break;
+        }
+        press(&mut app, KeyCode::PageDown);
+        seen = render_text(120, 40, &mut app);
+    }
+    assert!(
+        seen.contains("Approve with suggestions"),
+        "the help lists the tab's own verbs: {seen}"
+    );
+    press(&mut app, KeyCode::Esc);
+    assert!(!render_text(120, 40, &mut app).contains(" Help "));
+    assert_eq!(app.tab, TabId::PullRequests, "and the tab is still showing");
+
+    // `p`: the palette lists the pull requests' commands and runs one there.
+    press(&mut app, KeyCode::Char('p'));
+    for character in "wait".chars() {
+        press(&mut app, KeyCode::Char(character));
+    }
+    let text = render_text(120, 40, &mut app);
+    assert!(text.contains(" Commands "), "{text}");
+    assert!(text.contains("Wait for author"), "{text}");
+    let selected = app
+        .pull_requests
+        .selected(&app.shell)
+        .expect("a pull request under the cursor")
+        .request
+        .id;
+    let action = press(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(action, crate::app::AppAction::VotePullRequest { id, vote: -5, .. } if id == selected),
+        "the palette's choice runs on the tab it was opened for, got {action:?}"
+    );
+    assert!(!render_text(120, 40, &mut app).contains(" Commands "));
+
+    // `c`: the columns editor edits this tab's columns, not the work items'.
+    press(&mut app, KeyCode::Char('c'));
+    let text = render_text(120, 40, &mut app);
+    assert!(text.contains(" Columns "), "{text}");
+    assert!(
+        text.contains("Votes"),
+        "the editor lists the pull request columns: {text}"
+    );
+    let visible = |layout: &dyn crate::columns::ColumnLayout| {
+        (0..layout.count())
+            .map(|index| layout.is_visible(index))
+            .collect::<Vec<bool>>()
+    };
+    let before = visible(&app.pull_requests.layout);
+    let work_items_before = visible(&app.work_items.layout);
+    // Past the pinned id and title columns, which the editor refuses to hide.
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char(' '));
+    assert_ne!(
+        visible(&app.pull_requests.layout),
+        before,
+        "Space toggles a pull request column"
+    );
+    assert_eq!(
+        visible(&app.work_items.layout),
+        work_items_before,
+        "and leaves the work items' columns alone"
+    );
+    press(&mut app, KeyCode::Esc);
+
+    // `i`: the database overlay.
+    press(&mut app, KeyCode::Char('i'));
+    let text = render_text(120, 40, &mut app);
+    assert!(text.contains(" Database "), "{text}");
+    press(&mut app, KeyCode::Char('i'));
+    assert!(!render_text(120, 40, &mut app).contains(" Database "));
+
+    // A digit typed into the palette's filter is a character, not a tab.
+    press(&mut app, KeyCode::Char('p'));
+    press(&mut app, KeyCode::Char('1'));
+    assert_eq!(app.tab, TabId::PullRequests);
+    press(&mut app, KeyCode::Esc);
+}

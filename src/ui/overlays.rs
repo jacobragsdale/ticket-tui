@@ -2,6 +2,7 @@
 //! palette, views, the sprint summary and the chips and facets above the table.
 
 use super::*;
+use crate::columns::ColumnLayout;
 
 pub(super) fn render_sort_popup(
     frame: &mut Frame<'_>,
@@ -585,32 +586,49 @@ pub(super) fn render_filter_overlay(
     );
 }
 
+/// One row of the columns editor, read off a layout before the editor is
+/// drawn: the editor draws whichever tab's columns it was opened for.
+pub(crate) struct ColumnRowSpec {
+    label: &'static str,
+    visible: bool,
+    width: String,
+    flexible: bool,
+}
+
+pub(crate) fn column_rows(layout: &dyn ColumnLayout) -> Vec<ColumnRowSpec> {
+    (0..layout.count())
+        .map(|index| ColumnRowSpec {
+            label: layout.label(index),
+            visible: layout.is_visible(index),
+            width: if layout.flexible(index) {
+                "fill".into()
+            } else {
+                layout.width(index).to_string()
+            },
+            flexible: layout.flexible(index),
+        })
+        .collect()
+}
+
 pub(super) fn render_column_overlay(
     frame: &mut Frame<'_>,
     screen: &mut WorkItemsScreen,
     shell: &mut Shell,
+    columns: &[ColumnRowSpec],
 ) {
     let area = centered_rect(frame.area(), 56, 18);
     let inner = render_modal_frame(frame, modal_layer(screen), shell, area, " Columns ");
-    let layout = Screen::columns(screen);
-    let content = layout.count();
+    let content = columns.len();
     let selected = screen.column_overlay.cursor.index;
-    let rows: Vec<Line> = (0..content)
-        .map(|index| {
+    let rows: Vec<Line> = columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
             let marker = if index == selected { "›" } else { " " };
-            let check = if layout.is_visible(index) {
-                "[x]"
-            } else {
-                "[ ]"
-            };
-            let width = if layout.flexible(index) {
-                "fill".into()
-            } else {
-                layout.width(index).to_string()
-            };
+            let check = if column.visible { "[x]" } else { "[ ]" };
             Line::from(format!(
-                "{marker} {check} {:<12} {width}",
-                layout.label(index)
+                "{marker} {check} {:<12} {}",
+                column.label, column.width
             ))
         })
         .collect();
@@ -629,11 +647,12 @@ pub(super) fn render_column_overlay(
             row_hit_width: Some(5),
             target: &|index| PointerTarget::ColumnToggle { index },
             decorate: Some(&|frame: &mut Frame<'_>,
-                             screen: &mut WorkItemsScreen,
+                             _screen: &mut WorkItemsScreen,
                              shell: &mut Shell,
                              logical,
                              y| {
-                render_column_controls(frame, screen, shell, inner, content, logical, y);
+                let resizable = columns.get(logical).is_some_and(|column| !column.flexible);
+                render_column_controls(frame, shell, inner, content, logical, y, resizable);
             }),
         },
     );
@@ -641,14 +660,13 @@ pub(super) fn render_column_overlay(
 
 pub(super) fn render_column_controls(
     frame: &mut Frame<'_>,
-    screen: &mut WorkItemsScreen,
     shell: &mut Shell,
     inner: Rect,
     content: usize,
     logical: usize,
     y: u16,
+    resizable: bool,
 ) {
-    let resizable = !Screen::columns(screen).flexible(logical);
     let controls = [
         (
             15,
