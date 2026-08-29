@@ -34,6 +34,9 @@ struct Theme {
     body: Color,
     link: Color,
     selected_background: Color,
+    /// A dimmer wash than `selected_background`, laid under a hovered row so
+    /// its colour-coded cells keep their own foregrounds.
+    hover_background: Color,
     info: Color,
     error: Color,
     scrollbar: Color,
@@ -67,6 +70,7 @@ impl Theme {
                 body: Color::Reset,
                 link: Color::Reset,
                 selected_background: Color::Reset,
+                hover_background: Color::Reset,
                 info: Color::Reset,
                 error: Color::Reset,
                 scrollbar: Color::Reset,
@@ -95,6 +99,7 @@ impl Theme {
                 body: Color::Gray,
                 link: Color::Blue,
                 selected_background: Color::DarkGray,
+                hover_background: Color::Indexed(237),
                 info: Color::Yellow,
                 error: Color::Red,
                 scrollbar: Color::DarkGray,
@@ -2644,6 +2649,28 @@ fn capture_selectable(
     });
 }
 
+/// Whether a hovered target is a row of content rather than a control.
+///
+/// Rows carry colour-coded cells (State, Pri, and the `[Type]`/`[tag]` badges)
+/// that reversing would flatten into solid blocks, so a row is tinted instead.
+/// Controls stay reversed, because there a block is the intended affordance.
+fn row_like(target: &PointerTarget) -> bool {
+    matches!(
+        target,
+        PointerTarget::TableRow { .. }
+            | PointerTarget::OpenTicket { .. }
+            | PointerTarget::ToggleBookmark { .. }
+            | PointerTarget::ToggleRowSelect { .. }
+            | PointerTarget::JumpToTicket(_)
+            | PointerTarget::FacetValue { .. }
+            | PointerTarget::FilterRow { .. }
+            | PointerTarget::PaletteCommand { .. }
+            | PointerTarget::ViewRow { .. }
+            | PointerTarget::SortChoose(_)
+            | PointerTarget::ColumnToggle { .. }
+    )
+}
+
 fn paint_hover(frame: &mut Frame<'_>, app: &App) {
     let Some(region) = app.hovered_region() else {
         return;
@@ -2661,12 +2688,21 @@ fn paint_hover(frame: &mut Frame<'_>, app: &App) {
     ) {
         return;
     }
+    // Painted last, so on a hovered *and* selected row the tint covers the
+    // selection background. Without a palette there is no tint to see, so a
+    // monochrome terminal falls back to reversing the row.
+    let tint = (row_like(target) && theme().hover_background != Color::Reset)
+        .then(|| theme().hover_background);
     let rect = region.rect;
     let buffer = frame.buffer_mut();
     for y in rect.y..rect.y.saturating_add(rect.height) {
         for x in rect.x..rect.x.saturating_add(rect.width) {
             let cell = &mut buffer[(x, y)];
-            cell.set_style(cell.style().add_modifier(Modifier::REVERSED));
+            let style = match tint {
+                Some(background) => cell.style().bg(background),
+                None => cell.style().add_modifier(Modifier::REVERSED),
+            };
+            cell.set_style(style);
         }
     }
 }
@@ -3011,6 +3047,7 @@ mod tests {
         let monochrome = Theme::new(true);
 
         assert_eq!(monochrome.accent, Color::Reset);
+        assert_eq!(monochrome.hover_background, Color::Reset);
         assert_eq!(monochrome.state_in_progress, Color::Reset);
         assert_eq!(monochrome.type_epic, Color::Reset);
         assert_eq!(monochrome.priority_critical, Color::Reset);
@@ -3092,6 +3129,16 @@ mod tests {
         (cell.fg, cell.bg, cell.modifier)
     }
 
+    /// A hovered row tints its background, or reverses where there is no palette.
+    fn assert_row_hovered(terminal: &Terminal<TestBackend>, x: u16, y: u16, context: &str) {
+        let (_, bg, modifier) = painted_cell(terminal, x, y);
+        if theme().hover_background == Color::Reset {
+            assert!(modifier.contains(Modifier::REVERSED), "{context}");
+        } else {
+            assert_eq!(bg, theme().hover_background, "{context}");
+        }
+    }
+
     /// Left edge of one table column, shared by the header and the body rows.
     fn column_x(app: &App, field: SortField) -> u16 {
         app.hit_regions
@@ -3146,6 +3193,9 @@ mod tests {
         // row stays readable.
         click(&mut app, title_x, body.y + 2);
         assert_eq!(app.selected_row(), Some(2));
+        // Park the pointer on another row so the hover tint does not cover the
+        // selection background this assertion is about.
+        app.handle_mouse(mouse(MouseEventKind::Moved, title_x, body.y));
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let (selected_fg, selected_bg, selected_modifier) =
             painted_cell(&terminal, title_x, body.y + 2);
@@ -3624,11 +3674,118 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Moved, row.x + 8, row.y));
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
 
-        assert!((row.x..row.x.saturating_add(row.width)).all(|x| {
-            terminal.backend().buffer()[(x, row.y)]
-                .modifier
-                .contains(Modifier::REVERSED)
-        }));
+        let tinted = (row.x..row.x.saturating_add(row.width)).all(|x| {
+            let cell = &terminal.backend().buffer()[(x, row.y)];
+            if theme().hover_background == Color::Reset {
+                cell.modifier.contains(Modifier::REVERSED)
+            } else {
+                cell.bg == theme().hover_background
+            }
+        });
+        assert!(tinted, "the whole hovered family row should be highlighted");
+    }
+
+    #[test]
+    fn hovering_a_row_leaves_its_coloured_cells_coloured() {
+        let mut app = App::new(vec![
+            ticket_at(10_001, "Alpha", "Issue", "To Do", "2026-03-03T00:00:00Z"),
+            ticket_at(10_002, "Beta", "Issue", "Doing", "2026-03-02T00:00:00Z"),
+        ]);
+        let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let state_x = column_x(&app, SortField::State);
+        let body = app.hit_regions.table_body.expect("table body");
+        let row_y = body.y + 1;
+        let (resting_fg, _, resting_modifier) = painted_cell(&terminal, state_x, row_y);
+
+        app.handle_mouse(mouse(MouseEventKind::Moved, state_x, row_y));
+        assert_eq!(app.hovered(), Some(&PointerTarget::TableRow { index: 1 }));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let (hovered_fg, hovered_bg, hovered_modifier) = painted_cell(&terminal, state_x, row_y);
+
+        assert_eq!(
+            hovered_fg, resting_fg,
+            "hover must not repaint the state colour"
+        );
+        if theme().hover_background == Color::Reset {
+            assert!(hovered_modifier.contains(Modifier::REVERSED));
+        } else {
+            assert_eq!(hovered_bg, theme().hover_background);
+            assert!(
+                !hovered_modifier.contains(Modifier::REVERSED),
+                "a tinted row must not flip its coloured cells into blocks"
+            );
+            assert_eq!(
+                hovered_modifier, resting_modifier,
+                "hover must not touch a row's modifiers"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hover_tint_covers_and_outranks_the_selection_highlight() {
+        if theme().hover_background == Color::Reset {
+            return; // NO_COLOR: hover falls back to reversing the row.
+        }
+        let mut app = App::new(vec![
+            ticket_at(10_001, "Alpha", "Issue", "To Do", "2026-03-03T00:00:00Z"),
+            ticket_at(10_002, "Beta", "Issue", "Doing", "2026-03-02T00:00:00Z"),
+        ]);
+        let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let title_x = column_x(&app, SortField::Title);
+        let body = app.hit_regions.table_body.expect("table body");
+        assert_eq!(app.selected_row(), Some(0));
+
+        // Selected only: the pointer rests on the row below.
+        app.handle_mouse(mouse(MouseEventKind::Moved, title_x, body.y + 1));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let (_, selected_bg, _) = painted_cell(&terminal, title_x, body.y);
+        assert_eq!(selected_bg, theme().selected_background);
+
+        // Selected and hovered: the tint is painted last, so it wins.
+        app.handle_mouse(mouse(MouseEventKind::Moved, title_x, body.y));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let (_, hovered_bg, _) = painted_cell(&terminal, title_x, body.y);
+        assert_eq!(hovered_bg, theme().hover_background);
+        assert_ne!(
+            hovered_bg, selected_bg,
+            "a hovered selected row must still read differently from a selected one"
+        );
+    }
+
+    #[test]
+    fn hovering_a_control_still_reverses_it() {
+        let mut app = App::new(vec![ticket()]);
+        let mut terminal = Terminal::new(TestBackend::new(130, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let header = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::SortHeader(SortField::Title)))
+            .map(|region| region.rect)
+            .expect("title sort header");
+        app.handle_mouse(mouse(MouseEventKind::Moved, header.x, header.y));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let (_, _, header_modifier) = painted_cell(&terminal, header.x, header.y);
+        assert!(
+            header_modifier.contains(Modifier::REVERSED),
+            "a hovered sort header should stay a reversed block"
+        );
+
+        app.mode = AppMode::Help;
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let close = app
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::CloseOverlay))
+            .map(|region| region.rect)
+            .expect("overlay close button");
+        app.handle_mouse(mouse(MouseEventKind::Moved, close.x, close.y));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let (_, _, close_modifier) = painted_cell(&terminal, close.x, close.y);
+        assert!(
+            close_modifier.contains(Modifier::REVERSED),
+            "a hovered close button should stay a reversed block"
+        );
     }
 
     #[test]
@@ -3945,11 +4102,11 @@ mod tests {
                 index: app.table.offset + 1,
             })
         );
-        assert!(
-            terminal.backend().buffer()[(column, row)]
-                .modifier
-                .contains(Modifier::REVERSED),
-            "the ticket under the stationary pointer should remain highlighted"
+        assert_row_hovered(
+            &terminal,
+            column,
+            row,
+            "the ticket under the stationary pointer should remain highlighted",
         );
         let _ = details;
     }
