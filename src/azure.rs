@@ -1283,8 +1283,10 @@ fn parse_timeline(response: &Value) -> Vec<TimelineRecord> {
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or_default();
-    // Every phase, and the stage it hangs under, so its jobs can be lifted.
-    let phases: HashMap<&str, Option<String>> = entries
+    // Every phase: the stage it hangs under, so its jobs can be lifted onto
+    // that stage, and the log it holds, which in most pipelines is the whole
+    // job's log and would otherwise be dropped with the phase.
+    let phases: HashMap<&str, (Option<String>, Option<i64>)> = entries
         .iter()
         .filter(|entry| {
             entry["type"]
@@ -1294,7 +1296,7 @@ fn parse_timeline(response: &Value) -> Vec<TimelineRecord> {
         .filter_map(|entry| {
             Some((
                 entry["id"].as_str()?,
-                entry["parentId"].as_str().map(str::to_owned),
+                (entry["parentId"].as_str().map(str::to_owned), log_id(entry)),
             ))
         })
         .collect();
@@ -1302,13 +1304,10 @@ fn parse_timeline(response: &Value) -> Vec<TimelineRecord> {
         .iter()
         .filter_map(|entry| {
             let kind = TimelineKind::parse(entry["type"].as_str()?)?;
+            let phase = entry["parentId"].as_str().and_then(|id| phases.get(id));
             let parent = entry["parentId"].as_str().map(str::to_owned);
-            let parent = parent.map(|parent| {
-                phases
-                    .get(parent.as_str())
-                    .and_then(Clone::clone)
-                    .unwrap_or(parent)
-            });
+            let parent =
+                parent.map(|parent| phase.and_then(|(stage, _)| stage.clone()).unwrap_or(parent));
             let time = |key: &str| {
                 entry[key]
                     .as_str()
@@ -1324,7 +1323,9 @@ fn parse_timeline(response: &Value) -> Vec<TimelineRecord> {
                 start: time("startTime"),
                 finish: time("finishTime"),
                 percent_complete: entry["percentComplete"].as_i64(),
-                log_id: entry["log"]["id"].as_i64(),
+                // A job whose phase held the log takes it: the phase itself
+                // is not drawn, and its log is what the job wrote.
+                log_id: log_id(entry).or_else(|| phase.and_then(|(_, log)| *log)),
                 order: entry["order"].as_i64().unwrap_or_default(),
                 issues: entry["issues"]
                     .as_array()
@@ -1341,8 +1342,53 @@ fn parse_timeline(response: &Value) -> Vec<TimelineRecord> {
             })
         })
         .collect();
+    depth_first(records)
+}
+
+/// The log one timeline entry names. Azure DevOps answers `0` for a node that
+/// wrote nothing — the endpoint is there and empty — so that is no log at all.
+fn log_id(entry: &Value) -> Option<i64> {
+    entry["log"]["id"].as_i64().filter(|id| *id > 0)
+}
+
+/// The timeline in the order a tree reads: each node followed by its children,
+/// siblings in the order the API gives them. Azure DevOps answers in no
+/// particular order and `order` only ranks siblings, so sorting by it alone
+/// leaves a stage printed after the jobs inside it.
+fn depth_first(mut records: Vec<TimelineRecord>) -> Vec<TimelineRecord> {
     records.sort_by_key(|record| record.order);
-    records
+    let held: Vec<String> = records.iter().map(|record| record.id.clone()).collect();
+    let mut ordered = Vec::with_capacity(records.len());
+    // Roots first: a node whose parent is not in this answer stands on its own.
+    let mut stack: Vec<String> = records
+        .iter()
+        .rev()
+        .filter(|record| {
+            record
+                .parent_id
+                .as_ref()
+                .is_none_or(|parent| !held.contains(parent))
+        })
+        .map(|record| record.id.clone())
+        .collect();
+    while let Some(id) = stack.pop() {
+        let Some(index) = records.iter().position(|record| record.id == id) else {
+            continue;
+        };
+        let record = records.remove(index);
+        stack.extend(
+            records
+                .iter()
+                .rev()
+                .filter(|child| child.parent_id.as_deref() == Some(record.id.as_str()))
+                .map(|child| child.id.clone()),
+        );
+        ordered.push(record);
+    }
+    // Anything left is part of a cycle the API should never answer with; it
+    // goes on the end rather than being dropped.
+    ordered.extend(records);
+    ordered
 }
 
 /// The approvals in a pending-approvals response.
@@ -3309,6 +3355,77 @@ mod tests {
             pull_request_url(&json!({ "pullRequestId": 7 }), &config()),
             "",
             "and one the answer says nothing about is left empty rather than guessed"
+        );
+    }
+    #[test]
+    fn a_timeline_reads_as_a_tree_whatever_order_the_answer_arrives_in() {
+        let response = json!({
+            "records": [
+                { "id": "task-2", "parentId": "job", "type": "Task", "name": "Test",
+                  "state": "completed", "order": 2 },
+                { "id": "stage", "parentId": null, "type": "Stage", "name": "Build stage",
+                  "state": "completed", "order": 1 },
+                { "id": "task-1", "parentId": "job", "type": "Task", "name": "Compile",
+                  "state": "completed", "order": 1 },
+                { "id": "job", "parentId": "stage", "type": "Job", "name": "Build job",
+                  "state": "completed", "order": 1 },
+                { "id": "second", "parentId": null, "type": "Stage", "name": "Deploy stage",
+                  "state": "pending", "order": 2 }
+            ]
+        });
+
+        assert_eq!(
+            parse_timeline(&response)
+                .iter()
+                .map(|record| record.name.clone())
+                .collect::<Vec<_>>(),
+            [
+                "Build stage",
+                "Build job",
+                "Compile",
+                "Test",
+                "Deploy stage"
+            ],
+            "each node is followed by what is inside it, siblings in their own order"
+        );
+    }
+
+    #[test]
+    fn a_dropped_phase_leaves_its_log_with_the_job_and_an_empty_log_is_no_log() {
+        let response = json!({
+            "records": [
+                { "id": "stage", "parentId": null, "type": "Stage", "name": "__default",
+                  "state": "completed", "order": 1 },
+                { "id": "phase", "parentId": "stage", "type": "Phase", "name": "Job",
+                  "state": "completed", "order": 1, "log": { "id": 3 } },
+                { "id": "job", "parentId": "phase", "type": "Job", "name": "Job",
+                  "state": "completed", "order": 1 },
+                { "id": "task", "parentId": "job", "type": "Task", "name": "Wait briefly",
+                  "state": "completed", "order": 1, "log": { "id": 0 } }
+            ]
+        });
+
+        let records = parse_timeline(&response);
+        let by_name = |name: &str| {
+            records
+                .iter()
+                .find(|record| record.name == name && record.kind != TimelineKind::Stage)
+                .unwrap_or_else(|| panic!("no {name}"))
+        };
+        assert_eq!(
+            by_name("Job").parent_id.as_deref(),
+            Some("stage"),
+            "the phase is flattened away"
+        );
+        assert_eq!(
+            by_name("Job").log_id,
+            Some(3),
+            "and the log it was holding stays with the job that wrote it"
+        );
+        assert_eq!(
+            by_name("Wait briefly").log_id,
+            None,
+            "a log id of zero is Azure DevOps saying the node wrote nothing"
         );
     }
 }

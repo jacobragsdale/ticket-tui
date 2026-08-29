@@ -10,12 +10,15 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueHint};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::app::pipelines::RunSchema;
+use crate::app::pipelines::rows::{RunRow, duration_label, run_glyph, short_branch};
 use crate::app::pull_requests::{PrRow, PrSchema};
 use crate::app::repos::{RepoRow, RepoSchema};
 use crate::azure::{self, AzureClient, AzureConfig};
@@ -26,12 +29,13 @@ use crate::filter::{FilterField, MatchContext, ParsedQuery, WorkItemSchema, pars
 use crate::local;
 use crate::markdown;
 use crate::model::{
-    CommentRecord, CompletionOptions, Identity, MergeStrategy, PullRequest, Ticket, TicketKey,
-    same_text,
+    Approval, CommentRecord, CompletionOptions, Identity, MergeStrategy, Pipeline, PullRequest,
+    Run, RunResult, Ticket, TicketKey, TimelineKind, TimelineRecord, same_text,
 };
 use crate::search;
 use crate::sync::{self, AzureConnector, PrAction, SyncMode, SyncOutcome, WorkItemSource};
 use crate::timestamp::Timestamp;
+use crate::watch::{LIVE_RUNS_CADENCE, LOG_CADENCE, PipelineSource};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -112,6 +116,94 @@ pub enum Command {
     /// Read and act on pull requests
     #[command(subcommand)]
     Prs(PrsCommand),
+    /// Print the project's build definitions
+    Pipelines {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read, start and stop pipeline runs
+    #[command(subcommand)]
+    Runs(RunsCommand),
+    /// Read and answer the approvals a run is waiting on
+    #[command(subcommand)]
+    Approvals(ApprovalsCommand),
+}
+
+/// The Pipelines tab, without the tab. `list` answers from the database; every
+/// other form reads or writes Azure DevOps, because a timeline, a log and a
+/// run's own progress are not things a pull stores.
+#[derive(Clone, Debug, Subcommand)]
+pub enum RunsCommand {
+    /// Print runs, newest first
+    List {
+        /// Only this pipeline's runs, by name
+        #[arg(long, value_name = "NAME")]
+        pipeline: Option<String>,
+        /// The Pipelines tab's run grammar: `pipeline:`, `status:`, `result:`,
+        /// `branch:`, `by:` and `reason:`
+        #[arg(long, value_name = "QUERY")]
+        query: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one run and its timeline
+    Show {
+        id: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one node's log
+    Logs {
+        id: i64,
+        /// The job whose log to print, by name
+        #[arg(long, value_name = "NAME", conflicts_with = "task")]
+        job: Option<String>,
+        /// The task whose log to print, by name
+        #[arg(long, value_name = "NAME")]
+        task: Option<String>,
+        /// Keep printing as the node writes, until it finishes
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Start one pipeline on one branch
+    Trigger {
+        /// The pipeline's name, as the project spells it
+        pipeline: String,
+        /// The branch to build, with or without `refs/heads/`
+        #[arg(long, value_name = "NAME")]
+        branch: String,
+        /// Tail the deepest running node's log until the run finishes
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Stop one run
+    Cancel { id: i64 },
+    /// Retry the jobs that failed in one run
+    Retry { id: i64 },
+    /// Wait for one run to finish, exiting 0 succeeded, 1 failed, 2 canceled,
+    /// 3 partially succeeded
+    Wait { id: i64 },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum ApprovalsCommand {
+    /// Print the approvals the project is waiting on
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve one
+    Approve {
+        id: String,
+        #[arg(long, value_name = "TEXT")]
+        comment: Option<String>,
+    },
+    /// Reject one
+    Reject {
+        id: String,
+        #[arg(long, value_name = "TEXT")]
+        comment: Option<String>,
+    },
 }
 
 /// The Repos tab, without the tab. Both reads answer from the database and the
@@ -263,6 +355,9 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Create(args) => run_create(cli, &database, args),
         Command::Repos(command) => run_repos(cli, &database, command),
         Command::Prs(command) => run_prs(cli, &database, command),
+        Command::Pipelines { json } => run_pipelines(&database, *json),
+        Command::Runs(command) => run_runs(cli, &database, command),
+        Command::Approvals(command) => run_approvals(cli, command),
     }
 }
 
@@ -1566,6 +1661,543 @@ fn store_pull_request(
     Ok(())
 }
 
+/// The project's build definitions, from the database.
+fn run_pipelines(database: &Path, json: bool) -> Result<()> {
+    let repository = open_database(database)?;
+    let pipelines = repository.load_pipelines()?;
+    let runs = repository.load_runs()?;
+    emit(&if json {
+        to_json(
+            &pipelines
+                .iter()
+                .map(|pipeline| PipelineJson::new(pipeline, &runs))
+                .collect::<Vec<_>>(),
+        )?
+    } else if pipelines.is_empty() {
+        "no pipelines".to_owned()
+    } else {
+        columns(
+            &pipelines
+                .iter()
+                .map(|pipeline| {
+                    let last = runs.iter().find(|run| run.pipeline_id == pipeline.id);
+                    vec![
+                        pipeline.id.to_string(),
+                        pipeline.folder.clone(),
+                        last.map_or_else(|| "\u{2014}".to_owned(), run_word),
+                        pipeline.name.clone(),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    Ok(())
+}
+
+/// How a run turned out, in the words `result:` filters on.
+fn run_word(run: &Run) -> String {
+    run.result.map_or_else(
+        || run.status.as_str().to_owned(),
+        |result| result.as_str().to_owned(),
+    )
+}
+
+/// The Pipelines tab's runs. `list` reads the database; everything else talks
+/// to Azure DevOps, because a timeline, a log and a run's own progress are not
+/// things a pull stores.
+fn run_runs(cli: &Cli, database: &Path, command: &RunsCommand) -> Result<()> {
+    match command {
+        RunsCommand::List {
+            pipeline,
+            query,
+            json,
+        } => {
+            let repository = open_database(database)?;
+            let rows = run_rows(&repository)?;
+            let me = resolve_me(
+                repository.meta(db::ME_DISPLAY_NAME_KEY)?,
+                std::env::var("TICKET_TUI_ME").ok(),
+            );
+            let rows = filter_runs(rows, pipeline.as_deref(), query.as_deref(), me);
+            emit(&if *json {
+                to_json(&rows.iter().map(RunJson::from).collect::<Vec<_>>())?
+            } else {
+                tabulate_runs(&rows)
+            });
+            Ok(())
+        }
+        RunsCommand::Show { id, json } => {
+            let client = connect(cli)?;
+            let run = client
+                .fetch_run(*id)?
+                .with_context(|| format!("Azure DevOps has no run {id}"))?;
+            let timeline = client.fetch_timeline(*id).unwrap_or_default();
+            let pipeline = pipeline_name(database, run.pipeline_id);
+            emit(&if *json {
+                to_json(&RunShowJson::new(&run, &pipeline, &timeline))?
+            } else {
+                describe_run(&run, &pipeline, &timeline)
+            });
+            Ok(())
+        }
+        RunsCommand::Logs {
+            id,
+            job,
+            task,
+            follow,
+        } => {
+            let client = connect(cli)?;
+            print_log(
+                &client,
+                *id,
+                job.as_deref().or(task.as_deref()),
+                *follow,
+                &sleep,
+            )
+        }
+        RunsCommand::Trigger {
+            pipeline,
+            branch,
+            follow,
+        } => {
+            let repository = open_database(database)?;
+            let definition = repository
+                .load_pipelines()?
+                .into_iter()
+                .find(|held| same_text(&held.name, pipeline))
+                .with_context(|| format!("no pipeline called {pipeline} is in the database"))?;
+            let client = connect(cli)?;
+            let branch = if branch.starts_with("refs/") {
+                branch.clone()
+            } else {
+                format!("refs/heads/{branch}")
+            };
+            let run = client.start_run(definition.id, &branch)?;
+            emit(&format!(
+                "run {} queued: {} on {}",
+                run.id,
+                definition.name,
+                short_branch(&branch)
+            ));
+            if *follow {
+                print_log(&client, run.id, None, true, &sleep)?;
+                report_run(&wait_for_run(&client, run.id, &sleep)?);
+            }
+            Ok(())
+        }
+        RunsCommand::Cancel { id } => {
+            let run = connect(cli)?.patch_run(*id, false)?;
+            emit(&format!("run {} {}", run.id, run.status.as_str()));
+            Ok(())
+        }
+        RunsCommand::Retry { id } => {
+            let run = connect(cli)?.patch_run(*id, true)?;
+            emit(&format!("run {} retried: {}", run.id, run.status.as_str()));
+            Ok(())
+        }
+        RunsCommand::Wait { id } => report_run(&wait_for_run(&connect(cli)?, *id, &sleep)?),
+    }
+}
+
+/// What a blocking command does between polls. A test hands in a sleep that
+/// does not sleep.
+fn sleep(wait: Duration) {
+    std::thread::sleep(wait);
+}
+
+/// Says how the run went and exits with the code that says it again: 0
+/// succeeded, 1 failed, 2 canceled, 3 partially succeeded, so a script can
+/// branch on it without parsing anything.
+fn report_run(run: &Run) -> ! {
+    emit(&format!(
+        "run {} {} · {}",
+        run.id,
+        run_word(run),
+        run.build_number
+    ));
+    std::process::exit(match run.result {
+        Some(RunResult::Succeeded) => 0,
+        Some(RunResult::PartiallySucceeded) => 3,
+        Some(RunResult::Canceled) => 2,
+        _ => 1,
+    })
+}
+
+/// Polls one run until it stops, at the watcher's own live cadence.
+fn wait_for_run(source: &dyn PipelineSource, id: i64, rest: &dyn Fn(Duration)) -> Result<Run> {
+    loop {
+        let run = source
+            .run(id)?
+            .with_context(|| format!("Azure DevOps has no run {id}"))?;
+        if !run.status.is_live() {
+            return Ok(run);
+        }
+        rest(source.throttled_for().unwrap_or(LIVE_RUNS_CADENCE));
+    }
+}
+
+/// Prints one node's log, and keeps printing while `follow` and the node is
+/// still writing. With no node named it takes the deepest one running, which
+/// is what the tab's own log pane shows.
+fn print_log(
+    source: &dyn PipelineSource,
+    run_id: i64,
+    node: Option<&str>,
+    follow: bool,
+    rest: &dyn Fn(Duration),
+) -> Result<()> {
+    let mut from_line = 0;
+    loop {
+        let timeline = source.timeline(run_id)?;
+        let record = match node {
+            Some(name) => timeline
+                .iter()
+                .find(|record| same_text(&record.name, name))
+                .with_context(|| format!("run {run_id} has no node called {name}"))?,
+            None => timeline
+                .iter()
+                .rfind(|record| record.log_id.is_some() && record.state.is_live())
+                .or_else(|| timeline.iter().rfind(|record| record.log_id.is_some()))
+                .with_context(|| format!("run {run_id} has written no log yet"))?,
+        };
+        let Some(log_id) = record.log_id else {
+            if !follow {
+                bail!("{} has written no log", record.name);
+            }
+            rest(LOG_CADENCE);
+            continue;
+        };
+        for line in source.log_lines(run_id, log_id, from_line)? {
+            emit(&line);
+            from_line += 1;
+        }
+        if !follow || !record.state.is_live() {
+            return Ok(());
+        }
+        rest(source.throttled_for().unwrap_or(LOG_CADENCE));
+    }
+}
+
+/// Every stored run, newest first, with the pipeline name the table shows.
+fn run_rows(repository: &SqliteTicketRepository) -> Result<Vec<RunRow>> {
+    let pipelines = repository.load_pipelines()?;
+    Ok(repository
+        .load_runs()?
+        .into_iter()
+        .map(|run| RunRow {
+            pipeline: pipelines
+                .iter()
+                .find(|pipeline| pipeline.id == run.pipeline_id)
+                .map_or_else(
+                    || run.pipeline_id.to_string(),
+                    |pipeline| pipeline.name.clone(),
+                ),
+            run,
+        })
+        .collect())
+}
+
+fn filter_runs(
+    rows: Vec<RunRow>,
+    pipeline: Option<&str>,
+    query: Option<&str>,
+    me: Option<String>,
+) -> Vec<RunRow> {
+    let context = MatchContext::now().with_me(me);
+    let parsed = query.map(parse_query::<RunSchema>);
+    rows.into_iter()
+        .filter(|row| pipeline.is_none_or(|name| same_text(&row.pipeline, name)))
+        .filter(|row| {
+            parsed.as_ref().is_none_or(|parsed| {
+                parsed.filters.matches_in(row, false, &context) && row.matches_fuzzy(&parsed.fuzzy)
+            })
+        })
+        .collect()
+}
+
+fn tabulate_runs(rows: &[RunRow]) -> String {
+    if rows.is_empty() {
+        return "no matching runs".to_owned();
+    }
+    columns(
+        &rows
+            .iter()
+            .map(|row| {
+                vec![
+                    row.run.id.to_string(),
+                    row.run.build_number.clone(),
+                    run_word(&row.run),
+                    row.branch(),
+                    row.pipeline.clone(),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn pipeline_name(database: &Path, id: i64) -> String {
+    open_database(database)
+        .and_then(|repository| repository.load_pipelines())
+        .ok()
+        .and_then(|pipelines| {
+            pipelines
+                .into_iter()
+                .find(|pipeline| pipeline.id == id)
+                .map(|pipeline| pipeline.name)
+        })
+        .unwrap_or_else(|| id.to_string())
+}
+
+/// The run's header, then its timeline as the tab draws it: stages, the jobs
+/// in them, the tasks in those, each with the glyph its state earns.
+fn describe_run(run: &Run, pipeline: &str, timeline: &[TimelineRecord]) -> String {
+    let mut lines = vec![
+        format!(
+            "{} run {} · {} · {}",
+            run_glyph(run.status, run.result),
+            run.id,
+            run_word(run),
+            run.build_number
+        ),
+        format!("{pipeline} on {}", short_branch(&run.source_branch)),
+        String::new(),
+        format!(
+            "Requested by    {}",
+            run.requested_for.as_deref().unwrap_or("—")
+        ),
+        format!("Reason          {}", run.reason),
+        format!(
+            "Started         {}",
+            run.start_time
+                .map_or_else(|| "—".to_owned(), |at| at.to_rfc3339())
+        ),
+        format!(
+            "Finished        {}",
+            run.finish_time
+                .map_or_else(|| "—".to_owned(), |at| at.to_rfc3339())
+        ),
+        format!("URL             {}", run.url),
+    ];
+    if !timeline.is_empty() {
+        lines.push(String::new());
+        lines.push("Timeline".to_owned());
+        for record in timeline {
+            let depth = match record.kind {
+                TimelineKind::Stage => 0,
+                TimelineKind::Job | TimelineKind::Checkpoint => 1,
+                TimelineKind::Task => 2,
+            };
+            let seconds = match (record.start, record.finish) {
+                (Some(start), Some(finish)) => Some(start.seconds_until(finish).max(0)),
+                _ => None,
+            };
+            lines.push(format!(
+                "  {}{} {}{}",
+                "  ".repeat(depth),
+                run_glyph(record.state, record.result),
+                record.name,
+                seconds.map_or_else(String::new, |seconds| format!(
+                    "  {}",
+                    duration_label(seconds)
+                ))
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// The approvals a run is waiting on, and the two answers.
+fn run_approvals(cli: &Cli, command: &ApprovalsCommand) -> Result<()> {
+    let client = connect(cli)?;
+    match command {
+        ApprovalsCommand::List { json } => {
+            let approvals = client.fetch_approvals()?;
+            emit(&if *json {
+                to_json(&approvals.iter().map(ApprovalJson::from).collect::<Vec<_>>())?
+            } else if approvals.is_empty() {
+                "no pending approvals".to_owned()
+            } else {
+                columns(
+                    &approvals
+                        .iter()
+                        .map(|approval| {
+                            vec![
+                                approval.id.clone(),
+                                approval.build_number.clone(),
+                                approval.stage.clone(),
+                                approval.pipeline.clone(),
+                            ]
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            });
+            Ok(())
+        }
+        ApprovalsCommand::Approve { id, comment } => {
+            client.answer_approval(id, true, comment.as_deref().unwrap_or_default())?;
+            emit(&format!("approval {id} approved"));
+            Ok(())
+        }
+        ApprovalsCommand::Reject { id, comment } => {
+            client.answer_approval(id, false, comment.as_deref().unwrap_or_default())?;
+            emit(&format!("approval {id} rejected"));
+            Ok(())
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PipelineJson<'a> {
+    id: i64,
+    name: &'a str,
+    folder: &'a str,
+    repo_id: Option<&'a str>,
+    queue_status: &'a str,
+    url: &'a str,
+    last_run: Option<i64>,
+}
+
+impl<'a> PipelineJson<'a> {
+    fn new(pipeline: &'a Pipeline, runs: &[Run]) -> Self {
+        Self {
+            id: pipeline.id,
+            name: &pipeline.name,
+            folder: &pipeline.folder,
+            repo_id: pipeline.repo_id.as_deref(),
+            queue_status: &pipeline.queue_status,
+            url: &pipeline.url,
+            last_run: runs
+                .iter()
+                .find(|run| run.pipeline_id == pipeline.id)
+                .map(|run| run.id),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RunJson<'a> {
+    id: i64,
+    pipeline: &'a str,
+    pipeline_id: i64,
+    build_number: &'a str,
+    status: &'a str,
+    result: Option<&'a str>,
+    branch: String,
+    requested_for: Option<&'a str>,
+    reason: &'a str,
+    queued: Option<String>,
+    started: Option<String>,
+    finished: Option<String>,
+    url: &'a str,
+}
+
+impl<'a> From<&'a RunRow> for RunJson<'a> {
+    fn from(row: &'a RunRow) -> Self {
+        let run = &row.run;
+        Self {
+            id: run.id,
+            pipeline: &row.pipeline,
+            pipeline_id: run.pipeline_id,
+            build_number: &run.build_number,
+            status: run.status.as_str(),
+            result: run.result.map(RunResult::as_str),
+            branch: row.branch(),
+            requested_for: run.requested_for.as_deref(),
+            reason: &run.reason,
+            queued: run.queue_time.map(|at| at.to_rfc3339()),
+            started: run.start_time.map(|at| at.to_rfc3339()),
+            finished: run.finish_time.map(|at| at.to_rfc3339()),
+            url: &run.url,
+        }
+    }
+}
+
+/// `runs show --json`: the run, and the timeline flat with each node's parent
+/// named, which is what a tree is on the wire.
+#[derive(Serialize)]
+struct RunShowJson<'a> {
+    #[serde(flatten)]
+    run: RunJson<'a>,
+    timeline: Vec<TimelineJson<'a>>,
+}
+
+#[derive(Serialize)]
+struct TimelineJson<'a> {
+    id: &'a str,
+    parent_id: Option<&'a str>,
+    kind: &'a str,
+    name: &'a str,
+    state: &'a str,
+    result: Option<&'a str>,
+    log_id: Option<i64>,
+    issues: usize,
+}
+
+impl<'a> RunShowJson<'a> {
+    fn new(run: &'a Run, pipeline: &'a str, timeline: &'a [TimelineRecord]) -> Self {
+        Self {
+            run: RunJson {
+                id: run.id,
+                pipeline,
+                pipeline_id: run.pipeline_id,
+                build_number: &run.build_number,
+                status: run.status.as_str(),
+                result: run.result.map(RunResult::as_str),
+                branch: short_branch(&run.source_branch),
+                requested_for: run.requested_for.as_deref(),
+                reason: &run.reason,
+                queued: run.queue_time.map(|at| at.to_rfc3339()),
+                started: run.start_time.map(|at| at.to_rfc3339()),
+                finished: run.finish_time.map(|at| at.to_rfc3339()),
+                url: &run.url,
+            },
+            timeline: timeline
+                .iter()
+                .map(|record| TimelineJson {
+                    id: &record.id,
+                    parent_id: record.parent_id.as_deref(),
+                    kind: match record.kind {
+                        TimelineKind::Stage => "stage",
+                        TimelineKind::Job => "job",
+                        TimelineKind::Task => "task",
+                        TimelineKind::Checkpoint => "checkpoint",
+                    },
+                    name: &record.name,
+                    state: record.state.as_str(),
+                    result: record.result.map(RunResult::as_str),
+                    log_id: record.log_id,
+                    issues: record.issues.len(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ApprovalJson<'a> {
+    id: &'a str,
+    pipeline: &'a str,
+    run_id: Option<i64>,
+    build_number: &'a str,
+    stage: &'a str,
+    instructions: &'a str,
+    requested_at: Option<String>,
+}
+
+impl<'a> From<&'a Approval> for ApprovalJson<'a> {
+    fn from(approval: &'a Approval) -> Self {
+        Self {
+            id: &approval.id,
+            pipeline: &approval.pipeline,
+            run_id: approval.run_id,
+            build_number: &approval.build_number,
+            stage: &approval.stage,
+            instructions: &approval.instructions,
+            requested_at: approval.requested_at.map(|at| at.to_rfc3339()),
+        }
+    }
+}
+
 /// Pads every column but the last, which is the title.
 fn columns(cells: &[Vec<String>]) -> String {
     let width = cells.first().map_or(0, Vec::len);
@@ -2795,5 +3427,401 @@ mod tests {
         let stored = repository.load_pull_requests().unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].status, crate::model::PrStatus::Completed);
+    }
+    /// A pipeline source that answers from a script: each call takes the next
+    /// answer, and the last one repeats, so a test can say "running twice,
+    /// then finished" without a clock.
+    struct ScriptedRuns {
+        runs: Mutex<Vec<Run>>,
+        timelines: Mutex<Vec<Vec<TimelineRecord>>>,
+        lines: Mutex<Vec<Vec<String>>>,
+        polls: Arc<Mutex<usize>>,
+    }
+
+    impl ScriptedRuns {
+        fn new(
+            runs: Vec<Run>,
+            timelines: Vec<Vec<TimelineRecord>>,
+            lines: Vec<Vec<String>>,
+        ) -> Self {
+            Self {
+                runs: Mutex::new(runs),
+                timelines: Mutex::new(timelines),
+                lines: Mutex::new(lines),
+                polls: Arc::new(Mutex::new(0)),
+            }
+        }
+    }
+
+    /// Takes the next scripted answer, repeating the last one for ever.
+    fn next_of<T: Clone>(script: &Mutex<Vec<T>>) -> Option<T> {
+        let mut script = script.lock().unwrap();
+        if script.len() > 1 {
+            Some(script.remove(0))
+        } else {
+            script.first().cloned()
+        }
+    }
+
+    impl PipelineSource for ScriptedRuns {
+        fn live_runs(&self) -> Result<Vec<Run>> {
+            Ok(Vec::new())
+        }
+
+        fn run(&self, _run_id: i64) -> Result<Option<Run>> {
+            *self.polls.lock().unwrap() += 1;
+            Ok(next_of(&self.runs))
+        }
+
+        fn timeline(&self, _run_id: i64) -> Result<Vec<TimelineRecord>> {
+            Ok(next_of(&self.timelines).unwrap_or_default())
+        }
+
+        fn log_lines(&self, _run_id: i64, _log_id: i64, start_line: usize) -> Result<Vec<String>> {
+            let all = next_of(&self.lines).unwrap_or_default();
+            Ok(all.into_iter().skip(start_line).collect())
+        }
+    }
+
+    fn scripted_run(status: crate::model::RunStatus, result: Option<RunResult>) -> Run {
+        Run {
+            id: 14,
+            pipeline_id: 1,
+            build_number: "20260829.4".into(),
+            status,
+            result,
+            source_branch: "refs/heads/main".into(),
+            source_version: "abc1234".into(),
+            requested_for: Some("Jacob Ragsdale".into()),
+            reason: "manual".into(),
+            pr_id: None,
+            queue_time: Some(crate::timestamp::ts("2026-08-29T10:00:00Z")),
+            start_time: Some(crate::timestamp::ts("2026-08-29T10:00:05Z")),
+            finish_time: (!status.is_live()).then(|| crate::timestamp::ts("2026-08-29T10:04:17Z")),
+            url: "https://dev.azure.com/demo/atlas/_build/results?buildId=14".into(),
+        }
+    }
+
+    fn scripted_node(name: &str, status: crate::model::RunStatus) -> TimelineRecord {
+        TimelineRecord {
+            id: name.to_owned(),
+            parent_id: None,
+            kind: TimelineKind::Task,
+            name: name.to_owned(),
+            state: status,
+            result: (!status.is_live()).then_some(RunResult::Succeeded),
+            start: Some(crate::timestamp::ts("2026-08-29T10:00:05Z")),
+            finish: (!status.is_live()).then(|| crate::timestamp::ts("2026-08-29T10:04:17Z")),
+            percent_complete: None,
+            log_id: Some(7),
+            order: 1,
+            issues: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_pipeline_subcommands_take_the_arguments_the_readme_documents() {
+        assert!(matches!(
+            Cli::parse_from(["ticket-tui", "pipelines", "--json"]).command,
+            Some(Command::Pipelines { json: true })
+        ));
+
+        let Some(Command::Runs(RunsCommand::List {
+            pipeline,
+            query,
+            json,
+        })) = Cli::parse_from([
+            "ticket-tui",
+            "runs",
+            "list",
+            "--pipeline",
+            "ticket-tui CI",
+            "--query",
+            "result:failed",
+            "--json",
+        ])
+        .command
+        else {
+            panic!("runs list did not parse");
+        };
+        assert_eq!(pipeline.as_deref(), Some("ticket-tui CI"));
+        assert_eq!(query.as_deref(), Some("result:failed"));
+        assert!(json);
+
+        let Some(Command::Runs(RunsCommand::Logs {
+            id, job, follow, ..
+        })) = Cli::parse_from([
+            "ticket-tui",
+            "runs",
+            "logs",
+            "14",
+            "--job",
+            "Build",
+            "--follow",
+        ])
+        .command
+        else {
+            panic!("runs logs did not parse");
+        };
+        assert_eq!((id, job.as_deref(), follow), (14, Some("Build"), true));
+        assert!(
+            Cli::try_parse_from([
+                "ticket-tui",
+                "runs",
+                "logs",
+                "14",
+                "--job",
+                "Build",
+                "--task",
+                "Test",
+            ])
+            .is_err(),
+            "a log comes from one node, so the two ways of naming it are exclusive"
+        );
+
+        let Some(Command::Runs(RunsCommand::Trigger {
+            pipeline,
+            branch,
+            follow,
+        })) = Cli::parse_from([
+            "ticket-tui",
+            "runs",
+            "trigger",
+            "ticket-tui CI",
+            "--branch",
+            "main",
+            "--follow",
+        ])
+        .command
+        else {
+            panic!("runs trigger did not parse");
+        };
+        assert_eq!(
+            (pipeline.as_str(), branch.as_str(), follow),
+            ("ticket-tui CI", "main", true)
+        );
+
+        assert!(matches!(
+            Cli::parse_from(["ticket-tui", "runs", "cancel", "14"]).command,
+            Some(Command::Runs(RunsCommand::Cancel { id: 14 }))
+        ));
+        assert!(matches!(
+            Cli::parse_from(["ticket-tui", "runs", "retry", "14"]).command,
+            Some(Command::Runs(RunsCommand::Retry { id: 14 }))
+        ));
+        assert!(matches!(
+            Cli::parse_from(["ticket-tui", "runs", "wait", "14"]).command,
+            Some(Command::Runs(RunsCommand::Wait { id: 14 }))
+        ));
+        assert!(matches!(
+            Cli::parse_from(["ticket-tui", "approvals", "list"]).command,
+            Some(Command::Approvals(ApprovalsCommand::List { json: false }))
+        ));
+        let Some(Command::Approvals(ApprovalsCommand::Approve { id, comment })) =
+            Cli::parse_from([
+                "ticket-tui",
+                "approvals",
+                "approve",
+                "abc-123",
+                "--comment",
+                "ship it",
+            ])
+            .command
+        else {
+            panic!("approvals approve did not parse");
+        };
+        assert_eq!(
+            (id.as_str(), comment.as_deref()),
+            ("abc-123", Some("ship it"))
+        );
+    }
+
+    #[test]
+    fn waiting_polls_until_the_run_stops() {
+        use crate::model::RunStatus;
+
+        let source = ScriptedRuns::new(
+            vec![
+                scripted_run(RunStatus::InProgress, None),
+                scripted_run(RunStatus::InProgress, None),
+                scripted_run(RunStatus::Completed, Some(RunResult::Failed)),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        let polls = Arc::clone(&source.polls);
+        let rested = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&rested);
+        let rest = move |wait: Duration| rested.lock().unwrap().push(wait);
+
+        let run = wait_for_run(&source, 14, &rest).unwrap();
+
+        assert_eq!(run.result, Some(RunResult::Failed));
+        assert_eq!(
+            *polls.lock().unwrap(),
+            3,
+            "it asked until the answer changed"
+        );
+        assert_eq!(
+            *recorder.lock().unwrap(),
+            vec![LIVE_RUNS_CADENCE, LIVE_RUNS_CADENCE],
+            "and waited the watcher's own cadence between asks"
+        );
+    }
+
+    #[test]
+    fn a_followed_log_prints_what_is_new_until_the_node_finishes() {
+        use crate::model::RunStatus;
+
+        let source = ScriptedRuns::new(
+            vec![scripted_run(
+                RunStatus::Completed,
+                Some(RunResult::Succeeded),
+            )],
+            vec![
+                vec![scripted_node("Build", RunStatus::InProgress)],
+                vec![scripted_node("Build", RunStatus::InProgress)],
+                vec![scripted_node("Build", RunStatus::Completed)],
+            ],
+            vec![
+                vec!["one".to_owned()],
+                vec!["one".to_owned(), "two".to_owned()],
+                vec!["one".to_owned(), "two".to_owned(), "three".to_owned()],
+            ],
+        );
+        let rested = Arc::new(Mutex::new(0usize));
+        let counter = Arc::clone(&rested);
+        let rest = move |_: Duration| *rested.lock().unwrap() += 1;
+
+        print_log(&source, 14, Some("Build"), true, &rest).unwrap();
+
+        assert_eq!(
+            *counter.lock().unwrap(),
+            2,
+            "it rested between reads and stopped when the node did"
+        );
+
+        // Without --follow it prints once and returns, whatever the node is
+        // doing.
+        let source = ScriptedRuns::new(
+            Vec::new(),
+            vec![vec![scripted_node("Build", RunStatus::InProgress)]],
+            vec![vec!["one".to_owned()]],
+        );
+        let rested = Arc::new(Mutex::new(0usize));
+        let counter = Arc::clone(&rested);
+        let rest = move |_: Duration| *rested.lock().unwrap() += 1;
+        print_log(&source, 14, None, false, &rest).unwrap();
+        assert_eq!(*counter.lock().unwrap(), 0);
+
+        // A node nobody has is said rather than waited on for ever.
+        let source = ScriptedRuns::new(
+            Vec::new(),
+            vec![vec![scripted_node("Build", RunStatus::Completed)]],
+            Vec::new(),
+        );
+        let refused = print_log(&source, 14, Some("Deploy"), false, &|_| ()).unwrap_err();
+        assert!(
+            refused.to_string().contains("no node called Deploy"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn a_run_and_its_timeline_read_as_the_tab_draws_them() {
+        use crate::model::RunStatus;
+
+        let run = scripted_run(RunStatus::Completed, Some(RunResult::Succeeded));
+        let timeline = vec![
+            TimelineRecord {
+                kind: TimelineKind::Stage,
+                ..scripted_node("Build stage", RunStatus::Completed)
+            },
+            TimelineRecord {
+                kind: TimelineKind::Job,
+                ..scripted_node("Build job", RunStatus::Completed)
+            },
+            scripted_node("Compile", RunStatus::Completed),
+        ];
+
+        let text = describe_run(&run, "ticket-tui CI", &timeline);
+        assert!(
+            text.contains("\u{2713} run 14 · succeeded · 20260829.4"),
+            "{text}"
+        );
+        assert!(text.contains("ticket-tui CI on main"), "{text}");
+        assert!(text.contains("  \u{2713} Build stage  4m 12s"), "{text}");
+        assert!(
+            text.contains("    \u{2713} Build job"),
+            "the job is indented under it: {text}"
+        );
+        assert!(
+            text.contains("      \u{2713} Compile"),
+            "and the task under that: {text}"
+        );
+
+        let json =
+            serde_json::to_value(RunShowJson::new(&run, "ticket-tui CI", &timeline)).unwrap();
+        assert_eq!(json["id"], 14);
+        assert_eq!(json["pipeline"], "ticket-tui CI");
+        assert_eq!(json["branch"], "main");
+        assert_eq!(json["timeline"][0]["kind"], "stage");
+        assert_eq!(json["timeline"][2]["name"], "Compile");
+        assert_eq!(json["timeline"][2]["log_id"], 7);
+    }
+
+    #[test]
+    fn runs_are_narrowed_by_pipeline_and_by_the_tab_grammar() {
+        use crate::model::RunStatus;
+
+        let rows = vec![
+            RunRow {
+                run: scripted_run(RunStatus::Completed, Some(RunResult::Succeeded)),
+                pipeline: "ticket-tui CI".to_owned(),
+            },
+            RunRow {
+                run: Run {
+                    id: 15,
+                    ..scripted_run(RunStatus::Completed, Some(RunResult::Failed))
+                },
+                pipeline: "nightly".to_owned(),
+            },
+        ];
+
+        assert_eq!(
+            filter_runs(rows.clone(), Some("nightly"), None, None)
+                .iter()
+                .map(|row| row.run.id)
+                .collect::<Vec<_>>(),
+            [15]
+        );
+        assert_eq!(
+            filter_runs(rows.clone(), None, Some("result:failed"), None)
+                .iter()
+                .map(|row| row.run.id)
+                .collect::<Vec<_>>(),
+            [15]
+        );
+        assert!(
+            filter_runs(
+                rows.clone(),
+                Some("nightly"),
+                Some("result:succeeded"),
+                None
+            )
+            .is_empty()
+        );
+
+        let table = tabulate_runs(&rows);
+        assert!(
+            table.starts_with("14  20260829.4  succeeded  main  ticket-tui CI"),
+            "{table}"
+        );
+        assert_eq!(tabulate_runs(&[]), "no matching runs");
+
+        let json = serde_json::to_value(RunJson::from(&rows[0])).unwrap();
+        assert_eq!(json["pipeline"], "ticket-tui CI");
+        assert_eq!(json["result"], "succeeded");
+        assert_eq!(json["branch"], "main");
     }
 }

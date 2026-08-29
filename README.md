@@ -1498,6 +1498,17 @@ ticket-tui prs complete <id> [--strategy squash|merge|rebase] [--keep-source] [-
 ticket-tui prs abandon <id>
 ticket-tui prs autocomplete <id> on|off
 ticket-tui prs comment <id> "text"
+ticket-tui pipelines [--json]
+ticket-tui runs list [--pipeline NAME] [--query '<filter>'] [--json]
+ticket-tui runs show <id> [--json]
+ticket-tui runs logs <id> [--job NAME | --task NAME] [--follow]
+ticket-tui runs trigger <pipeline> --branch NAME [--follow]
+ticket-tui runs cancel <id>
+ticket-tui runs retry <id>
+ticket-tui runs wait <id>
+ticket-tui approvals list [--json]
+ticket-tui approvals approve <id> [--comment TEXT]
+ticket-tui approvals reject <id> [--comment TEXT]
 ```
 
 `sync` pulls and exits, printing what moved — `Synced 3 changes from
@@ -1576,6 +1587,42 @@ $ ticket-tui prs vote 7 approve
 !7 vote: approve
 $ ticket-tui prs complete 7 --strategy squash
 !7 completed
+```
+
+`pipelines` and `runs list` read the database; everything else under `runs` and
+`approvals` reads or writes Azure DevOps, because a timeline, a log and a run's
+own progress are not things a pull stores. `runs list` takes `--pipeline` and
+the tab's run grammar (`status:`, `result:`, `branch:`, `by:`, `reason:`).
+`runs show` prints the header and the timeline as a tree, with the same glyphs
+the tab draws.
+
+```console
+$ ticket-tui runs show 4
+✓ run 4 · succeeded · 20260516.2
+ado-helper-smoke on main
+…
+Timeline
+  ✓ __default  1m 00s
+    ✓ Job  1m 00s
+      ✓ Wait briefly  59s
+```
+
+`runs logs` prints one node's log — `--job` or `--task` names it, and with
+neither it takes the deepest node still running, which is what the tab's log
+pane shows. `--follow` keeps printing as the node writes, at the watcher's own
+cadence and honouring the same throttling, and returns when the node finishes.
+
+The blocking pair is what an agent wants: `runs trigger <pipeline> --branch main
+--follow` starts a build, tails its log, and exits when it stops; `runs wait
+<id>` just waits. Both exit with the result rather than making you parse
+anything — **0** succeeded, **1** failed, **2** canceled, **3** partially
+succeeded — so a script can branch on `$?`.
+
+```console
+$ ticket-tui runs trigger 'ticket-tui CI' --branch main --follow
+run 51 queued: ticket-tui CI on main
+…
+run 51 succeeded · 20260829.4
 ```
 
 `create` adds a work item of any type the process template offers, and
