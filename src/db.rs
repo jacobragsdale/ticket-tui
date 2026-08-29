@@ -92,6 +92,7 @@ DELETE FROM work_item_history;";
 pub struct SqliteTicketRepository {
     connection: Connection,
     path: PathBuf,
+    schema_rebuilt: bool,
 }
 
 impl SqliteTicketRepository {
@@ -111,9 +112,13 @@ impl SqliteTicketRepository {
             .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
             .context("failed to configure SQLite")?;
 
-        ensure_current_schema(&connection)?;
+        let schema_rebuilt = ensure_current_schema(&connection)?;
 
-        Ok(Self { connection, path })
+        Ok(Self {
+            connection,
+            path,
+            schema_rebuilt,
+        })
     }
 
     /// Open an existing cache without touching its schema. Background reloads use
@@ -132,7 +137,19 @@ impl SqliteTicketRepository {
                 "ticket cache schema is version {version} but this build expects {SCHEMA_VERSION}; restart ticket-tui"
             );
         }
-        Ok(Self { connection, path })
+        Ok(Self {
+            connection,
+            path,
+            schema_rebuilt: false,
+        })
+    }
+
+    /// Whether [`Self::open`] dropped and recreated the tables because the file
+    /// was at another schema version (a fresh file counts). The rows are gone,
+    /// so the caller pulls from Azure DevOps straight away.
+    #[must_use]
+    pub const fn schema_was_rebuilt(&self) -> bool {
+        self.schema_rebuilt
     }
 
     #[must_use]
@@ -386,15 +403,16 @@ fn schema_version(connection: &Connection) -> Result<i64> {
     Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
 }
 
-fn ensure_current_schema(connection: &Connection) -> Result<()> {
+/// Returns whether the schema had to be rebuilt.
+fn ensure_current_schema(connection: &Connection) -> Result<bool> {
     if schema_version(connection)? == SCHEMA_VERSION {
-        return Ok(());
+        return Ok(false);
     }
     connection
         .execute_batch(RESET_SCHEMA)
         .context("failed to rebuild the ticket cache schema")?;
     connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    Ok(())
+    Ok(true)
 }
 
 fn parse_row_timestamp(
@@ -517,6 +535,22 @@ mod tests {
             schema_version(&repository.connection).unwrap(),
             SCHEMA_VERSION
         );
+        assert!(
+            repository.schema_was_rebuilt(),
+            "a brand new file starts without the tables"
+        );
+        drop(repository);
+        assert!(
+            !SqliteTicketRepository::open(&path)
+                .unwrap()
+                .schema_was_rebuilt(),
+            "reopening a current database leaves its rows alone"
+        );
+        assert!(
+            !SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .schema_was_rebuilt()
+        );
     }
 
     #[test]
@@ -610,6 +644,7 @@ mod tests {
 
         let mut repository = SqliteTicketRepository::open(&path).unwrap();
         assert!(repository.load_all().unwrap().is_empty());
+        assert!(repository.schema_was_rebuilt());
         assert_eq!(
             schema_version(&repository.connection).unwrap(),
             SCHEMA_VERSION

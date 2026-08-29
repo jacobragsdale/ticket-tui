@@ -87,7 +87,7 @@ impl Focus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppAction {
     None,
-    Reload,
+    Sync,
     OpenUrl(String),
     Copy {
         text: String,
@@ -283,9 +283,32 @@ pub struct App {
     pub database_path: PathBuf,
     pub stale: bool,
     pub data_signature: u128,
+    /// Whether a pull from Azure DevOps is in flight.
+    pub sync_pending: bool,
+    /// Whether Azure DevOps is configured at all: an offline run browses the
+    /// database and reports no sync state.
+    sync_enabled: bool,
+    /// When the last successful pull finished, which is not `loaded_at`: a
+    /// SQLite reload moves that too.
+    synced_at: Option<Instant>,
+    /// The last pull's error, kept so the same timer failure is reported once.
+    sync_error: Option<String>,
     /// Display name of the signed-in Azure DevOps user, so their own work
     /// items can stand out. `None` until a sync records one.
     me: Option<String>,
+}
+
+/// Compact relative wording shared by the freshness and sync labels.
+fn relative_age(age: Duration) -> String {
+    if age.as_secs() < 45 {
+        "just now".into()
+    } else if age.as_secs() < 3600 {
+        format!("{}m ago", age.as_secs() / 60)
+    } else if age.as_secs() < 86_400 {
+        format!("{}h ago", age.as_secs() / 3600)
+    } else {
+        format!("{}d ago", age.as_secs() / 86_400)
+    }
 }
 
 impl App {
@@ -348,6 +371,10 @@ impl App {
             database_path: PathBuf::new(),
             stale: false,
             data_signature: 0,
+            sync_pending: false,
+            sync_enabled: false,
+            synced_at: None,
+            sync_error: None,
             me: None,
         };
         app.show_all(None);
@@ -589,15 +616,74 @@ impl App {
 
     #[must_use]
     pub fn freshness_label(&self) -> String {
-        let age = self.loaded_at.elapsed();
-        if age.as_secs() < 45 {
-            "just now".into()
-        } else if age.as_secs() < 3600 {
-            format!("{}m ago", age.as_secs() / 60)
-        } else if age.as_secs() < 86_400 {
-            format!("{}h ago", age.as_secs() / 3600)
+        relative_age(self.loaded_at.elapsed())
+    }
+
+    /// Turns on the sync parts of the UI. An offline run leaves them off, so
+    /// the table title says nothing about a sync that can not happen.
+    pub const fn enable_sync(&mut self) {
+        self.sync_enabled = true;
+    }
+
+    /// A pull has started.
+    pub const fn begin_sync(&mut self) {
+        self.sync_pending = true;
+    }
+
+    /// A pull succeeded. The tickets it brought are applied separately, so this
+    /// only records that Azure DevOps was reached.
+    pub fn finish_sync(&mut self) {
+        self.sync_pending = false;
+        self.sync_error = None;
+        self.synced_at = Some(Instant::now());
+    }
+
+    /// A pull failed. Reports whether the failure is worth a notification: the
+    /// same error on consecutive timer pulls is not, because the table title
+    /// already says the sync is failing. `announce` forces one anyway, for a
+    /// pull the user asked for.
+    pub fn fail_sync(&mut self, error: &str, announce: bool) -> bool {
+        self.sync_pending = false;
+        let repeated = self.sync_error.as_deref() == Some(error);
+        self.sync_error = Some(error.to_owned());
+        announce || !repeated
+    }
+
+    /// What the table title appends after the sort order, most urgent first.
+    #[must_use]
+    pub fn activity_label(&self) -> Option<String> {
+        if self.sync_enabled && self.sync_pending {
+            return Some("Syncing…".into());
+        }
+        if self.reload_pending {
+            return Some("Reloading…".into());
+        }
+        if self.sync_enabled && self.sync_error.is_some() {
+            return Some("Sync failed".into());
+        }
+        if self.stale {
+            return Some("Stale".into());
+        }
+        self.synced_at
+            .filter(|_| self.sync_enabled)
+            .map(|at| format!("Synced {}", relative_age(at.elapsed())))
+    }
+
+    /// The database overlay's one-line account of the last sync.
+    #[must_use]
+    pub fn sync_summary(&self) -> String {
+        if !self.sync_enabled {
+            return "offline; no Azure DevOps organization configured".into();
+        }
+        let last = self
+            .synced_at
+            .map_or_else(|| "not yet".to_owned(), |at| relative_age(at.elapsed()));
+        if self.sync_pending {
+            format!("in progress, last {last}")
+        } else if let Some(error) = &self.sync_error {
+            format!("failed, last {last}: {error}")
         } else {
-            format!("{}d ago", age.as_secs() / 86_400)
+            last
         }
     }
 
@@ -2179,7 +2265,7 @@ impl App {
                 self.mode = AppMode::Help;
                 AppAction::None
             }
-            CommandId::Reload => AppAction::Reload,
+            CommandId::Sync => AppAction::Sync,
             CommandId::Open => {
                 self.record_history();
                 self.open_selected()
@@ -3003,6 +3089,34 @@ mod tests {
             app.notification(),
             Some(("3 is hidden by the current search", NotificationLevel::Info))
         );
+    }
+
+    #[test]
+    fn a_background_sync_leaves_the_search_box_and_the_selection_alone() {
+        let mut app = App::new(vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+        ]);
+        press(&mut app, KeyCode::Char('/'));
+        for character in "alp".chars() {
+            press(&mut app, KeyCode::Char(character));
+        }
+        await_search(&mut app);
+        let selected = app.selected_ticket().unwrap().key.clone();
+
+        // The sync worker's rows land while the user is still typing.
+        let mut refreshed = app.tickets().to_vec();
+        refreshed.push(ticket(3, "Gamma", "2026-03-01T00:00:00Z"));
+        app.replace_prepared_tickets(PreparedTickets::new(refreshed));
+        await_search(&mut app);
+
+        assert_eq!(app.mode, AppMode::Search);
+        assert_eq!(app.query(), "alp");
+        assert_eq!(app.tickets().len(), 3);
+        assert_eq!(app.selected_ticket().unwrap().key, selected);
+
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.query(), "alph", "the caret stayed where it was");
     }
 
     #[test]

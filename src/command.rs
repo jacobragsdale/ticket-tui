@@ -10,7 +10,7 @@ pub enum CommandId {
     Views,
     Sort,
     Help,
-    Reload,
+    Sync,
     Open,
     ToggleDensity,
     ToggleDetails,
@@ -249,10 +249,10 @@ pub const COMMANDS: &[Command] = &[
         help: "Path, counts, freshness",
     },
     Command {
-        id: CommandId::Reload,
-        title: "Reload tickets",
+        id: CommandId::Sync,
+        title: "Sync from Azure DevOps",
         keys: &[key('r')],
-        help: "Re-read the SQLite cache",
+        help: "Pull work items now",
     },
     Command {
         id: CommandId::Help,
@@ -335,11 +335,7 @@ mod tests {
                 .iter()
                 .any(|command| command.id == CommandId::CopyId)
         );
-        assert!(
-            !matches
-                .iter()
-                .any(|command| command.id == CommandId::Reload)
-        );
+        assert!(!matches.iter().any(|command| command.id == CommandId::Sync));
         assert!(
             !matching_commands("")
                 .iter()

@@ -6,11 +6,12 @@ database, so navigation, sorting, filtering, and fuzzy search stay instant. It p
 navigation, responsive ticket details, field sorting, live fuzzy search, and
 links that open in the system browser.
 
-Azure DevOps is the source of truth. `--sync` pulls the project's work items
-over the REST API and replaces the local rows; the database file itself is
-durable, lives in the platform data directory, and is the interface other tools
-and agent skills read. Everything else the TUI does is local and never edits
-work items.
+Azure DevOps is the source of truth. A background worker pulls the project's
+work items over the REST API every minute and replaces the local rows, so a
+state changed in the browser shows up in a running TUI without restarting it;
+the database file itself is durable, lives in the platform data directory, and
+is the interface other tools and agent skills read. Everything else the TUI does
+is local and never edits work items.
 
 ## Run it
 
@@ -29,7 +30,7 @@ DevOps project.
    cargo run --release -- --sync --org my-org --project my-project
    ```
 
-3. Later runs open the cache without touching the network:
+3. Later runs open the database immediately and pull in the background:
 
    ```console
    cargo run --release
@@ -43,10 +44,21 @@ DevOps project.
 
 6. Press `q` to exit.
 
-Without `--sync`, an empty cache opens to the status line
-`Cache is empty; run with --sync to pull work items from Azure DevOps`.
+Press `r` at any time to pull immediately.
 
-To use another cache file:
+`--refresh SECONDS` changes how often the background pull runs, and `--refresh
+0` turns the timer off, leaving `r` as the only way to pull:
+
+```console
+cargo run --release -- --refresh 300
+```
+
+Without a configured organization the TUI runs offline: it browses the database,
+never contacts the network, and `r` reports the missing organization. An empty
+database then opens to the status line `Database is empty and offline; run with
+--sync --org ORG --project PROJECT to pull work items`.
+
+To use another database file:
 
 ```console
 cargo run --release -- --database ./tickets.sqlite3
@@ -69,6 +81,10 @@ switches to Basic authentication, for environments without the Azure CLI. A
 `401` or `302` response is reported as rejected credentials with a reminder to
 run `az login`.
 
+An access token expires in about an hour, well within one session, so a request
+Azure DevOps refuses is retried once with a freshly minted token before it is
+reported.
+
 ticket-tui stores no secrets. It reads the token from the CLI or the environment
 on each sync and keeps nothing but work-item data in SQLite.
 
@@ -83,14 +99,26 @@ Both values are resolved in this order:
    (`AZURE_CONFIG_DIR` moves that file).
 
 `--org` accepts a bare slug, `https://dev.azure.com/<slug>`, or
-`https://<slug>.visualstudio.com`; all three reduce to the slug. Neither value
-is needed unless `--sync` is used, and an unresolved value fails with the
-missing flag, variable, and command spelled out.
+`https://<slug>.visualstudio.com`; all three reduce to the slug. Without both
+values the TUI browses the database offline and never syncs; with `--sync` an
+unresolved value fails with the missing flag, variable, and command spelled out.
 
 ## Sync
 
-`--sync` runs before the TUI opens and blocks until it finishes. It queries
-every id in the project with WIQL:
+A sync worker pulls in the background on a timer, every 60 seconds by default,
+and whenever `r` asks it to. The TUI opens from the database straight away and
+the first pull runs behind it, so a state flipped in Azure DevOps appears within
+one interval without a keypress. `--sync` instead runs one pull before the TUI
+opens and blocks until it finishes; that pull failing is a notification over the
+existing database rather than a reason to refuse to start. Only one pull runs at
+a time: `r` during one reports `Sync already in progress`.
+
+The table title carries the sync state — `Syncing…`, `Synced just now`,
+`Synced 2m ago`, or `Sync failed` until the next success — and `i` shows the
+same in the database overlay. A timer pull that keeps failing the same way says
+so only in the title; a pull `r` asked for always reports itself.
+
+Each pull queries every id in the project with WIQL:
 
 ```sql
 SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project ORDER BY [System.Id]
@@ -98,7 +126,8 @@ SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project ORDER BY
 
 then reads those ids in batches of 200 from `/_apis/wit/workitems` with
 `$expand=relations`, and replaces the cached work items and relations in one
-transaction. The status line reports how many work items were synced.
+transaction. A pull that was asked for reports how many work items it synced in
+the status line; a timer pull only updates the table title.
 
 Fields map onto the cache as follows:
 
@@ -117,18 +146,17 @@ Hierarchy links become parent and child relations; related, predecessor,
 successor, and duplicate links are stored as themselves. Other link types, such
 as attachments, are ignored.
 
-`--sync` also reads `/_apis/profile/profiles/me` for the signed-in display name
-and stores it in the cache's `sync_meta` table. The profile host is separate
-from the work-item host, so a failure there is skipped rather than sinking the
-sync. Work items assigned to that name render bold in the accent colour in the
-Assignee column and in the details pane. Set `TICKET_TUI_ME` to override the
-stored name, for anyone whose profile name differs from the name their work
-items are assigned to.
+The first pull also reads `/_apis/profile/profiles/me` for the signed-in display
+name and stores it in the cache's `sync_meta` table. The profile host is
+separate from the work-item host, so a failure there is skipped rather than
+sinking the sync. Work items assigned to that name render bold in the accent
+colour in the Assignee column and in the details pane. Set `TICKET_TUI_ME` to
+override the stored name, for anyone whose profile name differs from the name
+their work items are assigned to.
 
-Sync is currently a full pull at startup. Periodic background refresh is planned
-(#608). Comments and revision history are not synced yet: their tables exist and
-the details pane renders them when present, but nothing fills them. `r` reloads
-from SQLite only and never contacts Azure DevOps.
+Every pull is a full pull; syncing only what changed is planned. Comments and
+revision history are not synced yet: their tables exist and the details pane
+renders them when present, but nothing fills them.
 
 ## Controls
 
@@ -161,8 +189,8 @@ from SQLite only and never contacts Azure DevOps.
 | `d` | Toggle the details screen when the terminal is under 70 columns |
 | `Enter` | Select the family cursor ticket, or open from the details pane |
 | `o` | Open the selected ticket in the system browser |
-| `r` | Reload from the cache and rebuild the search index in the background |
-| `i` | Show cache path, row counts, and data freshness |
+| `r` | Sync from Azure DevOps now, without waiting for the timer |
+| `i` | Show database path, row counts, and sync freshness |
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
 
@@ -194,9 +222,10 @@ assignee:"Avery Chen" priority:1 tag:rust`, plus `project:`, `area:`, and
 are combined with AND. `is:bookmarked` limits the table to locally bookmarked
 tickets. Active filters appear as removable chips. The command palette copies
 IDs, URLs, titles, Markdown links, or summaries and exports the selection as
-JSON or CSV. Press `i` for cache path, row count, and freshness. Local SQLite
-changes reload automatically; the table title shows `Stale` until the reload
-finishes.
+JSON or CSV. Press `i` for database path, row count, freshness, and the last
+sync. A database another process writes reloads automatically; the table title
+shows `Stale` until that reload finishes, and `Syncing…`, `Synced 2m ago`, or
+`Sync failed` for the pulls from Azure DevOps.
 
 States are coloured by category: New, To Do, and Proposed blue; Active, Doing,
 and In Progress yellow; Resolved magenta; Done and Closed green; Removed grey;
@@ -222,7 +251,7 @@ query are saved beside the cache as `*.session.json`.
 
 ## Database reference
 
-The default cache is `ticket-tui/tickets.sqlite3` under the platform data
+The default database is `ticket-tui/tickets.sqlite3` under the platform data
 directory:
 
 - macOS: `~/Library/Application Support/ticket-tui/tickets.sqlite3`
@@ -250,12 +279,12 @@ clears the other tables but leaves it alone; `me_display_name` lives there.
 
 The database carries `PRAGMA user_version = 6`. Because Azure DevOps is the
 record of truth, there are no migrations: a database at any other version has
-its tables dropped and recreated at startup, and the next `--sync` refills it.
-Deleting the file has the same effect. Background reloads instead open the
-database without touching its schema and report the version mismatch, ending in
-`restart ticket-tui`, so a running instance can never empty a database a newer
-build owns. After upgrading the binary, restart any running ticket-tui, and
-re-run `--sync` if the schema was rebuilt.
+its tables dropped and recreated at startup, and a pull runs immediately to
+refill it, whatever `--refresh` says. Deleting the file has the same effect. The
+sync worker and background reloads instead open the database without touching
+its schema and report the version mismatch, ending in `restart ticket-tui`, so a
+running instance can never empty a database a newer build owns. After upgrading
+the binary, restart any running ticket-tui.
 
 The TUI displays cached records but never edits them. Parent and child links
 render as an always-expanded family tree in the details pane. Click a family
@@ -302,8 +331,8 @@ for field-level semantics.
 
 ## Roadmap
 
-Planned work — periodic background refresh, editing work items, and creating
-them from the TUI — is tracked as work items in the same Azure DevOps project
+Planned work — editing work items, creating them from the TUI, and syncing only
+what changed — is tracked as work items in the same Azure DevOps project
 ticket-tui is pointed at. Sync the cache and browse it for the current list.
 
 ## Develop and verify
