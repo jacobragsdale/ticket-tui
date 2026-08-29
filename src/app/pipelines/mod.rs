@@ -104,6 +104,31 @@ impl PipelinesScreen {
         self.clamp_cursors();
     }
 
+    /// Folds in what the watcher has seen. A run already on file is updated
+    /// where it stands, so the cursor does not move under the user; one
+    /// nobody has seen before joins the list. Nothing here touches SQLite:
+    /// the next pull is what persists any of it.
+    pub fn merge_live_runs(&mut self, live: Vec<Run>) {
+        for run in live {
+            if let Some(held) = self.runs.iter_mut().find(|held| held.id == run.id) {
+                *held = run;
+            } else {
+                self.runs.push(run);
+            }
+        }
+        self.runs.sort_by_key(|run| std::cmp::Reverse(run.id));
+    }
+
+    /// The runs still going, which is what the watcher is asked to follow.
+    #[must_use]
+    pub fn live_run_ids(&self) -> Vec<i64> {
+        self.runs
+            .iter()
+            .filter(|run| run.status.is_live())
+            .map(|run| run.id)
+            .collect()
+    }
+
     #[must_use]
     pub const fn level(&self) -> Level {
         self.level

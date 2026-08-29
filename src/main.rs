@@ -19,7 +19,7 @@ use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use serde_json::Value;
 use ticket_tui::agent_context::{self, AgentContext};
 use ticket_tui::app::{
-    App, AppAction, CopiedContent, DividerOrientation, PointerTarget, Snapshot, SyncTarget,
+    App, AppAction, CopiedContent, DividerOrientation, PointerTarget, Snapshot, SyncTarget, TabId,
 };
 use ticket_tui::azure::AzureConfig;
 use ticket_tui::cli::{self, Cli, resolve_me};
@@ -33,6 +33,9 @@ use ticket_tui::sync::{
     SyncHandle, SyncMode, SyncOutcome, SyncRequest, SyncScheduler,
 };
 use ticket_tui::timestamp::Timestamp;
+use ticket_tui::watch::{
+    AzureWatchConnector, LIVE_RUNS_CADENCE, WatchEvent, WatchHandle, WatchRequest,
+};
 use url::Url;
 
 /// How often the background pull runs when nothing says otherwise.
@@ -43,6 +46,13 @@ const DEFAULT_REFRESH_SECONDS: u64 = 60;
 /// worker when there is none.
 struct SyncRuntime {
     worker: Option<SyncHandle>,
+    /// The pipeline watcher, on its own thread with its own client, so a log
+    /// fetch never queues behind a pull. `None` for a run with no project to
+    /// watch.
+    pipelines: Option<WatchHandle>,
+    /// Whether the watcher has been told the Pipelines tab is showing, so the
+    /// message is sent when it changes rather than every turn.
+    watching_tab: bool,
     scheduler: SyncScheduler,
     config: Option<AzureConfig>,
     /// Why Azure DevOps could not be resolved, reported when the user asks for
@@ -347,12 +357,22 @@ fn run() -> Result<()> {
         config: config.clone(),
         offline_reason,
         details: DetailsEngine::default(),
+        pipelines: None,
+        watching_tab: false,
     };
     if let Some(config) = config.filter(|_| wrong_project.is_none()) {
         runtime.worker = Some(SyncHandle::spawn(
             database_path.clone(),
-            Box::new(AzureConnector::new(config)),
+            Box::new(AzureConnector::new(config.clone())),
         )?);
+        runtime.pipelines = WatchHandle::spawn(Box::new(AzureWatchConnector::new(config))).ok();
+        app.shell
+            .set_watch_state(runtime.pipelines.as_ref().map(|_| {
+                format!(
+                    "idle · every {}s while showing",
+                    LIVE_RUNS_CADENCE.as_secs()
+                )
+            }));
         app.shell.enable_sync();
         // The TUI opens from the database and the first pull runs behind it
         // straight away — even with the timer off, when the database was just
@@ -507,6 +527,7 @@ fn run_terminal(
         redraw |= poll_reload(app, repository, &mut reloader);
         redraw |= poll_sync(app, repository, runtime);
         redraw |= poll_watch(app, repository, &mut reloader);
+        redraw |= poll_pipelines(app, runtime);
         redraw |= dispatch_due_pull(app, runtime);
         redraw |= dispatch_due_details(app, runtime);
         redraw |= persist_session(app, repository);
@@ -927,6 +948,48 @@ fn send_pull(app: &mut App, runtime: &mut SyncRuntime, origin: PullOrigin) {
     if let Err(error) = runtime.send(SyncRequest::Pull(origin)) {
         runtime.stop(app, &error);
     }
+}
+
+/// Tells the pipeline watcher what is worth polling and folds in what it has
+/// seen. None of it is written to SQLite: the next pull is what persists a run,
+/// and until then the screen shows what the watcher has and the file has not.
+fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
+    let Some(watcher) = runtime.pipelines.as_ref() else {
+        return false;
+    };
+    let showing = app.tab == TabId::Pipelines;
+    if showing != runtime.watching_tab {
+        runtime.watching_tab = showing;
+        let _ = watcher.send(WatchRequest::TabShowing(showing));
+        app.shell.set_watch_state(Some(if showing {
+            format!("polling live runs every {}s", LIVE_RUNS_CADENCE.as_secs())
+        } else {
+            format!(
+                "idle · every {}s while showing",
+                LIVE_RUNS_CADENCE.as_secs()
+            )
+        }));
+    }
+    let mut redraw = false;
+    while let Some(event) = watcher.try_event() {
+        redraw = true;
+        match event {
+            WatchEvent::LiveRuns(runs) => app.pipelines.merge_live_runs(runs),
+            WatchEvent::Throttled(wait) => app.shell.set_watch_state(Some(format!(
+                "holding off {}s — Azure DevOps asked",
+                wait.as_secs()
+            ))),
+            WatchEvent::Failed(error) => {
+                app.shell.set_watch_state(Some(format!("failing: {error}")));
+            }
+            WatchEvent::Stopped => {
+                runtime.pipelines = None;
+                app.shell.set_watch_state(Some("stopped".to_owned()));
+                break;
+            }
+        }
+    }
+    redraw
 }
 
 /// Applies whatever the sync worker has finished. A pull it completed wrote the
@@ -1593,6 +1656,8 @@ mod tests {
             }),
             offline_reason: None,
             details: DetailsEngine::default(),
+            pipelines: None,
+            watching_tab: false,
         };
         (app, repository, runtime)
     }
@@ -1876,6 +1941,8 @@ mod tests {
             config: Some(config),
             offline_reason: Some(message.clone()),
             details: DetailsEngine::default(),
+            pipelines: None,
+            watching_tab: false,
         };
 
         handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
@@ -2133,6 +2200,8 @@ mod tests {
             config: None,
             offline_reason: Some("no Azure DevOps organization; pass --org".into()),
             details: DetailsEngine::default(),
+            pipelines: None,
+            watching_tab: false,
         };
 
         handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
@@ -2836,6 +2905,8 @@ mod tests {
             config: None,
             offline_reason: Some("no Azure DevOps organization".into()),
             details: DetailsEngine::default(),
+            pipelines: None,
+            watching_tab: false,
         }
     }
 

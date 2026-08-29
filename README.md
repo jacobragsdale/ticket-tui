@@ -954,8 +954,17 @@ had, so `result:failed` is every pipeline that is currently red. Runs filter on
 `by:@me` is whoever the last sync signed in as. Going down into a pipeline's
 runs and back up again puts each list back the way it was left.
 
-The live parts — the timeline of a run, the log tail that follows it, and the
-watcher that keeps both moving — are #682 to #684.
+A second worker — the pipeline watcher — keeps the list live. It runs on its
+own thread with its own client, so a poll never queues behind the 60-second
+pull and an edit never queues behind a poll, and it writes nothing to the
+database: what it learns is merged into what the tab is showing, and the next
+pull is what persists it. While the tab is showing it reads the project's live
+runs every 15 seconds; while it is hidden and nothing is being followed it
+costs nothing at all. Every cadence doubles, up to a minute, when Azure DevOps
+reports a thin rate-limit budget or turns a request away, and goes back to 15
+seconds on the next clean response. The `i` overlay says what it is doing.
+
+The timeline of a run and the log tail that follows it are #683 and #684.
 
 ## Controls
 

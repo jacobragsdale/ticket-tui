@@ -163,6 +163,9 @@ pub struct Shell {
     /// reads these: a pull request, a run and an artifact link all name a
     /// repository by its GUID.
     pub(crate) repos: Vec<Repo>,
+    /// What the pipeline watcher is doing, as the database overlay reports
+    /// it. `None` for a run with no watcher at all.
+    pub(crate) watch_state: Option<String>,
     /// Everywhere this run has been, oldest last, across every tab. `[` walks
     /// back through it and `]` forward through what `[` came off.
     pub(crate) history: Vec<Jump>,
@@ -217,6 +220,7 @@ impl Default for Shell {
             data_signature: 0,
             sync_pending: false,
             repos: Vec::new(),
+            watch_state: None,
             history: Vec::new(),
             future: Vec::new(),
             offline_reason: None,
@@ -233,6 +237,16 @@ impl Default for Shell {
 }
 
 impl Shell {
+    /// What the watcher is doing, for the database overlay.
+    pub fn set_watch_state(&mut self, state: Option<String>) {
+        self.watch_state = state;
+    }
+
+    #[must_use]
+    pub fn watch_state(&self) -> Option<&str> {
+        self.watch_state.as_deref()
+    }
+
     /// What the last pull found. Written on every pull that changed them.
     pub fn set_repos(&mut self, repos: Vec<Repo>) {
         self.repos = repos;

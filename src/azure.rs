@@ -633,6 +633,19 @@ impl AzureClient {
         Ok(parse_runs(&self.get(url.as_str())?))
     }
 
+    /// Every run that is queued, going, or being cancelled. This is the one
+    /// the watcher polls, so it asks for as little as it can: the statuses
+    /// that mean "still happening", and a small window of them.
+    pub fn fetch_live_runs(&self) -> Result<Vec<Run>> {
+        let segments = [self.config.project.as_str(), "_apis", "build", "builds"];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&format!(
+            "statusFilter=inProgress,notStarted,cancelling&$top=50\
+             &queryOrder=queueTimeDescending&api-version={API_VERSION}"
+        )));
+        Ok(parse_runs(&self.get(url.as_str())?))
+    }
+
     /// The teams hang off `_apis/projects` rather than off the project. `tail`
     /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {

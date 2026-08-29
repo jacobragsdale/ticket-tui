@@ -992,7 +992,7 @@ pub(super) fn render_info_overlay(
     screen: &mut WorkItemsScreen,
     shell: &mut Shell,
 ) {
-    let area = centered_rect(frame.area(), 62, 12);
+    let area = centered_rect(frame.area(), 62, 13);
     let stale = if shell.stale { "stale" } else { "current" };
     // What the difference between the count and the total is made of, so the
     // rows the table is leaving out are a number rather than a suspicion.
@@ -1014,6 +1014,12 @@ pub(super) fn render_info_overlay(
         field_line("Loaded", shell.freshness_label()),
         field_line("Freshness", stale),
         field_line("Sync", shell.sync_summary()),
+        field_line(
+            "Watcher",
+            shell
+                .watch_state()
+                .map_or_else(|| "not running".to_owned(), str::to_owned),
+        ),
         Line::default(),
         Line::styled(
             "Press Esc or i to close",

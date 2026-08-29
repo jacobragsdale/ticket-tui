@@ -20,3 +20,4 @@ pub mod sync;
 pub mod text_input;
 pub mod timestamp;
 pub mod ui;
+pub mod watch;
