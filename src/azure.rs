@@ -1,6 +1,8 @@
 //! Azure DevOps work-item sync: authenticate with the Azure CLI, pull the
 //! project's work items over REST, and map them onto the local ticket model.
 
+use std::cell::RefCell;
+use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -112,7 +114,9 @@ fn az_config_path() -> Option<PathBuf> {
 pub struct AzureClient {
     agent: ureq::Agent,
     config: AzureConfig,
-    authorization: String,
+    /// Refreshed in place when Azure DevOps rejects it: CLI access tokens
+    /// expire in about an hour and the TUI outlives that.
+    authorization: RefCell<String>,
 }
 
 /// Everything one pull produces.
@@ -132,7 +136,7 @@ impl AzureClient {
         Ok(Self {
             agent,
             config,
-            authorization: authorization_header()?,
+            authorization: RefCell::new(authorization_header()?),
         })
     }
 
@@ -204,28 +208,69 @@ impl AzureClient {
     }
 
     fn get(&self, url: &str) -> Result<Value> {
-        let response = self
-            .agent
-            .get(url)
-            .header("Authorization", &self.authorization)
-            .header("X-VSS-ForceMsaPassThrough", "true")
-            .header("Accept", "application/json")
-            .call()
-            .with_context(|| format!("GET {url} failed"))?;
-        read_json(response, url)
+        self.send(url, None)
     }
 
     fn post(&self, url: &str, body: &Value) -> Result<Value> {
-        let response = self
-            .agent
-            .post(url)
-            .header("Authorization", &self.authorization)
-            .header("X-VSS-ForceMsaPassThrough", "true")
-            .header("Accept", "application/json")
-            .send_json(body)
-            .with_context(|| format!("POST {url} failed"))?;
+        self.send(url, Some(body))
+    }
+
+    /// One request, retried once with a freshly minted token when Azure DevOps
+    /// rejects the current one, because an access token expires long before a
+    /// running TUI does. A failed refresh reports the original rejection, which
+    /// carries the advice to sign in again.
+    fn send(&self, url: &str, body: Option<&Value>) -> Result<Value> {
+        match self.attempt(url, body) {
+            Err(error) if rejected_credentials(&error) => match authorization_header() {
+                Ok(refreshed) => {
+                    *self.authorization.borrow_mut() = refreshed;
+                    self.attempt(url, body)
+                }
+                Err(_) => Err(error),
+            },
+            result => result,
+        }
+    }
+
+    fn attempt(&self, url: &str, body: Option<&Value>) -> Result<Value> {
+        let authorization = self.authorization.borrow().clone();
+        let response = match body {
+            Some(body) => self
+                .agent
+                .post(url)
+                .header("Authorization", &authorization)
+                .header("X-VSS-ForceMsaPassThrough", "true")
+                .header("Accept", "application/json")
+                .send_json(body)
+                .with_context(|| format!("POST {url} failed"))?,
+            None => self
+                .agent
+                .get(url)
+                .header("Authorization", &authorization)
+                .header("X-VSS-ForceMsaPassThrough", "true")
+                .header("Accept", "application/json")
+                .call()
+                .with_context(|| format!("GET {url} failed"))?,
+        };
         read_json(response, url)
     }
+}
+
+/// Azure DevOps refused the credentials. Carried as its own error type so a
+/// request can tell an expired token apart from every other failure.
+#[derive(Debug)]
+struct RejectedCredentials(String);
+
+impl fmt::Display for RejectedCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RejectedCredentials {}
+
+fn rejected_credentials(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<RejectedCredentials>().is_some()
 }
 
 /// Pull `displayName` out of a `/_apis/profile/profiles/me` document.
@@ -257,9 +302,9 @@ fn read_json(mut response: ureq::http::Response<ureq::Body>, url: &str) -> Resul
             })
             .unwrap_or_else(|| text.chars().take(200).collect());
         if status == 401 || status == 302 {
-            bail!(
+            return Err(anyhow::Error::new(RejectedCredentials(format!(
                 "Azure DevOps rejected the credentials ({status}); run `az login` and retry: {message}"
-            );
+            ))));
         }
         bail!("Azure DevOps returned HTTP {status} for {url}: {message}");
     }
@@ -568,6 +613,40 @@ mod tests {
         assert_eq!(profile_display_name(&json!({"displayName": "  "})), None);
         assert_eq!(profile_display_name(&json!({"id": "abc"})), None);
         assert_eq!(profile_display_name(&json!("Jacob")), None);
+    }
+
+    fn response(status: u16, body: &str) -> ureq::http::Response<ureq::Body> {
+        ureq::http::Response::builder()
+            .status(status)
+            .body(ureq::Body::builder().data(body.as_bytes().to_vec()))
+            .unwrap()
+    }
+
+    #[test]
+    fn only_a_refused_token_is_worth_retrying_with_a_fresh_one() {
+        let url = "https://dev.azure.com/demo/_apis/wit/workitems";
+        for status in [401, 302] {
+            let error = read_json(response(status, r#"{"message":"token expired"}"#), url)
+                .expect_err("a refused token is an error");
+            assert!(
+                rejected_credentials(&error),
+                "HTTP {status} must be retryable: {error:#}"
+            );
+            assert!(format!("{error:#}").contains("token expired"), "{error:#}");
+        }
+
+        let error = read_json(response(500, r#"{"message":"boom"}"#), url).unwrap_err();
+        assert!(
+            !rejected_credentials(&error),
+            "a server fault is not a credential problem: {error:#}"
+        );
+        let error = read_json(response(200, "not json"), url).unwrap_err();
+        assert!(!rejected_credentials(&error), "{error:#}");
+
+        assert_eq!(
+            read_json(response(200, r#"{"count":1}"#), url).unwrap(),
+            json!({"count": 1})
+        );
     }
 
     #[test]

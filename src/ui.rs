@@ -408,13 +408,9 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             app.sort_direction.symbol()
         )
     };
-    let activity = if app.reload_pending {
-        " · Reloading…"
-    } else if app.stale {
-        " · Stale"
-    } else {
-        ""
-    };
+    let activity = app
+        .activity_label()
+        .map_or_else(String::new, |label| format!(" · {label}"));
     let title = if area.width < NARROW_BREAKPOINT {
         let short_order = if app.query().is_empty() {
             app.sort_direction.symbol()
@@ -621,7 +617,9 @@ fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     if count == 0 && inner.height > 2 {
-        let message = if app.reload_pending {
+        let message = if app.sync_pending {
+            "Syncing with Azure DevOps…"
+        } else if app.reload_pending {
             "Reloading tickets…"
         } else if !app.parsed_query().is_active() {
             "No tickets in this database"
@@ -2153,7 +2151,7 @@ impl RowTone {
 }
 
 fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
-    let area = centered_rect(frame.area(), 62, 10);
+    let area = centered_rect(frame.area(), 62, 11);
     frame.render_widget(Clear, area);
     let stale = if app.stale { "stale" } else { "current" };
     let path = if app.database_path.as_os_str().is_empty() {
@@ -2167,6 +2165,7 @@ fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
         field_line("Visible", app.visible_count().to_string()),
         field_line("Loaded", app.freshness_label()),
         field_line("Freshness", stale),
+        field_line("Sync", app.sync_summary()),
         Line::default(),
         Line::styled(
             "Press Esc or i to close",
@@ -3014,6 +3013,62 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_table_title_reports_the_sync_state_in_both_layouts() {
+        let mut app = App::new(vec![ticket()]);
+        assert!(
+            !render_text(130, 12, &mut app).contains("Sync"),
+            "an offline run says nothing about a sync it cannot run"
+        );
+
+        app.enable_sync();
+        app.begin_sync();
+        for width in [60, 130] {
+            assert!(
+                render_text(width, 12, &mut app).contains("Syncing…"),
+                "the narrow title keeps step at width {width}"
+            );
+        }
+
+        app.finish_sync();
+        assert!(render_text(130, 12, &mut app).contains("Synced just now"));
+
+        app.mark_stale();
+        assert!(
+            render_text(130, 12, &mut app).contains("Stale"),
+            "a database change outranks the last sync time"
+        );
+
+        app.fail_sync("network unreachable", true);
+        assert!(
+            render_text(130, 12, &mut app).contains("Sync failed"),
+            "a failing sync outranks a stale database"
+        );
+
+        app.reload_pending = true;
+        assert!(render_text(130, 12, &mut app).contains("Reloading…"));
+        app.begin_sync();
+        assert!(
+            render_text(130, 12, &mut app).contains("Syncing…"),
+            "a pull in flight is the most urgent thing the title can say"
+        );
+    }
+
+    #[test]
+    fn the_database_overlay_reports_the_last_sync() {
+        let mut app = App::new(vec![ticket()]);
+        app.mode = AppMode::Info;
+        assert!(render_text(90, 24, &mut app).contains("offline"));
+
+        app.enable_sync();
+        app.finish_sync();
+        let synced = render_text(90, 24, &mut app);
+        assert!(synced.contains("Sync: just now"), "{synced}");
+
+        app.fail_sync("network unreachable", true);
+        assert!(render_text(90, 24, &mut app).contains("failed"));
     }
 
     #[test]

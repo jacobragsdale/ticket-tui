@@ -21,7 +21,7 @@ wins.
 | `process_id` | integer | PID of the ticket-tui process that wrote the file |
 | `updated_at` | string | UTC RFC 3339 time of the published state change |
 | `database_path` | string | SQLite database backing the view |
-| `me` | string or null | Signed-in display name recorded by the last `--sync`, overridden by `TICKET_TUI_ME`; null when neither is set |
+| `me` | string or null | Signed-in display name recorded by sync, including the background refresh, overridden by `TICKET_TUI_ME`; null when neither is set |
 | `mode` | string | `browse`, `search`, or the active overlay name |
 | `focus` | string | `tickets`, `family`, or `details` |
 | `screen` | string | `workspace` or the narrow-layout `details` screen |
@@ -63,7 +63,9 @@ fields behind that view. Join a ticket identity to `work_items` on
 `work_item_relations`, `work_item_comments`, and `work_item_history`.
 
 The SQLite database is a durable local copy of one Azure DevOps project, synced
-by running ticket-tui with `--sync`; Azure DevOps remains the record of truth.
-It can lag the server, so a work item changed in Azure DevOps since the last
-sync still reads as its last synced values. Read it freely; never write to it,
-because ticket-tui replaces its rows wholesale on the next sync.
+by running ticket-tui with `--sync` and by the background refresh a running
+ticket-tui performs every 60 seconds by default; Azure DevOps remains the record
+of truth. It can still lag the server by up to one refresh interval, so a work
+item changed in Azure DevOps moments ago may read as its last synced values.
+Read it freely; never write to it, because ticket-tui replaces its rows
+wholesale on the next sync.
