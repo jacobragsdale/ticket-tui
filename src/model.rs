@@ -123,6 +123,14 @@ impl StateCategory {
         }
     }
 
+    /// Whether work in this category is off the board. Azure DevOps counts a
+    /// removed work item as finished the same way it counts a completed one:
+    /// neither is outstanding, so both close out a parent's progress.
+    #[must_use]
+    pub const fn is_done(self) -> bool {
+        matches!(self, Self::Completed | Self::Removed)
+    }
+
     /// Where the category sits in the order a workflow runs, which is the
     /// order the state picker falls back to when nothing is cached.
     #[must_use]
@@ -230,10 +238,14 @@ pub enum SortField {
     Iteration,
     Created,
     Tags,
+    /// Done out of total over a work item's direct children. Unlike every
+    /// other field this one is not on the work item: it comes from the graph,
+    /// which is why [`compare_tickets`] cannot order it on its own.
+    Progress,
 }
 
 impl SortField {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Changed,
         Self::Priority,
         Self::Id,
@@ -247,6 +259,7 @@ impl SortField {
         Self::Iteration,
         Self::Created,
         Self::Tags,
+        Self::Progress,
     ];
 
     #[must_use]
@@ -265,6 +278,7 @@ impl SortField {
             Self::Iteration => "Iteration",
             Self::Created => "Created",
             Self::Tags => "Tags",
+            Self::Progress => "Progress",
         }
     }
 
@@ -922,6 +936,10 @@ pub fn compare_tickets(
         SortField::Area => compare_text(&left.area_path, &right.area_path),
         SortField::Iteration => compare_text(&left.iteration_path, &right.iteration_path),
         SortField::Tags => compare_text(&left.tags.join(";"), &right.tags.join(";")),
+        // Child progress lives in the graph rather than on the work item, so
+        // the table orders it before it gets here and this arm only decides
+        // the two rows it could not tell apart.
+        SortField::Progress => Ordering::Equal,
     };
 
     let directed = if matches!(field, SortField::Priority | SortField::Assignee) {
