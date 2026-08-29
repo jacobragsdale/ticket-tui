@@ -19,30 +19,33 @@ impl App {
             .map(|ticket| self.ticket_context(ticket))
             .collect();
         AgentContext {
-            database_path: self.database_path.display().to_string(),
-            me: self.me.clone(),
+            database_path: self.shell.database_path.display().to_string(),
+            me: self.shell.me.clone(),
             sync: SyncContext {
                 organization: self
+                    .shell
                     .sync_target
                     .as_ref()
                     .map(|target| target.organization.clone()),
                 project: self
+                    .shell
                     .sync_target
                     .as_ref()
                     .map(|target| target.project.clone()),
                 refresh_seconds: self
+                    .shell
                     .sync_target
                     .as_ref()
                     .map_or(0, |target| target.refresh_seconds),
-                in_progress: self.sync_pending,
-                last_success_at: self.synced_wall_clock.map(Timestamp::to_rfc3339),
-                last_error: self.sync_error.clone(),
-                offline: !self.sync_enabled,
+                in_progress: self.shell.sync_pending,
+                last_success_at: self.shell.synced_wall_clock.map(Timestamp::to_rfc3339),
+                last_error: self.shell.sync_error.clone(),
+                offline: !self.shell.sync_enabled,
             },
             pending_edits: self.pending_edit_contexts(),
             mode: mode_name(self.mode).into(),
-            focus: focus_name(self.focus).into(),
-            screen: if self.narrow_details {
+            focus: focus_name(self.shell.focus).into(),
+            screen: if self.shell.narrow_details {
                 "details"
             } else {
                 "workspace"

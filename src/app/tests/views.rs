@@ -68,7 +68,7 @@ fn views_app() -> App {
             &format!("{today}T07:00:00Z"),
         ),
     ]);
-    app.set_me(Some("Avery Chen".into()));
+    app.shell.set_me(Some("Avery Chen".into()));
     app.set_classification_nodes(classification_trees(), None);
     app
 }
@@ -169,7 +169,7 @@ fn a_built_in_view_cannot_be_saved_over_or_deleted() {
     assert!(app.views().is_empty(), "a built-in owns its name");
     assert_eq!(app.view_rows().len(), 6, "and no second Mine is listed");
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("'Mine' is a built-in view; choose another name")
     );
 
@@ -177,7 +177,7 @@ fn a_built_in_view_cannot_be_saved_over_or_deleted() {
 
     assert_eq!(app.view_rows().len(), 6);
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("'Mine' is a built-in view and cannot be deleted")
     );
 }
@@ -222,7 +222,7 @@ fn the_mine_view_follows_the_name_the_session_is_signed_in_under() {
     app.apply_view_at(view_row(&app, "Mine"));
     assert_eq!(visible_ids(&app), vec![1, 5]);
 
-    app.set_me(Some("Jordan Patel".into()));
+    app.shell.set_me(Some("Jordan Patel".into()));
     app.show_all(None);
     assert_eq!(
         visible_ids(&app),
@@ -230,7 +230,7 @@ fn the_mine_view_follows_the_name_the_session_is_signed_in_under() {
         "the saved query is unchanged; the name under it is not"
     );
 
-    app.set_me(None);
+    app.shell.set_me(None);
     app.show_all(None);
     assert!(
         visible_ids(&app).is_empty(),
@@ -448,7 +448,7 @@ fn a_finished_relative_is_still_in_the_family_tree_of_the_row_that_holds_it() {
 
     app.jump_to_ticket(&family_key(2));
     assert_eq!(
-        app.notification(),
+        app.shell.notification(),
         Some((
             "2 is finished, and finished tickets are hidden",
             NotificationLevel::Info
@@ -669,11 +669,14 @@ fn setting_the_stale_threshold_steps_through_the_choices_and_names_the_query() {
         "the choices step upward and wrap round"
     );
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Stale after 21 days · changed:>21d state:@open"),
         "the status names the query the highlight stands for"
     );
-    assert!(app.session_dirty, "moving the setting is worth saving");
+    assert!(
+        app.shell.session_dirty,
+        "moving the setting is worth saving"
+    );
 }
 
 #[test]
@@ -914,7 +917,7 @@ fn enter_on_a_grid_row_filters_the_table_to_that_persons_sprint_work() {
              holds them back, and the chip over the table says how many"
     );
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Avery in Sprint 1")
     );
 }

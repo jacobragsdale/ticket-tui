@@ -187,7 +187,7 @@ fn submitting_a_form_sends_the_fields_it_holds_and_the_parent_as_a_link() {
     );
     assert!(app.creates_pending(), "the form is held until it answers");
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Creating Issue\u{2026}")
     );
 }
@@ -201,7 +201,7 @@ fn a_form_missing_a_required_field_or_holding_nonsense_refuses_to_be_sent() {
     assert_eq!(action, AppAction::None, "nothing goes out without a title");
     assert_eq!(app.mode, AppMode::Form, "the form stays open on it");
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Title is required")
     );
     assert_eq!(
@@ -219,7 +219,7 @@ fn a_form_missing_a_required_field_or_holding_nonsense_refuses_to_be_sent() {
     let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
     assert_eq!(action, AppAction::None);
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Type is required")
     );
 
@@ -232,7 +232,7 @@ fn a_form_missing_a_required_field_or_holding_nonsense_refuses_to_be_sent() {
     let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
     assert_eq!(action, AppAction::None, "garbage is refused, not sent");
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Priority must be a whole number, not \"high\"")
     );
     assert!(!app.creates_pending());
@@ -480,7 +480,7 @@ fn parent_app(work_item_type: &str) -> App {
     parent.area_path = "Atlas\\Platform".into();
     parent.iteration_path = "Atlas\\Sprint 3".into();
     let mut app = App::new(vec![parent]);
-    app.enable_sync();
+    app.shell.enable_sync();
     app
 }
 
@@ -524,7 +524,7 @@ fn a_created_work_item_joins_the_rows_with_its_family_and_the_selection_follows_
         "and the parent knows its child"
     );
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Created Issue #42")
     );
 }
@@ -541,7 +541,7 @@ fn a_created_work_item_the_query_would_hide_clears_it_and_says_so() {
     assert_eq!(app.visible_count(), 2);
     assert_eq!(app.selected_ticket().map(|ticket| ticket.key.id), Some(42));
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Created Issue #42 \u{b7} search cleared so it is visible")
     );
 }
@@ -555,7 +555,7 @@ fn a_created_work_item_the_query_already_admits_leaves_it_alone() {
 
     assert_eq!(app.query(), "type:Issue", "the filter still holds");
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Created Issue #42")
     );
 }
@@ -579,7 +579,7 @@ fn a_refused_create_reopens_the_form_with_everything_still_in_it() {
     assert_eq!(form.value(FormFieldId::Tags), "sync");
     assert!(!app.creates_pending(), "nothing is in flight any more");
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Work item not created: the work item type Issue is not in this project")
     );
     assert_eq!(app.tickets().len(), 1, "and no row was ever shown for it");

@@ -51,7 +51,7 @@ fn an_edit_shows_at_once_and_the_stored_copy_replaces_it() {
     assert!(!app.edits_pending());
     assert_eq!(app.ticket_by_key(&key), Some(&stored), "the server wins");
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Updated #3 · State → Doing")
     );
     assert_eq!(
@@ -81,7 +81,10 @@ fn a_refused_edit_puts_the_row_back_and_names_the_field() {
         "a refused write leaves nothing of itself behind"
     );
     assert_ne!(before, app.tickets());
-    let (message, level) = app.notification().expect("a refusal is always reported");
+    let (message, level) = app
+        .shell
+        .notification()
+        .expect("a refusal is always reported");
     assert!(message.contains("#3 changed in Azure DevOps"), "{message}");
     assert!(message.contains("State not saved"), "{message}");
     assert_eq!(level, NotificationLevel::Error);
@@ -152,7 +155,8 @@ fn an_edit_leaves_the_filtered_view_only_once_it_lands() {
 #[test]
 fn an_offline_app_refuses_an_edit_and_changes_nothing() {
     let mut app = App::new(vec![ticket(1, "Alpha", "2026-01-01T00:00:00Z")]);
-    app.set_offline_reason(Some("no Azure DevOps organization; pass --org".into()));
+    app.shell
+        .set_offline_reason(Some("no Azure DevOps organization; pass --org".into()));
 
     assert_eq!(
         app.edit_selected(FieldEdit::state("Doing")),
@@ -161,7 +165,7 @@ fn an_offline_app_refuses_an_edit_and_changes_nothing() {
 
     assert_eq!(app.tickets()[0].state, "Active");
     assert!(!app.edits_pending());
-    let (message, level) = app.notification().expect("the refusal is reported");
+    let (message, level) = app.shell.notification().expect("the refusal is reported");
     assert!(message.contains("State not saved"), "{message}");
     assert!(message.contains("--org"), "{message}");
     assert_eq!(level, NotificationLevel::Error);
@@ -174,7 +178,7 @@ fn a_second_edit_of_the_same_row_waits_for_the_first_to_answer() {
 
     assert_eq!(app.edit_selected(FieldEdit::state("Done")), AppAction::None);
     assert_eq!(app.ticket_by_key(&request.key).unwrap().state, "Doing");
-    let (message, _) = app.notification().unwrap();
+    let (message, _) = app.shell.notification().unwrap();
     assert!(
         message.contains("an earlier edit is still in flight"),
         "{message}"
@@ -265,7 +269,7 @@ fn a_picker_over_checked_rows_dispatches_one_request_for_each_of_them() {
     );
     assert!(app.edits_pending());
     assert_eq!(
-        app.notification(),
+        app.shell.notification(),
         None,
         "nothing is said until they answer"
     );
@@ -278,15 +282,18 @@ fn a_bulk_change_reports_itself_once_the_last_work_item_has_answered() {
 
     accept(&mut app, &requests[0]);
     assert_eq!(
-        app.notification(),
+        app.shell.notification(),
         None,
         "a bulk change speaks once, not once a row"
     );
     accept(&mut app, &requests[1]);
-    assert_eq!(app.notification(), None);
+    assert_eq!(app.shell.notification(), None);
 
     accept(&mut app, &requests[2]);
-    let (message, level) = app.notification().expect("the tally goes up at the end");
+    let (message, level) = app
+        .shell
+        .notification()
+        .expect("the tally goes up at the end");
     assert_eq!(message, "Updated 3 tickets \u{b7} State \u{2192} Doing");
     assert_eq!(level, NotificationLevel::Info);
     assert!(!app.edits_pending());
@@ -319,7 +326,10 @@ fn one_refusal_in_a_bulk_change_reverts_only_its_own_row_and_is_named() {
         message: "the transition is not allowed".into(),
     });
 
-    let (message, level) = app.notification().expect("a refusal is never dropped");
+    let (message, level) = app
+        .shell
+        .notification()
+        .expect("a refusal is never dropped");
     assert_eq!(
         message,
         "Updated 2 of 3 \u{b7} #3 failed: the transition is not allowed"
@@ -365,7 +375,7 @@ fn a_bulk_change_passes_over_the_work_items_already_carrying_the_value() {
     accept(&mut app, &requests[0]);
     accept(&mut app, &requests[1]);
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Updated 2 tickets \u{b7} State \u{2192} Doing")
     );
 }
@@ -382,7 +392,7 @@ fn a_bulk_change_with_nothing_left_to_do_says_so_and_writes_nothing() {
         "the state they are all already in is a no-op"
     );
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Nothing to change \u{b7} State \u{2192} To Do")
     );
     assert!(!app.edits_pending());
@@ -443,7 +453,7 @@ fn an_undo_puts_the_value_back_and_writes_it_to_azure_devops_to_do_it() {
 
     accept_edit(&mut app, &undone);
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Undid State on #3 (Doing \u{2192} Active)")
     );
     assert_eq!(
@@ -452,7 +462,7 @@ fn an_undo_puts_the_value_back_and_writes_it_to_azure_devops_to_do_it() {
         "an undo is not itself undoable, or u would only ever toggle"
     );
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Nothing to undo")
     );
 }
@@ -462,7 +472,7 @@ fn undoing_an_edit_of_a_field_that_was_empty_clears_it_rather_than_emptying_it()
     let mut unset = ticket(1, "Alpha", "2026-01-01T00:00:00Z");
     unset.priority = None;
     let mut app = App::new(vec![unset]);
-    app.enable_sync();
+    app.shell.enable_sync();
     app.set_table_viewport(1);
 
     let request = edit_request(&mut app, FieldEdit::priority(1));
@@ -485,7 +495,7 @@ fn undoing_an_edit_of_a_field_that_was_empty_clears_it_rather_than_emptying_it()
     accept_edit(&mut app, &undone);
     assert_eq!(app.tickets()[0].priority, None);
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Undid Priority on #1 (1 \u{2192} (none))")
     );
 }
@@ -495,7 +505,10 @@ fn pressing_undo_with_nothing_to_take_back_says_so() {
     let mut app = editing_app();
 
     assert_eq!(press(&mut app, KeyCode::Char('u')), AppAction::None);
-    let (message, level) = app.notification().expect("a key that did nothing says why");
+    let (message, level) = app
+        .shell
+        .notification()
+        .expect("a key that did nothing says why");
     assert_eq!(message, "Nothing to undo");
     assert_eq!(level, NotificationLevel::Info);
     assert!(!app.edits_pending(), "and nothing went out");
@@ -519,7 +532,7 @@ fn a_refused_edit_never_reaches_the_undo_stack() {
         "an edit that left nothing behind has nothing to take back"
     );
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Nothing to undo")
     );
 }
@@ -539,7 +552,10 @@ fn a_refused_undo_is_reported_like_any_other_conflict() {
         message: "the test operation on /rev failed".into(),
     });
 
-    let (message, level) = app.notification().expect("a refused undo is never dropped");
+    let (message, level) = app
+        .shell
+        .notification()
+        .expect("a refused undo is never dropped");
     assert!(message.contains("#3 changed in Azure DevOps"), "{message}");
     assert!(message.contains("State not saved"), "{message}");
     assert_eq!(level, NotificationLevel::Error);
@@ -585,7 +601,7 @@ fn the_undo_stack_remembers_twenty_edits_and_forgets_the_ones_before_them() {
     );
     assert_eq!(press(&mut app, KeyCode::Char('u')), AppAction::None);
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Nothing to undo")
     );
 }
@@ -621,7 +637,10 @@ fn one_press_takes_a_whole_bulk_change_back() {
         );
         accept(&mut app, request);
     }
-    let (message, level) = app.notification().expect("the tally goes up at the end");
+    let (message, level) = app
+        .shell
+        .notification()
+        .expect("the tally goes up at the end");
     assert_eq!(message, "Undid State on 3 tickets");
     assert_eq!(level, NotificationLevel::Info);
     assert_eq!(
@@ -643,7 +662,7 @@ fn a_bulk_undo_that_only_partly_lands_names_the_rows_left_where_they_were() {
     accept(&mut app, &undone[0]);
     accept(&mut app, &undone[1]);
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Updated 3 tickets \u{b7} State \u{2192} Doing"),
         "the change's own summary still stands: an undo speaks once, not once a row"
     );
@@ -656,6 +675,7 @@ fn a_bulk_undo_that_only_partly_lands_names_the_rows_left_where_they_were() {
     });
 
     let (message, level) = app
+        .shell
         .notification()
         .expect("a half-done undo is never silent");
     assert_eq!(
@@ -780,7 +800,7 @@ fn an_empty_title_is_refused_locally_and_an_unchanged_one_writes_nothing() {
         "a blank title leaves the prompt open to fix"
     );
     assert!(!app.edits_pending(), "nothing was sent");
-    let (message, level) = app.notification().expect("a refusal is reported");
+    let (message, level) = app.shell.notification().expect("a refusal is reported");
     assert!(message.contains("title cannot be empty"), "{message}");
     assert_eq!(level, NotificationLevel::Error);
 
@@ -798,7 +818,7 @@ fn an_empty_title_is_refused_locally_and_an_unchanged_one_writes_nothing() {
     assert_eq!(app.mode, AppMode::Browse);
     assert!(!app.edits_pending());
     assert_eq!(
-        app.notification(),
+        app.shell.notification(),
         None,
         "an unchanged title closes silently"
     );
@@ -848,7 +868,7 @@ fn a_tag_list_that_normalises_to_what_is_there_writes_nothing() {
     assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
     assert_eq!(app.mode, AppMode::Browse);
     assert!(!app.edits_pending());
-    assert_eq!(app.notification(), None);
+    assert_eq!(app.shell.notification(), None);
 }
 
 #[test]
@@ -861,7 +881,7 @@ fn the_description_row_hands_the_raw_html_to_the_editor() {
         ticket(2, "Beta", "2026-02-01T00:00:00Z"),
         gamma,
     ]);
-    app.enable_sync();
+    app.shell.enable_sync();
     app.set_table_viewport(3);
     let key = app.selected_ticket().unwrap().key.clone();
 
@@ -884,7 +904,7 @@ fn the_description_row_hands_the_raw_html_to_the_editor() {
         !app.edits_pending(),
         "nothing is written until the editor is"
     );
-    assert_eq!(app.notification(), None);
+    assert_eq!(app.shell.notification(), None);
 }
 
 #[test]
@@ -895,7 +915,7 @@ fn an_offline_run_refuses_the_description_before_the_editor_opens() {
     let row = menu_row(&app, CommandId::EditDescription);
     open_editor(&mut app, row);
 
-    let (message, level) = app.notification().expect("an offline run says so");
+    let (message, level) = app.shell.notification().expect("an offline run says so");
     assert!(message.contains("#3 description not saved"), "{message}");
     assert_eq!(level, NotificationLevel::Error);
     assert!(!app.edits_pending());
@@ -971,7 +991,10 @@ fn the_comment_prompt_opens_empty_and_posts_what_was_typed() {
         AppAction::None,
         "one comment at a time"
     );
-    let (message, level) = app.notification().expect("the second attempt says so");
+    let (message, level) = app
+        .shell
+        .notification()
+        .expect("the second attempt says so");
     assert!(message.contains("still in flight"), "{message}");
     assert_eq!(level, NotificationLevel::Error);
 }
@@ -989,7 +1012,7 @@ fn a_blank_comment_is_refused_locally_and_leaves_the_prompt_open() {
         "a blank comment leaves the prompt open to fix"
     );
     assert!(!app.comments_pending(), "nothing was sent");
-    let (message, level) = app.notification().expect("a refusal is reported");
+    let (message, level) = app.shell.notification().expect("a refusal is reported");
     assert!(message.contains("comment cannot be empty"), "{message}");
     assert_eq!(level, NotificationLevel::Error);
 
@@ -1014,7 +1037,7 @@ fn a_stored_comment_joins_the_discussion_newest_first() {
             .collect::<Vec<_>>(),
         ["Merged into main"]
     );
-    let (message, level) = app.notification().expect("the post reports itself");
+    let (message, level) = app.shell.notification().expect("the post reports itself");
     assert_eq!(message, "Commented on #3");
     assert_eq!(level, NotificationLevel::Info);
 
@@ -1043,7 +1066,7 @@ fn a_refused_comment_changes_nothing_and_says_why() {
 
     assert!(app.comments_for(&key).is_empty(), "nothing was filed");
     assert!(!app.comments_pending(), "the row is free to try again");
-    let (message, level) = app.notification().expect("a refusal is reported");
+    let (message, level) = app.shell.notification().expect("a refusal is reported");
     assert_eq!(
         message,
         "#3 comment not posted: HTTP 403: the work item is read only"

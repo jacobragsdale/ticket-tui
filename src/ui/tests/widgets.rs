@@ -45,6 +45,7 @@ fn the_table_thumb_is_painted_where_it_can_be_grabbed_and_reaches_the_bottom() {
         let mut terminal = Terminal::new(TestBackend::new(120, 29)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let metrics = app
+            .shell
             .hit_regions
             .scroll(ScrollSurface::Table)
             .expect("an overflowing table registers its scrollbar");
@@ -85,12 +86,13 @@ fn the_details_thumb_finishes_on_the_last_row_of_its_track() {
     let mut long_ticket = ticket();
     long_ticket.description = "A long wrapped detail line. ".repeat(40);
     let mut app = App::new(vec![long_ticket]);
-    app.narrow_details = true;
-    app.focus = Focus::Details;
+    app.shell.narrow_details = true;
+    app.shell.focus = Focus::Details;
     app.details.offset = usize::MAX;
     let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let metrics = app
+        .shell
         .hit_regions
         .scroll(ScrollSurface::Details)
         .expect("an overflowing details pane registers its scrollbar");
@@ -120,8 +122,8 @@ fn long_content_is_bounded_and_the_wheel_scrolls_without_moving_the_selection() 
     let mut long_ticket = ticket();
     long_ticket.description = "A long wrapped detail line. ".repeat(30);
     let mut app = App::new(vec![long_ticket]);
-    app.narrow_details = true;
-    app.focus = Focus::Details;
+    app.shell.narrow_details = true;
+    app.shell.focus = Focus::Details;
 
     let text = render_text(60, 20, &mut app);
 
@@ -150,16 +152,19 @@ fn long_content_is_bounded_and_the_wheel_scrolls_without_moving_the_selection() 
     let column = body.x + body.width / 2;
     let row = body.y + 1;
     app.handle_mouse(mouse(MouseEventKind::Moved, column, row));
-    assert_eq!(app.hovered(), Some(&PointerTarget::TableRow { index: 1 }));
+    assert_eq!(
+        app.shell.hovered(),
+        Some(&PointerTarget::TableRow { index: 1 })
+    );
 
     app.handle_mouse(mouse(MouseEventKind::ScrollDown, column, row));
     assert_eq!(app.selected_row(), selected, "the wheel selects nothing");
-    assert_eq!(app.focus, Focus::Tickets);
+    assert_eq!(app.shell.focus, Focus::Tickets);
     assert!(app.table.offset > 0);
     let mut terminal = Terminal::new(TestBackend::new(60, 15)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     assert_eq!(
-        app.hovered(),
+        app.shell.hovered(),
         Some(&PointerTarget::TableRow {
             index: app.table.offset + 1,
         })
@@ -226,6 +231,7 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
     let mut app = App::new(vec![ticket()]);
     render_text(110, 24, &mut app);
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::OpenPalette))
         .map(|region| (region.rect.x, region.rect.y))
@@ -235,6 +241,7 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
 
     render_text(110, 24, &mut app);
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::CloseOverlay))
         .map(|region| (region.rect.x, region.rect.y))
@@ -244,6 +251,7 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
 
     render_text(110, 24, &mut app);
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::OpenHelp))
         .map(|region| (region.rect.x, region.rect.y))
@@ -254,6 +262,7 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
     app.mode = AppMode::Browse;
     render_text(110, 24, &mut app);
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::ToggleRowSelect { index: 0 }))
         .map(|region| (region.rect.x, region.rect.y))
@@ -262,6 +271,7 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
     assert!(app.is_row_selected(&app.selected_ticket().unwrap().key));
 
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::CopyActions))
         .map(|region| (region.rect.x, region.rect.y))
@@ -272,7 +282,8 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
 }
 
 fn divider(app: &App) -> Rect {
-    app.hit_regions
+    app.shell
+        .hit_regions
         .find_target(|target| matches!(target, PointerTarget::PaneDivider))
         .expect("pane divider")
         .rect
@@ -284,7 +295,7 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
     let screen = render_text(130, 30, &mut app);
     let before = divider(&app);
     assert_eq!(before.width, 1, "the wide layout leaves a one-cell gap");
-    assert_eq!(app.pane_split_wide, 62);
+    assert_eq!(app.shell.pane_split_wide, 62);
     assert_eq!(
         screen
             .lines()
@@ -294,14 +305,15 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
         "the gap between the panes is drawn as a divider"
     );
     assert!(
-        app.hit_regions
+        app.shell
+            .hit_regions
             .resolve_scroll(before.x, before.y + 1)
             .is_none(),
         "the wheel over the divider scrolls nothing"
     );
 
     app.handle_mouse(mouse(MouseEventKind::Moved, before.x, before.y + 1));
-    assert_eq!(app.hovered(), Some(&PointerTarget::PaneDivider));
+    assert_eq!(app.shell.hovered(), Some(&PointerTarget::PaneDivider));
     let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     assert!(
@@ -311,16 +323,22 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
         "the hovered divider is painted reversed"
     );
 
-    app.session_dirty = false;
+    app.shell.session_dirty = false;
     let action = drag(
         &mut app,
         (before.x, before.y + 2),
         (before.x + 15, before.y + 2),
     );
     assert!(matches!(action, crate::app::AppAction::None));
-    assert!(app.selection().is_none(), "the divider selects no text");
-    assert!(app.pane_split_wide > 62);
-    assert!(app.session_dirty, "a finished drag is worth persisting");
+    assert!(
+        app.shell.selection().is_none(),
+        "the divider selects no text"
+    );
+    assert!(app.shell.pane_split_wide > 62);
+    assert!(
+        app.shell.session_dirty,
+        "a finished drag is worth persisting"
+    );
     render_text(130, 30, &mut app);
     let after = divider(&app);
     assert!(
@@ -336,7 +354,7 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
         render_text(130, 30, &mut app);
         divider(&app)
     };
-    let content = app.content_area();
+    let content = app.shell.content_area();
     assert!(
         leftmost.x - content.x >= 40,
         "tickets pane kept {} columns",
@@ -359,14 +377,14 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
     render_text(90, 30, &mut stacked);
     let before = divider(&stacked);
     assert_eq!(before.height, 1, "the stacked layout leaves a one-row gap");
-    assert_eq!(stacked.pane_split_stacked, 56);
+    assert_eq!(stacked.shell.pane_split_stacked, 56);
     let action = drag(
         &mut stacked,
         (before.x + 5, before.y),
         (before.x + 5, before.y + 3),
     );
     assert!(matches!(action, crate::app::AppAction::None));
-    assert!(stacked.pane_split_stacked > 56);
+    assert!(stacked.shell.pane_split_stacked > 56);
     render_text(90, 30, &mut stacked);
     assert!(
         divider(&stacked).y > before.y,

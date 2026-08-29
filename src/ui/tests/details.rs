@@ -34,8 +34,8 @@ fn the_details_pane_flags_a_neglected_work_item_beside_its_changed_instant() {
     item.state = "To Do".into();
     item.changed_at = crate::timestamp::ts("2020-01-01T00:00:00Z");
     let mut app = App::new(vec![item.clone()]);
-    app.narrow_details = true;
-    app.focus = Focus::Details;
+    app.shell.narrow_details = true;
+    app.shell.focus = Focus::Details;
 
     assert!(
         render_text(60, 44, &mut app).contains("(stale "),
@@ -46,8 +46,8 @@ fn the_details_pane_flags_a_neglected_work_item_beside_its_changed_instant() {
         state: "Done".into(),
         ..item
     }]);
-    finished.narrow_details = true;
-    finished.focus = Focus::Details;
+    finished.shell.narrow_details = true;
+    finished.shell.focus = Focus::Details;
     assert!(
         !render_text(60, 44, &mut finished).contains("(stale "),
         "and says nothing about work that is over"
@@ -58,8 +58,8 @@ fn the_details_pane_flags_a_neglected_work_item_beside_its_changed_instant() {
 fn details_render_relationships_history_and_comments() {
     let item = ticket();
     let mut app = App::new(vec![item.clone()]);
-    app.narrow_details = true;
-    app.focus = Focus::Details;
+    app.shell.narrow_details = true;
+    app.shell.focus = Focus::Details;
     app.set_workspace_graph(TicketGraph {
         relations: vec![RelationRecord {
             from: item.key.clone(),
@@ -119,8 +119,8 @@ fn details_render_relationships_history_and_comments() {
 fn a_comment_just_posted_shows_at_the_head_of_the_discussion() {
     let item = ticket();
     let mut app = App::new(vec![item.clone()]);
-    app.narrow_details = true;
-    app.focus = Focus::Details;
+    app.shell.narrow_details = true;
+    app.shell.focus = Focus::Details;
     app.set_workspace_graph(TicketGraph {
         comments: vec![CommentRecord {
             ticket: item.key.clone(),
@@ -155,7 +155,7 @@ fn a_comment_just_posted_shows_at_the_head_of_the_discussion() {
 #[test]
 fn the_comment_prompt_opens_empty_and_names_the_work_item() {
     let mut app = App::new(vec![ticket()]);
-    app.enable_sync();
+    app.shell.enable_sync();
     app.set_table_viewport(1);
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
     let row = crate::command::EDIT_MENU
@@ -183,7 +183,7 @@ fn the_comment_prompt_opens_empty_and_names_the_work_item() {
 fn the_delete_confirmation_names_the_work_item_the_children_and_the_recycle_bin() {
     let mut app = App::new(progress_tickets());
     app.set_workspace_graph(progress_graph());
-    app.enable_sync();
+    app.shell.enable_sync();
     app.set_table_viewport(5);
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
     let row = crate::command::EDIT_MENU
@@ -221,7 +221,8 @@ fn the_delete_confirmation_names_the_work_item_the_children_and_the_recycle_bin(
         "the footer says what confirms it: {confirm}"
     );
     assert!(
-        app.hit_regions
+        app.shell
+            .hit_regions
             .find_target(|target| matches!(target, PointerTarget::CancelDelete))
             .is_some(),
         "and both buttons are clickable"
@@ -345,8 +346,8 @@ fn an_epic_whose_children_have_all_finished_fills_its_bar() {
 #[test]
 fn the_family_tree_writes_a_parents_ratio_after_its_title_and_leaves_the_rest_bare() {
     let mut app = progress_app();
-    app.narrow_details = true;
-    app.focus = Focus::Details;
+    app.shell.narrow_details = true;
+    app.shell.focus = Focus::Details;
 
     let text = render_text(60, 30, &mut app);
     assert!(text.contains("Auth rewrite 2/3"), "{text}");
@@ -443,8 +444,8 @@ fn details_render_family_tree_without_other_links() {
         ),
     ]);
     app.set_workspace_graph(parent_child_graph());
-    app.narrow_details = true;
-    app.focus = Focus::Details;
+    app.shell.narrow_details = true;
+    app.shell.focus = Focus::Details;
     assert_eq!(app.selected_ticket().unwrap().key.id, 10_002);
 
     let text = render_text(60, 36, &mut app);
@@ -508,8 +509,8 @@ fn auth_family_app() -> App {
     // These read the details pane row by row, so the chip bar saying
     // finished work is hidden must not sit between it and the top.
     app.set_show_finished(true);
-    app.narrow_details = true;
-    app.focus = Focus::Family;
+    app.shell.narrow_details = true;
+    app.shell.focus = Focus::Family;
     app
 }
 
@@ -522,6 +523,7 @@ fn family_rows_show_the_current_and_cursor_styles_and_click_through_to_a_ticket(
     });
     render_text(60, 24, &mut app);
     let current = app
+        .shell
         .hit_regions
         .find_target(
             |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_002),
@@ -529,6 +531,7 @@ fn family_rows_show_the_current_and_cursor_styles_and_click_through_to_a_ticket(
         .map(|region| region.rect)
         .expect("current row");
     let cursor = app
+        .shell
         .hit_regions
         .find_target(
             |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
@@ -558,25 +561,26 @@ fn family_rows_show_the_current_and_cursor_styles_and_click_through_to_a_ticket(
         );
     }
 
-    app.focus = Focus::Details;
+    app.shell.focus = Focus::Details;
     render_text(72, 36, &mut app);
     let details = details_pane(&app);
     let summary_x = details.x.saturating_add(8);
     let summary_y = details.y.saturating_add(3);
     assert!(!matches!(
-        app.hit_regions
+        app.shell
+            .hit_regions
             .resolve(summary_x, summary_y)
             .map(|region| &region.target),
         Some(PointerTarget::JumpToTicket(_))
     ));
     click(&mut app, summary_x, summary_y);
     assert_eq!(app.selected_ticket().unwrap().key.id, 10_002);
-    assert_eq!(app.focus, Focus::Details);
+    assert_eq!(app.shell.focus, Focus::Details);
 
     let row = family_row(&app, 10_001).expect("parent row");
     click(&mut app, row.x + 8, row.y);
     assert_eq!(app.selected_ticket().unwrap().key.id, 10_001);
-    assert_eq!(app.focus, Focus::Family);
+    assert_eq!(app.shell.focus, Focus::Family);
 }
 
 #[test]
@@ -593,7 +597,10 @@ fn hovering_tints_a_row_without_recolouring_it_and_still_reverses_controls() {
     let (resting_fg, _, resting_modifier) = painted_cell(&terminal, state_x, row_y);
 
     app.handle_mouse(mouse(MouseEventKind::Moved, state_x, row_y));
-    assert_eq!(app.hovered(), Some(&PointerTarget::TableRow { index: 1 }));
+    assert_eq!(
+        app.shell.hovered(),
+        Some(&PointerTarget::TableRow { index: 1 })
+    );
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let (hovered_fg, hovered_bg, hovered_modifier) = painted_cell(&terminal, state_x, row_y);
 
@@ -631,6 +638,7 @@ fn hovering_tints_a_row_without_recolouring_it_and_still_reverses_controls() {
     }
 
     let header = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::SortHeader(SortField::Title)))
         .map(|region| region.rect)
@@ -646,6 +654,7 @@ fn hovering_tints_a_row_without_recolouring_it_and_still_reverses_controls() {
     app.mode = AppMode::Help;
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let close = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::CloseOverlay))
         .map(|region| region.rect)
@@ -669,8 +678,8 @@ fn auth_family_app_with_long_details() -> App {
         .description = "line\n".repeat(40);
     let graph = parent_child_graph();
     app.replace_prepared_tickets(crate::app::PreparedTickets::with_graph(tickets, graph));
-    app.narrow_details = true;
-    app.focus = Focus::Family;
+    app.shell.narrow_details = true;
+    app.shell.focus = Focus::Family;
     app
 }
 
@@ -680,6 +689,7 @@ fn family_hit_targets_follow_the_details_scroll_and_the_wheel_only_scrolls() {
     render_text(60, 24, &mut app);
     assert!(app.details.max_offset() > 0);
     let before = app
+        .shell
         .hit_regions
         .find_target(
             |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
@@ -688,7 +698,7 @@ fn family_hit_targets_follow_the_details_scroll_and_the_wheel_only_scrolls() {
         .expect("parent row should be on screen");
     app.details.scroll_to(app.details.max_offset());
     render_text(60, 24, &mut app);
-    let after = app.hit_regions.find_target(
+    let after = app.shell.hit_regions.find_target(
         |target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == 10_001),
     );
     assert!(after.is_none() || after.is_some_and(|region| region.rect.y != before));
@@ -697,10 +707,10 @@ fn family_hit_targets_follow_the_details_scroll_and_the_wheel_only_scrolls() {
     render_text(60, 24, &mut app);
     let row = family_row(&app, 10_002).expect("current family row");
     let cursor = app.family_cursor.clone();
-    let focus = app.focus;
+    let focus = app.shell.focus;
     app.handle_mouse(mouse(MouseEventKind::ScrollDown, row.x + 8, row.y));
     assert_eq!(app.family_cursor, cursor, "the wheel moves no cursor");
-    assert_eq!(app.focus, focus, "the wheel takes no focus");
+    assert_eq!(app.shell.focus, focus, "the wheel takes no focus");
     assert!(app.details.offset > 0);
 }
 
@@ -811,7 +821,10 @@ fn planning_fields_follow_the_details_scroll_and_a_breadcrumb_shifts_the_rest() 
     app.details.scroll_to(app.details.max_offset());
     render_text(60, 24, &mut app);
     assert!(
-        app.hit_regions.edit_field(EditableField::Area).is_none(),
+        app.shell
+            .hit_regions
+            .edit_field(EditableField::Area)
+            .is_none(),
         "a value scrolled off the pane is not clickable"
     );
 }
@@ -839,18 +852,22 @@ fn the_heading_scrolls_away_and_its_fields_travel_with_it() {
         AppMode::AssigneePicker,
         "a scrolled value still opens its editor"
     );
-    assert_eq!(app.overlay_anchor, OverlayAnchor::Below(after));
+    assert_eq!(app.shell.overlay_anchor, OverlayAnchor::Below(after));
 
     let mut app = auth_family_app_with_long_details();
     render_text(60, 24, &mut app);
     app.details.scroll_to(app.details.max_offset());
     render_text(60, 24, &mut app);
     assert!(
-        app.hit_regions.edit_field(EditableField::Title).is_none(),
+        app.shell
+            .hit_regions
+            .edit_field(EditableField::Title)
+            .is_none(),
         "a heading value scrolled off the pane is not clickable"
     );
     assert!(
-        app.hit_regions
+        app.shell
+            .hit_regions
             .edit_field(EditableField::Assignee)
             .is_none(),
         "and neither is the assignee beside it"
@@ -864,7 +881,7 @@ fn the_heading_scrolls_away_and_its_fields_travel_with_it() {
 #[test]
 fn the_family_cursor_scrolls_itself_back_into_view_below_the_heading() {
     let mut app = auth_family_app_with_long_details();
-    app.focus = Focus::Family;
+    app.shell.focus = Focus::Family;
     render_text(60, 14, &mut app);
     let pane = details_pane(&app);
     let fold = usize::from(pane.height.saturating_sub(2));
@@ -915,8 +932,8 @@ fn end_scrolls_past_the_description_to_the_last_comment() {
         }],
         history: Vec::new(),
     });
-    app.narrow_details = true;
-    app.focus = Focus::Details;
+    app.shell.narrow_details = true;
+    app.shell.focus = Focus::Details;
 
     let text = render_text(60, 20, &mut app);
     assert!(

@@ -145,9 +145,9 @@ impl App {
             return;
         }
         self.show_finished = show;
-        self.session_dirty = true;
+        self.shell.session_dirty = true;
         self.resubmit_query();
-        self.set_status(format!(
+        self.shell.set_status(format!(
             "Finished tickets: {}",
             if show { "shown" } else { "hidden" }
         ));
@@ -198,8 +198,9 @@ impl App {
         let days = clamp_stale_days(days);
         self.stale_days = days;
         self.stale_days_override = None;
-        self.session_dirty = true;
-        self.set_status(format!("Stale after {days} days · {}", stale_query(days)));
+        self.shell.session_dirty = true;
+        self.shell
+            .set_status(format!("Stale after {days} days · {}", stale_query(days)));
     }
 
     /// How many whole days a work item has been sitting when it counts as
@@ -262,10 +263,6 @@ impl App {
                 .map(|row| row.kind),
             Some(ViewRowKind::Saved(_))
         )
-    }
-
-    pub fn mark_stale(&mut self) {
-        self.stale = true;
     }
 
     pub(super) fn open_views(&mut self) {
@@ -352,7 +349,8 @@ impl App {
     pub(super) fn save_view(&mut self, name: String) {
         if let Some(builtin) = builtin_named(&name) {
             let name = builtin.name;
-            self.set_status(format!("'{name}' is a built-in view; choose another name"));
+            self.shell
+                .set_status(format!("'{name}' is a built-in view; choose another name"));
             return;
         }
         let view = NamedView {
@@ -375,8 +373,8 @@ impl App {
             self.views.push(view);
         }
         self.active_view = Some(name.clone());
-        self.session_dirty = true;
-        self.set_status(format!("Saved view '{name}'"));
+        self.shell.session_dirty = true;
+        self.shell.set_status(format!("Saved view '{name}'"));
     }
 
     /// Loads the view on one row of the overlay, whichever kind it is. A
@@ -395,10 +393,11 @@ impl App {
         self.active_view = Some(view.name.to_owned());
         self.sort_field = view.sort_field;
         self.sort_direction = view.sort_direction;
-        self.session_dirty = true;
+        self.shell.session_dirty = true;
         self.set_query(view.query.to_owned());
         self.mode = AppMode::Browse;
-        self.set_status(format!("Loaded view '{}'", view.name));
+        self.shell
+            .set_status(format!("Loaded view '{}'", view.name));
     }
 
     fn apply_saved_view(&mut self, index: usize) {
@@ -411,10 +410,11 @@ impl App {
         self.search_order = view.search_order;
         self.row_density = view.row_density;
         self.layout = TableLayout::from_session_columns(&view.columns, Some(view.auto_hide));
-        self.session_dirty = true;
+        self.shell.session_dirty = true;
         self.set_query(view.query);
         self.mode = AppMode::Browse;
-        self.set_status(format!("Loaded view '{}'", view.name));
+        self.shell
+            .set_status(format!("Loaded view '{}'", view.name));
     }
 
     pub(super) fn delete_view_at(&mut self, index: usize) {
@@ -422,7 +422,8 @@ impl App {
             Some(ViewRowKind::Saved(saved)) => saved,
             Some(ViewRowKind::Builtin(builtin)) => {
                 let name = BUILTIN_VIEWS[builtin].name;
-                self.set_status(format!("'{name}' is a built-in view and cannot be deleted"));
+                self.shell
+                    .set_status(format!("'{name}' is a built-in view and cannot be deleted"));
                 return;
             }
             Some(ViewRowKind::Heading) | None => return,
@@ -432,8 +433,9 @@ impl App {
             self.active_view = None;
         }
         self.focus_view(index);
-        self.session_dirty = true;
-        self.set_status(format!("Deleted view '{}'", removed.name));
+        self.shell.session_dirty = true;
+        self.shell
+            .set_status(format!("Deleted view '{}'", removed.name));
     }
 
     /// The iteration the sprint summary counts: the sprint the project is in,
@@ -634,7 +636,7 @@ impl App {
         self.active_view = None;
         self.set_query(format_query(&filters, ""));
         self.mode = AppMode::Browse;
-        self.set_status(match assignee {
+        self.shell.set_status(match assignee {
             Some(name) => format!("{name} in {leaf}"),
             None => format!("All work in {leaf}"),
         });

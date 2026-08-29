@@ -99,21 +99,24 @@ fn a_bar_fills_only_on_a_whole_ratio_and_never_reads_empty_once_work_has_landed(
 #[test]
 fn pane_keys_move_focus_and_only_the_details_pane_opens_on_enter() {
     let mut app = family_app();
-    assert_eq!(app.focus, Focus::Tickets);
+    assert_eq!(app.shell.focus, Focus::Tickets);
 
     press(&mut app, KeyCode::Tab);
-    assert_eq!(app.focus, Focus::Details);
-    assert!(app.narrow_details, "the narrow layout follows the focus");
+    assert_eq!(app.shell.focus, Focus::Details);
+    assert!(
+        app.shell.narrow_details,
+        "the narrow layout follows the focus"
+    );
 
     press(&mut app, KeyCode::Char('d'));
-    assert_eq!(app.focus, Focus::Tickets);
-    assert!(!app.narrow_details);
+    assert_eq!(app.shell.focus, Focus::Tickets);
+    assert!(!app.shell.narrow_details);
 
-    app.focus = Focus::Family;
+    app.shell.focus = Focus::Family;
     press(&mut app, KeyCode::Tab);
-    assert_eq!(app.focus, Focus::Details);
+    assert_eq!(app.shell.focus, Focus::Details);
 
-    app.focus = Focus::Tickets;
+    app.shell.focus = Focus::Tickets;
     assert_eq!(
         press(&mut app, KeyCode::Enter),
         AppAction::None,
@@ -123,7 +126,7 @@ fn pane_keys_move_focus_and_only_the_details_pane_opens_on_enter() {
         press(&mut app, KeyCode::Char('o')),
         AppAction::OpenUrl(_)
     ));
-    app.focus = Focus::Details;
+    app.shell.focus = Focus::Details;
     assert!(matches!(
         press(&mut app, KeyCode::Enter),
         AppAction::OpenUrl(_)
@@ -133,7 +136,7 @@ fn pane_keys_move_focus_and_only_the_details_pane_opens_on_enter() {
 #[test]
 fn family_cursor_movement_clamps_and_scrolls_the_details_viewport() {
     let mut app = family_app();
-    app.focus = Focus::Family;
+    app.shell.focus = Focus::Family;
     app.details.set_viewport(2, 20);
 
     press(&mut app, KeyCode::Home);
@@ -154,7 +157,7 @@ fn family_cursor_movement_clamps_and_scrolls_the_details_viewport() {
 fn family_enter_selects_visible_tickets_records_history_once_and_explains_hidden_ones() {
     let mut app = family_app();
     assert_eq!(app.selected_ticket().unwrap().key.id, 2);
-    app.focus = Focus::Family;
+    app.shell.focus = Focus::Family;
 
     let opened = press(&mut app, KeyCode::Char('o'));
     assert!(matches!(opened, AppAction::OpenUrl(_)));
@@ -163,7 +166,7 @@ fn family_enter_selects_visible_tickets_records_history_once_and_explains_hidden
     press(&mut app, KeyCode::Down);
     press(&mut app, KeyCode::Enter);
     assert_eq!(app.selected_ticket().unwrap().key.id, 3);
-    assert_eq!(app.focus, Focus::Family);
+    assert_eq!(app.shell.focus, Focus::Family);
     assert_eq!(
         app.recent.iter().map(|key| key.id).collect::<Vec<_>>(),
         vec![2, 3]
@@ -180,7 +183,7 @@ fn family_enter_selects_visible_tickets_records_history_once_and_explains_hidden
     assert_eq!(app.selected_ticket().unwrap().key.id, 2);
     assert_eq!(app.query(), query, "a hidden target changes no search");
     assert_eq!(
-        app.notification(),
+        app.shell.notification(),
         Some(("3 is hidden by the current search", NotificationLevel::Info))
     );
 }
@@ -216,7 +219,7 @@ fn a_background_sync_leaves_the_search_box_and_the_selection_alone() {
 #[test]
 fn family_selection_and_cursor_restore_after_reload() {
     let mut app = family_app();
-    app.focus = Focus::Family;
+    app.shell.focus = Focus::Family;
     press(&mut app, KeyCode::Down);
     assert_eq!(app.family_cursor.as_ref().map(|key| key.id), Some(3));
     press(&mut app, KeyCode::Enter);

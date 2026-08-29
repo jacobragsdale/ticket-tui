@@ -166,8 +166,8 @@ impl SyncRuntime {
     fn stop(&mut self, app: &mut App, error: &str) {
         self.worker = None;
         self.scheduler.stop();
-        if app.fail_sync(error, true) {
-            app.set_error(format!("Sync stopped: {error}"));
+        if app.shell.fail_sync(error, true) {
+            app.shell.set_error(format!("Sync stopped: {error}"));
         }
     }
 }
@@ -302,16 +302,18 @@ fn run() -> Result<()> {
             .meta(db::CLASSIFICATION_FETCHED_KEY)?
             .and_then(|raw| Timestamp::parse(&raw).ok()),
     );
-    app.set_me(resolve_me(
+    app.shell.set_me(resolve_me(
         repository.meta(db::ME_DISPLAY_NAME_KEY)?,
         std::env::var("TICKET_TUI_ME").ok(),
     ));
     stamp_database(&mut app, &repository);
-    app.set_offline_reason(offline_reason.clone());
+    app.shell.set_offline_reason(offline_reason.clone());
     let session_path = session::path_for(repository.path());
     match session::load(&session_path) {
         Ok(loaded) => app.restore_session(loaded),
-        Err(error) => app.set_error(format!("Could not load session: {error:#}")),
+        Err(error) => app
+            .shell
+            .set_error(format!("Could not load session: {error:#}")),
     }
     // After the session, so a threshold asked for on this run beats the one
     // the last run left behind.
@@ -322,12 +324,14 @@ fn run() -> Result<()> {
     let interval = (refresh > 0).then(|| Duration::from_secs(refresh));
     // Where the rows come from, for the database overlay: the project, how
     // often it is pulled, and whatever narrows it.
-    app.set_sync_source(config.as_ref().map(|config| sync_source(config, refresh)));
-    app.set_sync_target(config.as_ref().map(|config| SyncTarget {
-        organization: config.organization.clone(),
-        project: config.project.clone(),
-        refresh_seconds: refresh,
-    }));
+    app.shell
+        .set_sync_source(config.as_ref().map(|config| sync_source(config, refresh)));
+    app.shell
+        .set_sync_target(config.as_ref().map(|config| SyncTarget {
+            organization: config.organization.clone(),
+            project: config.project.clone(),
+            refresh_seconds: refresh,
+        }));
     let mut runtime = SyncRuntime {
         worker: None,
         scheduler: SyncScheduler::new(interval),
@@ -340,7 +344,7 @@ fn run() -> Result<()> {
             database_path.clone(),
             Box::new(AzureConnector::new(config)),
         )?);
-        app.enable_sync();
+        app.shell.enable_sync();
         // The TUI opens from the database and the first pull runs behind it
         // straight away — even with the timer off, when the database was just
         // rebuilt or holds nothing to browse.
@@ -351,12 +355,12 @@ fn run() -> Result<()> {
             runtime.scheduler.schedule_next(now);
         }
     } else {
-        app.set_status(offline_status(database_is_empty));
+        app.shell.set_status(offline_status(database_is_empty));
     }
     // Said last, because a database held by another project is a more specific
     // reason to be offline than having no organization at all.
     if let Some(message) = wrong_project {
-        app.set_error(message);
+        app.shell.set_error(message);
     }
 
     let mut context_publisher = AgentContextPublisher::new(repository.path());
@@ -382,7 +386,7 @@ fn run() -> Result<()> {
 /// Records the database as it stands, so the watcher does not reload a file
 /// our own worker just wrote.
 fn stamp_database(app: &mut App, repository: &SqliteTicketRepository) {
-    app.configure_database(
+    app.shell.configure_database(
         repository.path().to_path_buf(),
         db::data_signature(repository.path()),
     );
@@ -489,7 +493,7 @@ fn run_terminal(
     enable_terminal_input()?;
 
     let mut redraw = true;
-    while !app.should_quit {
+    while !app.shell.should_quit {
         redraw |= app.poll_search();
         redraw |= poll_reload(app, repository, &mut reloader);
         redraw |= poll_sync(app, repository, runtime);
@@ -497,24 +501,25 @@ fn run_terminal(
         redraw |= dispatch_due_pull(app, runtime);
         redraw |= dispatch_due_details(app, runtime);
         redraw |= persist_session(app, repository);
-        redraw |= app.tick();
+        redraw |= app.shell.tick();
         if redraw {
             terminal.draw(|frame| ticket_tui::ui::render(frame, app))?;
             sync_mouse_pointer(app, &mut mouse_pointer);
             redraw = false;
             if let Err(error) = context_publisher.publish(app) {
-                app.set_error(format!("Could not publish agent context: {error:#}"));
+                app.shell
+                    .set_error(format!("Could not publish agent context: {error:#}"));
                 redraw = true;
             }
         }
 
-        let timeout = if app.search_pending || app.reload_pending {
+        let timeout = if app.search_pending || app.shell.reload_pending {
             Duration::from_millis(33)
         } else {
             // The loop has to wake for the next scheduled pull as well as for
             // an expiring notification.
             [
-                app.next_wakeup(),
+                app.shell.next_wakeup(),
                 runtime.scheduler.time_until_due(Instant::now()),
                 runtime.details.time_until_due(Instant::now()),
             ]
@@ -538,7 +543,7 @@ fn run_terminal(
                 (AppAction::None, true)
             }
             Event::Resize(_, _) => {
-                app.handle_resize();
+                app.shell.handle_resize();
                 (AppAction::None, true)
             }
             Event::FocusGained | Event::FocusLost | Event::Key(_) => (AppAction::None, false),
@@ -602,16 +607,20 @@ fn handle_action(
             return true;
         }
         AppAction::OpenUrl(raw_url) => match open_https_url(&raw_url, opener) {
-            Ok(()) => app.set_status(format!("Opened {raw_url}")),
-            Err(error) => app.set_error(format!("Could not open ticket: {error:#}")),
+            Ok(()) => app.shell.set_status(format!("Opened {raw_url}")),
+            Err(error) => app
+                .shell
+                .set_error(format!("Could not open ticket: {error:#}")),
         },
         AppAction::Copy { text, content } => match copy_to_clipboard(&text) {
-            Ok(()) => app.set_status(copied_status(content)),
-            Err(error) => app.set_error(format!("Could not copy: {error:#}")),
+            Ok(()) => app.shell.set_status(copied_status(content)),
+            Err(error) => app.shell.set_error(format!("Could not copy: {error:#}")),
         },
         AppAction::WriteFile { path, contents } => match fs::write(&path, contents) {
-            Ok(()) => app.set_status(format!("Exported {}", path.display())),
-            Err(error) => app.set_error(format!("Could not export {}: {error:#}", path.display())),
+            Ok(()) => app.shell.set_status(format!("Exported {}", path.display())),
+            Err(error) => app
+                .shell
+                .set_error(format!("Could not export {}: {error:#}", path.display())),
         },
     }
     false
@@ -653,8 +662,12 @@ fn apply_description_outcome(
                 }
             }
         }
-        Ok(None) => app.set_status(format!("#{} description unchanged", key.id)),
-        Err(error) => app.set_error(format!("#{} description not saved: {error:#}", key.id)),
+        Ok(None) => app
+            .shell
+            .set_status(format!("#{} description unchanged", key.id)),
+        Err(error) => app
+            .shell
+            .set_error(format!("#{} description not saved: {error:#}", key.id)),
     }
 }
 
@@ -745,11 +758,13 @@ fn start_reload(
 ) {
     match reloader.start(repository.path()) {
         Ok(true) => {
-            app.reload_pending = true;
-            app.set_status(message);
+            app.shell.reload_pending = true;
+            app.shell.set_status(message);
         }
-        Ok(false) => app.set_status("Reload already in progress"),
-        Err(error) => app.set_error(format!("Could not start reload: {error:#}")),
+        Ok(false) => app.shell.set_status("Reload already in progress"),
+        Err(error) => app
+            .shell
+            .set_error(format!("Could not start reload: {error:#}")),
     }
 }
 
@@ -760,7 +775,7 @@ fn dispatch_due_pull(app: &mut App, runtime: &mut SyncRuntime) -> bool {
         return false;
     }
     runtime.scheduler.start();
-    app.begin_sync();
+    app.shell.begin_sync();
     send_pull(app, runtime, PullOrigin::Timer);
     true
 }
@@ -786,15 +801,15 @@ fn dispatch_due_details(app: &mut App, runtime: &mut SyncRuntime) -> bool {
 /// `r`: pull now, whatever the timer is doing.
 fn start_sync(app: &mut App, runtime: &mut SyncRuntime) {
     if runtime.worker.is_none() {
-        app.set_error(runtime.offline_message());
+        app.shell.set_error(runtime.offline_message());
         return;
     }
     if !runtime.scheduler.request_user_pull() {
-        app.set_status("Sync already in progress");
+        app.shell.set_status("Sync already in progress");
         return;
     }
-    app.begin_sync();
-    app.set_status("Syncing from Azure DevOps…");
+    app.shell.begin_sync();
+    app.shell.set_status("Syncing from Azure DevOps…");
     send_pull(app, runtime, PullOrigin::User);
 }
 
@@ -822,7 +837,9 @@ fn start_comment(app: &mut App, runtime: &mut SyncRuntime, key: TicketKey, text:
         text,
     };
     match runtime.send(request) {
-        Ok(()) => app.set_status(format!("Posting comment on #{}\u{2026}", key.id)),
+        Ok(()) => app
+            .shell
+            .set_status(format!("Posting comment on #{}\u{2026}", key.id)),
         Err(message) => app.reject_comment(&key, &message),
     }
 }
@@ -901,9 +918,11 @@ fn poll_sync(
         match event {
             SyncEvent::DisplayName(name) => {
                 if let Err(error) = repository.set_meta(db::ME_DISPLAY_NAME_KEY, &name) {
-                    app.set_error(format!("Could not record the signed-in name: {error:#}"));
+                    app.shell
+                        .set_error(format!("Could not record the signed-in name: {error:#}"));
                 }
-                app.set_me(resolve_me(Some(name), std::env::var("TICKET_TUI_ME").ok()));
+                app.shell
+                    .set_me(resolve_me(Some(name), std::env::var("TICKET_TUI_ME").ok()));
             }
             SyncEvent::Finished {
                 origin,
@@ -928,10 +947,10 @@ fn poll_sync(
                         count,
                     } => {
                         app.replace_prepared_tickets(prepared);
-                        app.finish_sync();
+                        app.shell.finish_sync();
                         stamp_database(app, repository);
                         if origin == PullOrigin::User {
-                            app.set_status(runtime.status_for(mode, count));
+                            app.shell.set_status(runtime.status_for(mode, count));
                         }
                     }
                     // Nothing moved in Azure DevOps, so nothing was written and
@@ -939,16 +958,16 @@ fn poll_sync(
                     // if another process wrote the file while this pull was out,
                     // the watcher is free to notice it now.
                     SyncOutcome::Unchanged => {
-                        app.finish_sync();
+                        app.shell.finish_sync();
                         if origin == PullOrigin::User {
-                            app.set_status("Nothing changed");
+                            app.shell.set_status("Nothing changed");
                         }
                     }
                     // A timer pull that keeps failing the same way says so in
                     // the table title rather than in a toast every minute.
                     SyncOutcome::Failed(error) => {
-                        if app.fail_sync(&error, origin == PullOrigin::User) {
-                            app.set_error(format!("Sync failed: {error}"));
+                        if app.shell.fail_sync(&error, origin == PullOrigin::User) {
+                            app.shell.set_error(format!("Sync failed: {error}"));
                         }
                     }
                     // Throttling is the service working as designed. Nothing is
@@ -961,7 +980,7 @@ fn poll_sync(
                 // request to be left alone, asked for twice.
                 if let Some(retry_after) = throttled.into_iter().chain(pause).max() {
                     let until = runtime.scheduler.pause(now, retry_after);
-                    app.pause_sync(until);
+                    app.shell.pause_sync(until);
                 }
             }
             SyncEvent::Edited(result) => match *result {
@@ -994,7 +1013,7 @@ fn poll_sync(
                     }
                     DetailsOutcome::Failed { key, message } => {
                         if runtime.details.fail(key) {
-                            app.set_error(format!(
+                            app.shell.set_error(format!(
                                 "Could not read comments and history: {message}"
                             ));
                         }
@@ -1067,9 +1086,9 @@ fn poll_watch(
     reloader: &mut ReloadEngine,
 ) -> bool {
     let signature = db::data_signature(repository.path());
-    if signature == app.data_signature
-        || app.reload_pending
-        || app.sync_pending
+    if signature == app.shell.data_signature
+        || app.shell.reload_pending
+        || app.shell.sync_pending
         || app.edits_pending()
         || app.comments_pending()
         || app.creates_pending()
@@ -1079,19 +1098,21 @@ fn poll_watch(
     {
         return false;
     }
-    app.mark_stale();
+    app.shell.mark_stale();
     start_reload(app, repository, reloader, "Database changed; reloading…");
     true
 }
 
 fn persist_session(app: &mut App, repository: &SqliteTicketRepository) -> bool {
-    if !app.session_dirty {
+    if !app.shell.session_dirty {
         return false;
     }
     let path = session::path_for(repository.path());
     match session::save(&path, &app.snapshot_session()) {
-        Ok(()) => app.session_dirty = false,
-        Err(error) => app.set_error(format!("Could not save session: {error:#}")),
+        Ok(()) => app.shell.session_dirty = false,
+        Err(error) => app
+            .shell
+            .set_error(format!("Could not save session: {error:#}")),
     }
     true
 }
@@ -1130,7 +1151,7 @@ impl MousePointerShape {
 }
 
 fn sync_mouse_pointer(app: &App, current: &mut MousePointerShape) {
-    let desired = mouse_pointer_for_hover(app.hovered(), app.divider_orientation());
+    let desired = mouse_pointer_for_hover(app.shell.hovered(), app.shell.divider_orientation());
     if desired == *current {
         return;
     }
@@ -1216,15 +1237,15 @@ fn poll_reload(
     let Some(result) = reloader.try_result() else {
         return false;
     };
-    app.reload_pending = false;
+    app.shell.reload_pending = false;
     match result {
         Ok(prepared) => {
             let count = prepared.ticket_count();
             app.replace_prepared_tickets(prepared);
             stamp_database(app, repository);
-            app.set_status(format!("Reloaded {count} tickets"));
+            app.shell.set_status(format!("Reloaded {count} tickets"));
         }
-        Err(error) => app.set_error(format!("Reload failed: {error}")),
+        Err(error) => app.shell.set_error(format!("Reload failed: {error}")),
     }
     true
 }
@@ -1518,8 +1539,9 @@ mod tests {
     fn synced_app(path: &Path, source: FakeAzure) -> (App, SqliteTicketRepository, SyncRuntime) {
         let repository = seeded_repository(path);
         let mut app = App::new(repository.load_all().unwrap());
-        app.configure_database(path.to_path_buf(), db::data_signature(path));
-        app.enable_sync();
+        app.shell
+            .configure_database(path.to_path_buf(), db::data_signature(path));
+        app.shell.enable_sync();
         let runtime = SyncRuntime {
             worker: Some(SyncHandle::spawn(path.to_path_buf(), Box::new(source)).unwrap()),
             scheduler: SyncScheduler::new(Some(Duration::from_secs(60))),
@@ -1541,7 +1563,7 @@ mod tests {
         runtime: &mut SyncRuntime,
     ) {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while app.sync_pending {
+        while app.shell.sync_pending {
             poll_sync(app, repository, runtime);
             assert!(Instant::now() < deadline, "the sync worker timed out");
             thread::yield_now();
@@ -1802,8 +1824,8 @@ mod tests {
         // The run that finds one opens offline: no worker, and the reason both
         // in the overlay and under the sync key.
         let mut app = App::new(repository.load_all().unwrap());
-        app.set_offline_reason(Some(message.clone()));
-        app.set_sync_source(Some(sync_source(&config, 60)));
+        app.shell.set_offline_reason(Some(message.clone()));
+        app.shell.set_sync_source(Some(sync_source(&config, 60)));
         let mut runtime = SyncRuntime {
             worker: None,
             scheduler: SyncScheduler::new(None),
@@ -1815,12 +1837,12 @@ mod tests {
         handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
 
         assert_eq!(
-            app.notification(),
+            app.shell.notification(),
             Some((message.as_str(), NotificationLevel::Error))
         );
-        assert!(!app.sync_pending, "there is no worker to pull with");
+        assert!(!app.shell.sync_pending, "there is no worker to pull with");
         assert_eq!(
-            app.sync_summary(),
+            app.shell.sync_summary(),
             format!("example-org/atlas every 60s · offline; {message}"),
             "the database overlay says where the rows would come from and why they do not"
         );
@@ -1847,10 +1869,10 @@ mod tests {
         );
 
         let mut app = App::new(vec![ticket(1)]);
-        app.enable_sync();
-        app.set_sync_source(Some(sync_source(&config, 300)));
+        app.shell.enable_sync();
+        app.shell.set_sync_source(Some(sync_source(&config, 300)));
         assert_eq!(
-            app.sync_summary(),
+            app.shell.sync_summary(),
             "example-org/atlas every 300s · scope ([System.ChangedDate] > @today-180) · not yet"
         );
     }
@@ -1885,7 +1907,7 @@ mod tests {
         runtime.scheduler.schedule_now(Instant::now());
 
         assert!(dispatch_due_pull(&mut app, &mut runtime));
-        assert_eq!(app.activity_label().as_deref(), Some("Syncing…"));
+        assert_eq!(app.shell.activity_label().as_deref(), Some("Syncing…"));
         assert!(
             !dispatch_due_pull(&mut app, &mut runtime),
             "the timer never queues a second pull behind one in flight"
@@ -1894,9 +1916,12 @@ mod tests {
         await_sync(&mut app, &mut repository, &mut runtime);
         assert_eq!(app.tickets().len(), 1);
         assert_eq!(app.tickets()[0].key.id, 9);
-        assert_eq!(app.activity_label().as_deref(), Some("Synced just now"));
+        assert_eq!(
+            app.shell.activity_label().as_deref(),
+            Some("Synced just now")
+        );
         assert!(
-            app.notification().is_none(),
+            app.shell.notification().is_none(),
             "a timer pull says so in the title, not in a toast"
         );
         assert!(
@@ -1915,17 +1940,18 @@ mod tests {
         repository
             .set_meta(db::WATERMARK_KEY, "2026-01-01T00:00:00Z")
             .unwrap();
-        app.configure_database(path.clone(), db::data_signature(&path));
+        app.shell
+            .configure_database(path.clone(), db::data_signature(&path));
 
         start_sync(&mut app, &mut runtime);
         await_sync(&mut app, &mut repository, &mut runtime);
 
         assert_eq!(
-            app.notification().map(|(message, _)| message),
+            app.shell.notification().map(|(message, _)| message),
             Some("Nothing changed")
         );
         assert_eq!(
-            app.activity_label().as_deref(),
+            app.shell.activity_label().as_deref(),
             Some("Synced just now"),
             "the pull still happened, so the title moves"
         );
@@ -1961,21 +1987,24 @@ mod tests {
         await_sync(&mut app, &mut repository, &mut runtime);
 
         assert_eq!(app.tickets().len(), 3, "a failed pull changes nothing");
-        let (message, level) = app.notification().expect("the first failure is reported");
+        let (message, level) = app
+            .shell
+            .notification()
+            .expect("the first failure is reported");
         assert!(message.contains("network unreachable"), "{message}");
         assert_eq!(level, NotificationLevel::Error);
-        assert_eq!(app.activity_label().as_deref(), Some("Sync failed"));
+        assert_eq!(app.shell.activity_label().as_deref(), Some("Sync failed"));
 
-        app.set_status("still browsing");
+        app.shell.set_status("still browsing");
         runtime.scheduler.schedule_now(Instant::now());
         dispatch_due_pull(&mut app, &mut runtime);
         await_sync(&mut app, &mut repository, &mut runtime);
         assert_eq!(
-            app.notification().map(|(message, _)| message),
+            app.shell.notification().map(|(message, _)| message),
             Some("still browsing"),
             "the same timer failure is not raised again"
         );
-        assert_eq!(app.activity_label().as_deref(), Some("Sync failed"));
+        assert_eq!(app.shell.activity_label().as_deref(), Some("Sync failed"));
     }
 
     #[test]
@@ -1984,7 +2013,7 @@ mod tests {
         let path = directory.path().join("tickets.sqlite3");
         let (mut app, mut repository, mut runtime) =
             synced_app(&path, FakeAzure::throttling(Duration::from_secs(120)));
-        app.set_status("still browsing");
+        app.shell.set_status("still browsing");
         let start = Instant::now();
         runtime.scheduler.schedule_now(start);
 
@@ -1992,13 +2021,16 @@ mod tests {
         await_sync(&mut app, &mut repository, &mut runtime);
 
         assert_eq!(app.tickets().len(), 3, "a throttled pull changes nothing");
-        assert_eq!(app.activity_label().as_deref(), Some("Sync paused 2m"));
         assert_eq!(
-            app.notification().map(|(message, _)| message),
+            app.shell.activity_label().as_deref(),
+            Some("Sync paused 2m")
+        );
+        assert_eq!(
+            app.shell.notification().map(|(message, _)| message),
             Some("still browsing"),
             "throttling is the service working, not an error to toast"
         );
-        let summary = app.sync_summary();
+        let summary = app.shell.sync_summary();
         assert!(summary.contains("paused for throttling"), "{summary}");
         assert!(summary.contains("next in 2m"), "{summary}");
 
@@ -2017,12 +2049,12 @@ mod tests {
             synced_app(&path, FakeAzure::returning(vec![ticket(9)]));
 
         start_sync(&mut app, &mut runtime);
-        assert!(app.sync_pending);
+        assert!(app.shell.sync_pending);
         assert!(runtime.scheduler.in_flight());
 
         start_sync(&mut app, &mut runtime);
         assert_eq!(
-            app.notification().map(|(message, _)| message),
+            app.shell.notification().map(|(message, _)| message),
             Some("Sync already in progress")
         );
     }
@@ -2040,11 +2072,14 @@ mod tests {
 
         handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
 
-        let (message, level) = app.notification().expect("the sync key answers offline");
+        let (message, level) = app
+            .shell
+            .notification()
+            .expect("the sync key answers offline");
         assert!(message.contains("--org"), "{message}");
         assert_eq!(level, NotificationLevel::Error);
-        assert!(!app.sync_pending);
-        assert_eq!(app.activity_label(), None);
+        assert!(!app.shell.sync_pending);
+        assert_eq!(app.shell.activity_label(), None);
         assert!(offline_status(true).contains("ticket-tui sync"));
         assert!(offline_status(false).contains("offline"));
     }
@@ -2083,7 +2118,7 @@ mod tests {
 
         handle_action(action, &mut app, &mut runtime, &failing_opener);
         assert_eq!(
-            app.notification().map(|(message, _)| message),
+            app.shell.notification().map(|(message, _)| message),
             Some("Creating Issue\u{2026}")
         );
         assert_eq!(app.tickets().len(), 3, "nothing shows until it is stored");
@@ -2133,7 +2168,7 @@ mod tests {
             "Honour Retry-After",
             "with everything still in it"
         );
-        let (message, level) = app.notification().expect("the refusal is reported");
+        let (message, level) = app.shell.notification().expect("the refusal is reported");
         assert!(message.contains("TF401320: rule error"), "{message}");
         assert_eq!(level, NotificationLevel::Error);
     }
@@ -2161,7 +2196,7 @@ mod tests {
         assert!(matches!(action, AppAction::Comment { .. }));
         handle_action(action, &mut app, &mut runtime, &failing_opener);
         assert_eq!(
-            app.notification().map(|(message, _)| message),
+            app.shell.notification().map(|(message, _)| message),
             Some("Posting comment on #3\u{2026}")
         );
         assert!(
@@ -2172,11 +2207,11 @@ mod tests {
 
         assert_eq!(app.comments_for(&selected), vec![&stored]);
         assert_eq!(
-            app.notification().map(|(message, _)| message),
+            app.shell.notification().map(|(message, _)| message),
             Some("Commented on #3")
         );
         assert_eq!(
-            app.data_signature,
+            app.shell.data_signature,
             db::data_signature(&path),
             "the worker wrote that row, so the watcher leaves the file alone"
         );
@@ -2187,7 +2222,7 @@ mod tests {
         handle_action(action, &mut app, &mut runtime, &failing_opener);
         await_comment(&mut app, &mut repository, &mut runtime);
 
-        let (message, level) = app.notification().expect("a refusal is reported");
+        let (message, level) = app.shell.notification().expect("a refusal is reported");
         assert!(message.contains("comment not posted"), "{message}");
         assert!(message.contains("read only"), "{message}");
         assert_eq!(level, NotificationLevel::Error);
@@ -2224,7 +2259,7 @@ mod tests {
 
         assert_eq!(app.ticket_by_key(&selected), Some(&stored));
         assert_eq!(
-            app.notification().map(|(message, _)| message),
+            app.shell.notification().map(|(message, _)| message),
             Some("Updated #3 · State → Done")
         );
         assert_eq!(
@@ -2331,7 +2366,7 @@ mod tests {
             "the row that was never checked is untouched"
         );
         assert_eq!(
-            app.notification().map(|(message, _)| message),
+            app.shell.notification().map(|(message, _)| message),
             Some("Updated 2 tickets · State → Done"),
             "one summary, not one toast a work item"
         );
@@ -2368,12 +2403,15 @@ mod tests {
             Some("Active".to_owned()),
             "the row goes back to what Azure DevOps still holds"
         );
-        let (message, level) = app.notification().expect("a conflict is always reported");
+        let (message, level) = app
+            .shell
+            .notification()
+            .expect("a conflict is always reported");
         assert!(message.contains("#3 changed in Azure DevOps"), "{message}");
         assert!(message.contains("State not saved"), "{message}");
         assert_eq!(level, NotificationLevel::Error);
         assert!(
-            app.sync_pending && runtime.scheduler.in_flight(),
+            app.shell.sync_pending && runtime.scheduler.in_flight(),
             "a conflict asks for the latest copy straight away"
         );
 
@@ -2403,7 +2441,7 @@ mod tests {
             "an edit that never left is not left showing"
         );
         assert!(!app.edits_pending());
-        let (message, level) = app.notification().unwrap();
+        let (message, level) = app.shell.notification().unwrap();
         assert!(message.contains("--org"), "{message}");
         assert_eq!(level, NotificationLevel::Error);
     }
@@ -2414,7 +2452,8 @@ mod tests {
         let path = directory.path().join("tickets.sqlite3");
         let repository = seeded_repository(&path);
         let mut app = App::new(repository.load_all().unwrap());
-        app.configure_database(path.clone(), db::data_signature(&path));
+        app.shell
+            .configure_database(path.clone(), db::data_signature(&path));
         let mut reloader = ReloadEngine::default();
         assert!(!poll_watch(&mut app, &repository, &mut reloader));
 
@@ -2425,15 +2464,16 @@ mod tests {
                 .unwrap();
         };
 
-        app.sync_pending = true;
+        app.shell.sync_pending = true;
         write(&[ticket(4)]);
         assert!(
             !poll_watch(&mut app, &repository, &mut reloader),
             "a pull in flight is writing the database itself"
         );
 
-        app.sync_pending = false;
-        app.configure_database(path.clone(), db::data_signature(&path));
+        app.shell.sync_pending = false;
+        app.shell
+            .configure_database(path.clone(), db::data_signature(&path));
         assert!(
             !poll_watch(&mut app, &repository, &mut reloader),
             "applying the pull records the signature it wrote"
@@ -2444,7 +2484,7 @@ mod tests {
             poll_watch(&mut app, &repository, &mut reloader),
             "another process writing the database still reloads"
         );
-        assert!(app.reload_pending);
+        assert!(app.shell.reload_pending);
     }
 
     /// Pumps the event loop's sync polling until the details fetch answers.
@@ -2611,7 +2651,7 @@ mod tests {
             "the row records the revision its details came from"
         );
         assert!(
-            app.notification().is_none(),
+            app.shell.notification().is_none(),
             "a fetch nobody asked for is silent"
         );
         assert!(
@@ -2630,7 +2670,8 @@ mod tests {
         let path = directory.path().join("tickets.sqlite3");
         let repository = seeded_repository(&path);
         let mut app = App::new(repository.load_all().unwrap());
-        app.configure_database(path.clone(), db::data_signature(&path));
+        app.shell
+            .configure_database(path.clone(), db::data_signature(&path));
         app.set_table_viewport(3);
         let mut publisher = AgentContextPublisher::new(&path);
         publisher.publish(&app).unwrap();
@@ -2763,7 +2804,7 @@ mod tests {
     fn an_untouched_file_writes_nothing_and_an_editor_that_fails_says_so() {
         let directory = tempdir().unwrap();
         let mut app = App::new(vec![ticket(3)]);
-        app.enable_sync();
+        app.shell.enable_sync();
         app.set_table_viewport(3);
         let key = app.selected_ticket().unwrap().key.clone();
         let mut runtime = offline_runtime();
@@ -2777,7 +2818,7 @@ mod tests {
         .unwrap();
         assert_eq!(unchanged, None, "a file nobody typed into is not an edit");
         apply_description_outcome(&mut app, &mut runtime, &key, Ok(unchanged));
-        let (message, level) = app.notification().expect("the run says what it did");
+        let (message, level) = app.shell.notification().expect("the run says what it did");
         assert!(message.contains("description unchanged"), "{message}");
         assert_eq!(level, NotificationLevel::Info);
         assert!(!app.edits_pending(), "nothing was sent");
@@ -2793,7 +2834,7 @@ mod tests {
             "an editor that exits non-zero saves nothing"
         );
         apply_description_outcome(&mut app, &mut runtime, &key, failed);
-        let (message, level) = app.notification().expect("a failure is reported");
+        let (message, level) = app.shell.notification().expect("a failure is reported");
         assert!(message.contains("description not saved"), "{message}");
         assert_eq!(level, NotificationLevel::Error);
         assert!(!app.edits_pending());
@@ -2844,7 +2885,7 @@ mod tests {
 
         assert_eq!(app.ticket_by_key(&key), Some(&stored));
         assert_eq!(
-            app.notification().map(|(message, _)| message),
+            app.shell.notification().map(|(message, _)| message),
             Some("Updated #3 · Description → updated")
         );
     }

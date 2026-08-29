@@ -24,12 +24,13 @@ impl App {
             return;
         };
         if self.bookmarks.remove(&key) {
-            self.set_status(format!("Removed bookmark {}", key.id));
+            self.shell
+                .set_status(format!("Removed bookmark {}", key.id));
         } else {
             self.bookmarks.insert(key.clone());
-            self.set_status(format!("Bookmarked {}", key.id));
+            self.shell.set_status(format!("Bookmarked {}", key.id));
         }
-        self.session_dirty = true;
+        self.shell.session_dirty = true;
         if self.parsed_query().filters.bookmarked {
             let selected = Some(key);
             if self.fuzzy_query().is_empty() {
@@ -102,7 +103,7 @@ impl App {
             self.recent.remove(0);
         }
         self.future.clear();
-        self.session_dirty = true;
+        self.shell.session_dirty = true;
     }
 
     pub(super) fn history_back(&mut self) {
@@ -113,7 +114,7 @@ impl App {
         self.future.push(current);
         let key = self.recent.last().cloned();
         self.restore_selection(key.as_ref());
-        self.session_dirty = true;
+        self.shell.session_dirty = true;
     }
 
     pub(super) fn history_forward(&mut self) {
@@ -122,7 +123,7 @@ impl App {
         };
         self.recent.push(key.clone());
         self.restore_selection(Some(&key));
-        self.session_dirty = true;
+        self.shell.session_dirty = true;
     }
 
     pub fn snapshot_session(&self) -> Session {
@@ -140,8 +141,8 @@ impl App {
             active_view: self.active_view.clone(),
             show_finished: self.show_finished,
             selected: self.selected_ticket().map(|ticket| ticket.key.clone()),
-            pane_split_wide: self.pane_split_wide,
-            pane_split_stacked: self.pane_split_stacked,
+            pane_split_wide: self.shell.pane_split_wide,
+            pane_split_stacked: self.shell.pane_split_stacked,
             stale_days: self.stale_days,
         }
     }
@@ -152,10 +153,10 @@ impl App {
         self.search_order = session.search_order;
         self.row_density = session.row_density;
         self.layout = TableLayout::from_session_columns(&session.columns, session.auto_hide);
-        self.pane_split_wide = session
+        self.shell.pane_split_wide = session
             .pane_split_wide
             .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
-        self.pane_split_stacked = session
+        self.shell.pane_split_stacked = session
             .pane_split_stacked
             .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
         self.stale_days = clamp_stale_days(session.stale_days);
@@ -179,6 +180,6 @@ impl App {
                 self.pending_selection = Some(selected);
             }
         }
-        self.session_dirty = false;
+        self.shell.session_dirty = false;
     }
 }

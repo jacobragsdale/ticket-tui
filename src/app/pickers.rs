@@ -239,24 +239,6 @@ pub(super) fn fuzzy_contains(haystack: &str, query: &str) -> bool {
 }
 
 impl App {
-    pub fn set_me(&mut self, me: Option<String>) {
-        self.me = me;
-    }
-
-    #[must_use]
-    pub fn me(&self) -> Option<&str> {
-        self.me.as_deref()
-    }
-
-    /// Whether a work item is assigned to the signed-in user.
-    #[must_use]
-    pub fn is_mine(&self, ticket: &Ticket) -> bool {
-        match (self.me.as_deref(), ticket.assigned_to.as_deref()) {
-            (Some(me), Some(assignee)) => same_text(me, assignee),
-            _ => false,
-        }
-    }
-
     /// The people a previous session cached, read out of the database as the
     /// TUI opens so the first assignee picker of the run is already complete.
     pub fn set_identities(&mut self, identities: Vec<Identity>) {
@@ -357,14 +339,15 @@ impl App {
     pub(super) fn open_state_picker(&mut self) {
         let scope = self.edit_scope();
         let Some(ticket) = self.selected_ticket() else {
-            self.set_error("No work item is selected");
+            self.shell.set_error("No work item is selected");
             return;
         };
         let current = ticket.state.clone();
         let work_item_type = ticket.work_item_type.clone();
         let options = self.states_for(&work_item_type);
         if options.is_empty() {
-            self.set_error(format!("No states are known for {work_item_type}"));
+            self.shell
+                .set_error(format!("No states are known for {work_item_type}"));
             return;
         }
         let index = options
@@ -429,7 +412,7 @@ impl App {
     /// priority the work item already has under the cursor.
     pub(super) fn open_priority_picker(&mut self) {
         let Some(ticket) = self.selected_ticket() else {
-            self.set_error("No work item is selected");
+            self.shell.set_error("No work item is selected");
             return;
         };
         let current = ticket.priority;
@@ -502,6 +485,7 @@ impl App {
             me: false,
         }];
         if let Some(me) = self
+            .shell
             .me
             .as_deref()
             .map(str::trim)
@@ -579,7 +563,7 @@ impl App {
     pub(super) fn open_assignee_picker(&mut self) -> AppAction {
         let scope = self.edit_scope();
         let Some(ticket) = self.selected_ticket() else {
-            self.set_error("No work item is selected");
+            self.shell.set_error("No work item is selected");
             return AppAction::None;
         };
         let current = ticket.assigned_to.clone();
@@ -757,12 +741,13 @@ impl App {
     /// built from the rows already loaded, so the picker opens at once.
     pub(super) fn open_parent_picker(&mut self) {
         let Some(child) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
-            self.set_error("No work item is selected");
+            self.shell.set_error("No work item is selected");
             return;
         };
         let candidates = self.parent_candidates(&child);
         if candidates.is_empty() {
-            self.set_error("No other work item is loaded to file this one under");
+            self.shell
+                .set_error("No other work item is loaded to file this one under");
             return;
         }
         let current = self.parent_of(&child);
@@ -963,7 +948,7 @@ impl App {
             }
         };
         let Some(ticket) = self.selected_ticket() else {
-            self.set_error("No work item is selected");
+            self.shell.set_error("No work item is selected");
             return AppAction::None;
         };
         let current = match kind {

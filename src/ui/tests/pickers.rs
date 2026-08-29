@@ -9,7 +9,7 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
         "To Do",
         "2026-03-03T00:00:00Z",
     )]);
-    app.enable_sync();
+    app.shell.enable_sync();
 
     app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
     assert_eq!(app.mode, AppMode::Form);
@@ -50,6 +50,7 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
         .and_then(|form| form.index_of(FormFieldId::Tags))
         .expect("the form has a Tags row");
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(
             |target| matches!(target, PointerTarget::FormField { index } if *index == tags),
@@ -69,6 +70,7 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
         .and_then(|form| form.index_of(FormFieldId::Iteration))
         .expect("the form has an Iteration row");
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(
             |target| matches!(target, PointerTarget::FormField { index } if *index == iteration),
@@ -91,6 +93,7 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
     render_text(90, 24, &mut app);
 
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::CancelForm))
         .map(|region| (region.rect.x, region.rect.y))
@@ -109,7 +112,7 @@ fn the_child_form_names_the_parent_it_is_filing_under_rather_than_its_id() {
         "To Do",
         "2026-03-03T00:00:00Z",
     )]);
-    app.enable_sync();
+    app.shell.enable_sync();
 
     app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
     assert_eq!(app.mode, AppMode::Form);
@@ -135,7 +138,7 @@ fn the_title_prompt_renders_a_prefilled_field_with_save_and_cancel() {
         "To Do",
         "2026-03-03T00:00:00Z",
     )]);
-    app.enable_sync();
+    app.shell.enable_sync();
 
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -153,6 +156,7 @@ fn the_title_prompt_renders_a_prefilled_field_with_save_and_cancel() {
     );
 
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::CancelPrompt))
         .map(|region| (region.rect.x, region.rect.y))
@@ -178,7 +182,7 @@ fn the_title_prompt_renders_a_prefilled_field_with_save_and_cancel() {
 fn clickable_assignees(app: &App) -> usize {
     (0..)
         .take_while(|index| {
-            app.hit_regions
+            app.shell.hit_regions
                 .find_target(|target| {
                     matches!(target, PointerTarget::AssigneeOption { index: at } if at == index)
                 })
@@ -206,8 +210,8 @@ fn the_assignee_picker_renders_a_filter_field_over_the_people_it_offers() {
     );
     second.assigned_to = Some("Priya Nair".into());
     let mut app = App::new(vec![first, second]);
-    app.enable_sync();
-    app.set_me(Some("Jacob Ragsdale".into()));
+    app.shell.enable_sync();
+    app.shell.set_me(Some("Jacob Ragsdale".into()));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     assert_eq!(app.mode, AppMode::AssigneePicker);
@@ -237,6 +241,7 @@ fn the_assignee_picker_renders_a_filter_field_over_the_people_it_offers() {
     assert_eq!(clickable_assignees(&app), 1, "{filtered}");
 
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::AssigneeOption { index: 0 }))
         .map(|region| (region.rect.x, region.rect.y))
@@ -275,7 +280,7 @@ fn the_parent_picker_renders_the_work_items_that_could_hold_this_one() {
         ),
     ]);
     app.set_workspace_graph(parent_child_graph());
-    app.enable_sync();
+    app.shell.enable_sync();
     app.set_table_viewport(4);
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.selected_ticket().map(|item| item.key.id), Some(10_002));
@@ -321,7 +326,7 @@ fn the_iteration_picker_renders_an_indented_tree_with_dates_and_the_current_spri
     );
     item.iteration_path = "development\\Q3".into();
     let mut app = App::new(vec![item]);
-    app.enable_sync();
+    app.shell.enable_sync();
     let today = Timestamp::now().calendar_date();
     let day = || Timestamp::parse(&format!("{today}T00:00:00Z")).ok();
     app.set_classification_nodes(
@@ -378,6 +383,7 @@ fn the_iteration_picker_renders_an_indented_tree_with_dates_and_the_current_spri
     assert_eq!(clickable_nodes(&app), 1, "{filtered}");
 
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::NodeOption { index: 0 }))
         .map(|region| (region.rect.x, region.rect.y))
@@ -398,7 +404,7 @@ fn the_iteration_picker_renders_an_indented_tree_with_dates_and_the_current_spri
 fn clickable_nodes(app: &App) -> usize {
     (0..)
         .take_while(|index| {
-            app.hit_regions
+            app.shell.hit_regions
                 .find_target(|target| {
                     matches!(target, PointerTarget::NodeOption { index: at } if at == index)
                 })
@@ -416,7 +422,7 @@ fn the_edit_menu_and_the_state_picker_render_their_rows_and_state_colours() {
         "To Do",
         "2026-03-03T00:00:00Z",
     )]);
-    app.enable_sync();
+    app.shell.enable_sync();
     let mut catalog = StateCatalog::default();
     catalog.insert(
         "Issue",
@@ -435,6 +441,7 @@ fn the_edit_menu_and_the_state_picker_render_their_rows_and_state_colours() {
     assert!(menu.contains('S'), "the menu names the key that skips it");
 
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::EditMenuRow { index: 0 }))
         .map(|region| (region.rect.x, region.rect.y))
@@ -446,7 +453,7 @@ fn the_edit_menu_and_the_state_picker_render_their_rows_and_state_colours() {
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let rows: Vec<(u16, u16)> = (0..3)
         .map(|index| {
-            app.hit_regions
+            app.shell.hit_regions
                 .find_target(|target| {
                     matches!(target, PointerTarget::StateOption { index: at } if *at == index)
                 })
@@ -515,7 +522,7 @@ fn a_picker_over_checked_rows_counts_them_in_its_title() {
             "2026-03-02T00:00:00Z",
         ),
     ]);
-    app.enable_sync();
+    app.shell.enable_sync();
     let mut catalog = StateCatalog::default();
     catalog.insert(
         "Issue",
@@ -563,7 +570,7 @@ fn clicking_a_field_opens_its_editor_anchored_under_the_value() {
         click(&mut app, rect.x, rect.y);
         assert_eq!(app.mode, mode, "clicking {field:?}");
         assert_eq!(
-            app.overlay_anchor,
+            app.shell.overlay_anchor,
             OverlayAnchor::Below(rect),
             "{field:?} anchors its editor to its own value"
         );
@@ -590,6 +597,7 @@ fn an_anchored_dropdown_is_drawn_under_the_field_and_dismissed_by_a_click_away()
         "the dropdown's corner sits under the value"
     );
     let first = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::AssigneeOption { index: 0 }))
         .expect("the first candidate should be clickable")
@@ -659,17 +667,17 @@ fn enter_opens_the_field_under_the_pointer_and_still_opens_the_link() {
     let mut app = App::new(vec![ticket()]);
     render_text(130, 40, &mut app);
     let field = edit_field_rect(&app, EditableField::Priority);
-    app.focus = Focus::Details;
+    app.shell.focus = Focus::Details;
     app.handle_mouse(mouse(MouseEventKind::Moved, field.x, field.y));
     let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(action, crate::app::AppAction::None);
     assert_eq!(app.mode, AppMode::PriorityPicker);
-    assert_eq!(app.overlay_anchor, OverlayAnchor::Below(field));
+    assert_eq!(app.shell.overlay_anchor, OverlayAnchor::Below(field));
 
     let mut app = App::new(vec![ticket()]);
     render_text(130, 40, &mut app);
     let url = detail_url(&app).expect("detail url");
-    app.focus = Focus::Details;
+    app.shell.focus = Focus::Details;
     app.handle_mouse(mouse(MouseEventKind::Moved, url.x, url.y));
     assert!(matches!(
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -681,7 +689,7 @@ fn enter_opens_the_field_under_the_pointer_and_still_opens_the_link() {
 fn an_anchored_picker_writes_the_same_edit_as_the_keyboard_one() {
     let mut keyboard = issue_app();
     keyboard.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE));
-    assert_eq!(keyboard.overlay_anchor, OverlayAnchor::Centered);
+    assert_eq!(keyboard.shell.overlay_anchor, OverlayAnchor::Centered);
     keyboard.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     let expected = keyboard.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(

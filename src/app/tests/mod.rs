@@ -85,7 +85,7 @@ fn focus_field(app: &mut App, id: FormFieldId) {
 /// An app that can write, with one work item to hang new work under.
 fn creating_app() -> App {
     let mut app = App::new(vec![ticket(10, "Sync timer", "2026-01-01T00:00:00Z")]);
-    app.enable_sync();
+    app.shell.enable_sync();
     app
 }
 
@@ -207,7 +207,7 @@ fn reparent_app() -> App {
         ],
         ..TicketGraph::default()
     });
-    app.enable_sync();
+    app.shell.enable_sync();
     app.set_table_viewport(5);
     app.jump_to_ticket(&family_key(3));
     app
@@ -240,7 +240,7 @@ fn editing_app() -> App {
         ticket(2, "Beta", "2026-02-01T00:00:00Z"),
         ticket(3, "Gamma", "2026-03-01T00:00:00Z"),
     ]);
-    app.enable_sync();
+    app.shell.enable_sync();
     app.set_table_viewport(3);
     app
 }
@@ -301,7 +301,7 @@ fn picker_app() -> App {
         ticket.state = "To Do".into();
     }
     let mut app = App::new(tickets);
-    app.enable_sync();
+    app.shell.enable_sync();
     app.set_table_viewport(3);
     let mut catalog = StateCatalog::default();
     catalog.insert("Task", task_states());
@@ -339,7 +339,7 @@ fn edit_app() -> App {
         ticket(2, "Beta", "2026-02-01T00:00:00Z"),
         gamma,
     ]);
-    app.enable_sync();
+    app.shell.enable_sync();
     app.set_table_viewport(3);
     app
 }

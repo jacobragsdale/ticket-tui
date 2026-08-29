@@ -9,6 +9,7 @@ fn facet_pills_open_their_menu_and_the_filter_overlay_maps_scrolled_clicks() {
     assert!(text.contains("▾"));
 
     let pill = app
+        .shell
         .hit_regions
         .facet_pill(FacetTarget::Field(FilterField::Type))
         .expect("type pill should be clickable");
@@ -24,6 +25,7 @@ fn facet_pills_open_their_menu_and_the_filter_overlay_maps_scrolled_clicks() {
     let overlay = render_text(110, 24, &mut app);
     assert!(overlay.contains("Filters"));
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::FilterRow { index: 2 }))
         .map(|region| (region.rect.x, region.rect.y))
@@ -48,6 +50,7 @@ fn the_chip_bar_says_finished_work_is_hidden_and_its_cross_puts_it_back() {
     );
 
     let chip = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::ShowFinished))
         .map(|region| region.rect)
@@ -137,6 +140,7 @@ fn the_sprint_summary_draws_its_grid_and_a_clicked_row_filters_the_table() {
     );
 
     let (x, y) = app
+        .shell
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::SummaryRow { index: 1 }))
         .map(|region| (region.rect.x, region.rect.y))

@@ -67,8 +67,8 @@ pub(super) fn render_state_picker(frame: &mut Frame<'_>, app: &mut App) {
             ])
         })
         .collect();
-    let width = overlay_width(app.overlay_anchor, &rows, 40, frame.area());
-    let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
+    let width = overlay_width(app.shell.overlay_anchor, &rows, 40, frame.area());
+    let area = overlay_area(frame.area(), app.shell.overlay_anchor, width, height);
     let title = format!(" State \u{b7} {} ", app.state_picker.scope.label());
     let inner = render_modal_frame(frame, app, area, &title);
     render_list_overlay(
@@ -109,8 +109,8 @@ pub(super) fn render_priority_picker(frame: &mut Frame<'_>, app: &mut App) {
             ])
         })
         .collect();
-    let width = overlay_width(app.overlay_anchor, &rows, 40, frame.area());
-    let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
+    let width = overlay_width(app.shell.overlay_anchor, &rows, 40, frame.area());
+    let area = overlay_area(frame.area(), app.shell.overlay_anchor, width, height);
     let title = format!(" Priority \u{b7} #{} ", app.priority_picker.id);
     let inner = render_modal_frame(frame, app, area, &title);
     render_list_overlay(
@@ -171,8 +171,8 @@ pub(super) fn render_assignee_picker(frame: &mut Frame<'_>, app: &mut App) {
             Line::from(spans)
         })
         .collect();
-    let width = overlay_width(app.overlay_anchor, &rows, 52, frame.area());
-    let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
+    let width = overlay_width(app.shell.overlay_anchor, &rows, 52, frame.area());
+    let area = overlay_area(frame.area(), app.shell.overlay_anchor, width, height);
     let title = format!(
         " Assignee \u{b7} {} ",
         app.scope_label(app.assignee_picker.scope)
@@ -246,8 +246,8 @@ pub(super) fn render_parent_picker(frame: &mut Frame<'_>, app: &mut App) {
             ])
         })
         .collect();
-    let width = overlay_width(app.overlay_anchor, &rows, 64, frame.area());
-    let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
+    let width = overlay_width(app.shell.overlay_anchor, &rows, 64, frame.area());
+    let area = overlay_area(frame.area(), app.shell.overlay_anchor, width, height);
     let title = format!(" Parent of #{} ", app.parent_picker.child.id);
     let inner = render_modal_frame(frame, app, area, &title);
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
@@ -322,8 +322,8 @@ pub(super) fn render_node_picker(frame: &mut Frame<'_>, app: &mut App) {
             Line::from(spans)
         })
         .collect();
-    let width = overlay_width(app.overlay_anchor, &rows, 56, frame.area());
-    let area = overlay_area(frame.area(), app.overlay_anchor, width, height);
+    let width = overlay_width(app.shell.overlay_anchor, &rows, 56, frame.area());
+    let area = overlay_area(frame.area(), app.shell.overlay_anchor, width, height);
     let title = format!(
         " {} \u{b7} {} ",
         kind.label(),
@@ -377,8 +377,8 @@ pub(super) fn render_prompt(frame: &mut Frame<'_>, app: &mut App) {
         return;
     };
     let measured = [Line::from(format!("{}: {text}", field.label()))];
-    let width = overlay_width(app.overlay_anchor, &measured, 64, frame.area());
-    let area = overlay_area(frame.area(), app.overlay_anchor, width, 5);
+    let width = overlay_width(app.shell.overlay_anchor, &measured, 64, frame.area());
+    let area = overlay_area(frame.area(), app.shell.overlay_anchor, width, 5);
     let title = format!(" {} ", field.title(id));
     let inner = render_modal_frame(frame, app, area, &title);
     let chunks = Layout::vertical([
@@ -402,7 +402,7 @@ pub(super) fn render_prompt(frame: &mut Frame<'_>, app: &mut App) {
         chunks[0].width.saturating_sub(offset),
         1,
     );
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         editable,
         PointerTarget::PromptInput,
         PointerLayer::Modal,
@@ -562,7 +562,7 @@ pub(super) fn render_form(frame: &mut Frame<'_>, app: &mut App) {
         let label_rect = Rect::new(rows.x, y, FORM_LABEL_WIDTH.saturating_add(2), 1);
         let value_rect = Rect::new(value_x, y, value_width, 1);
         for rect in [label_rect, value_rect] {
-            app.hit_regions.push(region(
+            app.shell.hit_regions.push(region(
                 rect,
                 PointerTarget::FormField { index },
                 PointerLayer::Modal,
@@ -672,7 +672,7 @@ pub(super) fn render_delete_confirm(frame: &mut Frame<'_>, app: &mut App) {
     let inner = render_modal_frame(frame, app, area, " Delete ");
     let chunks = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).split(inner);
     frame.render_widget(body, chunks[0]);
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         chunks[0],
         PointerTarget::OverlayBody,
         PointerLayer::Modal,

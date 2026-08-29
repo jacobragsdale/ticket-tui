@@ -150,7 +150,7 @@ fn my_own_work_items_stand_out_in_the_table_and_the_details_pane() {
         mine,
         theirs,
     ]);
-    app.set_me(Some("Avery Chen".into()));
+    app.shell.set_me(Some("Avery Chen".into()));
 
     let mut terminal = Terminal::new(TestBackend::new(200, 20)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();

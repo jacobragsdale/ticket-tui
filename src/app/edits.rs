@@ -360,7 +360,7 @@ impl App {
     /// it, and a refusal puts the row back. Every edit feature goes this way.
     pub fn edit_selected(&mut self, edit: FieldEdit) -> AppAction {
         let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
-            self.set_error("No work item is selected");
+            self.shell.set_error("No work item is selected");
             return AppAction::None;
         };
         self.edit_ticket(&key, edit)
@@ -373,7 +373,8 @@ impl App {
         match self.begin_edit(key, edit, undo) {
             Ok(request) => AppAction::Edit(vec![request]),
             Err(reason) => {
-                self.set_error(format!("#{} {label} not saved: {reason}", key.id));
+                self.shell
+                    .set_error(format!("#{} {label} not saved: {reason}", key.id));
                 AppAction::None
             }
         }
@@ -409,7 +410,8 @@ impl App {
         }
         let total = requests.len() + failures.len();
         if total == 0 {
-            self.set_status(format!("Nothing to change · {}", edit.summary()));
+            self.shell
+                .set_status(format!("Nothing to change · {}", edit.summary()));
             return AppAction::None;
         }
         let bulk = BulkEdit {
@@ -421,7 +423,7 @@ impl App {
         };
         if bulk.outstanding.is_empty() {
             // Nothing could even be asked, so the whole change is already told.
-            self.set_error(bulk.notification());
+            self.shell.set_error(bulk.notification());
             return AppAction::None;
         }
         self.bulk_edits.push(bulk);
@@ -437,7 +439,7 @@ impl App {
         edit: FieldEdit,
         undo: UndoRole,
     ) -> Result<EditRequest, String> {
-        if let Some(reason) = self.write_refusal() {
+        if let Some(reason) = self.shell.write_refusal() {
             // Nothing to write to, so the row is left exactly as it is.
             return Err(reason);
         }
@@ -527,7 +529,7 @@ impl App {
             }
         }
         if !self.record_bulk_outcome(&key, None) {
-            self.set_status(landed);
+            self.shell.set_status(landed);
         }
     }
 
@@ -587,7 +589,7 @@ impl App {
     /// no longer to be trusted.
     pub fn undo_last_edit(&mut self) -> AppAction {
         let Some(entry) = self.undo_stack.pop() else {
-            self.set_status("Nothing to undo");
+            self.shell.set_status("Nothing to undo");
             return AppAction::None;
         };
         let headline = entry.headline();
@@ -613,7 +615,7 @@ impl App {
             // Nothing could even be asked, so nothing was taken back: the
             // change goes back on the stack, to try again once whatever is in
             // the way has cleared.
-            self.set_error(bulk.notification());
+            self.shell.set_error(bulk.notification());
             self.undo_stack.push(entry);
             return AppAction::None;
         }
@@ -633,7 +635,7 @@ impl App {
             self.set_ticket(index, pending.original);
         }
         if !self.record_bulk_outcome(&rejection.key, Some(rejection.failure())) {
-            self.set_error(rejection.notification());
+            self.shell.set_error(rejection.notification());
         }
     }
 
@@ -656,26 +658,11 @@ impl App {
         let bulk = self.bulk_edits.remove(index);
         let message = bulk.notification();
         if bulk.failed() {
-            self.set_error(message);
+            self.shell.set_error(message);
         } else {
-            self.set_status(message);
+            self.shell.set_status(message);
         }
         true
-    }
-
-    /// Why the TUI cannot write anything, told to whoever tries to.
-    pub fn set_offline_reason(&mut self, reason: Option<String>) {
-        self.offline_reason = reason;
-    }
-
-    /// Why nothing can be written right now, and `None` while Azure DevOps is
-    /// configured. Every editor asks this before it changes anything.
-    pub(super) fn write_refusal(&self) -> Option<String> {
-        (!self.sync_enabled).then(|| {
-            self.offline_reason
-                .clone()
-                .unwrap_or_else(|| "no Azure DevOps organization is configured".to_owned())
-        })
     }
 
     /// Puts the optimistic copies back on top of a pull that finished while an
@@ -764,11 +751,12 @@ impl App {
     /// family and hangs under nothing.
     pub(super) fn remove_parent(&mut self) -> AppAction {
         let Some(child) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
-            self.set_error("No work item is selected");
+            self.shell.set_error("No work item is selected");
             return AppAction::None;
         };
         if self.parent_of(&child).is_none() {
-            self.set_error(format!("#{} has no parent to remove", child.id));
+            self.shell
+                .set_error(format!("#{} has no parent to remove", child.id));
             return AppAction::None;
         }
         self.begin_reparent(&child, None)
@@ -783,19 +771,21 @@ impl App {
         child: &TicketKey,
         new_parent: Option<TicketKey>,
     ) -> AppAction {
-        if let Some(reason) = self.write_refusal() {
-            self.set_error(format!("#{} not moved: {reason}", child.id));
+        if let Some(reason) = self.shell.write_refusal() {
+            self.shell
+                .set_error(format!("#{} not moved: {reason}", child.id));
             return AppAction::None;
         }
         if self.pending_reparents.contains_key(child) {
-            self.set_error(format!("#{}: an earlier move is still in flight", child.id));
+            self.shell
+                .set_error(format!("#{}: an earlier move is still in flight", child.id));
             return AppAction::None;
         }
         let previous = self.parent_of(child);
         self.graph.reparent(child, new_parent.as_ref());
         self.refresh_child_progress();
         self.pending_reparents.insert(child.clone(), previous);
-        self.set_status(match new_parent.as_ref() {
+        self.shell.set_status(match new_parent.as_ref() {
             Some(parent) => format!("Moving #{} under #{}\u{2026}", child.id, parent.id),
             None => format!("Detaching #{}\u{2026}", child.id),
         });
@@ -828,7 +818,7 @@ impl App {
             self.resettle_rows();
         }
         self.refresh_child_progress();
-        self.set_status(match parent {
+        self.shell.set_status(match parent {
             Some(parent) => format!("Moved #{} under #{}", key.id, parent.id),
             None => format!("Detached #{}", key.id),
         });
@@ -846,7 +836,7 @@ impl App {
         } else {
             ""
         };
-        self.set_error(format!(
+        self.shell.set_error(format!(
             "#{} not moved: {}{tail}",
             rejection.key.id, rejection.message
         ));
@@ -857,7 +847,7 @@ impl App {
     /// named-view editor.
     pub(super) fn open_prompt(&mut self, field: PromptField) {
         let Some(ticket) = self.selected_ticket() else {
-            self.set_error("No work item is selected");
+            self.shell.set_error("No work item is selected");
             return;
         };
         let original = match field {
@@ -911,11 +901,13 @@ impl App {
         if edited.is_empty() {
             match field {
                 PromptField::Title => {
-                    self.set_error(format!("#{} title cannot be empty", prompt.id));
+                    self.shell
+                        .set_error(format!("#{} title cannot be empty", prompt.id));
                     return AppAction::None;
                 }
                 PromptField::Comment => {
-                    self.set_error(format!("#{} comment cannot be empty", prompt.id));
+                    self.shell
+                        .set_error(format!("#{} comment cannot be empty", prompt.id));
                     return AppAction::None;
                 }
                 PromptField::Tags => {}
@@ -940,13 +932,14 @@ impl App {
     /// here.
     pub(super) fn edit_description(&mut self) -> AppAction {
         let Some(ticket) = self.selected_ticket() else {
-            self.set_error("No work item is selected");
+            self.shell.set_error("No work item is selected");
             return AppAction::None;
         };
         let key = ticket.key.clone();
         let html = ticket.description_html.clone();
-        if let Some(reason) = self.write_refusal() {
-            self.set_error(format!("#{} description not saved: {reason}", key.id));
+        if let Some(reason) = self.shell.write_refusal() {
+            self.shell
+                .set_error(format!("#{} description not saved: {reason}", key.id));
             return AppAction::None;
         }
         AppAction::EditDescription { key, html }
@@ -958,16 +951,17 @@ impl App {
     /// turned out never to have been posted is worse than a moment's wait.
     pub fn comment_selected(&mut self, text: String) -> AppAction {
         let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
-            self.set_error("No work item is selected");
+            self.shell.set_error("No work item is selected");
             return AppAction::None;
         };
-        let refusal = self.write_refusal().or_else(|| {
+        let refusal = self.shell.write_refusal().or_else(|| {
             self.pending_comments
                 .contains(&key)
                 .then(|| "an earlier comment is still in flight".to_owned())
         });
         if let Some(reason) = refusal {
-            self.set_error(format!("#{} comment not posted: {reason}", key.id));
+            self.shell
+                .set_error(format!("#{} comment not posted: {reason}", key.id));
             return AppAction::None;
         }
         self.pending_comments.insert(key.clone());
@@ -988,14 +982,15 @@ impl App {
         self.pending_comments.remove(&comment.ticket);
         let id = comment.ticket.id;
         self.graph.add_comment(comment);
-        self.set_status(format!("Commented on #{id}"));
+        self.shell.set_status(format!("Commented on #{id}"));
     }
 
     /// A comment that never landed. Nothing was shown for it and nothing is
     /// stored, so only the notification is left to say so.
     pub fn reject_comment(&mut self, key: &TicketKey, message: &str) {
         self.pending_comments.remove(key);
-        self.set_error(format!("#{} comment not posted: {message}", key.id));
+        self.shell
+            .set_error(format!("#{} comment not posted: {message}", key.id));
     }
 
     /// Who a typed assignee names. A name the database already knows is written
@@ -1030,8 +1025,8 @@ impl App {
     /// checked, and over the row under the cursor otherwise — the rule the
     /// bulk editors already follow.
     pub(super) fn open_delete_confirm(&mut self) {
-        if let Some(reason) = self.write_refusal() {
-            self.set_error(reason);
+        if let Some(reason) = self.shell.write_refusal() {
+            self.shell.set_error(reason);
             return;
         }
         let checked = self.checked_keys();
@@ -1044,11 +1039,12 @@ impl App {
                 .collect()
         };
         if keys.is_empty() {
-            self.set_error("No work item is selected");
+            self.shell.set_error("No work item is selected");
             return;
         }
         if keys.iter().any(|key| self.pending_deletes.contains(key)) {
-            self.set_error("That work item is already being deleted");
+            self.shell
+                .set_error("That work item is already being deleted");
             return;
         }
         // A child going the same way is not an orphan, so a delete of a parent
@@ -1071,7 +1067,7 @@ impl App {
             children,
         });
         self.mode = AppMode::ConfirmDelete;
-        self.overlay_anchor = OverlayAnchor::Centered;
+        self.shell.overlay_anchor = OverlayAnchor::Centered;
     }
 
     pub(super) fn handle_delete_confirm_key(&mut self, key: KeyEvent) -> AppAction {
@@ -1100,7 +1096,9 @@ impl App {
         let keys = confirm.keys;
         match keys.as_slice() {
             [] => return AppAction::None,
-            [key] => self.set_status(format!("Deleting #{}\u{2026}", key.id)),
+            [key] => self
+                .shell
+                .set_status(format!("Deleting #{}\u{2026}", key.id)),
             keys => {
                 // The same tracker a bulk edit uses, so a checked-set delete
                 // speaks once when the last answer is in rather than once a row.
@@ -1111,7 +1109,8 @@ impl App {
                     failures: Vec::new(),
                     outstanding: keys.iter().cloned().collect(),
                 });
-                self.set_status(format!("Deleting {} tickets\u{2026}", keys.len()));
+                self.shell
+                    .set_status(format!("Deleting {} tickets\u{2026}", keys.len()));
             }
         }
         self.pending_deletes.extend(keys.iter().cloned());
@@ -1141,7 +1140,7 @@ impl App {
         self.pending_deletes.remove(key);
         self.forget_ticket(key);
         if !self.record_bulk_outcome(key, None) {
-            self.set_status(format!(
+            self.shell.set_status(format!(
                 "Deleted #{} \u{b7} restore it from the Azure DevOps recycle bin",
                 key.id
             ));
@@ -1153,7 +1152,8 @@ impl App {
     pub fn reject_delete(&mut self, key: &TicketKey, message: &str) {
         self.pending_deletes.remove(key);
         if !self.record_bulk_outcome(key, Some(format!("#{} failed: {message}", key.id))) {
-            self.set_error(format!("#{} not deleted: {message}", key.id));
+            self.shell
+                .set_error(format!("#{} not deleted: {message}", key.id));
         }
     }
 

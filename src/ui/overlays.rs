@@ -138,7 +138,7 @@ pub(super) fn render_help_popup(frame: &mut Frame<'_>, app: &mut App) {
         paragraph.scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
         area,
     );
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         inner,
         PointerTarget::OverlayBody,
         PointerLayer::Modal,
@@ -182,7 +182,7 @@ pub(super) fn render_chips(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         if x.saturating_add(width) > area.x.saturating_add(area.width) {
             break;
         }
-        app.hit_regions.push(region(
+        app.shell.hit_regions.push(region(
             Rect::new(x, area.y, width, 1),
             target,
             PointerLayer::Base,
@@ -214,7 +214,7 @@ pub(super) fn render_facet_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             break;
         }
         let rect = Rect::new(x, area.y, width, 1);
-        app.hit_regions.push(region(
+        app.shell.hit_regions.push(region(
             rect,
             PointerTarget::FacetPill(FacetTarget::Field(*field)),
             PointerLayer::Base,
@@ -236,7 +236,7 @@ pub(super) fn render_facet_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect)
             format!(" +{more_count} ")
         };
         let width = u16::try_from(more.chars().count()).unwrap_or(u16::MAX);
-        app.hit_regions.push(region(
+        app.shell.hit_regions.push(region(
             Rect::new(x, area.y, width.min(remaining), 1),
             PointerTarget::FacetPill(FacetTarget::More),
             PointerLayer::Base,
@@ -348,7 +348,7 @@ pub(super) fn render_list_overlay(frame: &mut Frame<'_>, app: &mut App, overlay:
     let hit_width = row_hit_width.unwrap_or_else(|| area.width.saturating_sub(1));
     let visible = scroll..content.min(scroll.saturating_add(viewport));
     for (logical, y) in visible.clone().zip(area.y..) {
-        app.hit_regions.push(region(
+        app.shell.hit_regions.push(region(
             Rect::new(area.x, y, hit_width, 1),
             target(logical),
             layer,
@@ -375,7 +375,7 @@ pub(super) fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
         return;
     };
     let facets = app.facets_for(field);
-    let pill = app.hit_regions.facet_pill(FacetTarget::Field(field));
+    let pill = app.shell.hit_regions.facet_pill(FacetTarget::Field(field));
     let width = 36.min(frame.area().width.saturating_sub(2)).max(20);
     let height = u16::try_from(facets.len().saturating_add(2))
         .unwrap_or(u16::MAX)
@@ -393,7 +393,7 @@ pub(super) fn render_facet_menu(frame: &mut Frame<'_>, app: &mut App) {
     if area.y.saturating_add(area.height) > frame.area().height {
         area.y = area.y.saturating_sub(area.height.saturating_add(1));
     }
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         frame.area(),
         PointerTarget::DismissFacet,
         PointerLayer::Popup,
@@ -692,7 +692,7 @@ pub(super) fn render_views_overlay(frame: &mut Frame<'_>, app: &mut App) {
             chunks[0].width.saturating_sub(6),
             1,
         );
-        app.hit_regions.push(region(
+        app.shell.hit_regions.push(region(
             field,
             PointerTarget::ViewName,
             PointerLayer::Modal,
@@ -886,7 +886,7 @@ pub(super) fn terminate_underline(mut line: Line<'static>) -> Line<'static> {
 
 pub(super) fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
     let area = centered_rect(frame.area(), 62, 12);
-    let stale = if app.stale { "stale" } else { "current" };
+    let stale = if app.shell.stale { "stale" } else { "current" };
     // What the difference between the count and the total is made of, so the
     // rows the table is leaving out are a number rather than a suspicion.
     let finished = if app.finished_hidden() {
@@ -894,19 +894,19 @@ pub(super) fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
     } else {
         "shown".to_owned()
     };
-    let path = if app.database_path.as_os_str().is_empty() {
+    let path = if app.shell.database_path.as_os_str().is_empty() {
         "(not set)".into()
     } else {
-        app.database_path.display().to_string()
+        app.shell.database_path.display().to_string()
     };
     let text = Text::from(vec![
         field_line("Path", path),
         field_line("Tickets", app.tickets().len().to_string()),
         field_line("Visible", app.visible_count().to_string()),
         field_line("Finished", finished),
-        field_line("Loaded", app.freshness_label()),
+        field_line("Loaded", app.shell.freshness_label()),
         field_line("Freshness", stale),
-        field_line("Sync", app.sync_summary()),
+        field_line("Sync", app.shell.sync_summary()),
         Line::default(),
         Line::styled(
             "Press Esc or i to close",
@@ -915,7 +915,7 @@ pub(super) fn render_info_overlay(frame: &mut Frame<'_>, app: &mut App) {
     ]);
     let inner = render_modal_frame(frame, app, area, " Database ");
     frame.render_widget(Paragraph::new(text), inner);
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         inner,
         PointerTarget::OverlayBody,
         PointerLayer::Modal,

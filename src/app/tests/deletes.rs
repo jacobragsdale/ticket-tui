@@ -26,7 +26,7 @@ fn deleting_app() -> App {
         relations: vec![child_of(2, 1), child_of(3, 1), child_of(4, 3)],
         ..TicketGraph::default()
     });
-    app.enable_sync();
+    app.shell.enable_sync();
     app.set_table_viewport(4);
     app
 }
@@ -101,7 +101,7 @@ fn escaping_the_delete_confirmation_changes_nothing_at_all() {
     assert_eq!(app.mode, AppMode::Browse);
     assert!(app.delete_confirm.is_none());
     assert!(!app.deletes_pending());
-    assert_eq!(app.notification(), None, "cancelling closes silently");
+    assert_eq!(app.shell.notification(), None, "cancelling closes silently");
     assert_eq!(rows_of(&app), [1, 2, 3, 4]);
     assert_eq!(
         app.family_of(&family_key(1)).children,
@@ -146,7 +146,7 @@ fn a_delete_that_lands_takes_the_row_and_its_links_and_moves_the_cursor_on() {
         "and the epic is left with the one issue it still has"
     );
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Deleted #3 \u{b7} restore it from the Azure DevOps recycle bin"),
         "a soft delete is recoverable, and the line reporting it says so"
     );
@@ -212,7 +212,7 @@ fn a_refused_delete_says_so_and_leaves_the_row_on_the_table() {
         "and so are the links under it"
     );
     assert_eq!(
-        app.notification(),
+        app.shell.notification(),
         Some((
             "#1 not deleted: TF401232: the work item does not exist",
             NotificationLevel::Error
@@ -249,7 +249,7 @@ fn a_checked_set_deletes_one_at_a_time_and_speaks_once_at_the_end() {
 
     app.apply_deleted(&family_key(2));
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Deleting 2 tickets\u{2026}"),
         "the first answer says nothing of its own"
     );
@@ -258,7 +258,7 @@ fn a_checked_set_deletes_one_at_a_time_and_speaks_once_at_the_end() {
 
     assert_eq!(rows_of(&app), [1, 4]);
     assert_eq!(
-        app.notification(),
+        app.shell.notification(),
         Some(("Deleted 2 tickets", NotificationLevel::Info)),
         "the whole change speaks once, when the last answer is in"
     );
@@ -278,7 +278,7 @@ fn a_checked_set_that_only_partly_lands_counts_what_went_and_names_what_stayed()
     app.reject_delete(&family_key(3), "it is locked");
 
     assert_eq!(
-        app.notification(),
+        app.shell.notification(),
         Some((
             "Deleted 1 of 2 \u{b7} #3 failed: it is locked",
             NotificationLevel::Error
@@ -307,7 +307,7 @@ fn a_delete_never_reaches_the_undo_stack() {
     );
     assert_eq!(press(&mut app, KeyCode::Char('u')), AppAction::None);
     assert_eq!(
-        app.notification().map(|(message, _)| message),
+        app.shell.notification().map(|(message, _)| message),
         Some("Nothing to undo")
     );
     assert_eq!(rows_of(&app), [1, 2, 4], "and the row stays gone");
@@ -316,14 +316,15 @@ fn a_delete_never_reaches_the_undo_stack() {
 #[test]
 fn a_delete_is_refused_before_the_confirmation_when_there_is_nothing_to_write_to() {
     let mut app = App::new(deletable_tickets());
-    app.set_offline_reason(Some("no Azure DevOps organization is configured".into()));
+    app.shell
+        .set_offline_reason(Some("no Azure DevOps organization is configured".into()));
 
     app.run_command(CommandId::DeleteWorkItem);
 
     assert_eq!(app.mode, AppMode::Browse, "the confirmation never opens");
     assert!(app.delete_confirm.is_none());
     assert_eq!(
-        app.notification(),
+        app.shell.notification(),
         Some((
             "no Azure DevOps organization is configured",
             NotificationLevel::Error

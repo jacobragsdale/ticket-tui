@@ -8,13 +8,13 @@ use super::*;
 /// paragraph, so the title scrolls away with everything under it and the
 /// scrollbar measures the whole pane.
 pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let mut block = focused_block(" Details ", app.focus.is_details_pane());
+    let mut block = focused_block(" Details ", app.shell.focus.is_details_pane());
     if area.width >= 24 {
         block = block.title(Line::from("[Copy]").right_aligned());
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         area,
         PointerTarget::FocusDetails,
         PointerLayer::Base,
@@ -22,7 +22,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Some(ScrollSurface::Details),
     ));
     if area.width >= 24 {
-        app.hit_regions.push(region(
+        app.shell.hit_regions.push(region(
             Rect::new(
                 area.x.saturating_add(area.width.saturating_sub(8)),
                 area.y,
@@ -58,7 +58,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let has_family = family.has_family();
     let width = inner.width;
     let cursor = app.family_cursor.clone();
-    let family_focused = app.focus == Focus::Family;
+    let family_focused = app.shell.focus == Focus::Family;
     let mut highlighter = QueryHighlighter::new(app.query());
     let title_style = Style::default()
         .fg(theme().text)
@@ -84,7 +84,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     lines.push(ticket_assignment_line(
         &ticket,
-        app.is_mine(&ticket),
+        app.shell.is_mine(&ticket),
         &mut highlighter,
     ));
     lines.push(tags_field_line(&ticket.tags, &mut highlighter));
@@ -253,7 +253,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         visible_row_y(inner, row, scroll_rows)
     };
     if let Some(y) = url_line.and_then(row_of) {
-        app.hit_regions.push(region(
+        app.shell.hit_regions.push(region(
             Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
             PointerTarget::OpenSelectedUrl,
             PointerLayer::Base,
@@ -266,7 +266,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             continue;
         }
         if let Some(y) = row_of(hit.line) {
-            app.hit_regions.push(region(
+            app.shell.hit_regions.push(region(
                 Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
                 PointerTarget::JumpToTicket(hit.key.clone()),
                 PointerLayer::Base,
@@ -277,7 +277,7 @@ pub(super) fn render_details(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     for (logical, key) in line_links {
         if let Some(y) = row_of(logical) {
-            app.hit_regions.push(region(
+            app.shell.hit_regions.push(region(
                 Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
                 PointerTarget::JumpToTicket(key),
                 PointerLayer::Base,
@@ -829,7 +829,7 @@ pub(super) fn register_edit_field(
     if x >= area.width || width == 0 {
         return;
     }
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         Rect::new(
             area.x.saturating_add(x),
             y,

@@ -27,7 +27,7 @@ pub(super) fn render_modal_frame(
 }
 
 pub(super) fn register_close_button(app: &mut App, area: Rect, layer: PointerLayer) {
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         Rect::new(
             area.x.saturating_add(area.width.saturating_sub(4)),
             area.y,
@@ -62,7 +62,7 @@ pub(super) fn render_query_field(
         Paragraph::new(query).style(Style::default().fg(theme().text)),
         area,
     );
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         area,
         target,
         PointerLayer::Modal,
@@ -87,7 +87,7 @@ pub(super) fn render_control(
     layer: PointerLayer,
     enabled: bool,
 ) {
-    let hovered = app.hovered() == Some(&target);
+    let hovered = app.shell.hovered() == Some(&target);
     let style = if !enabled {
         Style::default().fg(theme().muted)
     } else if hovered {
@@ -100,7 +100,8 @@ pub(super) fn render_control(
     };
     frame.render_widget(Paragraph::new(label).style(style), area);
     if enabled {
-        app.hit_regions
+        app.shell
+            .hit_regions
             .push(region(area, target, layer, None, None));
     }
 }
@@ -136,14 +137,14 @@ pub(super) fn render_scrollbar(
     };
     let geometry = metrics.thumb();
     paint_scrollbar(frame, track, geometry);
-    app.hit_regions.set_scroll(surface, metrics);
+    app.shell.hit_regions.set_scroll(surface, metrics);
     if let Some(thumb) = geometry {
         let thumb_rect = Rect::new(track.x, track.y.saturating_add(thumb.y), 1, thumb.height);
         let above = Rect::new(track.x, track.y, 1, thumb.y);
         let below_y = track.y.saturating_add(thumb.y).saturating_add(thumb.height);
         let below_height = track.y.saturating_add(track.height).saturating_sub(below_y);
         if above.height > 0 {
-            app.hit_regions.push(region(
+            app.shell.hit_regions.push(region(
                 above,
                 PointerTarget::ScrollbarTrack {
                     surface,
@@ -154,7 +155,7 @@ pub(super) fn render_scrollbar(
                 Some(surface),
             ));
         }
-        app.hit_regions.push(region(
+        app.shell.hit_regions.push(region(
             thumb_rect,
             PointerTarget::ScrollbarThumb { surface },
             current_layer(app),
@@ -162,7 +163,7 @@ pub(super) fn render_scrollbar(
             Some(surface),
         ));
         if below_height > 0 {
-            app.hit_regions.push(region(
+            app.shell.hit_regions.push(region(
                 Rect::new(track.x, below_y, 1, below_height),
                 PointerTarget::ScrollbarTrack {
                     surface,
@@ -224,7 +225,7 @@ pub(super) fn capture_selectable(
         }
         cells.push(row);
     }
-    app.hit_regions.add_selectable(SelectableSnapshot {
+    app.shell.hit_regions.add_selectable(SelectableSnapshot {
         surface,
         rect: Rect { width, ..rect },
         cells,
@@ -255,7 +256,7 @@ pub(super) fn row_like(target: &PointerTarget) -> bool {
 }
 
 pub(super) fn paint_hover(frame: &mut Frame<'_>, app: &App) {
-    let Some(region) = app.hovered_region() else {
+    let Some(region) = app.shell.hovered_region() else {
         return;
     };
     let target = &region.target;
@@ -307,10 +308,14 @@ pub(super) fn paint_hover(frame: &mut Frame<'_>, app: &App) {
 }
 
 pub(super) fn paint_selection(frame: &mut Frame<'_>, app: &App) {
-    let Some(selection) = app.selection().filter(|selection| !selection.is_empty()) else {
+    let Some(selection) = app
+        .shell
+        .selection()
+        .filter(|selection| !selection.is_empty())
+    else {
         return;
     };
-    let Some(snapshot) = app.hit_regions.selectable(selection.surface) else {
+    let Some(snapshot) = app.shell.hit_regions.selectable(selection.surface) else {
         return;
     };
     let (start, end) = selection.ordered();

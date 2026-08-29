@@ -186,7 +186,10 @@ fn a_refused_move_puts_both_halves_of_the_link_and_both_ratios_back() {
     );
     assert_eq!(progress_of(&app, 1), Some((1, 2)));
     assert_eq!(progress_of(&app, 2), None);
-    let (message, level) = app.notification().expect("a refused move is never silent");
+    let (message, level) = app
+        .shell
+        .notification()
+        .expect("a refused move is never silent");
     assert_eq!(level, NotificationLevel::Error);
     assert!(
         message.contains("#3 not moved") && message.contains("syncing"),
@@ -226,7 +229,10 @@ fn a_cycle_the_stale_graph_could_not_see_is_refused_and_put_back_in_its_own_word
     assert_eq!(app.family_of(&family_key(2)).children, Vec::new());
     assert_eq!(progress_of(&app, 1), Some((1, 2)));
     assert!(!app.reparents_pending());
-    let (message, _) = app.notification().expect("a refused move is never silent");
+    let (message, _) = app
+        .shell
+        .notification()
+        .expect("a refused move is never silent");
     assert!(
         message.contains("circular relationship") && !message.contains("syncing"),
         "Azure DevOps's own reason is reported, and a rule refusal is not a conflict: {message}"
@@ -344,7 +350,7 @@ fn choosing_the_current_state_or_pressing_escape_writes_nothing() {
     );
     assert_eq!(app.mode, AppMode::Browse);
     assert!(!app.edits_pending());
-    assert_eq!(app.notification(), None, "a no-op closes silently");
+    assert_eq!(app.shell.notification(), None, "a no-op closes silently");
 
     shift(&mut app, 'S');
     press(&mut app, KeyCode::Down);
@@ -352,7 +358,7 @@ fn choosing_the_current_state_or_pressing_escape_writes_nothing() {
     assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
     assert_eq!(app.mode, AppMode::Browse);
     assert!(!app.edits_pending());
-    assert_eq!(app.notification(), None);
+    assert_eq!(app.shell.notification(), None);
     assert_eq!(
         app.selected_ticket().map(|ticket| ticket.state.as_str()),
         Some("To Do"),
@@ -379,7 +385,7 @@ fn the_priority_picker_opens_on_the_current_value_and_writes_the_one_chosen() {
         "the priority it already has is a no-op"
     );
     assert!(!app.edits_pending());
-    assert_eq!(app.notification(), None);
+    assert_eq!(app.shell.notification(), None);
 
     open_editor(&mut app, 2);
     press(&mut app, KeyCode::Down);
@@ -494,9 +500,9 @@ fn assignee_app() -> App {
     let mut gamma = ticket(3, "Gamma", "2026-03-01T00:00:00Z");
     gamma.assigned_to = Some("Avery Chen".into());
     let mut app = App::new(vec![alpha, beta, gamma]);
-    app.enable_sync();
+    app.shell.enable_sync();
     app.set_table_viewport(3);
-    app.set_me(Some("Jacob Ragsdale".into()));
+    app.shell.set_me(Some("Jacob Ragsdale".into()));
     app
 }
 
@@ -640,7 +646,7 @@ fn typing_filters_the_assignee_picker_and_enter_assigns_who_is_left() {
         Some("Jacob Ragsdale".to_owned()),
         "the cell reads as the display name, not the address"
     );
-    assert!(app.is_mine(app.selected_ticket().unwrap()));
+    assert!(app.shell.is_mine(app.selected_ticket().unwrap()));
 }
 
 #[test]
@@ -696,7 +702,7 @@ fn choosing_the_current_assignee_or_pressing_escape_writes_nothing() {
     );
     assert_eq!(app.mode, AppMode::Browse);
     assert!(!app.edits_pending());
-    assert_eq!(app.notification(), None, "a no-op closes silently");
+    assert_eq!(app.shell.notification(), None, "a no-op closes silently");
 
     // The same again for a work item nobody holds, where Unassigned is the
     // row the picker opens on.
@@ -710,7 +716,7 @@ fn choosing_the_current_assignee_or_pressing_escape_writes_nothing() {
     assert_eq!(app.assignee_picker.index, 0);
     assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
     assert!(!app.edits_pending());
-    assert_eq!(app.notification(), None);
+    assert_eq!(app.shell.notification(), None);
 
     press(&mut app, KeyCode::Char('a'));
     press(&mut app, KeyCode::Down);
@@ -934,7 +940,7 @@ fn choosing_the_node_the_work_item_is_already_in_writes_nothing() {
     );
     assert_eq!(app.mode, AppMode::Browse);
     assert!(!app.edits_pending());
-    assert_eq!(app.notification(), None, "a no-op closes silently");
+    assert_eq!(app.shell.notification(), None, "a no-op closes silently");
 
     open_nodes(&mut app, NodeKind::Iteration);
     press(&mut app, KeyCode::Up);

@@ -82,7 +82,7 @@ impl App {
     #[must_use]
     pub fn match_context(&self) -> MatchContext {
         MatchContext::now()
-            .with_me(self.me.clone())
+            .with_me(self.shell.me.clone())
             .with_current_iteration(self.current_iteration())
     }
 
@@ -220,7 +220,7 @@ impl App {
     fn after_query_edit(&mut self) {
         self.search_history_index = None;
         self.search_history_draft = self.query.text().to_owned();
-        self.session_dirty = true;
+        self.shell.session_dirty = true;
         self.resubmit_query();
     }
 
@@ -270,13 +270,14 @@ impl App {
         self.sort_direction = direction;
         self.sort_visible();
         self.restore_selection(selected.as_ref());
-        self.session_dirty = true;
+        self.shell.session_dirty = true;
     }
 
     pub fn toggle_row_density(&mut self) {
         self.row_density = self.row_density.toggled();
-        self.session_dirty = true;
-        self.set_status(format!("Row density: {}", self.row_density.label()));
+        self.shell.session_dirty = true;
+        self.shell
+            .set_status(format!("Row density: {}", self.row_density.label()));
     }
 
     pub fn toggle_search_order(&mut self) {
@@ -287,8 +288,9 @@ impl App {
         self.search_order = self.search_order.toggled();
         self.sort_visible();
         self.restore_selection(selected.as_ref());
-        self.session_dirty = true;
-        self.set_status(format!("Search order: {}", self.search_order.label()));
+        self.shell.session_dirty = true;
+        self.shell
+            .set_status(format!("Search order: {}", self.search_order.label()));
     }
 
     pub fn toggle_sort(&mut self, field: SortField) {
@@ -604,23 +606,23 @@ impl App {
             }
             KeyCode::Char(' ') => {
                 self.layout.toggle_visible(self.column_overlay.index);
-                self.session_dirty = true;
+                self.shell.session_dirty = true;
             }
             KeyCode::Char('K') => {
                 self.column_overlay.index = self.layout.move_column(self.column_overlay.index, -1);
-                self.session_dirty = true;
+                self.shell.session_dirty = true;
             }
             KeyCode::Char('J') => {
                 self.column_overlay.index = self.layout.move_column(self.column_overlay.index, 1);
-                self.session_dirty = true;
+                self.shell.session_dirty = true;
             }
             KeyCode::Left | KeyCode::Char('-') | KeyCode::Char('<') => {
                 self.layout.resize(self.column_overlay.index, -1);
-                self.session_dirty = true;
+                self.shell.session_dirty = true;
             }
             KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('>') => {
                 self.layout.resize(self.column_overlay.index, 1);
-                self.session_dirty = true;
+                self.shell.session_dirty = true;
             }
             _ => {}
         }
@@ -676,7 +678,7 @@ impl App {
     pub(super) fn run_command(&mut self, id: CommandId) -> AppAction {
         // Every command opens its overlay centred; clicking a field sets its
         // anchor afterwards, so a picker never inherits the last one's.
-        self.overlay_anchor = OverlayAnchor::Centered;
+        self.shell.overlay_anchor = OverlayAnchor::Centered;
         match id {
             CommandId::Search => {
                 self.begin_search();
@@ -774,7 +776,7 @@ impl App {
                 AppAction::None
             }
             CommandId::ToggleDetails => {
-                self.toggle_narrow_details();
+                self.shell.toggle_narrow_details();
                 AppAction::None
             }
             CommandId::ToggleSearchOrder => {
@@ -807,12 +809,13 @@ impl App {
                     .visible_tickets()
                     .map(|ticket| ticket.key.clone())
                     .collect();
-                self.set_status(format!("Selected {} tickets", self.selected_keys.len()));
+                self.shell
+                    .set_status(format!("Selected {} tickets", self.selected_keys.len()));
                 AppAction::None
             }
             CommandId::ClearSelection => {
                 self.selected_keys.clear();
-                self.set_status("Cleared selection");
+                self.shell.set_status("Cleared selection");
                 AppAction::None
             }
             CommandId::HistoryBack => {
@@ -832,11 +835,11 @@ impl App {
                 AppAction::None
             }
             CommandId::Quit => {
-                self.should_quit = true;
+                self.shell.should_quit = true;
                 AppAction::None
             }
             CommandId::ResetPaneSplit => {
-                self.reset_pane_split();
+                self.shell.reset_pane_split();
                 AppAction::None
             }
             CommandId::SetStaleThreshold => {

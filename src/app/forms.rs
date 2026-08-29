@@ -282,7 +282,7 @@ impl App {
     /// something is not a form retyped.
     pub fn open_create_form(&mut self) -> AppAction {
         if self.pending_create.is_some() {
-            self.set_error("A work item is already being created");
+            self.shell.set_error("A work item is already being created");
             return AppAction::None;
         }
         let form = self.take_draft(FormKind::NewWorkItem).unwrap_or_else(|| {
@@ -304,11 +304,11 @@ impl App {
     /// offered under the next.
     pub fn open_child_form(&mut self) -> AppAction {
         if self.pending_create.is_some() {
-            self.set_error("A work item is already being created");
+            self.shell.set_error("A work item is already being created");
             return AppAction::None;
         }
         let Some(parent) = self.selected_ticket() else {
-            self.set_error("No work item is selected");
+            self.shell.set_error("No work item is selected");
             return AppAction::None;
         };
         let id = parent.key.id;
@@ -329,7 +329,7 @@ impl App {
     fn open_form(&mut self, form: FormOverlay) -> AppAction {
         self.form = Some(form);
         self.mode = AppMode::Form;
-        self.overlay_anchor = OverlayAnchor::Centered;
+        self.shell.overlay_anchor = OverlayAnchor::Centered;
         self.form_scroll.scroll_to(0);
         if self.work_item_types_requested {
             AppAction::None
@@ -559,7 +559,7 @@ impl App {
             let (label, id) = (missing.label, missing.id);
             let index = form.index_of(id).unwrap_or_default();
             self.focus_form_field(index);
-            self.set_error(format!("{label} is required"));
+            self.shell.set_error(format!("{label} is required"));
             return AppAction::None;
         }
         let parent = match form_number(form, FormFieldId::Parent) {
@@ -597,8 +597,9 @@ impl App {
         if !tags.is_empty() {
             edits.push(FieldEdit::tags(&tags));
         }
-        if let Some(reason) = self.write_refusal() {
-            self.set_error(format!("Work item not created: {reason}"));
+        if let Some(reason) = self.shell.write_refusal() {
+            self.shell
+                .set_error(format!("Work item not created: {reason}"));
             return AppAction::None;
         }
         let patch: Vec<Value> = edits.iter().flat_map(FieldEdit::patch).collect();
@@ -606,7 +607,8 @@ impl App {
         // with everything still in it.
         self.pending_create = self.form.take();
         self.mode = AppMode::Browse;
-        self.set_status(format!("Creating {work_item_type}\u{2026}"));
+        self.shell
+            .set_status(format!("Creating {work_item_type}\u{2026}"));
         AppAction::Create {
             work_item_type,
             patch,
@@ -620,7 +622,7 @@ impl App {
         if let Some(index) = self.form.as_ref().and_then(|form| form.index_of(id)) {
             self.focus_form_field(index);
         }
-        self.set_error(message);
+        self.shell.set_error(message);
     }
 
     /// Whether a work item is waiting to be created. The database watcher
@@ -652,7 +654,7 @@ impl App {
         }
         self.show_all(Some(&key));
         self.details.scroll_to(0);
-        self.set_status(if hidden {
+        self.shell.set_status(if hidden {
             format!("{headline} \u{b7} search cleared so it is visible")
         } else {
             headline
@@ -679,8 +681,9 @@ impl App {
         if let Some(form) = self.pending_create.take() {
             self.form = Some(form);
             self.mode = AppMode::Form;
-            self.overlay_anchor = OverlayAnchor::Centered;
+            self.shell.overlay_anchor = OverlayAnchor::Centered;
         }
-        self.set_error(format!("Work item not created: {message}"));
+        self.shell
+            .set_error(format!("Work item not created: {message}"));
     }
 }

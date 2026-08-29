@@ -53,6 +53,7 @@ mod history;
 mod pickers;
 mod pointer;
 mod query;
+pub mod shell;
 #[cfg(test)]
 mod tests;
 mod views;
@@ -65,8 +66,8 @@ pub use pickers::{
     AssigneeCandidate, AssigneePicker, NodePicker, NodeRow, ParentCandidate, ParentPicker,
     PriorityPicker, StatePicker, TypePicker,
 };
-pub use pointer::{DividerOrientation, PointerUpdate};
 pub use query::{ColumnOverlay, FacetBar, FilterOverlay, PaletteState, SortDraft};
+pub use shell::{DividerOrientation, Focus, NotificationLevel, PointerUpdate, Shell};
 use views::builtin_named;
 pub use views::{BuiltinView, SprintOverlay, ViewRow, ViewRowKind, ViewsOverlay};
 
@@ -140,21 +141,6 @@ const MIN_TICKETS_COLUMNS: u16 = 40;
 const MIN_DETAILS_COLUMNS: u16 = 30;
 
 const MIN_PANE_ROWS: u16 = 6;
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum Focus {
-    #[default]
-    Tickets,
-    Family,
-    Details,
-}
-
-impl Focus {
-    #[must_use]
-    pub const fn is_details_pane(self) -> bool {
-        matches!(self, Self::Family | Self::Details)
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AppAction {
@@ -248,23 +234,6 @@ impl CopiedContent {
         }
     }
 }
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NotificationLevel {
-    Info,
-    Error,
-}
-
-#[derive(Debug)]
-struct Notification {
-    message: String,
-    level: NotificationLevel,
-    expires_at: Instant,
-}
-
-const INFO_NOTIFICATION_DURATION: Duration = Duration::from_secs(4);
-
-const ERROR_NOTIFICATION_DURATION: Duration = Duration::from_secs(8);
 
 /// The priorities the picker offers, in the order it lists them. `None` is the
 /// `Clear` row, which takes the field off the work item rather than writing an
@@ -389,6 +358,9 @@ impl PreparedTickets {
 }
 
 pub struct App {
+    /// Everything a screen shares: focus, the pointer, notifications,
+    /// the layout and what the sync worker is doing.
+    pub shell: Shell,
     tickets: Arc<Vec<Ticket>>,
     visible: Vec<SearchMatch>,
     search: SearchEngine,
@@ -409,7 +381,6 @@ pub struct App {
     pub sort_direction: SortDirection,
     pub layout: TableLayout,
     pub mode: AppMode,
-    pub focus: Focus,
     pub table_state: TableState,
     pub table: ScrollState,
     pub details: ScrollState,
@@ -421,9 +392,6 @@ pub struct App {
     pub family_cursor: Option<TicketKey>,
     pub help: ScrollState,
     pub sort: ScrollState,
-    pub narrow_details: bool,
-    pub pane_split_wide: u16,
-    pub pane_split_stacked: u16,
     /// The remembered stale threshold: what the palette last set, and what the
     /// session file carries between runs.
     stale_days: u16,
@@ -432,15 +400,7 @@ pub struct App {
     /// palette moves the setting, and is never written back to the session: a
     /// flag passed once should not quietly become the setting.
     stale_days_override: Option<u16>,
-    content_area: Rect,
-    divider: Option<DividerOrientation>,
-    pub reload_pending: bool,
-    pub should_quit: bool,
-    pub session_dirty: bool,
-    notification: Option<Notification>,
     pub sort_draft: SortDraft,
-    pub hit_regions: HitRegions,
-    pub pointer: PointerState,
     pub filter_overlay: FilterOverlay,
     pub column_overlay: ColumnOverlay,
     pub palette: PaletteState,
@@ -472,10 +432,6 @@ pub struct App {
     pub delete_confirm: Option<DeleteConfirm>,
     /// The open single-line field editor, if there is one.
     pub prompt: Option<TextPrompt>,
-    /// Where the open picker or prompt is drawn: centred, as every
-    /// keyboard-opened one is, or hung off the details-pane field that was
-    /// clicked to open it.
-    pub overlay_anchor: OverlayAnchor,
     bookmarks: HashSet<TicketKey>,
     selected_keys: HashSet<TicketKey>,
     recent: Vec<TicketKey>,
@@ -489,12 +445,6 @@ pub struct App {
     /// The states Azure DevOps allows for each work item type. Empty until a
     /// sync has fetched them, which is what [`App::states_for`] falls back for.
     state_catalog: StateCatalog,
-    pub loaded_at: Instant,
-    pub database_path: PathBuf,
-    pub stale: bool,
-    pub data_signature: u128,
-    /// Whether a pull from Azure DevOps is in flight.
-    pub sync_pending: bool,
     /// The work item whose comments and history are being read, if one is.
     /// The details pane says so where that history is about to appear.
     pub details_pending: Option<TicketKey>,
@@ -523,34 +473,6 @@ pub struct App {
     /// this is what stops the same work item being deleted twice and what keeps
     /// the cursor off a row that is on its way out.
     pending_deletes: HashSet<TicketKey>,
-    /// Why there is nothing to write to, reported when an edit is attempted
-    /// without a configured Azure DevOps project.
-    offline_reason: Option<String>,
-    /// Whether Azure DevOps is configured at all: an offline run browses the
-    /// database and reports no sync state.
-    sync_enabled: bool,
-    /// Where the rows come from — the organization and project, how often they
-    /// are pulled, and the scope narrowing them — as the database overlay
-    /// reports it. `None` until the run resolves a project.
-    sync_source: Option<String>,
-    /// The same project, as the agent context publishes it. `None` until the
-    /// run resolves one.
-    sync_target: Option<SyncTarget>,
-    /// When the last successful pull finished, which is not `loaded_at`: a
-    /// SQLite reload moves that too.
-    synced_at: Option<Instant>,
-    /// The same moment on the wall clock, because the agent context has to say
-    /// when the last pull landed and an `Instant` only says how long ago.
-    synced_wall_clock: Option<Timestamp>,
-    /// The last pull's error, kept so the same timer failure is reported once.
-    sync_error: Option<String>,
-    /// When the next pull may go out, for a timer Azure DevOps asked to hold
-    /// off. Not a failure: the title counts it down instead of saying the sync
-    /// broke, and nothing is announced.
-    sync_paused_until: Option<Instant>,
-    /// Display name of the signed-in Azure DevOps user, so their own work
-    /// items can stand out. `None` until a sync records one.
-    me: Option<String>,
     /// The people the project's teams hold, as the last identity fetch cached
     /// them. The assignee picker offers these alongside everybody the rows
     /// already name, and reads their addresses out of here.
@@ -625,6 +547,35 @@ impl App {
         let prepared = PreparedTickets::new(tickets);
         let search = SearchEngine::from_documents(prepared.search_documents);
         let mut app = Self {
+            shell: Shell {
+                focus: Focus::Tickets,
+                narrow_details: false,
+                pane_split_wide: DEFAULT_PANE_SPLIT_WIDE,
+                pane_split_stacked: DEFAULT_PANE_SPLIT_STACKED,
+                content_area: Rect::ZERO,
+                divider: None,
+                reload_pending: false,
+                should_quit: false,
+                session_dirty: false,
+                notification: None,
+                hit_regions: HitRegions::default(),
+                pointer: PointerState::default(),
+                overlay_anchor: OverlayAnchor::Centered,
+                loaded_at: Instant::now(),
+                database_path: PathBuf::new(),
+                stale: false,
+                data_signature: 0,
+                sync_pending: false,
+                offline_reason: None,
+                sync_enabled: false,
+                sync_source: None,
+                sync_target: None,
+                synced_at: None,
+                synced_wall_clock: None,
+                sync_error: None,
+                sync_paused_until: None,
+                me: None,
+            },
             tickets: Arc::new(prepared.tickets),
             visible: Vec::new(),
             search,
@@ -642,7 +593,6 @@ impl App {
             sort_direction: SortDirection::Descending,
             layout: TableLayout::default(),
             mode: AppMode::Browse,
-            focus: Focus::Tickets,
             table_state: TableState::default(),
             table: ScrollState::default(),
             details: ScrollState::default(),
@@ -650,23 +600,12 @@ impl App {
             family_cursor: None,
             help: ScrollState::default(),
             sort: ScrollState::default(),
-            narrow_details: false,
-            pane_split_wide: DEFAULT_PANE_SPLIT_WIDE,
-            pane_split_stacked: DEFAULT_PANE_SPLIT_STACKED,
             stale_days: DEFAULT_STALE_DAYS,
             stale_days_override: None,
-            content_area: Rect::ZERO,
-            divider: None,
-            reload_pending: false,
-            should_quit: false,
-            session_dirty: false,
-            notification: None,
             sort_draft: SortDraft {
                 field_index: 0,
                 direction: SortDirection::Descending,
             },
-            hit_regions: HitRegions::default(),
-            pointer: PointerState::default(),
             filter_overlay: FilterOverlay::default(),
             column_overlay: ColumnOverlay::default(),
             palette: PaletteState::default(),
@@ -680,7 +619,6 @@ impl App {
             parent_picker: ParentPicker::default(),
             node_picker: NodePicker::default(),
             prompt: None,
-            overlay_anchor: OverlayAnchor::Centered,
             bookmarks: HashSet::new(),
             selected_keys: HashSet::new(),
             recent: Vec::new(),
@@ -690,11 +628,6 @@ impl App {
             graph: prepared.graph,
             child_progress: ChildProgressIndex::default(),
             state_catalog: prepared.states,
-            loaded_at: Instant::now(),
-            database_path: PathBuf::new(),
-            stale: false,
-            data_signature: 0,
-            sync_pending: false,
             details_pending: None,
             pending_edits: HashMap::new(),
             pending_reparents: HashMap::new(),
@@ -711,15 +644,6 @@ impl App {
             pending_create: None,
             work_item_types: Vec::new(),
             work_item_types_requested: false,
-            offline_reason: None,
-            sync_enabled: false,
-            sync_source: None,
-            sync_target: None,
-            synced_at: None,
-            synced_wall_clock: None,
-            sync_error: None,
-            sync_paused_until: None,
-            me: None,
             identities: Vec::new(),
             identities_requested: false,
             classification_nodes: Vec::new(),
@@ -759,190 +683,10 @@ impl App {
         self.table_state.selected()
     }
 
-    pub fn configure_database(&mut self, path: PathBuf, signature: u128) {
-        self.database_path = path;
-        self.data_signature = signature;
-        self.loaded_at = Instant::now();
-        self.stale = false;
-    }
-
     pub fn set_workspace_graph(&mut self, graph: TicketGraph) {
         self.graph = graph;
         self.refresh_child_progress();
         self.sync_family_state();
-    }
-
-    #[must_use]
-    pub fn freshness_label(&self) -> String {
-        relative_age(self.loaded_at.elapsed())
-    }
-
-    /// Turns on the sync parts of the UI. An offline run leaves them off, so
-    /// the table title says nothing about a sync that can not happen.
-    pub const fn enable_sync(&mut self) {
-        self.sync_enabled = true;
-    }
-
-    /// A pull has started.
-    pub const fn begin_sync(&mut self) {
-        self.sync_pending = true;
-    }
-
-    /// A pull succeeded. The tickets it brought are applied separately, so this
-    /// only records that Azure DevOps was reached.
-    pub fn finish_sync(&mut self) {
-        self.sync_pending = false;
-        self.sync_error = None;
-        self.sync_paused_until = None;
-        self.synced_at = Some(Instant::now());
-        self.synced_wall_clock = Some(Timestamp::now());
-    }
-
-    /// Azure DevOps asked to be left alone until `until`, and the timer agreed.
-    /// Nothing is wrong and nothing is announced: this is the pause the title
-    /// counts down, and the next success clears it. Deliberately not
-    /// [`Self::fail_sync`] — a throttled pull is the service working as
-    /// designed, and an error toast a minute would only be noise.
-    pub fn pause_sync(&mut self, until: Instant) {
-        self.sync_pending = false;
-        self.sync_error = None;
-        self.sync_paused_until = Some(until);
-    }
-
-    /// A pull failed. Reports whether the failure is worth a notification: the
-    /// same error on consecutive timer pulls is not, because the table title
-    /// already says the sync is failing. `announce` forces one anyway, for a
-    /// pull the user asked for.
-    pub fn fail_sync(&mut self, error: &str, announce: bool) -> bool {
-        self.sync_pending = false;
-        self.sync_paused_until = None;
-        let repeated = self.sync_error.as_deref() == Some(error);
-        self.sync_error = Some(error.to_owned());
-        announce || !repeated
-    }
-
-    /// What the table title appends after the sort order, most urgent first.
-    #[must_use]
-    pub fn activity_label(&self) -> Option<String> {
-        if self.sync_enabled && self.sync_pending {
-            return Some("Syncing…".into());
-        }
-        if self.reload_pending {
-            return Some("Reloading…".into());
-        }
-        if self.sync_enabled
-            && let Some(left) = self.sync_pause_left()
-        {
-            return Some(format!("Sync paused {}", remaining_wait(left)));
-        }
-        if self.sync_enabled && self.sync_error.is_some() {
-            return Some("Sync failed".into());
-        }
-        if self.stale {
-            return Some("Stale".into());
-        }
-        self.synced_at
-            .filter(|_| self.sync_enabled)
-            .map(|at| format!("Synced {}", relative_age(at.elapsed())))
-    }
-
-    /// Where the rows are pulled from, as the database overlay reports it.
-    pub fn set_sync_source(&mut self, source: Option<String>) {
-        self.sync_source = source;
-    }
-
-    /// The same project, for the agent context, which needs the organization,
-    /// the project, and the interval apart rather than as one line of prose.
-    pub fn set_sync_target(&mut self, target: Option<SyncTarget>) {
-        self.sync_target = target;
-    }
-
-    /// The database overlay's one-line account of the sync: where the rows come
-    /// from, and how the last pull went. An offline run says why it is offline
-    /// there instead — a missing organization, or a database another project
-    /// filled.
-    #[must_use]
-    pub fn sync_summary(&self) -> String {
-        let state = if self.sync_enabled {
-            self.sync_state()
-        } else {
-            self.offline_reason.as_ref().map_or_else(
-                || "offline; no Azure DevOps organization configured".to_owned(),
-                |reason| format!("offline; {reason}"),
-            )
-        };
-        match &self.sync_source {
-            Some(source) => format!("{source} · {state}"),
-            None => state,
-        }
-    }
-
-    /// How the last pull went, for a run that can pull at all.
-    fn sync_state(&self) -> String {
-        let last = self
-            .synced_at
-            .map_or_else(|| "not yet".to_owned(), |at| relative_age(at.elapsed()));
-        if self.sync_pending {
-            format!("in progress, last {last}")
-        } else if let Some(left) = self.sync_pause_left() {
-            format!(
-                "paused for throttling, next in {}, last {last}",
-                remaining_wait(left)
-            )
-        } else if let Some(error) = &self.sync_error {
-            format!("failed, last {last}: {error}")
-        } else {
-            last
-        }
-    }
-
-    /// How long the throttling pause still has to run, or `None` once it is
-    /// over and the timer is free again.
-    fn sync_pause_left(&self) -> Option<Duration> {
-        let left = self
-            .sync_paused_until?
-            .saturating_duration_since(Instant::now());
-        (!left.is_zero()).then_some(left)
-    }
-
-    pub fn set_status(&mut self, message: impl Into<String>) {
-        self.set_notification(message, NotificationLevel::Info, INFO_NOTIFICATION_DURATION);
-    }
-
-    pub fn set_error(&mut self, message: impl Into<String>) {
-        self.set_notification(
-            message,
-            NotificationLevel::Error,
-            ERROR_NOTIFICATION_DURATION,
-        );
-    }
-
-    #[must_use]
-    pub fn notification(&self) -> Option<(&str, NotificationLevel)> {
-        self.notification
-            .as_ref()
-            .map(|notification| (notification.message.as_str(), notification.level))
-    }
-
-    pub fn tick(&mut self) -> bool {
-        if self
-            .notification
-            .as_ref()
-            .is_some_and(|notification| Instant::now() >= notification.expires_at)
-        {
-            self.notification = None;
-            return true;
-        }
-        false
-    }
-
-    #[must_use]
-    pub fn next_wakeup(&self) -> Option<Duration> {
-        self.notification.as_ref().map(|notification| {
-            notification
-                .expires_at
-                .saturating_duration_since(Instant::now())
-        })
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
@@ -1001,42 +745,32 @@ impl App {
         }
     }
 
-    pub fn handle_resize(&mut self) {
-        self.pointer.clear_selection();
-        if matches!(
-            self.pointer.drag(),
-            DragKind::Text | DragKind::Cancelled | DragKind::Divider
-        ) {
-            self.pointer.set_drag(DragKind::Cancelled);
-        }
-    }
-
     fn handle_browse_key(&mut self, key: KeyEvent) -> AppAction {
         // Navigation keys depend on the focused pane; everything else is a command.
         match key.code {
-            KeyCode::Char(' ') if self.focus != Focus::Family => self.toggle_row_selection(),
-            KeyCode::Tab => self.toggle_focus(),
+            KeyCode::Char(' ') if self.shell.focus != Focus::Family => self.toggle_row_selection(),
+            KeyCode::Tab => self.shell.toggle_focus(),
             KeyCode::Down | KeyCode::Char('j') => self.move_focused(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_focused(-1),
-            KeyCode::PageDown => match self.focus {
+            KeyCode::PageDown => match self.shell.focus {
                 Focus::Family => self.move_family_cursor(self.family_page_size()),
                 Focus::Tickets | Focus::Details => self.move_focused(10),
             },
-            KeyCode::PageUp => match self.focus {
+            KeyCode::PageUp => match self.shell.focus {
                 Focus::Family => self.move_family_cursor(-self.family_page_size()),
                 Focus::Tickets | Focus::Details => self.move_focused(-10),
             },
-            KeyCode::Home => match self.focus {
+            KeyCode::Home => match self.shell.focus {
                 Focus::Tickets => self.select_row(0),
                 Focus::Family => self.move_family_cursor_to_edge(false),
                 Focus::Details => self.details.scroll_to(0),
             },
-            KeyCode::End => match self.focus {
+            KeyCode::End => match self.shell.focus {
                 Focus::Tickets => self.select_row(self.visible.len().saturating_sub(1)),
                 Focus::Family => self.move_family_cursor_to_edge(true),
                 Focus::Details => self.details.scroll_to(self.details.max_offset()),
             },
-            KeyCode::Enter => match self.focus {
+            KeyCode::Enter => match self.shell.focus {
                 Focus::Tickets => {}
                 Focus::Family => {
                     if let Some(key) = self.family_cursor.clone() {
@@ -1152,11 +886,11 @@ impl App {
             AppMode::Browse | AppMode::Search => {}
             _ => self.mode = AppMode::Browse,
         }
-        self.pointer.clear_selection();
+        self.shell.pointer.clear_selection();
     }
 
     fn move_focused(&mut self, delta: isize) {
-        match self.focus {
+        match self.shell.focus {
             Focus::Tickets => self.move_selection(delta),
             Focus::Family => self.move_family_cursor(delta),
             Focus::Details => self.scroll_details(delta),
@@ -1170,39 +904,6 @@ impl App {
             i32::MAX
         });
         self.details.scroll_by(delta);
-    }
-
-    fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::Tickets => Focus::Details,
-            Focus::Family => Focus::Details,
-            Focus::Details => Focus::Tickets,
-        };
-        self.narrow_details = self.focus.is_details_pane();
-    }
-
-    fn toggle_narrow_details(&mut self) {
-        self.narrow_details = !self.narrow_details;
-        if self.narrow_details {
-            if !self.focus.is_details_pane() {
-                self.focus = Focus::Details;
-            }
-        } else {
-            self.focus = Focus::Tickets;
-        }
-    }
-
-    fn set_notification(
-        &mut self,
-        message: impl Into<String>,
-        level: NotificationLevel,
-        duration: Duration,
-    ) {
-        self.notification = Some(Notification {
-            message: message.into(),
-            level,
-            expires_at: Instant::now() + duration,
-        });
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -1252,9 +953,11 @@ impl App {
                 } else {
                     "hidden by the current search"
                 };
-                self.set_status(format!("{id} is {reason}", id = key.id));
+                self.shell
+                    .set_status(format!("{id} is {reason}", id = key.id));
             } else {
-                self.set_error(format!("{id} is not in this database", id = key.id));
+                self.shell
+                    .set_error(format!("{id} is not in this database", id = key.id));
             }
             return;
         };

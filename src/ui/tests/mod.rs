@@ -97,7 +97,8 @@ fn parent_child_graph() -> TicketGraph {
 
 /// Where the last frame painted a target the predicate names.
 fn target_rect(app: &App, predicate: impl Fn(&PointerTarget) -> bool) -> Rect {
-    app.hit_regions
+    app.shell
+        .hit_regions
         .find_target(predicate)
         .expect("the frame painted that target")
         .rect
@@ -119,13 +120,15 @@ fn header_rect(app: &App, field: SortField) -> Rect {
 }
 
 fn detail_url(app: &App) -> Option<Rect> {
-    app.hit_regions
+    app.shell
+        .hit_regions
         .find_target(|target| matches!(target, PointerTarget::OpenSelectedUrl))
         .map(|region| region.rect)
 }
 
 fn family_row(app: &App, id: i64) -> Option<Rect> {
-    app.hit_regions
+    app.shell
+        .hit_regions
         .find_target(|target| matches!(target, PointerTarget::JumpToTicket(key) if key.id == id))
         .map(|region| region.rect)
 }
@@ -161,31 +164,34 @@ fn layouts_render_both_panes_and_expose_hit_regions_at_every_breakpoint() {
     assert!(table.contains("[Details]"));
     assert!(!table.contains("ID / Type / State"));
 
-    app.narrow_details = true;
+    app.shell.narrow_details = true;
     let details = render_text(60, 20, &mut app);
     assert!(details.contains("Details"));
     assert!(!details.contains("[Tickets]"));
     assert!(!details.contains("[Details]"));
     assert!(details.contains("Fix ticket search"));
-    app.narrow_details = false;
+    app.shell.narrow_details = false;
 
     for width in [36, 69, 70, 109, 110] {
         render_text(width, 16, &mut app);
         assert!(
-            app.hit_regions
+            app.shell
+                .hit_regions
                 .find_target(|target| matches!(target, PointerTarget::SearchField))
                 .is_some(),
             "search field missing at width {width}"
         );
         assert!(
-            app.hit_regions
+            app.shell
+                .hit_regions
                 .find_target(|target| matches!(target, PointerTarget::FocusTickets))
                 .is_some(),
             "table body missing at width {width}"
         );
         if width >= 70 {
             assert!(
-                app.hit_regions
+                app.shell
+                    .hit_regions
                     .find_target(|target| matches!(target, PointerTarget::FocusDetails))
                     .is_some(),
                 "details pane missing at width {width}"
@@ -202,8 +208,8 @@ fn the_table_title_reports_the_sync_state_in_both_layouts() {
         "an offline run says nothing about a sync it cannot run"
     );
 
-    app.enable_sync();
-    app.begin_sync();
+    app.shell.enable_sync();
+    app.shell.begin_sync();
     for width in [60, 130] {
         assert!(
             render_text(width, 12, &mut app).contains("Syncing…"),
@@ -211,24 +217,24 @@ fn the_table_title_reports_the_sync_state_in_both_layouts() {
         );
     }
 
-    app.finish_sync();
+    app.shell.finish_sync();
     assert!(render_text(130, 12, &mut app).contains("Synced just now"));
 
-    app.mark_stale();
+    app.shell.mark_stale();
     assert!(
         render_text(130, 12, &mut app).contains("Stale"),
         "a database change outranks the last sync time"
     );
 
-    app.fail_sync("network unreachable", true);
+    app.shell.fail_sync("network unreachable", true);
     assert!(
         render_text(130, 12, &mut app).contains("Sync failed"),
         "a failing sync outranks a stale database"
     );
 
-    app.reload_pending = true;
+    app.shell.reload_pending = true;
     assert!(render_text(130, 12, &mut app).contains("Reloading…"));
-    app.begin_sync();
+    app.shell.begin_sync();
     assert!(
         render_text(130, 12, &mut app).contains("Syncing…"),
         "a pull in flight is the most urgent thing the title can say"
@@ -241,12 +247,12 @@ fn the_database_overlay_reports_the_last_sync() {
     app.mode = AppMode::Info;
     assert!(render_text(90, 24, &mut app).contains("offline"));
 
-    app.enable_sync();
-    app.finish_sync();
+    app.shell.enable_sync();
+    app.shell.finish_sync();
     let synced = render_text(90, 24, &mut app);
     assert!(synced.contains("Sync: just now"), "{synced}");
 
-    app.fail_sync("network unreachable", true);
+    app.shell.fail_sync("network unreachable", true);
     assert!(render_text(90, 24, &mut app).contains("failed"));
 }
 
@@ -275,10 +281,10 @@ fn empty_reloading_and_no_result_states_render_with_a_usable_search_field() {
     let empty = render_text(90, 24, &mut app);
     assert!(empty.contains("No tickets in this database"));
 
-    app.reload_pending = true;
+    app.shell.reload_pending = true;
     let loading = render_text(90, 24, &mut app);
     assert!(loading.contains("Reloading tickets"));
-    app.reload_pending = false;
+    app.shell.reload_pending = false;
 
     app.mode = AppMode::Search;
     app.set_query("a very long query whose visible tail is unique".into());
@@ -419,7 +425,8 @@ fn drag(app: &mut App, from: (u16, u16), to: (u16, u16)) -> crate::app::AppActio
 }
 
 fn edit_field_rect(app: &App, field: EditableField) -> Rect {
-    app.hit_regions
+    app.shell
+        .hit_regions
         .edit_field(field)
         .unwrap_or_else(|| panic!("{field:?} should be clickable"))
 }
@@ -432,7 +439,7 @@ fn issue_app() -> App {
         "To Do",
         "2026-03-03T00:00:00Z",
     )]);
-    app.enable_sync();
+    app.shell.enable_sync();
     let mut catalog = StateCatalog::default();
     catalog.insert(
         "Issue",

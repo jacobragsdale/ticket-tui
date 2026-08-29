@@ -15,6 +15,7 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         )
     };
     let activity = app
+        .shell
         .activity_label()
         .map_or_else(String::new, |label| format!(" · {label}"));
     let title = if area.width < NARROW_BREAKPOINT {
@@ -30,7 +31,7 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         format!(" Tickets {count}/{total} · {ordering}{activity} ")
     };
-    let block = focused_block(title, app.focus == Focus::Tickets);
+    let block = focused_block(title, app.shell.focus == Focus::Tickets);
     let inner = block.inner(area);
     let columns = app.layout.visible_columns(inner.width.saturating_sub(5));
     let mut constraints = vec![Constraint::Length(4)];
@@ -95,7 +96,7 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let mut cells = vec![Cell::from(row_marker_line(checked, bookmarked))];
         let row = RowContext {
             tone: RowTone::of(&ticket.state),
-            mine: app.is_mine(ticket),
+            mine: app.shell.is_mine(ticket),
             progress: app.child_progress(&ticket.key),
             stale: app.stale_age_days_at(ticket, table_now).is_some(),
         };
@@ -139,7 +140,7 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .spacing(1)
             .split(header_area);
         for (header_rect, column) in header_columns.iter().skip(1).zip(columns.iter()) {
-            app.hit_regions.push(region(
+            app.shell.hit_regions.push(region(
                 *header_rect,
                 PointerTarget::SortHeader(column.id),
                 PointerLayer::Base,
@@ -148,7 +149,7 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ));
         }
         let body = Rect::new(inner.x, inner.y.saturating_add(2), inner.width, body_height);
-        app.hit_regions.push(region(
+        app.shell.hit_regions.push(region(
             body,
             PointerTarget::FocusTickets,
             PointerLayer::Base,
@@ -170,7 +171,7 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 body.width.saturating_sub(1),
                 row_height.min(body.y.saturating_add(body.height).saturating_sub(y)),
             );
-            app.hit_regions.push(region(
+            app.shell.hit_regions.push(region(
                 row_rect,
                 PointerTarget::TableRow { index: logical },
                 PointerLayer::Base,
@@ -178,14 +179,14 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Some(ScrollSurface::Table),
             ));
             if let Some(marker) = header_columns.first() {
-                app.hit_regions.push(region(
+                app.shell.hit_regions.push(region(
                     Rect::new(marker.x, y, 3, 1),
                     PointerTarget::ToggleRowSelect { index: logical },
                     PointerLayer::Base,
                     None,
                     None,
                 ));
-                app.hit_regions.push(region(
+                app.shell.hit_regions.push(region(
                     Rect::new(marker.x.saturating_add(3), y, 1, 1),
                     PointerTarget::ToggleBookmark { index: logical },
                     PointerLayer::Base,
@@ -194,7 +195,7 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 ));
             }
             if let Some(id_area) = header_columns.get(1) {
-                app.hit_regions.push(region(
+                app.shell.hit_regions.push(region(
                     Rect::new(id_area.x, y, id_area.width, 1),
                     PointerTarget::OpenTicket { index: logical },
                     PointerLayer::Base,
@@ -219,9 +220,9 @@ pub(super) fn render_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     if count == 0 && inner.height > 2 {
-        let message = if app.sync_pending {
+        let message = if app.shell.sync_pending {
             "Syncing with Azure DevOps…"
-        } else if app.reload_pending {
+        } else if app.shell.reload_pending {
             "Reloading tickets…"
         } else if !app.parsed_query().is_active() {
             "No tickets in this database"

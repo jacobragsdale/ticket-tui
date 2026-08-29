@@ -215,8 +215,8 @@ impl App {
         self.search.replace_documents(prepared.search_documents);
         self.reapply_pending_edits();
         self.refresh_child_progress();
-        self.loaded_at = Instant::now();
-        self.stale = false;
+        self.shell.loaded_at = Instant::now();
+        self.shell.stale = false;
         if self.fuzzy_query().is_empty() {
             self.show_all(selected.as_ref());
         } else {
@@ -282,8 +282,8 @@ impl App {
 
     pub(super) fn sync_family_state(&mut self) {
         self.reset_family_cursor();
-        if self.focus == Focus::Family && !self.selected_has_family() {
-            self.focus = Focus::Details;
+        if self.shell.focus == Focus::Family && !self.selected_has_family() {
+            self.shell.focus = Focus::Details;
         }
     }
 

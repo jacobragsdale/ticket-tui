@@ -7,11 +7,12 @@ fn agent_context_describes_the_live_ticket_workspace() {
         ticket(2, "Beta", "2026-02-01T00:00:00Z"),
         ticket(3, "Gamma", "2026-03-01T00:00:00Z"),
     ]);
-    app.configure_database(PathBuf::from("/tmp/tickets.sqlite3"), 0);
+    app.shell
+        .configure_database(PathBuf::from("/tmp/tickets.sqlite3"), 0);
     app.set_table_viewport(2);
     app.set_query("state:Active".into());
     app.toggle_row_selection();
-    app.focus = Focus::Details;
+    app.shell.focus = Focus::Details;
     app.mode = AppMode::Filter;
     app.active_view = Some("Active work".into());
 
@@ -36,14 +37,17 @@ fn agent_context_describes_the_live_ticket_workspace() {
     theirs.assigned_to = Some("Jordan Patel".into());
     let mut unassigned = app.tickets()[1].clone();
     unassigned.assigned_to = None;
-    assert!(!app.is_mine(&mine), "nobody is \"me\" until a name is set");
+    assert!(
+        !app.shell.is_mine(&mine),
+        "nobody is \"me\" until a name is set"
+    );
 
-    app.set_me(Some("Avery Chen".into()));
+    app.shell.set_me(Some("Avery Chen".into()));
 
-    assert_eq!(app.me(), Some("Avery Chen"));
-    assert!(app.is_mine(&mine), "casing and padding do not matter");
-    assert!(!app.is_mine(&theirs));
-    assert!(!app.is_mine(&unassigned));
+    assert_eq!(app.shell.me(), Some("Avery Chen"));
+    assert!(app.shell.is_mine(&mine), "casing and padding do not matter");
+    assert!(!app.shell.is_mine(&theirs));
+    assert!(!app.shell.is_mine(&unassigned));
     assert_eq!(app.agent_context().me.as_deref(), Some("Avery Chen"));
 }
 
@@ -59,13 +63,13 @@ fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() 
     assert_eq!(offline.last_success_at, None);
     assert_eq!(offline.last_error, None);
 
-    app.enable_sync();
-    app.set_sync_target(Some(SyncTarget {
+    app.shell.enable_sync();
+    app.shell.set_sync_target(Some(SyncTarget {
         organization: "example-org".into(),
         project: "atlas".into(),
         refresh_seconds: 60,
     }));
-    app.begin_sync();
+    app.shell.begin_sync();
 
     let running = app.agent_context().sync;
     assert!(!running.offline);
@@ -74,7 +78,7 @@ fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() 
     assert_eq!(running.refresh_seconds, 60);
     assert!(running.in_progress, "a pull is out");
 
-    app.finish_sync();
+    app.shell.finish_sync();
 
     let succeeded = app.agent_context().sync;
     assert!(!succeeded.in_progress);
@@ -85,8 +89,8 @@ fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() 
         "the last sync is RFC 3339: {landed}"
     );
 
-    app.begin_sync();
-    app.fail_sync("network unreachable", true);
+    app.shell.begin_sync();
+    app.shell.fail_sync("network unreachable", true);
 
     let failed = app.agent_context().sync;
     assert!(!failed.in_progress);
@@ -97,7 +101,7 @@ fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() 
         "a failure does not erase when the rows last arrived"
     );
 
-    app.finish_sync();
+    app.shell.finish_sync();
     assert_eq!(
         app.agent_context().sync.last_error,
         None,

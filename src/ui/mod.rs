@@ -199,7 +199,7 @@ fn theme() -> &'static Theme {
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     render_pass(frame, app);
-    if app.refresh_hover() {
+    if app.shell.refresh_hover() {
         render_pass(frame, app);
     }
     paint_hover(frame, app);
@@ -207,7 +207,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 }
 
 fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
-    app.hit_regions = HitRegions::default();
+    app.shell.hit_regions = HitRegions::default();
     let area = frame.area();
     if area.width < 36 || area.height < 10 {
         frame.render_widget(
@@ -240,7 +240,7 @@ fn render_pass(frame: &mut Frame<'_>, app: &mut App) {
     // it becomes one target that closes it. The overlay's own regions are
     // pushed after this one and on the same layer, so they still win.
     if anchored_overlay(app) {
-        app.hit_regions.push(region(
+        app.shell.hit_regions.push(region(
             area,
             PointerTarget::DismissOverlay,
             PointerLayer::Modal,
@@ -337,7 +337,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             true,
         );
     }
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         field,
         PointerTarget::SearchField,
         PointerLayer::Base,
@@ -352,7 +352,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             actions_width.saturating_sub(1),
             1,
         );
-        app.hit_regions.push(region(
+        app.shell.hit_regions.push(region(
             actions,
             PointerTarget::OpenPalette,
             PointerLayer::Base,
@@ -367,7 +367,7 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             3,
             1,
         );
-        app.hit_regions.push(region(
+        app.shell.hit_regions.push(region(
             help,
             PointerTarget::OpenHelp,
             PointerLayer::Base,
@@ -390,9 +390,10 @@ fn render_search(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
 fn render_content(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if area.width >= WIDE_BREAKPOINT {
-        app.set_content_layout(area, Some(DividerOrientation::Vertical));
+        app.shell
+            .set_content_layout(area, Some(DividerOrientation::Vertical));
         let panes = Layout::horizontal([
-            Constraint::Percentage(app.pane_split_wide),
+            Constraint::Percentage(app.shell.pane_split_wide),
             Constraint::Fill(1),
         ])
         .spacing(1)
@@ -401,9 +402,10 @@ fn render_content(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         render_details(frame, app, panes[1]);
         render_divider(frame, app, panes[0], panes[1], DividerOrientation::Vertical);
     } else if area.width >= NARROW_BREAKPOINT {
-        app.set_content_layout(area, Some(DividerOrientation::Horizontal));
+        app.shell
+            .set_content_layout(area, Some(DividerOrientation::Horizontal));
         let panes = Layout::vertical([
-            Constraint::Percentage(app.pane_split_stacked),
+            Constraint::Percentage(app.shell.pane_split_stacked),
             Constraint::Fill(1),
         ])
         .spacing(1)
@@ -418,8 +420,8 @@ fn render_content(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             DividerOrientation::Horizontal,
         );
     } else {
-        app.set_content_layout(area, None);
-        if app.narrow_details {
+        app.shell.set_content_layout(area, None);
+        if app.shell.narrow_details {
             render_details(frame, app, area);
         } else {
             render_table(frame, app, area);
@@ -449,7 +451,7 @@ fn render_divider(
         .map(|_| Line::styled(row.clone(), style))
         .collect();
     frame.render_widget(Paragraph::new(Text::from(lines)), rect);
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         rect,
         PointerTarget::PaneDivider,
         PointerLayer::Base,
@@ -478,7 +480,7 @@ fn divider_rect(first: Rect, second: Rect, orientation: DividerOrientation) -> O
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let (text, style) = if let Some((message, level)) = app.notification() {
+    let (text, style) = if let Some((message, level)) = app.shell.notification() {
         let color = match level {
             NotificationLevel::Info => theme().info,
             NotificationLevel::Error => theme().error,
@@ -527,8 +529,10 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             AppMode::TypePicker => "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel",
             AppMode::Form => "\u{2191}\u{2193}/Tab fields  Enter picker  Ctrl-S create  Esc cancel",
             AppMode::ConfirmDelete => "d delete  Esc cancel",
-            AppMode::Browse if app.focus == Focus::Family => "↑↓ move  Enter select  Tab details",
-            AppMode::Browse if app.focus == Focus::Details => {
+            AppMode::Browse if app.shell.focus == Focus::Family => {
+                "↑↓ move  Enter select  Tab details"
+            }
+            AppMode::Browse if app.shell.focus == Focus::Details => {
                 "↑↓/jk scroll details  Tab tickets  Enter/o open  / search  ? help  q quit"
             }
             AppMode::Browse if !app.query().is_empty() => {
@@ -551,14 +555,14 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn register_narrow_tabs(app: &mut App, area: Rect) {
     let tickets = Rect::new(area.x.saturating_add(1), area.y, 9, 1);
     let details = Rect::new(area.x.saturating_add(11), area.y, 9, 1);
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         tickets,
         PointerTarget::NarrowTickets,
         PointerLayer::Base,
         None,
         None,
     ));
-    app.hit_regions.push(region(
+    app.shell.hit_regions.push(region(
         details,
         PointerTarget::NarrowDetails,
         PointerLayer::Base,
@@ -589,7 +593,7 @@ fn focused_block<'a>(title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
 /// Whether the overlay on screen is a dropdown hung off a details-pane field
 /// rather than a centred modal.
 fn anchored_overlay(app: &App) -> bool {
-    app.overlay_anchor.is_anchored()
+    app.shell.overlay_anchor.is_anchored()
         && matches!(
             app.mode,
             AppMode::StatePicker
