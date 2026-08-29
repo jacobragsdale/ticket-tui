@@ -2,6 +2,7 @@
 //! project's work items over REST, and map them onto the local ticket model.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
@@ -16,8 +17,9 @@ use url::Url;
 use crate::classification::{self, ClassificationNode};
 use crate::html::html_to_text;
 use crate::model::{
-    CommentRecord, HistoryRecord, Identity, Pipeline, RelationKind, RelationRecord, Repo, Run,
-    RunResult, RunStatus, StateCategory, StateOption, Ticket, TicketKey, WorkItemDetails,
+    CommentRecord, HistoryRecord, Identity, Issue, Pipeline, RelationKind, RelationRecord, Repo,
+    Run, RunResult, RunStatus, StateCategory, StateOption, Ticket, TicketKey, TimelineKind,
+    TimelineRecord, WorkItemDetails,
 };
 use crate::timestamp::Timestamp;
 
@@ -646,6 +648,24 @@ impl AzureClient {
         Ok(parse_runs(&self.get(url.as_str())?))
     }
 
+    /// One run's timeline: its stages, jobs and tasks, and what each is
+    /// doing. This is what the watcher reads every five seconds while a run is
+    /// on screen and going.
+    pub fn fetch_timeline(&self, run_id: i64) -> Result<Vec<TimelineRecord>> {
+        let id = run_id.to_string();
+        let segments = [
+            self.config.project.as_str(),
+            "_apis",
+            "build",
+            "builds",
+            id.as_str(),
+            "timeline",
+        ];
+        let mut url = self.api_url(&segments)?;
+        url.set_query(Some(&version_query()));
+        Ok(parse_timeline(&self.get(url.as_str())?))
+    }
+
     /// The teams hang off `_apis/projects` rather than off the project. `tail`
     /// is whatever follows `teams`.
     fn teams_url(&self, tail: &[&str]) -> Result<String> {
@@ -862,6 +882,76 @@ fn parse_runs(response: &Value) -> Vec<Run> {
             })
         })
         .collect()
+}
+
+/// The records in a timeline response. Phase records are dropped and their
+/// children re-parented onto the stage above them, which is the tree the epic
+/// draws: stages, jobs, tasks.
+fn parse_timeline(response: &Value) -> Vec<TimelineRecord> {
+    let entries = response["records"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    // Every phase, and the stage it hangs under, so its jobs can be lifted.
+    let phases: HashMap<&str, Option<String>> = entries
+        .iter()
+        .filter(|entry| {
+            entry["type"]
+                .as_str()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("phase"))
+        })
+        .filter_map(|entry| {
+            Some((
+                entry["id"].as_str()?,
+                entry["parentId"].as_str().map(str::to_owned),
+            ))
+        })
+        .collect();
+    let mut records: Vec<TimelineRecord> = entries
+        .iter()
+        .filter_map(|entry| {
+            let kind = TimelineKind::parse(entry["type"].as_str()?)?;
+            let parent = entry["parentId"].as_str().map(str::to_owned);
+            let parent = parent.map(|parent| {
+                phases
+                    .get(parent.as_str())
+                    .and_then(Clone::clone)
+                    .unwrap_or(parent)
+            });
+            let time = |key: &str| {
+                entry[key]
+                    .as_str()
+                    .and_then(|raw| Timestamp::parse(raw).ok())
+            };
+            Some(TimelineRecord {
+                id: entry["id"].as_str()?.to_owned(),
+                parent_id: parent,
+                kind,
+                name: entry["name"].as_str().unwrap_or_default().to_owned(),
+                state: RunStatus::parse(entry["state"].as_str().unwrap_or_default()),
+                result: entry["result"].as_str().and_then(RunResult::parse),
+                start: time("startTime"),
+                finish: time("finishTime"),
+                percent_complete: entry["percentComplete"].as_i64(),
+                log_id: entry["log"]["id"].as_i64(),
+                order: entry["order"].as_i64().unwrap_or_default(),
+                issues: entry["issues"]
+                    .as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|issue| {
+                        Some(Issue {
+                            kind: issue["type"].as_str()?.to_owned(),
+                            message: issue["message"].as_str().unwrap_or_default().to_owned(),
+                        })
+                    })
+                    .collect(),
+            })
+        })
+        .collect();
+    records.sort_by_key(|record| record.order);
+    records
 }
 
 /// The repositories in a `GET .../_apis/git/repositories` response, and the

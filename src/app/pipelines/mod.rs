@@ -10,11 +10,11 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use super::ListCursor;
-use super::{AppAction, Screen, Shell, TabId};
+use super::{AppAction, Focus, Screen, Shell, TabId};
 use crate::columns::{ColumnId, ColumnLayout, TableLayout};
 use crate::command::{CommandId, command_for_key};
 use crate::filter::{MatchContext, ParsedQuery, parse_query};
-use crate::model::{Jump, Pipeline, Run};
+use crate::model::{Jump, Pipeline, Run, TimelineRecord};
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 use crate::session::TabSession;
 use crate::text_input::TextInput;
@@ -66,6 +66,10 @@ pub struct PipelinesScreen {
     pub pipeline_cursor: ListCursor,
     pub run_cursor: ListCursor,
     pub details: ScrollState,
+    /// The timelines that have come back, newest last, keyed by run.
+    timelines: Vec<(i64, Vec<TimelineRecord>)>,
+    /// The run the details pane is showing and where its tree cursor is.
+    focused: Option<(i64, usize)>,
 }
 
 impl Default for PipelinesScreen {
@@ -86,6 +90,8 @@ impl Default for PipelinesScreen {
             pipeline_cursor: ListCursor::default(),
             run_cursor: ListCursor::default(),
             details: ScrollState::default(),
+            timelines: Vec::new(),
+            focused: None,
         }
     }
 }
@@ -117,6 +123,81 @@ impl PipelinesScreen {
             }
         }
         self.runs.sort_by_key(|run| std::cmp::Reverse(run.id));
+    }
+
+    /// What the watcher answered with for one run. Kept whole: a timeline is
+    /// small, and replacing it is what makes a running node's state move.
+    pub fn set_timeline(&mut self, run_id: i64, records: Vec<TimelineRecord>) {
+        self.timelines.retain(|(held, _)| *held != run_id);
+        self.timelines.push((run_id, records));
+        // Only ever a handful: the run on screen, and whatever was on screen
+        // before it.
+        if self.timelines.len() > 8 {
+            self.timelines.remove(0);
+        }
+        self.clamp_timeline_cursor();
+    }
+
+    /// The timeline of the run the details pane is showing, if one has come
+    /// back yet.
+    #[must_use]
+    pub fn timeline(&self, run_id: i64) -> &[TimelineRecord] {
+        self.timelines
+            .iter()
+            .find(|(held, _)| *held == run_id)
+            .map_or(&[], |(_, records)| records.as_slice())
+    }
+
+    /// The run the details pane is on, which is whose timeline is worth
+    /// reading.
+    #[must_use]
+    pub fn focused_run(&self) -> Option<i64> {
+        self.focused.map(|(run, _)| run)
+    }
+
+    /// Puts the focus on whatever the cursor is now over, which is what tells
+    /// the watcher whose timeline to read.
+    pub fn sync_focus(&mut self, shell: &Shell) {
+        let run = self.selected_run(shell).map(|row| row.run.id);
+        self.focus_run(run);
+    }
+
+    /// Records which run the details pane settled on, so the tree cursor
+    /// starts at the top of a run that has just come up.
+    pub fn focus_run(&mut self, run_id: Option<i64>) {
+        if self.focused.map(|(run, _)| run) != run_id {
+            self.focused = run_id.map(|run| (run, 0));
+        }
+    }
+
+    /// The node the timeline cursor is on.
+    #[must_use]
+    pub fn timeline_cursor(&self) -> usize {
+        self.focused.map_or(0, |(_, index)| index)
+    }
+
+    /// Moves the timeline cursor, which is what `j` and `k` do while the
+    /// details pane has the focus.
+    pub fn move_timeline_cursor(&mut self, delta: isize) {
+        let Some((run, index)) = self.focused else {
+            return;
+        };
+        let count = self.timeline(run).len();
+        if count == 0 {
+            return;
+        }
+        let next = index
+            .saturating_add_signed(delta)
+            .min(count.saturating_sub(1));
+        self.focused = Some((run, next));
+    }
+
+    fn clamp_timeline_cursor(&mut self) {
+        let Some((run, index)) = self.focused else {
+            return;
+        };
+        let count = self.timeline(run).len();
+        self.focused = Some((run, index.min(count.saturating_sub(1))));
     }
 
     /// The runs still going, which is what the watcher is asked to follow.
@@ -364,14 +445,37 @@ impl Screen for PipelinesScreen {
         if self.mode == PipelineMode::Search {
             return self.handle_search_key(shell, key);
         }
+        if shell.focus == Focus::Details {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.move_timeline_cursor(1);
+                    return AppAction::None;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.move_timeline_cursor(-1);
+                    return AppAction::None;
+                }
+                KeyCode::Tab | KeyCode::Esc => {
+                    shell.focus = Focus::Tickets;
+                    return AppAction::None;
+                }
+                _ => {}
+            }
+        }
         match key.code {
+            KeyCode::Tab => {
+                shell.focus = Focus::Details;
+                self.sync_focus(shell);
+            }
             KeyCode::Down | KeyCode::Char('j') => {
                 let count = self.row_count(shell);
                 self.cursor_mut().move_by(1, count);
+                self.sync_focus(shell);
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 let count = self.row_count(shell);
                 self.cursor_mut().move_by(-1, count);
+                self.sync_focus(shell);
             }
             KeyCode::PageDown => {
                 let count = self.row_count(shell);
@@ -386,7 +490,10 @@ impl Screen for PipelinesScreen {
                 let count = self.row_count(shell);
                 self.cursor_mut().move_by(isize::MAX, count);
             }
-            KeyCode::Enter => self.open_runs(shell),
+            KeyCode::Enter => {
+                self.open_runs(shell);
+                self.sync_focus(shell);
+            }
             KeyCode::Backspace | KeyCode::Char('h') => self.close_runs(),
             KeyCode::Esc if !self.query().is_empty() => {
                 self.query_mut().clear();
@@ -415,6 +522,19 @@ impl Screen for PipelinesScreen {
                 let count = self.row_count(shell);
                 if index < count {
                     self.cursor_mut().focus(index);
+                    self.sync_focus(shell);
+                }
+                shell.focus = Focus::Tickets;
+            }
+            // A click in the timeline tree picks the node up, which is what
+            // #684 hangs the log off.
+            PointerTarget::TreeRow { index } => {
+                shell.focus = Focus::Details;
+                if let Some((run, _)) = self.focused {
+                    let count = self.timeline(run).len();
+                    if index < count {
+                        self.focused = Some((run, index));
+                    }
                 }
             }
             // The id column of a list opens what the row is about in the

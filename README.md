@@ -964,7 +964,16 @@ costs nothing at all. Every cadence doubles, up to a minute, when Azure DevOps
 reports a thin rate-limit budget or turns a request away, and goes back to 15
 seconds on the next clean response. The `i` overlay says what it is doing.
 
-The timeline of a run and the log tail that follows it are #683 and #684.
+Under the run's header the details pane draws its timeline: the stages, the
+jobs in them and the tasks in those, as a tree with the same connectors the
+work-item family tree uses. Each node carries its glyph, its name, `✗ 2` in red
+where it reported errors, `42%` where a running task says how far it has got,
+and its duration on the right — recomputed each frame while it runs, `—` for
+one that has not started. `Tab` moves the focus to the tree, `j`/`k` and a
+click move between nodes, and while the run on screen is going the watcher
+reads its timeline every five seconds; a finished run's is read once and kept.
+
+The log tail that follows the selected node is #684.
 
 ## Controls
 

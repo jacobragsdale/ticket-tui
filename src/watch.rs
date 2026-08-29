@@ -17,11 +17,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use crate::model::Run;
+use crate::model::{Run, TimelineRecord};
 
 /// How often the live runs of the whole project are read while anything is
 /// worth reading them for.
 pub const LIVE_RUNS_CADENCE: Duration = Duration::from_secs(15);
+
+/// How often the timeline of the run on screen is read while it is going. A
+/// finished run's timeline is read once and kept for the session.
+pub const TIMELINE_CADENCE: Duration = Duration::from_secs(5);
 
 /// The longest any cadence stretches to when the budget is thin. Past this,
 /// waiting longer stops being politeness and starts being uselessness.
@@ -35,6 +39,11 @@ pub enum WatchRequest {
     /// Whether the Pipelines tab is the one showing. A hidden tab with nothing
     /// watched is the watcher's cue to go quiet.
     TabShowing(bool),
+    /// The run the details pane is showing, whose timeline is worth reading
+    /// every few seconds while it is going. #684 adds the log node to this.
+    Focus(i64),
+    /// Nothing is on screen worth reading a timeline for.
+    Blur,
     /// Keep following one run wherever the user goes. #685 puts this behind a
     /// key; the watcher only has to know it is asked for.
     Watch(i64),
@@ -48,6 +57,11 @@ pub enum WatchRequest {
 pub enum WatchEvent {
     /// Every run in the project that is queued, going, or being cancelled.
     LiveRuns(Vec<Run>),
+    /// One run's stages, jobs and tasks, as they stand.
+    Timeline {
+        run_id: i64,
+        records: Vec<TimelineRecord>,
+    },
     /// Azure DevOps asked to be left alone, and for how long. Not an error:
     /// the cadences stretch and the overlay says so.
     Throttled(Duration),
@@ -63,6 +77,11 @@ pub enum WatchEvent {
 pub trait PipelineSource: Send {
     /// Every run that is queued, in progress, or being cancelled.
     fn live_runs(&self) -> Result<Vec<Run>>;
+
+    /// One run's timeline: its stages, jobs and tasks.
+    fn timeline(&self, _run_id: i64) -> Result<Vec<TimelineRecord>> {
+        Ok(Vec::new())
+    }
 
     /// How long the responses read since this was last asked want to be left
     /// alone, from the rate-limit budget they reported. Reading it clears it.
@@ -146,8 +165,14 @@ impl Cadence {
 pub struct Watcher {
     source: Box<dyn PipelineSource>,
     live: Cadence,
+    timeline: Cadence,
     tab_showing: bool,
     watched: Vec<i64>,
+    /// The run whose timeline is worth reading, if one is on screen.
+    focus: Option<i64>,
+    /// Runs whose timeline has finished moving. One of these is read once and
+    /// never again: nothing about a finished run changes.
+    settled: Vec<i64>,
     /// Whether the last poll failed, so a spell of failure is reported once.
     failing: bool,
 }
@@ -158,8 +183,11 @@ impl Watcher {
         Self {
             source,
             live: Cadence::new(LIVE_RUNS_CADENCE),
+            timeline: Cadence::new(TIMELINE_CADENCE),
             tab_showing: false,
             watched: Vec::new(),
+            focus: None,
+            settled: Vec::new(),
             failing: false,
         }
     }
@@ -181,6 +209,15 @@ impl Watcher {
     pub fn handle(&mut self, request: &WatchRequest) -> bool {
         match request {
             WatchRequest::TabShowing(showing) => self.tab_showing = *showing,
+            WatchRequest::Focus(run) => {
+                if self.focus != Some(*run) {
+                    self.focus = Some(*run);
+                    // A run just moved onto the screen is read at once rather
+                    // than at the next tick of somebody else's cadence.
+                    self.timeline = Cadence::new(TIMELINE_CADENCE);
+                }
+            }
+            WatchRequest::Blur => self.focus = None,
             WatchRequest::Watch(run) => {
                 if !self.watched.contains(run) {
                     self.watched.push(*run);
@@ -195,30 +232,60 @@ impl Watcher {
     /// Everything due at `now`. Nothing at all while there is nothing to watch,
     /// which is what keeps a hidden tab from costing a request.
     pub fn poll(&mut self, now: Instant) -> Vec<WatchEvent> {
-        if !self.is_watching() || !self.live.is_due(now) {
+        if !self.is_watching() {
             return Vec::new();
         }
         let mut events = Vec::new();
-        match self.source.live_runs() {
-            Ok(runs) => {
-                self.failing = false;
-                self.live.relax();
-                events.push(WatchEvent::LiveRuns(runs));
-            }
-            Err(error) => {
-                self.live.stretch();
-                if !self.failing {
-                    self.failing = true;
-                    events.push(WatchEvent::Failed(format!("{error:#}")));
+        if self.live.is_due(now) {
+            match self.source.live_runs() {
+                Ok(runs) => {
+                    self.failing = false;
+                    self.live.relax();
+                    events.push(WatchEvent::LiveRuns(runs));
+                }
+                Err(error) => {
+                    self.live.stretch();
+                    if !self.failing {
+                        self.failing = true;
+                        events.push(WatchEvent::Failed(format!("{error:#}")));
+                    }
                 }
             }
+            self.live.polled(now);
+        }
+        if let Some(run) = self.focus.filter(|run| !self.settled.contains(run))
+            && self.timeline.is_due(now)
+        {
+            match self.source.timeline(run) {
+                Ok(records) => {
+                    self.timeline.relax();
+                    // A run whose every node has finished is not going to move
+                    // again, so its timeline is read once and kept.
+                    if records.iter().all(|record| !record.state.is_live()) && !records.is_empty() {
+                        self.settled.push(run);
+                    }
+                    events.push(WatchEvent::Timeline {
+                        run_id: run,
+                        records,
+                    });
+                }
+                Err(error) => {
+                    self.timeline.stretch();
+                    if !self.failing {
+                        self.failing = true;
+                        events.push(WatchEvent::Failed(format!("{error:#}")));
+                    }
+                }
+            }
+            self.timeline.polled(now);
         }
         if let Some(wait) = self.source.throttled_for() {
             self.live.stretch();
+            self.timeline.stretch();
             self.live.hold_off(now, wait);
+            self.timeline.hold_off(now, wait);
             events.push(WatchEvent::Throttled(wait));
         }
-        self.live.polled(now);
         events
     }
 
@@ -226,13 +293,25 @@ impl Watcher {
     /// nothing to watch waits for a request rather than for a clock.
     #[must_use]
     pub fn until_due(&self, now: Instant) -> Option<Duration> {
-        self.is_watching().then(|| self.live.until_due(now))
+        if !self.is_watching() {
+            return None;
+        }
+        let live = self.live.until_due(now);
+        let timeline = self
+            .focus
+            .filter(|run| !self.settled.contains(run))
+            .map_or(live, |_| self.timeline.until_due(now));
+        Some(live.min(timeline))
     }
 }
 
 impl PipelineSource for crate::azure::AzureClient {
     fn live_runs(&self) -> Result<Vec<Run>> {
         self.fetch_live_runs()
+    }
+
+    fn timeline(&self, run_id: i64) -> Result<Vec<TimelineRecord>> {
+        self.fetch_timeline(run_id)
     }
 
     fn throttled_for(&self) -> Option<Duration> {
@@ -349,6 +428,9 @@ mod tests {
 
     struct FakeRuns {
         runs: Arc<Mutex<Vec<Run>>>,
+        /// How many timelines were read, and whether the run has finished.
+        timelines: Arc<Mutex<usize>>,
+        finished: Arc<Mutex<bool>>,
         /// The errors the next reads answer with, oldest first.
         failures: Arc<Mutex<Vec<String>>>,
         /// The waits the source reports having been asked for.
@@ -363,6 +445,29 @@ mod tests {
                 return Err(anyhow::anyhow!(error));
             }
             Ok(self.runs.lock().unwrap().clone())
+        }
+
+        fn timeline(&self, _run_id: i64) -> Result<Vec<TimelineRecord>> {
+            *self.timelines.lock().unwrap() += 1;
+            let state = if *self.finished.lock().unwrap() {
+                RunStatus::Completed
+            } else {
+                RunStatus::InProgress
+            };
+            Ok(vec![TimelineRecord {
+                id: "stage-1".into(),
+                parent_id: None,
+                kind: crate::model::TimelineKind::Stage,
+                name: "Build".into(),
+                state,
+                result: None,
+                start: None,
+                finish: None,
+                percent_complete: None,
+                log_id: None,
+                order: 1,
+                issues: Vec::new(),
+            }])
         }
 
         fn throttled_for(&self) -> Option<Duration> {
@@ -395,23 +500,31 @@ mod tests {
         reads: Arc<Mutex<usize>>,
         throttles: Arc<Mutex<Vec<Duration>>>,
         failures: Arc<Mutex<Vec<String>>>,
+        timelines: Arc<Mutex<usize>>,
+        finished: Arc<Mutex<bool>>,
     }
 
     fn watcher() -> Harness {
         let reads = Arc::new(Mutex::new(0));
         let throttles = Arc::new(Mutex::new(Vec::new()));
         let failures = Arc::new(Mutex::new(Vec::new()));
+        let timelines = Arc::new(Mutex::new(0));
+        let finished = Arc::new(Mutex::new(false));
         let source = FakeRuns {
             runs: Arc::new(Mutex::new(vec![run(14)])),
             failures: Arc::clone(&failures),
             throttles: Arc::clone(&throttles),
             reads: Arc::clone(&reads),
+            timelines: Arc::clone(&timelines),
+            finished: Arc::clone(&finished),
         };
         Harness {
             watcher: Watcher::new(Box::new(source)),
             reads,
             throttles,
             failures,
+            timelines,
+            finished,
         }
     }
 
@@ -533,6 +646,53 @@ mod tests {
             "and it reports again the moment it works"
         );
         assert_eq!(watcher.live_cadence(), LIVE_RUNS_CADENCE);
+    }
+
+    #[test]
+    fn the_focused_runs_timeline_is_read_every_five_seconds_and_stops_when_it_finishes() {
+        let Harness {
+            mut watcher,
+            timelines,
+            finished,
+            ..
+        } = watcher();
+        watcher.handle(&WatchRequest::TabShowing(true));
+        watcher.handle(&WatchRequest::Focus(14));
+        let start = Instant::now();
+
+        let events = watcher.poll(start);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                WatchEvent::Timeline { run_id: 14, records } if records[0].name == "Build"
+            )),
+            "the run on screen is read the moment it gets there"
+        );
+        assert!(
+            watcher.poll(start + Duration::from_secs(4)).is_empty(),
+            "and not again until the cadence is up"
+        );
+        assert_eq!(*timelines.lock().unwrap(), 1);
+
+        let events = watcher.poll(start + TIMELINE_CADENCE);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, WatchEvent::Timeline { .. })),
+            "every five seconds while it is going"
+        );
+        assert_eq!(*timelines.lock().unwrap(), 2);
+
+        // The run finishes: every node has stopped moving.
+        *finished.lock().unwrap() = true;
+        watcher.poll(start + Duration::from_secs(20));
+        let reads = *timelines.lock().unwrap();
+        watcher.poll(start + Duration::from_secs(120));
+        assert_eq!(
+            *timelines.lock().unwrap(),
+            reads,
+            "a finished run's timeline is read once and kept"
+        );
     }
 
     #[test]

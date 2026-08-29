@@ -383,7 +383,9 @@ impl WorkItemsScreen {
             PointerTarget::EditField { field } => return self.open_field_editor(shell, field),
             // The tab bar is the shell's: `App::handle_mouse` acts on a tab
             // before the click reaches a screen.
-            PointerTarget::SelectTab { .. } => {}
+            // The work items screen draws no tree the pointer can pick a row
+            // out of; its family rows are Follow targets.
+            PointerTarget::SelectTab { .. } | PointerTarget::TreeRow { .. } => {}
             PointerTarget::DismissOverlay => self.close_overlay(shell),
             PointerTarget::PromptInput => {
                 self.place_caret(shell, TextEditor::Prompt, column, row);

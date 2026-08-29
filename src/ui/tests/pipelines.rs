@@ -1,7 +1,7 @@
 use super::*;
 use crate::app::TabId;
 use crate::app::pipelines::tests::{pipeline, pipelines_app, run};
-use crate::model::{RunResult, RunStatus};
+use crate::model::{RunResult, RunStatus, TimelineKind, TimelineRecord};
 
 /// The tab, drawn, with the Pipelines tab showing.
 fn pipelines_text(width: u16, height: u16, app: &mut App) -> String {
@@ -193,4 +193,160 @@ fn a_canceled_run_fades_and_a_failed_one_is_painted_red() {
             "a failed run and a canceled one do not read the same"
         );
     }
+}
+
+fn timeline_fixture() -> Vec<TimelineRecord> {
+    let at = |raw: &str| Some(crate::timestamp::ts(raw));
+    vec![
+        TimelineRecord {
+            id: "stage-1".into(),
+            parent_id: None,
+            kind: TimelineKind::Stage,
+            name: "Build".into(),
+            state: RunStatus::Completed,
+            result: Some(RunResult::Succeeded),
+            start: at("2026-08-29T10:00:05Z"),
+            finish: at("2026-08-29T10:02:05Z"),
+            percent_complete: None,
+            log_id: None,
+            order: 1,
+            issues: Vec::new(),
+        },
+        TimelineRecord {
+            id: "job-1".into(),
+            parent_id: Some("stage-1".into()),
+            kind: TimelineKind::Job,
+            name: "cargo test".into(),
+            state: RunStatus::Completed,
+            result: Some(RunResult::Succeeded),
+            start: at("2026-08-29T10:00:05Z"),
+            finish: at("2026-08-29T10:02:05Z"),
+            percent_complete: None,
+            log_id: Some(7),
+            order: 2,
+            issues: Vec::new(),
+        },
+        TimelineRecord {
+            id: "task-1".into(),
+            parent_id: Some("job-1".into()),
+            kind: TimelineKind::Task,
+            name: "Checkout".into(),
+            state: RunStatus::Completed,
+            result: Some(RunResult::Failed),
+            start: at("2026-08-29T10:00:05Z"),
+            finish: at("2026-08-29T10:00:20Z"),
+            percent_complete: None,
+            log_id: Some(8),
+            order: 3,
+            issues: vec![
+                crate::model::Issue {
+                    kind: "error".into(),
+                    message: "fatal: could not read from remote".into(),
+                },
+                crate::model::Issue {
+                    kind: "warning".into(),
+                    message: "shallow clone".into(),
+                },
+            ],
+        },
+        TimelineRecord {
+            id: "stage-2".into(),
+            parent_id: None,
+            kind: TimelineKind::Stage,
+            name: "Publish".into(),
+            state: RunStatus::InProgress,
+            result: None,
+            start: at("2026-08-29T10:02:05Z"),
+            finish: None,
+            percent_complete: Some(42),
+            log_id: None,
+            order: 4,
+            issues: Vec::new(),
+        },
+        TimelineRecord {
+            id: "stage-3".into(),
+            parent_id: None,
+            kind: TimelineKind::Stage,
+            name: "Deploy".into(),
+            state: RunStatus::NotStarted,
+            result: None,
+            start: None,
+            finish: None,
+            percent_complete: None,
+            log_id: None,
+            order: 5,
+            issues: Vec::new(),
+        },
+    ]
+}
+
+#[test]
+fn the_details_pane_draws_the_timeline_as_a_tree_with_a_glyph_and_a_duration_each() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    render_text(140, 34, &mut app);
+    let run = app
+        .pipelines
+        .focused_run()
+        .expect("the details pane settles on a run");
+    app.pipelines.set_timeline(run, timeline_fixture());
+
+    let text = render_text(140, 34, &mut app);
+    assert!(text.contains("Timeline"), "{text}");
+    assert!(
+        text.contains("\u{2713} Build"),
+        "a finished stage is a tick: {text}"
+    );
+    assert!(
+        text.contains("  \u{2713} cargo test"),
+        "its job is indented under it: {text}"
+    );
+    assert!(
+        text.contains("    \u{2717} Checkout"),
+        "and the task under that, failed: {text}"
+    );
+    assert!(
+        text.contains("\u{2717} 1"),
+        "the failing task says how many errors it reported: {text}"
+    );
+    assert!(
+        text.contains("\u{25d0} Publish") && text.contains("42%"),
+        "a running stage carries its glyph and how far it says it has got: {text}"
+    );
+    assert!(
+        text.contains("\u{25cb} Deploy") && text.contains("\u{2014}"),
+        "and one that has not started has no duration to report: {text}"
+    );
+    assert!(
+        text.contains("2m 00s"),
+        "a finished node reports its own: {text}"
+    );
+}
+
+#[test]
+fn the_timeline_cursor_moves_with_the_keyboard_and_a_click() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    render_text(140, 34, &mut app);
+    let run = app.pipelines.focused_run().expect("a run");
+    app.pipelines.set_timeline(run, timeline_fixture());
+    render_text(140, 34, &mut app);
+
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.shell.focus, Focus::Details);
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    assert_eq!(app.pipelines.timeline_cursor(), 2);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+    assert_eq!(app.pipelines.timeline_cursor(), 1);
+
+    let node = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::TreeRow { index: 3 }))
+        .expect("every node on screen is clickable")
+        .rect;
+    click(&mut app, node.x + 2, node.y);
+    assert_eq!(app.pipelines.timeline_cursor(), 3);
 }

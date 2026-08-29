@@ -368,6 +368,80 @@ pub struct Run {
     pub url: String,
 }
 
+/// What a run is made of: its stages, the jobs in them, and the tasks in
+/// those. Azure DevOps also reports a phase between a stage and its jobs; it
+/// says nothing a stage does not, so it is flattened out.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineKind {
+    Stage,
+    Job,
+    Task,
+    /// A checkpoint or approval, which the API reports alongside the rest.
+    Checkpoint,
+}
+
+impl TimelineKind {
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        Some(match raw.to_ascii_lowercase().as_str() {
+            "stage" => Self::Stage,
+            "job" => Self::Job,
+            "task" => Self::Task,
+            "checkpoint" | "checkpoint.approval" => Self::Checkpoint,
+            // A phase says nothing its stage does not.
+            _ => return None,
+        })
+    }
+}
+
+/// One error or warning a task reported.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Issue {
+    /// `error` or `warning`, as reported.
+    pub kind: String,
+    pub message: String,
+}
+
+/// One node of a run's timeline.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimelineRecord {
+    pub id: String,
+    /// The node above it, once the phases have been flattened out.
+    pub parent_id: Option<String>,
+    pub kind: TimelineKind,
+    pub name: String,
+    pub state: RunStatus,
+    pub result: Option<RunResult>,
+    pub start: Option<Timestamp>,
+    pub finish: Option<Timestamp>,
+    /// How far a running task says it has got, when it says.
+    pub percent_complete: Option<i64>,
+    /// The log this node wrote, for the tail to follow.
+    pub log_id: Option<i64>,
+    /// Where it sits among its siblings.
+    pub order: i64,
+    pub issues: Vec<Issue>,
+}
+
+impl TimelineRecord {
+    /// How long the node took, or has been going, measured against `now`.
+    #[must_use]
+    pub fn duration_seconds(&self, now: Timestamp) -> Option<i64> {
+        let start = self.start?;
+        let end = self.finish.unwrap_or(now);
+        Some(start.seconds_until(end).max(0))
+    }
+
+    /// How many errors it reported, which is what the tree paints in red.
+    #[must_use]
+    pub fn error_count(&self) -> usize {
+        self.issues
+            .iter()
+            .filter(|issue| issue.kind.eq_ignore_ascii_case("error"))
+            .count()
+    }
+}
+
 /// Somewhere worth going, wherever it lives. The shell resolves one by
 /// switching to the tab that holds it and asking that screen to select it, so
 /// a work item's pull request and a run's branch are one keystroke apart.

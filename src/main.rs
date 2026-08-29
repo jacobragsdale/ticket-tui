@@ -53,6 +53,8 @@ struct SyncRuntime {
     /// Whether the watcher has been told the Pipelines tab is showing, so the
     /// message is sent when it changes rather than every turn.
     watching_tab: bool,
+    /// The run the watcher was last told about, for the same reason.
+    watching_run: Option<i64>,
     scheduler: SyncScheduler,
     config: Option<AzureConfig>,
     /// Why Azure DevOps could not be resolved, reported when the user asks for
@@ -359,6 +361,7 @@ fn run() -> Result<()> {
         details: DetailsEngine::default(),
         pipelines: None,
         watching_tab: false,
+        watching_run: None,
     };
     if let Some(config) = config.filter(|_| wrong_project.is_none()) {
         runtime.worker = Some(SyncHandle::spawn(
@@ -958,6 +961,14 @@ fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
         return false;
     };
     let showing = app.tab == TabId::Pipelines;
+    // Which run the details pane is on decides whose timeline is worth
+    // reading, so the watcher is told whenever the cursor settles somewhere
+    // else.
+    let focus = showing.then(|| app.pipelines.focused_run()).flatten();
+    if focus != runtime.watching_run {
+        runtime.watching_run = focus;
+        let _ = watcher.send(focus.map_or(WatchRequest::Blur, WatchRequest::Focus));
+    }
     if showing != runtime.watching_tab {
         runtime.watching_tab = showing;
         let _ = watcher.send(WatchRequest::TabShowing(showing));
@@ -975,6 +986,9 @@ fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
         redraw = true;
         match event {
             WatchEvent::LiveRuns(runs) => app.pipelines.merge_live_runs(runs),
+            WatchEvent::Timeline { run_id, records } => {
+                app.pipelines.set_timeline(run_id, records);
+            }
             WatchEvent::Throttled(wait) => app.shell.set_watch_state(Some(format!(
                 "holding off {}s — Azure DevOps asked",
                 wait.as_secs()
@@ -1658,6 +1672,7 @@ mod tests {
             details: DetailsEngine::default(),
             pipelines: None,
             watching_tab: false,
+            watching_run: None,
         };
         (app, repository, runtime)
     }
@@ -1943,6 +1958,7 @@ mod tests {
             details: DetailsEngine::default(),
             pipelines: None,
             watching_tab: false,
+            watching_run: None,
         };
 
         handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
@@ -2202,6 +2218,7 @@ mod tests {
             details: DetailsEngine::default(),
             pipelines: None,
             watching_tab: false,
+            watching_run: None,
         };
 
         handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
@@ -2907,6 +2924,7 @@ mod tests {
             details: DetailsEngine::default(),
             pipelines: None,
             watching_tab: false,
+            watching_run: None,
         }
     }
 

@@ -6,7 +6,8 @@ use crate::app::pipelines::rows::{duration_label, run_glyph};
 use crate::app::pipelines::{
     Level, PipelineColumn, PipelineRow, PipelinesScreen, RunColumn, RunRow,
 };
-use crate::model::{RunResult, RunStatus};
+use crate::model::{RunResult, RunStatus, TimelineKind, TimelineRecord};
+use crate::ui::details::section_line;
 use crate::ui::table::{TableSpec, render_list_table, table_geometry};
 
 /// The whole tab: the search box, the table, the details pane and the footer.
@@ -16,6 +17,9 @@ pub(crate) fn render(
     shell: &mut Shell,
     area: Rect,
 ) {
+    // Which run the details pane is on is settled here, on the way to drawing
+    // it, so the watcher is asked for the timeline of whatever is on screen.
+    screen.sync_focus(shell);
     let sections = Layout::vertical([
         Constraint::Length(3),
         Constraint::Fill(1),
@@ -272,6 +276,8 @@ fn render_details(
         );
         return;
     };
+    let timeline = screen.timeline(row.run.id).to_vec();
+    let cursor = screen.timeline_cursor();
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -309,7 +315,34 @@ fn render_details(
         Span::styled(" [Cancel] ", Style::default().fg(theme().muted)),
         Span::styled(" [Retry] ", Style::default().fg(theme().muted)),
     ]));
+    if !timeline.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section_line("Timeline"));
+    }
+    let tree_start = lines.len();
+    lines.extend(timeline_lines(
+        &timeline,
+        cursor,
+        now,
+        shell.focus == Focus::Details,
+    ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // One hit region per node, so a click picks the node the log follows.
+    for index in 0..timeline.len() {
+        let y = inner
+            .y
+            .saturating_add(u16::try_from(tree_start + index).unwrap_or(u16::MAX));
+        if y >= inner.y.saturating_add(inner.height) {
+            break;
+        }
+        shell.hit_regions.push(region(
+            Rect::new(inner.x, y, inner.width, 1),
+            PointerTarget::TreeRow { index },
+            PointerLayer::Base,
+            None,
+            None,
+        ));
+    }
 }
 
 fn render_footer(frame: &mut Frame<'_>, screen: &PipelinesScreen, shell: &Shell, area: Rect) {
@@ -334,6 +367,82 @@ fn render_footer(frame: &mut Frame<'_>, screen: &PipelinesScreen, shell: &Shell,
             .style(style),
         area,
     );
+}
+
+/// The timeline as a tree: stages, the jobs under them, the tasks under those,
+/// with the same connectors the work-item family tree uses. A running node
+/// carries the time it has been going, recomputed each frame; a pending one
+/// reads `—`; a node with errors says how many.
+fn timeline_lines(
+    records: &[TimelineRecord],
+    cursor: usize,
+    now: Timestamp,
+    focused: bool,
+) -> Vec<Line<'static>> {
+    let depth_of = |record: &TimelineRecord| match record.kind {
+        TimelineKind::Stage => 0_usize,
+        TimelineKind::Job | TimelineKind::Checkpoint => 1,
+        TimelineKind::Task => 2,
+    };
+    records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            let indent = "  ".repeat(depth_of(record));
+            let glyph = node_glyph(record);
+            let style = node_style(record);
+            let mut spans = vec![
+                Span::raw(format!(" {indent}")),
+                Span::styled(format!("{glyph} "), style),
+                Span::raw(record.name.clone()),
+            ];
+            let errors = record.error_count();
+            if errors > 0 {
+                spans.push(Span::styled(
+                    format!("  \u{2717} {errors}"),
+                    Style::default().fg(theme().error),
+                ));
+            }
+            if let Some(percent) = record
+                .percent_complete
+                .filter(|_| record.state == RunStatus::InProgress)
+            {
+                spans.push(Span::styled(
+                    format!("  {percent}%"),
+                    Style::default().fg(theme().muted),
+                ));
+            }
+            spans.push(Span::styled(
+                format!(
+                    "  {}",
+                    record
+                        .duration_seconds(now)
+                        .map_or_else(|| "\u{2014}".to_owned(), duration_label)
+                ),
+                Style::default().fg(theme().muted),
+            ));
+            let line = Line::from(spans);
+            if index == cursor && focused {
+                line.style(Style::default().bg(theme().selected_background))
+            } else {
+                line
+            }
+        })
+        .collect()
+}
+
+fn node_glyph(record: &TimelineRecord) -> &'static str {
+    match (record.kind, record.state, record.result) {
+        (TimelineKind::Checkpoint, RunStatus::InProgress, _) => "\u{25c7}",
+        _ => run_glyph(record.state, record.result),
+    }
+}
+
+fn node_style(record: &TimelineRecord) -> Style {
+    if record.kind == TimelineKind::Checkpoint && record.state == RunStatus::InProgress {
+        return Style::default().fg(theme().state_in_progress);
+    }
+    run_style(record.state, record.result)
 }
 
 fn result_word(row: &RunRow) -> String {

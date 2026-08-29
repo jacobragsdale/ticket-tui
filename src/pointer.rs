@@ -132,6 +132,10 @@ pub enum PointerTarget {
     /// resolves the key against its own columns.
     SortHeader(&'static str),
     OpenSelectedUrl,
+    /// One row of a tree in a details pane: a node of a run's timeline today.
+    TreeRow {
+        index: usize,
+    },
     /// A reference in a details pane: the family tree's rows today, a pull
     /// request's build or a run's branch once those tabs exist.
     Follow(Jump),
