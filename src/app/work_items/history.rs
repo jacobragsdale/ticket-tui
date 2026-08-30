@@ -123,7 +123,6 @@ impl WorkItemsScreen {
             search_order: self.search_order,
             row_density: self.row_density,
             columns: self.layout.to_session_columns(),
-            auto_hide: Some(self.layout.auto_hide),
             views: self.views.clone(),
             active_view: self.active_view.clone(),
         }
@@ -136,7 +135,7 @@ impl WorkItemsScreen {
         self.sort_direction = session.sort_direction;
         self.search_order = session.search_order;
         self.row_density = session.row_density;
-        self.layout = TableLayout::from_session_columns(&session.columns, session.auto_hide);
+        self.layout = TableLayout::from_session_columns(&session.columns);
         self.views = session
             .views
             .into_iter()

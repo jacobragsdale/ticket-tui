@@ -1150,7 +1150,6 @@ impl Screen for PipelinesScreen {
             query: self.pipeline_query.text().to_owned(),
             sort_field: self.pipeline_sort.0.key().to_owned(),
             columns: self.pipelines_layout.to_session_columns(),
-            auto_hide: Some(self.pipelines_layout.auto_hide),
             ..TabSession::default()
         }
     }
@@ -1160,8 +1159,7 @@ impl Screen for PipelinesScreen {
         if let Some(column) = PipelineColumn::from_key(&session.sort_field) {
             self.pipeline_sort = (column, self.pipeline_sort.1);
         }
-        self.pipelines_layout =
-            TableLayout::from_session_columns(&session.columns, session.auto_hide);
+        self.pipelines_layout = TableLayout::from_session_columns(&session.columns);
     }
 
     fn footer_hint(&self, _shell: &Shell) -> &str {

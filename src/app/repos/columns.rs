@@ -76,6 +76,11 @@ impl ColumnId for RepoColumn {
     fn flexible(self) -> bool {
         matches!(self, Self::Name)
     }
+
+    /// A repository name is a slug, not a sentence.
+    fn min_flexible_width(self) -> u16 {
+        16
+    }
 }
 
 pub(super) fn compare(left: &RepoRow, right: &RepoRow, column: RepoColumn) -> Ordering {

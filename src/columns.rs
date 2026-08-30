@@ -5,6 +5,28 @@ use ratatui::layout::Constraint;
 
 use crate::session::SessionColumn;
 
+/// The two columns the selection marker (`› `) is always given, whether or
+/// not the row under the cursor is on screen.
+pub const SELECTION_WIDTH: u16 = 2;
+
+/// The gutter the check and bookmark markers sit in, on the tables that have
+/// one.
+pub const MARKER_WIDTH: u16 = 4;
+
+/// The scrollbar's own column, at the right edge of every list table. It is
+/// reserved whether or not the list overflows, so a table does not shuffle
+/// sideways as rows arrive.
+pub const SCROLLBAR_WIDTH: u16 = 1;
+
+/// The blank column between two neighbouring cells.
+pub const COLUMN_SPACING: u16 = 1;
+
+/// The fewest characters a flexible column is squeezed to before the table
+/// starts dropping optional columns from the right, unless that column asks
+/// for something else. Below this a title stops being a title — "Serialize
+/// se" — and whatever took the room is worth less than what lost it.
+pub const MIN_FLEXIBLE_WIDTH: u16 = 24;
+
 /// One screen's set of columns. Work items sort and arrange by `SortField`;
 /// repositories, pull requests and runs bring their own enum and get the same
 /// table, the same header sorting and the same Columns overlay for free.
@@ -40,6 +62,14 @@ pub trait ColumnId: Copy + Eq + Sized + 'static {
     /// The one column that takes whatever width is left over. Its stored width
     /// is ignored and it cannot be resized.
     fn flexible(self) -> bool;
+
+    /// The fewest characters this column is squeezed to while there is still
+    /// an optional column to drop. Only the flexible column is asked. The
+    /// default is what a title needs; a table whose flexible column holds
+    /// something shorter — a repository or a pipeline name — says so.
+    fn min_flexible_width(self) -> u16 {
+        MIN_FLEXIBLE_WIDTH
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,9 +82,6 @@ pub struct ColumnConfig<C> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableLayout<C> {
     pub columns: Vec<ColumnConfig<C>>,
-    /// Whether the table is still dropping optional columns to fit a narrow
-    /// terminal. Any deliberate change to the layout turns it off.
-    pub auto_hide: bool,
 }
 
 impl<C: ColumnId> Default for TableLayout<C> {
@@ -68,7 +95,6 @@ impl<C: ColumnId> Default for TableLayout<C> {
                     width: id.default_width(),
                 })
                 .collect(),
-            auto_hide: true,
         }
     }
 }
@@ -87,12 +113,9 @@ impl<C: ColumnId> TableLayout<C> {
     }
 
     #[must_use]
-    pub fn from_session_columns(columns: &[SessionColumn], auto_hide: Option<bool>) -> Self {
+    pub fn from_session_columns(columns: &[SessionColumn]) -> Self {
         let mut layout = Self::default();
         if columns.is_empty() {
-            if let Some(auto_hide) = auto_hide {
-                layout.auto_hide = auto_hide;
-            }
             return layout;
         }
         let mut restored: Vec<ColumnConfig<C>> = columns
@@ -111,26 +134,38 @@ impl<C: ColumnId> TableLayout<C> {
             }
         }
         layout.columns = restored;
-        layout.auto_hide = auto_hide.unwrap_or(false);
         layout
     }
 
+    /// The width the columns and the gaps between them share, inside a pane
+    /// `inner_width` wide: what the selection marker, the gutter and the
+    /// scrollbar take is spent before a column sees any of it.
     #[must_use]
-    pub fn visible_columns(&self, inner_width: u16) -> Vec<ColumnConfig<C>> {
+    pub fn available_width(inner_width: u16, marker: bool) -> u16 {
+        let gutter = if marker {
+            MARKER_WIDTH + COLUMN_SPACING
+        } else {
+            0
+        };
+        inner_width
+            .saturating_sub(SELECTION_WIDTH)
+            .saturating_sub(SCROLLBAR_WIDTH)
+            .saturating_sub(gutter)
+    }
+
+    /// The columns this table draws in `available` cells, dropping the
+    /// right-most unpinned one for as long as the flexible column would
+    /// otherwise fall under [`MIN_FLEXIBLE_WIDTH`]. A pinned column never
+    /// goes, so a table always keeps its identity and its title.
+    #[must_use]
+    pub fn visible_columns(&self, available: u16) -> Vec<ColumnConfig<C>> {
         let mut columns: Vec<_> = self
             .columns
             .iter()
             .copied()
             .filter(|column| column.visible)
             .collect();
-        if !self.auto_hide {
-            return columns;
-        }
-        while columns.len() > 2 {
-            let required = required_width(&columns);
-            if required <= inner_width {
-                break;
-            }
+        while columns.len() > 2 && required_width(&columns) > available {
             if let Some(index) = columns.iter().rposition(|column| !column.id.pinned()) {
                 columns.remove(index);
             } else {
@@ -160,7 +195,6 @@ pub trait ColumnLayout {
     /// Whether the column takes the width left over, which is what the overlay
     /// shows as `fill` and refuses to resize.
     fn flexible(&self, index: usize) -> bool;
-    fn auto_hide(&self) -> bool;
     fn toggle_visible(&mut self, index: usize);
     /// Moves one column and answers where it landed.
     fn move_column(&mut self, index: usize, delta: isize) -> usize;
@@ -192,16 +226,11 @@ impl<C: ColumnId> ColumnLayout for TableLayout<C> {
             .is_some_and(|column| column.id.flexible())
     }
 
-    fn auto_hide(&self) -> bool {
-        self.auto_hide
-    }
-
     fn toggle_visible(&mut self, index: usize) {
         if let Some(column) = self.columns.get_mut(index)
             && !column.id.pinned()
         {
             column.visible = !column.visible;
-            self.auto_hide = false;
         }
     }
 
@@ -214,7 +243,6 @@ impl<C: ColumnId> ColumnLayout for TableLayout<C> {
             .min(self.columns.len() - 1);
         if next != index {
             self.columns.swap(index, next);
-            self.auto_hide = false;
         }
         next
     }
@@ -228,23 +256,28 @@ impl<C: ColumnId> ColumnLayout for TableLayout<C> {
         }
         let width = i16::try_from(column.width).unwrap_or(i16::MAX);
         column.width = width.saturating_add(delta).clamp(3, 40) as u16;
-        self.auto_hide = false;
     }
 }
 
+/// What these columns need to draw with the flexible one still readable: every
+/// fixed width, the flexible column's own minimum, and a gap between each
+/// pair.
 fn required_width<C: ColumnId>(columns: &[ColumnConfig<C>]) -> u16 {
-    let spacing = columns.len().saturating_sub(1) as u16;
-    let widths: u16 = columns
+    let spacing = COLUMN_SPACING.saturating_mul(
+        u16::try_from(columns.len())
+            .unwrap_or(u16::MAX)
+            .saturating_sub(1),
+    );
+    columns
         .iter()
         .map(|column| {
-            if column.id.flexible() {
-                12
+            if column.id.flexible() || column.width == 0 {
+                column.id.min_flexible_width()
             } else {
                 column.width.max(3)
             }
         })
-        .sum();
-    widths.saturating_add(spacing).saturating_add(2)
+        .fold(spacing, u16::saturating_add)
 }
 
 #[cfg(test)]
@@ -252,19 +285,65 @@ mod tests {
     use super::*;
     use crate::model::SortField;
 
-    #[test]
-    fn auto_hide_drops_trailing_optional_columns_when_narrow() {
-        let layout = TableLayout::<SortField>::default();
-        let visible: Vec<_> = layout
-            .visible_columns(40)
-            .into_iter()
-            .map(|column| column.id)
-            .collect();
+    /// What the flexible column is left with once the fixed ones and the gaps
+    /// between them are paid for.
+    fn flexible_width<C: ColumnId>(columns: &[ColumnConfig<C>], available: u16) -> u16 {
+        let spacing = COLUMN_SPACING * (columns.len() as u16 - 1);
+        let fixed: u16 = columns
+            .iter()
+            .filter(|column| !column.id.flexible() && column.width > 0)
+            .map(|column| column.width)
+            .sum();
+        available.saturating_sub(spacing).saturating_sub(fixed)
+    }
 
-        assert_eq!(visible[0], SortField::Id);
-        assert_eq!(visible[1], SortField::Title);
-        assert!(!visible.contains(&SortField::Assignee));
-        assert!(!visible.contains(&SortField::Organization));
+    #[test]
+    fn columns_drop_from_the_right_before_the_title_is_squeezed() {
+        let layout = TableLayout::<SortField>::default();
+        for pane in [140_u16, 110, 90, 60] {
+            // What the pane leaves the columns: its own border, the selection
+            // marker, the check-and-bookmark gutter and the scrollbar.
+            let available = TableLayout::<SortField>::available_width(pane - 2, true);
+            let columns = layout.visible_columns(available);
+            let visible: Vec<_> = columns.iter().map(|column| column.id).collect();
+
+            assert_eq!(visible[0], SortField::Id, "the pinned columns stay");
+            assert_eq!(visible[1], SortField::Title);
+            assert!(
+                flexible_width(&columns, available) >= MIN_FLEXIBLE_WIDTH,
+                "{pane} columns left the title {} wide with {visible:?}",
+                flexible_width(&columns, available)
+            );
+            // Whatever went, went off the right-hand end.
+            let mut ordered = visible.clone();
+            ordered.sort_by_key(|id| {
+                SortField::all()
+                    .iter()
+                    .position(|candidate| candidate == id)
+                    .unwrap()
+            });
+            assert_eq!(ordered, visible, "the columns keep their order");
+        }
+
+        let wide = TableLayout::<SortField>::available_width(200, true);
+        assert!(
+            layout
+                .visible_columns(wide)
+                .iter()
+                .any(|column| column.id == SortField::Assignee),
+            "a wide enough table keeps every column it was given"
+        );
+
+        // Narrower than the two pinned columns want, and there is nothing left
+        // to drop: the title takes what is there rather than the table
+        // dropping the column that says which work item a row is.
+        let cramped = TableLayout::<SortField>::available_width(38, true);
+        let columns = layout.visible_columns(cramped);
+        assert_eq!(
+            columns.iter().map(|column| column.id).collect::<Vec<_>>(),
+            vec![SortField::Id, SortField::Title]
+        );
+        assert!(flexible_width(&columns, cramped) > 0);
     }
 
     #[test]
@@ -300,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn toggling_disables_auto_hide_while_title_stays_visible() {
+    fn editing_the_columns_leaves_the_pinned_ones_alone() {
         let mut layout = TableLayout::<SortField>::default();
         let org = layout
             .columns
@@ -310,7 +389,6 @@ mod tests {
 
         layout.toggle_visible(org);
         assert!(layout.columns[org].visible);
-        assert!(!layout.auto_hide);
 
         let moved = layout.move_column(org, -1);
         assert_eq!(layout.columns[moved].id, SortField::Organization);
@@ -409,7 +487,7 @@ mod tests {
         assert_eq!(stored[0].id, "name");
         assert_eq!(stored[size].width, 10);
 
-        let restored = TableLayout::<RepoColumn>::from_session_columns(&stored, Some(false));
+        let restored = TableLayout::<RepoColumn>::from_session_columns(&stored);
         assert_eq!(restored, layout, "the file round-trips through the keys");
 
         layout.toggle_visible(0);

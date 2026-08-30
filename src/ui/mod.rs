@@ -5,7 +5,7 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, HighlightSpacing, Paragraph, Row, Table, Wrap,
+    Block, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Table, Wrap,
 };
 use time::OffsetDateTime;
 
@@ -40,7 +40,7 @@ mod tests;
 pub mod theme;
 mod widgets;
 
-use details::{assigned_to_me_style, field_line, render_details};
+use details::{assigned_to_me_style, field_line, render_details, state_glyph};
 use overlays::{
     ListOverlay, column_rows, link_line, overlay_line, render_chips, render_column_overlay,
     render_facet_bar, render_facet_menu, render_filter_overlay, render_help_popup,

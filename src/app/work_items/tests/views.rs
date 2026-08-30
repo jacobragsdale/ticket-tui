@@ -593,7 +593,6 @@ fn a_stored_view_never_takes_a_name_a_built_in_owns() {
         search_order: SearchOrder::Relevance,
         row_density: RowDensity::Compact,
         columns: Vec::new(),
-        auto_hide: true,
     }];
     app.restore_session(session);
 

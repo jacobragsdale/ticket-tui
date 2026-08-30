@@ -1396,12 +1396,20 @@ red, 2 yellow, 3 and 4 blue, and each tag is hashed onto a stable badge colour
 so one tag reads the same everywhere. Completed and removed rows are dimmed
 wherever they are shown — once the toggle above lists them, and in the family
 tree, which never leaves them out — the Area and Iteration table columns show only the last
-path segment while details keeps the full path, family-tree rows carry a
-one-character state glyph (`○ ◐ ● ✓ ✗`), and matched search characters are
-underlined in visible results. ID, Title, State, Type, Pri, Changed, and
-Assignee are the columns a fresh session shows; Org, Project, Area, Iteration,
-Created, Tags, and Progress are there under `w` and stay hidden until they are
-switched on, after which the choice is saved with the rest of the layout. A
+path segment while details keeps the full path, the State cell and the
+family-tree rows carry the same one-character state glyph
+(`○ ◐ ● ✓ ✗`) in front of the word, the Pri cell reads `P1`–`P4`, and matched
+search characters are underlined in visible results. ID, Title, State, Type,
+Pri, Changed, and Assignee are the columns a fresh session shows; Org, Project,
+Area, Iteration, Created, Tags, and Progress are there under `c` and stay hidden
+until they are switched on, after which the choice is saved with the rest of the
+layout. A table that cannot fit the columns it has been given drops the
+right-most optional one for as long as the Title would otherwise fall under 24
+characters — so a narrow pane loses Assignee, then Changed, rather than the
+title, and each comes back as soon as there is room for it again. ID and Title
+are pinned and never go. The scrollbar has a column of its own at the right
+edge, reserved whether or not the list overflows, so the last cell keeps every
+character it was given. A
 parent whose children have all finished goes green and bold, in the Progress
 column and in the details heading alike. A hovered row is tinted with a
 256-colour background rather than repainted, so its coloured cells keep their own

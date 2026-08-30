@@ -1,7 +1,9 @@
 //! The work item table: its rows, its cells and the colours they carry.
 
 use super::*;
-use crate::columns::{ColumnId, TableLayout};
+use crate::columns::{
+    COLUMN_SPACING, ColumnId, MARKER_WIDTH, SCROLLBAR_WIDTH, SELECTION_WIDTH, TableLayout,
+};
 /// Where a list table's parts land inside its area. A screen works this out
 /// before it draws, because how many rows fit is what its viewport is.
 #[derive(Clone, Copy, Debug)]
@@ -63,12 +65,22 @@ pub(crate) fn render_list_table<C: ColumnId>(
     area: Rect,
     spec: &mut TableSpec<'_, C>,
 ) {
-    let block = focused_block(spec.title.clone(), spec.focused);
-    let inner = block.inner(area);
-    let columns = spec.layout.visible_columns(inner.width.saturating_sub(5));
+    // The scrollbar's column is padding, not a place a cell may be painted:
+    // the table lays its columns out inside what is left, so the last one
+    // keeps every character it was given whether or not the list overflows.
+    let block =
+        focused_block(spec.title.clone(), spec.focused).padding(Padding::right(SCROLLBAR_WIDTH));
+    let geometry = table_geometry(area, spec.row_height);
+    let inner = geometry.inner;
+    let columns = spec
+        .layout
+        .visible_columns(TableLayout::<C>::available_width(
+            inner.width,
+            spec.marker.is_some(),
+        ));
     let mut constraints = Vec::new();
     if spec.marker.is_some() {
-        constraints.push(Constraint::Length(4));
+        constraints.push(Constraint::Length(MARKER_WIDTH));
     }
     constraints.extend(columns.iter().copied().map(TableLayout::constraint));
 
@@ -97,26 +109,39 @@ pub(crate) fn render_list_table<C: ColumnId>(
         .height(1)
         .bottom_margin(1);
 
-    let geometry = table_geometry(area, spec.row_height);
     let visible_rows = geometry.visible_rows;
+    // A palette that names the colour a selected row reads in lends it to the
+    // cells that have none of their own; the state, type and priority cells
+    // keep theirs, so the row under the cursor is still colour-coded.
+    let selection_fg = theme().selection_fg;
     let rows = (spec.offset..spec.count.min(spec.offset + visible_rows)).map(|index| {
         let mut cells = Vec::new();
         if let Some(marker) = spec.marker {
             cells.push(Cell::from(marker(index)));
         }
         cells.extend(columns.iter().map(|column| (spec.cell)(index, column.id)));
-        Row::new(cells).height(spec.row_height)
+        let row = Row::new(cells).height(spec.row_height);
+        if selection_fg == Color::Reset || spec.selected != Some(index) {
+            row
+        } else {
+            row.style(Style::default().fg(selection_fg))
+        }
     });
     let table = Table::new(rows, constraints.clone())
         .header(header)
         .block(block)
-        .column_spacing(1)
+        .column_spacing(COLUMN_SPACING)
         .row_highlight_style(
             Style::default()
                 .bg(theme().selected_background)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("\u{203a} ")
+        .highlight_symbol(Line::styled(
+            "\u{203a} ",
+            Style::default()
+                .fg(theme().accent)
+                .add_modifier(Modifier::BOLD),
+        ))
         .highlight_spacing(HighlightSpacing::Always);
     let mut local_state = ratatui::widgets::TableState::default();
     if let Some(selected) = spec
@@ -132,13 +157,16 @@ pub(crate) fn render_list_table<C: ColumnId>(
         return;
     }
     let header_area = Rect::new(
-        inner.x.saturating_add(2),
+        inner.x.saturating_add(SELECTION_WIDTH),
         inner.y,
-        inner.width.saturating_sub(2),
+        inner
+            .width
+            .saturating_sub(SELECTION_WIDTH)
+            .saturating_sub(SCROLLBAR_WIDTH),
         1,
     );
     let header_columns = Layout::horizontal(constraints)
-        .spacing(1)
+        .spacing(COLUMN_SPACING)
         .split(header_area);
     let column_areas: Vec<Rect> = header_columns
         .iter()
@@ -457,12 +485,20 @@ pub(super) fn table_cell(
             ))
         }
         // Finished rows recede whole: the state cell fades with the rest of
-        // the row rather than staying bright against muted neighbours.
-        SortField::State => highlight_searchable(
-            &ticket.state,
-            tone.apply(state_style(&ticket.state)),
-            highlighter,
-        ),
+        // the row rather than staying bright against muted neighbours. The
+        // glyph in front of the word is the family tree's, so one state reads
+        // the same in both, and it says which state this is under NO_COLOR,
+        // where the colour cannot.
+        SortField::State => {
+            let style = tone.apply(state_style(&ticket.state));
+            let mut line = highlight_searchable(&ticket.state, style, highlighter);
+            let glyph = state_glyph(StateCategory::of(&ticket.state));
+            if !glyph.is_empty() {
+                line.spans
+                    .insert(0, Span::styled(format!("{glyph} "), style));
+            }
+            line
+        }
         SortField::Assignee => match ticket.assigned_to.as_deref() {
             Some(name) if mine => {
                 highlight_searchable(name, tone.apply(assigned_to_me_style()), highlighter)
@@ -470,10 +506,12 @@ pub(super) fn table_cell(
             Some(name) => highlight_searchable(name, plain, highlighter),
             None => Line::styled("Unassigned", tone.apply(Style::default().fg(theme().muted))),
         },
+        // `P1` rather than a bare `1`: a number alone in a narrow column reads
+        // as a count, and the header has no room to say what it counts.
         SortField::Priority => Line::from(
             ticket
                 .priority
-                .map_or_else(|| "—".into(), |priority| priority.to_string()),
+                .map_or_else(|| "—".into(), |priority| format!("P{priority}")),
         )
         .right_aligned()
         .style(tone.apply(priority_style(ticket.priority))),

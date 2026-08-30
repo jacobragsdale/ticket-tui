@@ -245,7 +245,8 @@ fn the_changed_cell_flags_work_left_untouched_and_never_finished_work() {
     // table leaves finished work out until asked, so ask.
     app.work_items.set_show_finished(&mut app.shell, true);
 
-    let mut terminal = Terminal::new(TestBackend::new(130, 20)).unwrap();
+    // Wide enough that the table still has room for the Changed column.
+    let mut terminal = Terminal::new(TestBackend::new(150, 20)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let column = header_rect(&app, SortField::Changed);
     let body = table_body(&app);
@@ -304,7 +305,9 @@ fn tag_colours_are_stable_and_shared_by_the_table_and_details() {
         .expect("tags column");
     ColumnLayout::toggle_visible(&mut app.work_items.layout, tags);
 
-    let mut terminal = Terminal::new(TestBackend::new(150, 24)).unwrap();
+    // Wide enough that a table with every default column on it still has room
+    // for the one this test asked for.
+    let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let body = table_body(&app);
     let details = details_pane(&app);
@@ -524,4 +527,76 @@ fn the_list_table_draws_another_screens_columns_and_sorts_by_their_keys() {
             .is_none(),
         "a screen without markers gets no gutter targets"
     );
+}
+
+#[test]
+fn the_scrollbar_gets_a_column_of_its_own_rather_than_the_last_cell() {
+    let now = OffsetDateTime::now_utc();
+    let day_old = |id| Ticket {
+        changed_at: Timestamp::from_offset_date_time(now - Duration::from_secs(86_400)),
+        ..ticket_at(
+            id,
+            "A work item whose title is long enough to fill its column",
+            "Issue",
+            "To Do",
+            "2026-03-03T00:00:00Z",
+        )
+    };
+    // More rows than fit, so the table has a scrollbar to put somewhere.
+    let mut app = App::new((10_001..10_041).map(day_old).collect());
+    let mut terminal = Terminal::new(TestBackend::new(140, 20)).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+    assert!(
+        app.shell
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::ScrollbarThumb { .. }))
+            .is_some(),
+        "the list overflows, so there is a scrollbar over the last column"
+    );
+    let column = header_rect(&app, SortField::Changed);
+    let body = table_body(&app);
+    let buffer = terminal.backend().buffer();
+    let cell: String = (column.x..column.x.saturating_add(column.width))
+        .map(|x| buffer[(x, body.y)].symbol())
+        .collect();
+    assert_eq!(
+        cell.trim(),
+        "1d",
+        "the age keeps its unit: the scrollbar is painted beside the cells, not over them"
+    );
+}
+
+#[test]
+fn a_palette_lends_the_selected_row_its_text_colour_and_leaves_the_coded_cells_alone() {
+    let restore = theme();
+    let selection = Color::Rgb(0xee, 0xee, 0xee);
+    set_theme(Theme {
+        selection_fg: selection,
+        ..Theme::terminal()
+    });
+    // The newest is the selected row, so the one this test reads is `ticket`
+    // and its Active state.
+    let mut app = App::new(vec![
+        ticket(),
+        ticket_at(10_002, "Beta", "Issue", "To Do", "2025-12-02T00:00:00Z"),
+    ]);
+    let mut terminal = Terminal::new(TestBackend::new(140, 20)).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let body = table_body(&app);
+    let title = painted_column_cell(&terminal, header_rect(&app, SortField::Title), body.y);
+    let state = painted_column_cell(&terminal, header_rect(&app, SortField::State), body.y);
+    let below = painted_column_cell(&terminal, header_rect(&app, SortField::Title), body.y + 1);
+    set_theme(restore);
+
+    assert_eq!(
+        title.0, selection,
+        "the selected row reads in the palette's own foreground"
+    );
+    assert_eq!(
+        state.0,
+        Theme::terminal().state_in_progress,
+        "and the cells that carry a colour of their own keep it"
+    );
+    assert_ne!(below.0, selection, "the rows around it are untouched");
 }

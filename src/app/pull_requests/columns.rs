@@ -69,7 +69,8 @@ impl ColumnId for PrColumn {
             Self::Title => 0,
             Self::Id => 7,
             Self::Repo => 14,
-            Self::Branches => 26,
+            // `feature/tabs → main` and a little more.
+            Self::Branches => 22,
             Self::Author => 16,
             Self::Votes => 8,
             Self::Build => 12,

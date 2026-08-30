@@ -25,8 +25,6 @@ pub struct TabSession {
     #[serde(default, deserialize_with = "known_columns")]
     pub columns: Vec<SessionColumn>,
     #[serde(default)]
-    pub auto_hide: Option<bool>,
-    #[serde(default)]
     pub views: Vec<NamedView>,
     #[serde(default)]
     pub active_view: Option<String>,
@@ -49,8 +47,6 @@ pub(crate) struct FlatSession {
     row_density: Option<RowDensity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     columns: Option<Vec<SessionColumn>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    auto_hide: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     views: Option<Vec<NamedView>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -123,9 +119,6 @@ impl Session {
         }
         if let Some(columns) = flat.columns {
             tab.columns = columns;
-        }
-        if flat.auto_hide.is_some() {
-            tab.auto_hide = flat.auto_hide;
         }
         if let Some(views) = flat.views {
             tab.views = views;
@@ -222,7 +215,6 @@ pub struct NamedView {
     pub row_density: RowDensity,
     #[serde(default, deserialize_with = "known_columns")]
     pub columns: Vec<SessionColumn>,
-    pub auto_hide: bool,
 }
 
 /// Drops a stored column that is not shaped like one instead of failing the
@@ -295,7 +287,6 @@ mod tests {
             search_order: SearchOrder::Relevance,
             row_density: RowDensity::Compact,
             columns: TableLayout::<crate::model::SortField>::default().to_session_columns(),
-            auto_hide: true,
         });
 
         save(&path, &session).unwrap();
@@ -348,7 +339,6 @@ mod tests {
             search_order: SearchOrder::Relevance,
             row_density: RowDensity::Compact,
             columns: TableLayout::<crate::model::SortField>::default().to_session_columns(),
-            auto_hide: true,
         });
 
         save(&path, &session).unwrap();
@@ -413,13 +403,11 @@ mod tests {
         ColumnLayout::toggle_visible(&mut layout, index);
         let mut session = Session::default();
         session.work_items.columns = layout.to_session_columns();
-        session.work_items.auto_hide = Some(layout.auto_hide);
 
         save(&path, &session).unwrap();
         let loaded = load(&path).unwrap();
         let restored = TableLayout::<crate::model::SortField>::from_session_columns(
             &loaded.work_items.columns,
-            loaded.work_items.auto_hide,
         );
 
         assert_eq!(
@@ -500,7 +488,6 @@ mod tests {
         assert_eq!(work_items.sort_direction, SortDirection::Ascending);
         assert_eq!(work_items.search_order, SearchOrder::Field);
         assert_eq!(work_items.row_density, RowDensity::Comfortable);
-        assert_eq!(work_items.auto_hide, Some(false));
         assert_eq!(
             loaded.active_tab,
             crate::app::TabId::WorkItems,
@@ -542,10 +529,8 @@ mod tests {
             ["id", "sprint", "title"],
             "the file keeps every key it holds, whoever they belong to"
         );
-        let layout = TableLayout::<crate::model::SortField>::from_session_columns(
-            &work_items.columns,
-            work_items.auto_hide,
-        );
+        let layout =
+            TableLayout::<crate::model::SortField>::from_session_columns(&work_items.columns);
         let restored: Vec<_> = layout
             .columns
             .iter()

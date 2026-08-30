@@ -79,6 +79,12 @@ impl ColumnId for PipelineColumn {
     fn flexible(self) -> bool {
         matches!(self, Self::Name)
     }
+
+    /// A pipeline name is longer than a repository's — it usually carries
+    /// the repository's own name — but it is still not a sentence.
+    fn min_flexible_width(self) -> u16 {
+        20
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,6 +168,11 @@ impl ColumnId for RunColumn {
 
     fn flexible(self) -> bool {
         matches!(self, Self::Run)
+    }
+
+    /// A run's name is a build number and a date.
+    fn min_flexible_width(self) -> u16 {
+        16
     }
 }
 

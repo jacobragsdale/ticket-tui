@@ -151,10 +151,6 @@ impl ColumnLayout for NoColumns {
         false
     }
 
-    fn auto_hide(&self) -> bool {
-        false
-    }
-
     fn toggle_visible(&mut self, _index: usize) {}
 
     fn move_column(&mut self, index: usize, _delta: isize) -> usize {

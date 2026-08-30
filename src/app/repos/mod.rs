@@ -756,7 +756,6 @@ impl Screen for ReposScreen {
             query: self.query.text().to_owned(),
             sort_field: <RepoColumn as crate::columns::ColumnId>::key(self.sort.0).to_owned(),
             columns: self.layout.to_session_columns(),
-            auto_hide: Some(self.layout.auto_hide),
             ..TabSession::default()
         }
     }
@@ -768,7 +767,7 @@ impl Screen for ReposScreen {
         {
             self.sort = (column, self.sort.1);
         }
-        self.layout = TableLayout::from_session_columns(&session.columns, session.auto_hide);
+        self.layout = TableLayout::from_session_columns(&session.columns);
     }
 
     fn footer_hint(&self, _shell: &Shell) -> &str {

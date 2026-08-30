@@ -1020,7 +1020,6 @@ impl Screen for PullRequestsScreen {
             query: self.query.text().to_owned(),
             sort_field: <PrColumn as crate::columns::ColumnId>::key(self.sort.0).to_owned(),
             columns: self.layout.to_session_columns(),
-            auto_hide: Some(self.layout.auto_hide),
             active_view: self.active_view.clone(),
             ..TabSession::default()
         }
@@ -1032,7 +1031,7 @@ impl Screen for PullRequestsScreen {
         {
             self.sort = (column, self.sort.1);
         }
-        self.layout = TableLayout::from_session_columns(&session.columns, session.auto_hide);
+        self.layout = TableLayout::from_session_columns(&session.columns);
         self.active_view = session.active_view;
     }
 

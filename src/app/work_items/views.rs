@@ -369,7 +369,6 @@ impl WorkItemsScreen {
             search_order: self.search_order,
             row_density: self.row_density,
             columns: self.layout.to_session_columns(),
-            auto_hide: self.layout.auto_hide,
         };
         if let Some(existing) = self
             .views
@@ -418,7 +417,7 @@ impl WorkItemsScreen {
         self.sort_direction = view.sort_direction;
         self.search_order = view.search_order;
         self.row_density = view.row_density;
-        self.layout = TableLayout::from_session_columns(&view.columns, Some(view.auto_hide));
+        self.layout = TableLayout::from_session_columns(&view.columns);
         shell.session_dirty = true;
         self.set_query(shell, view.query);
         self.mode = WorkItemMode::Browse;
