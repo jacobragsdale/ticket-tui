@@ -102,8 +102,8 @@ fn the_details_thumb_finishes_on_the_last_row_of_its_track() {
     let pane = details_pane(&app);
     assert_eq!(
         (track.y, track.height),
-        (pane.y + 1, pane.height - 2),
-        "the track spans the whole pane, heading included"
+        (pane.y, pane.height),
+        "the track spans everything inside the border, heading included"
     );
     let thumb = metrics.thumb().expect("the description overflows the pane");
     assert_eq!(
@@ -295,7 +295,7 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
     let mut app = App::new(vec![ticket()]);
     let screen = render_text(130, 30, &mut app);
     let before = divider(&app);
-    assert_eq!(before.width, 1, "the wide layout leaves a one-cell gap");
+    assert_eq!(before.width, 1, "the panes share one border column");
     assert_eq!(app.shell.pane_split_wide, 62);
     assert_eq!(
         screen
@@ -303,7 +303,7 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
             .nth(usize::from(before.y + 1))
             .and_then(|row| row.chars().nth(usize::from(before.x))),
         Some('│'),
-        "the gap between the panes is drawn as a divider"
+        "the seam between the panes is the border they share"
     );
     assert!(
         app.shell
@@ -356,10 +356,12 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
         divider(&app)
     };
     let content = app.shell.content_area();
+    // The panes share the divider column, so the tickets pane runs from the
+    // content's left edge to the far side of the seam.
     assert!(
-        leftmost.x - content.x >= 40,
+        leftmost.right() - content.x >= 40,
         "tickets pane kept {} columns",
-        leftmost.x - content.x
+        leftmost.right() - content.x
     );
     drag(&mut app, (leftmost.x, leftmost.y), (129, leftmost.y));
     render_text(130, 30, &mut app);
@@ -369,15 +371,15 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
         "dragging right still moves the divider"
     );
     assert!(
-        content.right() - rightmost.right() >= 30,
+        content.right() - rightmost.x >= 30,
         "details pane kept {} columns",
-        content.right() - rightmost.right()
+        content.right() - rightmost.x
     );
 
     let mut stacked = App::new(vec![ticket()]);
     render_text(90, 30, &mut stacked);
     let before = divider(&stacked);
-    assert_eq!(before.height, 1, "the stacked layout leaves a one-row gap");
+    assert_eq!(before.height, 1, "and one border row when they are stacked");
     assert_eq!(stacked.shell.pane_split_stacked, 56);
     let action = drag(
         &mut stacked,

@@ -280,7 +280,8 @@ fn render_pipeline_table(
         .collect();
     let marker = |index: usize| watch_marker(watched.get(index).copied().unwrap_or_default());
     let mut spec = TableSpec {
-        title: format!(" Pipelines {} ", rows.len()),
+        title: " Pipelines ".to_owned(),
+        status: rows.len().to_string(),
         focused: true,
         layout: &layout,
         sorted: Some((sorted, if descending { "\u{2193}" } else { "\u{2191}" })),
@@ -315,8 +316,9 @@ fn render_run_table(
     let layout = screen.runs_layout.clone();
     let title = screen.open_pipeline().map_or_else(
         || " Runs ".to_owned(),
-        |pipeline| format!(" {} \u{00b7} {} runs ", pipeline.name, rows.len()),
+        |pipeline| format!(" {} ", pipeline.name),
     );
+    let status = format!("{} runs", rows.len());
     let watched: Vec<bool> = rows
         .iter()
         .map(|row| screen.is_watched(row.run.id))
@@ -328,6 +330,7 @@ fn render_run_table(
     };
     let mut spec = TableSpec {
         title,
+        status,
         focused: true,
         layout: &layout,
         sorted: Some((sorted, if descending { "\u{2193}" } else { "\u{2191}" })),
@@ -478,7 +481,8 @@ fn render_run_details(
     area: Rect,
 ) {
     let now = Timestamp::now();
-    let block = focused_block(" Run ", shell.focus == Focus::Details);
+    let block =
+        focused_block(" Run ", shell.focus == Focus::Details).padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(row) = screen.selected_run(shell) else {
@@ -725,7 +729,8 @@ fn render_log(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut S
             "scrolled"
         }
     );
-    let block = focused_block(title, shell.focus == Focus::Details);
+    let block = focused_block(title, shell.focus == Focus::Details).padding(Padding::horizontal(1));
+    let pane = inside_border(area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if lines.is_empty() {
@@ -754,7 +759,7 @@ fn render_log(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut S
             frame,
             PointerLayer::Base,
             shell,
-            inner,
+            pane,
             ScrollSurface::Details,
             ScrollState {
                 offset,

@@ -7,7 +7,7 @@ fn the_table_draws_every_repository_with_its_counts_and_local_state() {
     let mut app = repos_app();
     let text = render_text(150, 24, &mut app);
 
-    assert!(text.contains("Repos 4"), "{text}");
+    assert!(pane_reads(&text, "Repos", "4"), "{text}");
     assert!(text.contains("ticket-tui"), "{text}");
     assert!(
         text.contains("main \u{2713}"),
@@ -143,7 +143,7 @@ fn the_repos_tab_reads_at_every_breakpoint() {
     for width in [150, 90, 60] {
         app.select_tab(TabId::Repos);
         let text = render_text(width, 24, &mut app);
-        assert!(text.contains("Repos 4"), "{width} columns: {text}");
+        assert!(pane_reads(&text, "Repos", "4"), "{width} columns: {text}");
         assert!(text.contains("ticket-tui"), "{width} columns: {text}");
     }
 }

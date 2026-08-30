@@ -20,9 +20,16 @@ pub(super) fn render_modal_frame(
 ) -> Rect {
     frame.render_widget(Clear, area);
     let block = Block::default()
-        .title(title.to_owned())
+        .title(Line::styled(
+            title.to_owned(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
         .title(Line::from("[×]").right_aligned())
         .borders(Borders::ALL)
+        .border_type(theme().border_type)
+        // A gutter on the left; the column on the right is where a list's own
+        // scrollbar goes.
+        .padding(Padding::left(1))
         .border_style(Style::default().fg(theme().accent));
     let inner = block.inner(area);
     frame.render_widget(block, area);

@@ -51,7 +51,7 @@ fn the_runs_level_draws_the_runs_of_the_pipeline_that_was_opened() {
     let text = render_text(170, 24, &mut app);
 
     assert!(
-        text.contains("ticket-tui CI \u{00b7} 3 runs"),
+        pane_reads(&text, "ticket-tui CI", "3 runs"),
         "the title says whose runs these are: {text}"
     );
     assert!(text.contains("Result"), "{text}");

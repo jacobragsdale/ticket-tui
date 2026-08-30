@@ -467,7 +467,8 @@ fn the_list_table_draws_another_screens_columns_and_sorts_by_their_keys() {
                 Cell::from(repositories[row][index])
             };
             let mut spec = crate::ui::table::TableSpec {
-                title: " Repos 3/3 ".to_owned(),
+                title: " Repos ".to_owned(),
+                status: "3/3".to_owned(),
                 focused: true,
                 layout: &layout,
                 sorted: Some((RepoColumn::Behind, "↓")),
@@ -493,7 +494,11 @@ fn the_list_table_draws_another_screens_columns_and_sorts_by_their_keys() {
         }
         text.push('\n');
     }
-    assert!(text.contains("Repos 3/3"), "{text}");
+    assert!(text.contains("Repos"), "{text}");
+    assert!(
+        text.contains("3/3"),
+        "the status is on the bottom border: {text}"
+    );
     assert!(
         text.contains("Repository"),
         "the header is this screen's: {text}"

@@ -161,6 +161,14 @@ fn render_text(width: u16, height: u16, app: &mut App) -> String {
 /// with them: that one is the overlay's own scrollbar track, which draws the
 /// same `\u{2502}` the panes behind it do.
 fn modal_interior(text: &str) -> Option<Vec<String>> {
+    // Whichever corners the theme draws with.
+    let corners = ratatui::widgets::BorderType::border_symbols(theme().border_type);
+    let corner = |glyph: &str| glyph.chars().next().unwrap_or(' ');
+    let (top_left, top_right, bottom_left) = (
+        corner(corners.top_left),
+        corner(corners.top_right),
+        corner(corners.bottom_left),
+    );
     let rows: Vec<Vec<char>> = text.lines().map(|line| line.chars().collect()).collect();
     let (top, close) = rows.iter().enumerate().find_map(|(y, row)| {
         let line: String = row.iter().collect();
@@ -169,12 +177,12 @@ fn modal_interior(text: &str) -> Option<Vec<String>> {
     })?;
     let left = rows[top][..close]
         .iter()
-        .rposition(|glyph| *glyph == '\u{250c}')?;
+        .rposition(|glyph| *glyph == top_left)?;
     let right = close
         + rows[top][close..]
             .iter()
-            .position(|glyph| *glyph == '\u{2510}')?;
-    let bottom = (top + 1..rows.len()).find(|y| rows[*y].get(left) == Some(&'\u{2514}'))?;
+            .position(|glyph| *glyph == top_right)?;
+    let bottom = (top + 1..rows.len()).find(|y| rows[*y].get(left) == Some(&bottom_left))?;
     let (from, to) = (left + 1, right.saturating_sub(1));
     (from < to).then(|| {
         rows[top + 1..bottom]
@@ -184,11 +192,21 @@ fn modal_interior(text: &str) -> Option<Vec<String>> {
     })
 }
 
+/// Whether a pane's frame says both what it is and what it holds: the name is
+/// on the top border and the count on the bottom, unless the pane is stacked
+/// over another, where the two share the top border row.
+fn pane_reads(text: &str, name: &str, status: &str) -> bool {
+    text.contains(name)
+        && text
+            .lines()
+            .any(|line| line.contains(status) && line.contains('─'))
+}
+
 #[test]
 fn layouts_render_both_panes_and_expose_hit_regions_at_every_breakpoint() {
     let mut app = App::new(vec![ticket()]);
     let wide = render_text(130, 30, &mut app);
-    assert!(wide.contains("Tickets 1/1"));
+    assert!(pane_reads(&wide, "Tickets", "1/1"), "{wide}");
     assert!(wide.contains("Details"));
     assert!(wide.contains("Fix ticket search"));
     assert!(wide.contains("Pri"));

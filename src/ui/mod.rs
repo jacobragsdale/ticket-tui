@@ -1,11 +1,12 @@
 use std::cmp::Ordering;
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect, Spacing};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols::merge::MergeStrategy;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Table, Wrap,
+    Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Table, Wrap,
 };
 use time::OffsetDateTime;
 
@@ -414,7 +415,7 @@ fn render_content(
             Constraint::Percentage(shell.pane_split_wide),
             Constraint::Fill(1),
         ])
-        .spacing(1)
+        .spacing(Spacing::Overlap(1))
         .split(area);
         render_table(frame, screen, shell, panes[0]);
         render_details(frame, screen, shell, panes[1]);
@@ -431,7 +432,7 @@ fn render_content(
             Constraint::Percentage(shell.pane_split_stacked),
             Constraint::Fill(1),
         ])
-        .spacing(1)
+        .spacing(Spacing::Overlap(1))
         .split(area);
         render_table(frame, screen, shell, panes[0]);
         render_details(frame, screen, shell, panes[1]);
@@ -452,8 +453,11 @@ fn render_content(
     }
 }
 
-/// Paints the gap the layout leaves between the panes and registers it as the
-/// draggable divider. Hovering reverses it through the usual hover pass.
+/// Registers the border the two panes share as the draggable divider, and
+/// gives it the neutral border colour: the seam belongs to neither pane, so a
+/// focused pane does not paint half of it in the accent. The glyphs are the
+/// merged ones the panes have already drawn. Hovering reverses it through the
+/// usual hover pass.
 fn render_divider(
     frame: &mut Frame<'_>,
     shell: &mut Shell,
@@ -464,16 +468,14 @@ fn render_divider(
     let Some(rect) = divider_rect(first, second, orientation) else {
         return;
     };
-    let glyph = match orientation {
-        DividerOrientation::Vertical => "\u{2502}",
-        DividerOrientation::Horizontal => "\u{2500}",
-    };
-    let style = Style::default().fg(theme().muted);
-    let row = glyph.repeat(usize::from(rect.width));
-    let lines: Vec<Line<'_>> = (0..rect.height)
-        .map(|_| Line::styled(row.clone(), style))
-        .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), rect);
+    let buffer = frame.buffer_mut();
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            let cell = &mut buffer[(x, y)];
+            let style = cell.style().fg(theme().border);
+            cell.set_style(style);
+        }
+    }
     shell.hit_regions.push(region(
         rect,
         PointerTarget::PaneDivider,
@@ -483,20 +485,20 @@ fn render_divider(
     ));
 }
 
-/// The cells the layout left between two panes, if any.
+/// The one border column, or row, the two panes share.
 fn divider_rect(first: Rect, second: Rect, orientation: DividerOrientation) -> Option<Rect> {
     let rect = match orientation {
         DividerOrientation::Vertical => Rect {
-            x: first.right(),
+            x: second.x,
             y: first.y,
-            width: second.x.checked_sub(first.right())?,
+            width: first.right().checked_sub(second.x)?,
             height: first.height,
         },
         DividerOrientation::Horizontal => Rect {
             x: first.x,
-            y: first.bottom(),
+            y: second.y,
             width: first.width,
-            height: second.y.checked_sub(first.bottom())?,
+            height: first.bottom().checked_sub(second.y)?,
         },
     };
     (rect.width > 0 && rect.height > 0).then_some(rect)
@@ -557,14 +559,40 @@ fn current_layer(screen: &WorkItemsScreen) -> PointerLayer {
     }
 }
 
+/// The cells inside a pane's border, before any padding it carries: what the
+/// pane owns, the scrollbar's column and the seam it shares with a neighbour
+/// included.
+fn inside_border(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    )
+}
+
+/// The frame every pane wears: the theme's corners, the accent while it has
+/// focus and a weight on its name to say so, and borders that merge with a
+/// neighbour's rather than sitting beside them.
+///
+/// The merge is `Fuzzy` rather than `Exact` because the corners are rounded:
+/// there is no rounded `┬`, so an exact merge would leave `╮` where two panes meet.
+/// Fuzzy falls back to the plain junction, which is the glyph a seam wants.
 fn focused_block<'a>(title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
+    let title = title.into();
     Block::default()
-        .title(title)
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(if focused {
-            theme().accent
+        .title(if focused {
+            title.style(Style::default().add_modifier(Modifier::BOLD))
         } else {
-            theme().muted
+            title
+        })
+        .borders(Borders::ALL)
+        .border_type(theme().border_type)
+        .merge_borders(MergeStrategy::Fuzzy)
+        .border_style(Style::default().fg(if focused {
+            theme().border_focused
+        } else {
+            theme().border
         }))
 }
 

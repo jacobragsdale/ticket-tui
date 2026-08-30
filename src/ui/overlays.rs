@@ -168,9 +168,14 @@ pub(super) fn render_help_popup(
     ]);
     let help = Text::from(lines);
     let block = Block::default()
-        .title(" Help ")
+        .title(Line::styled(
+            " Help ",
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
         .title(Line::from("[×]").right_aligned())
         .borders(Borders::ALL)
+        .border_type(theme().border_type)
+        .padding(Padding::left(1))
         .border_style(Style::default().fg(theme().accent));
     let inner = block.inner(area);
     let paragraph = Paragraph::new(help).block(block).wrap(Wrap { trim: false });

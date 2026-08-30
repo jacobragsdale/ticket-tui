@@ -599,7 +599,7 @@ fn an_anchored_dropdown_is_drawn_under_the_field_and_dismissed_by_a_click_away()
     let buffer = terminal.backend().buffer();
     assert_eq!(
         buffer[(field.x, field.y + 1)].symbol(),
-        "\u{250c}",
+        ratatui::widgets::BorderType::border_symbols(theme().border_type).top_left,
         "the dropdown's corner sits under the value"
     );
     let first = app
@@ -623,7 +623,7 @@ fn an_anchored_dropdown_is_drawn_under_the_field_and_dismissed_by_a_click_away()
     let corner = find_buffer_text_in(
         terminal.backend().buffer(),
         Rect::new(0, state.y + 1, 130, 1),
-        "\u{250c}",
+        ratatui::widgets::BorderType::border_symbols(theme().border_type).top_left,
     )
     .expect("the state dropdown is drawn on the row under the value");
     assert!(

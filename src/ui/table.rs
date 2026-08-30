@@ -37,7 +37,12 @@ pub(crate) fn table_geometry(area: Rect, row_height: u16) -> TableGeometry {
 /// the hit regions are the same on all of them, so a row is selected, opened
 /// and sorted the same way whatever it holds.
 pub(crate) struct TableSpec<'a, C: ColumnId> {
+    /// What the pane is, on the top border: `Tickets`, `Repos`, a pipeline's
+    /// name. It stays the same while the list underneath changes.
     pub title: String,
+    /// What the list is doing, on the bottom border: how many rows, how they
+    /// are ordered. Empty leaves the bottom border bare.
+    pub status: String,
     pub focused: bool,
     pub layout: &'a TableLayout<C>,
     /// The column the list is ordered by and the arrow that says which way, if
@@ -65,11 +70,25 @@ pub(crate) fn render_list_table<C: ColumnId>(
     area: Rect,
     spec: &mut TableSpec<'_, C>,
 ) {
+    // A pane stacked above another shares its bottom border with it, and the
+    // pane below paints that row last: there is nowhere down there to write,
+    // so the status joins the name on the top border instead.
+    let shares_its_bottom_border =
+        shell.divider_orientation() == Some(DividerOrientation::Horizontal);
+    let (title, status) = if spec.status.is_empty() {
+        (spec.title.clone(), String::new())
+    } else if shares_its_bottom_border {
+        (format!("{}{} ", spec.title, spec.status), String::new())
+    } else {
+        (spec.title.clone(), format!(" {} ", spec.status))
+    };
     // The scrollbar's column is padding, not a place a cell may be painted:
     // the table lays its columns out inside what is left, so the last one
     // keeps every character it was given whether or not the list overflows.
-    let block =
-        focused_block(spec.title.clone(), spec.focused).padding(Padding::right(SCROLLBAR_WIDTH));
+    let mut block = focused_block(title, spec.focused).padding(Padding::right(SCROLLBAR_WIDTH));
+    if !status.is_empty() {
+        block = block.title_bottom(Line::from(status));
+    }
     let geometry = table_geometry(area, spec.row_height);
     let inner = geometry.inner;
     let columns = spec
@@ -103,7 +122,7 @@ pub(crate) fn render_list_table<C: ColumnId>(
     let header = Row::new(header_cells)
         .style(
             Style::default()
-                .fg(theme().accent)
+                .fg(theme().header)
                 .add_modifier(Modifier::BOLD),
         )
         .height(1)
@@ -156,6 +175,18 @@ pub(crate) fn render_list_table<C: ColumnId>(
     if inner.height < 2 {
         return;
     }
+    // The blank row the header's bottom margin leaves, drawn as a rule: the
+    // column names read as a heading over the rows rather than as a first row
+    // among them.
+    frame.render_widget(
+        Line::styled(
+            BorderType::border_symbols(theme().border_type)
+                .horizontal_top
+                .repeat(usize::from(inner.width)),
+            Style::default().fg(theme().border),
+        ),
+        Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 1),
+    );
     let header_area = Rect::new(
         inner.x.saturating_add(SELECTION_WIDTH),
         inner.y,
@@ -279,7 +310,7 @@ pub(super) fn render_table(
     let activity = shell
         .activity_label()
         .map_or_else(String::new, |label| format!(" · {label}"));
-    let title = if area.width < NARROW_BREAKPOINT {
+    let (title, status) = if area.width < NARROW_BREAKPOINT {
         let short_order = if screen.query().is_empty() {
             screen.sort_direction.symbol()
         } else {
@@ -288,9 +319,15 @@ pub(super) fn render_table(
                 SearchOrder::Field => "Field",
             }
         };
-        format!(" [Tickets] [Details] {count}/{total} · {short_order}{activity} ")
+        (
+            " [Tickets] [Details] ".to_owned(),
+            format!("{count}/{total} · {short_order}{activity}"),
+        )
     } else {
-        format!(" Tickets {count}/{total} · {ordering}{activity} ")
+        (
+            " Tickets ".to_owned(),
+            format!("{count}/{total} · {ordering}{activity}"),
+        )
     };
 
     let now = OffsetDateTime::now_utc();
@@ -349,6 +386,7 @@ pub(super) fn render_table(
     };
     let mut spec = TableSpec {
         title,
+        status,
         focused: shell.focus == Focus::Tickets,
         layout: &screen.layout,
         sorted: Some((screen.sort_field, screen.sort_direction.symbol())),

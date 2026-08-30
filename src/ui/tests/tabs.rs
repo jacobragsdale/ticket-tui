@@ -66,7 +66,7 @@ fn the_number_keys_switch_tabs_and_the_screens_keep_their_own_state() {
     assert_eq!(app.tab, TabId::Repos);
 
     let text = render_text(110, 30, &mut app);
-    assert!(text.contains("Repos 0"), "{text}");
+    assert!(pane_reads(&text, "Repos", "0"), "{text}");
     assert!(
         !text.contains("Fix ticket search"),
         "the work items screen is not painted while another tab is showing"
@@ -120,7 +120,7 @@ fn clicking_a_tab_switches_to_it() {
     click(&mut app, pipelines.x, pipelines.y);
     assert_eq!(app.tab, TabId::Pipelines);
     assert!(
-        render_text(110, 30, &mut app).contains("Pipelines 0"),
+        pane_reads(&render_text(110, 30, &mut app), "Pipelines", "0"),
         "the tab that was clicked is the one showing"
     );
 }

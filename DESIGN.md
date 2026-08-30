@@ -1304,6 +1304,19 @@ its parent back. A work item nobody broke down shows nothing at all in any of
 the three places, never `0/0`. The bar is drawn from two different glyphs
 rather than two colours, so it reads the same under `NO_COLOR`.
 
+Every pane wears the same frame: the theme's corners — rounded in `terminal`,
+`terminal-light` and `custom`, plain under `NO_COLOR` — the accent and a bold
+name while it has the focus, and the neutral border colour when it has not.
+Two panes side by side, or stacked, share one border rather than leaving a gap
+between them: that column is the seam, drawn as `┬` and `┴` where it meets the
+frame, painted in the neutral colour because it belongs to neither pane, and it
+is the divider you drag. A list pane says what it is on its top border and what
+it holds on the bottom one — `╰ 106/106 · Changed ↑ ─` — except where it is stacked
+over another pane, which paints that row last: there the count joins the name
+above. A rule under the table header separates the column names from the rows,
+and the details pane is padded a column in from each side, with the scrollbar
+in a column of its own at the edge.
+
 Mouse input stays captured so the TUI can provide its own pointer controls
 without restoring terminal drag-select. Wheel scrolling moves the hovered
 table, details pane, help, or overlay by three rows or lines and does not
@@ -1323,7 +1336,7 @@ selects it and copies the plain text on release, a field value included. Bracket
 the caret in search, the command palette, the named-view editor, and the title,
 tags, and comment prompts.
 Scrollbar tracks page by a viewport-minus-one step; thumbs can be
-dragged. Dragging the divider between the Tickets and Details panes resizes
+dragged. Dragging the border the Tickets and Details panes share resizes
 them, both side by side and stacked; the tickets pane keeps at least 40 columns
 and details at least 30 side by side, and each keeps six rows when stacked.
 `Reset pane split` in the command palette restores the built-in layout.

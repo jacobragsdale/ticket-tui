@@ -12,7 +12,7 @@ fn the_table_draws_a_row_per_pull_request_with_its_votes_and_build() {
     let mut app = pull_requests_app();
     let text = tab_text(200, 24, &mut app);
 
-    assert!(text.contains("Pull requests 3"), "{text}");
+    assert!(pane_reads(&text, "Pull requests", "3"), "{text}");
     assert!(
         text.contains("!11"),
         "the id reads as a pull request: {text}"

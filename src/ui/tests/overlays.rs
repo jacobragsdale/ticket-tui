@@ -47,7 +47,7 @@ fn the_chip_bar_says_finished_work_is_hidden_and_its_cross_puts_it_back() {
     let text = render_text(130, 24, &mut app);
     assert!(text.contains("Finished hidden ×"), "{text}");
     assert!(
-        text.contains("Tickets 1/2"),
+        pane_reads(&text, "Tickets", "1/2"),
         "the total stays the database's, so the count hidden is the difference: {text}"
     );
 
@@ -61,7 +61,7 @@ fn the_chip_bar_says_finished_work_is_hidden_and_its_cross_puts_it_back() {
 
     let text = render_text(130, 24, &mut app);
     assert!(!text.contains("Finished hidden"), "{text}");
-    assert!(text.contains("Tickets 2/2"), "{text}");
+    assert!(pane_reads(&text, "Tickets", "2/2"), "{text}");
 }
 
 #[test]

@@ -68,7 +68,8 @@ fn render_table(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut She
             .map_or_else(|| Cell::from(""), |row| repo_cell(row, column))
     };
     let mut spec = TableSpec {
-        title: format!(" Repos {} ", rows.len()),
+        title: " Repos ".to_owned(),
+        status: rows.len().to_string(),
         focused: shell.focus == Focus::Tickets,
         layout: &layout,
         sorted: Some((sorted, if descending { "\u{2193}" } else { "\u{2191}" })),
@@ -160,7 +161,9 @@ pub(crate) fn local_line(row: &RepoRow) -> Line<'static> {
 }
 
 fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut Shell, area: Rect) {
-    let block = focused_block(" Repository ", shell.focus == Focus::Details);
+    let block = focused_block(" Repository ", shell.focus == Focus::Details)
+        .padding(Padding::horizontal(1));
+    let pane = inside_border(area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(row) = screen.selected(shell) else {
@@ -312,7 +315,7 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
     );
     // The pane itself: the wheel scrolls it, a click gives it the focus.
     shell.hit_regions.push(region(
-        inner,
+        pane,
         PointerTarget::FocusDetails,
         PointerLayer::Base,
         Some(SelectableSurface::Details),
@@ -323,7 +326,7 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
             frame,
             PointerLayer::Base,
             shell,
-            inner,
+            pane,
             ScrollSurface::Details,
             ScrollState {
                 offset,

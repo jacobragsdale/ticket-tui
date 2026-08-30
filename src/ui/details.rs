@@ -13,11 +13,16 @@ pub(super) fn render_details(
     shell: &mut Shell,
     area: Rect,
 ) {
-    let block = focused_block(" Details ", shell.focus.is_details_pane());
+    // `pane` is everything inside the border — what the wheel scrolls and
+    // where the scrollbar's own column is; `inner` is the padded column the
+    // text is laid in, one in from each side.
+    let block =
+        focused_block(" Details ", shell.focus.is_details_pane()).padding(Padding::horizontal(1));
+    let pane = inside_border(area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     shell.hit_regions.push(region(
-        area,
+        pane,
         PointerTarget::FocusDetails,
         PointerLayer::Base,
         Some(SelectableSurface::Details),
@@ -261,7 +266,7 @@ pub(super) fn render_details(
     };
     if let Some(y) = url_line.and_then(row_of) {
         shell.hit_regions.push(region(
-            Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
+            Rect::new(inner.x, y, inner.width, 1),
             PointerTarget::OpenSelectedUrl,
             PointerLayer::Base,
             Some(SelectableSurface::Details),
@@ -274,7 +279,7 @@ pub(super) fn render_details(
         }
         if let Some(y) = row_of(hit.line) {
             shell.hit_regions.push(region(
-                Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
+                Rect::new(inner.x, y, inner.width, 1),
                 PointerTarget::Follow(Jump::WorkItem(hit.key.clone())),
                 PointerLayer::Base,
                 Some(SelectableSurface::Details),
@@ -285,7 +290,7 @@ pub(super) fn render_details(
     for (logical, key) in line_links {
         if let Some(y) = row_of(logical) {
             shell.hit_regions.push(region(
-                Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
+                Rect::new(inner.x, y, inner.width, 1),
                 PointerTarget::Follow(Jump::WorkItem(key)),
                 PointerLayer::Base,
                 Some(SelectableSurface::Details),
@@ -296,7 +301,7 @@ pub(super) fn render_details(
     for (logical, jump) in artifact_links {
         if let Some(y) = row_of(logical) {
             shell.hit_regions.push(region(
-                Rect::new(inner.x, y, inner.width.saturating_sub(1), 1),
+                Rect::new(inner.x, y, inner.width, 1),
                 PointerTarget::Follow(jump),
                 PointerLayer::Base,
                 Some(SelectableSurface::Details),
@@ -315,7 +320,7 @@ pub(super) fn render_details(
             frame,
             current_layer(screen),
             shell,
-            inner,
+            pane,
             ScrollSurface::Details,
             ScrollState {
                 offset: scroll,

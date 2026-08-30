@@ -221,7 +221,8 @@ fn render_table(
             .map_or_else(|| Cell::from(""), |row| pr_cell(row, column, now))
     };
     let mut spec = TableSpec {
-        title: format!(" Pull requests {} ", rows.len()),
+        title: " Pull requests ".to_owned(),
+        status: rows.len().to_string(),
         focused: shell.focus == Focus::Tickets,
         layout: &layout,
         sorted: Some((sorted, if descending { "\u{2193}" } else { "\u{2191}" })),
@@ -320,7 +321,9 @@ fn render_details(
     work_item_titles: &[(i64, String)],
     area: Rect,
 ) {
-    let block = focused_block(" Pull request ", shell.focus == Focus::Details);
+    let block = focused_block(" Pull request ", shell.focus == Focus::Details)
+        .padding(Padding::horizontal(1));
+    let pane = inside_border(area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let Some(row) = screen.selected(shell) else {
@@ -495,7 +498,7 @@ fn render_details(
         inner,
     );
     shell.hit_regions.push(region(
-        inner,
+        pane,
         PointerTarget::FocusDetails,
         PointerLayer::Base,
         Some(SelectableSurface::Details),
@@ -506,7 +509,7 @@ fn render_details(
             frame,
             PointerLayer::Base,
             shell,
-            inner,
+            pane,
             ScrollSurface::Details,
             ScrollState {
                 offset,
