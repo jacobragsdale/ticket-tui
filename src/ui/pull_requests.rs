@@ -17,7 +17,7 @@ pub(crate) fn render(
 ) {
     let chip_height = u16::from(screen.closed_hidden() && screen.hidden_closed(shell) > 0);
     let sections = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(1),
         Constraint::Length(chip_height),
         Constraint::Fill(1),
         Constraint::Length(1),
@@ -137,21 +137,24 @@ fn render_search(
     shell: &mut Shell,
     area: Rect,
 ) {
-    let title = screen.active_view.as_ref().map_or_else(
-        || " Search / ".to_owned(),
-        |view| format!(" Search / \u{2022} {view} "),
-    );
-    let block = focused_block(title, false);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    render_query_field(
+    render_search_row(
         frame,
         shell,
-        inner,
-        screen.query(),
-        screen.query_cursor(),
-        "Type / to search, or repo:, author:@me, reviewer:@me, vote:none",
-        PointerTarget::SearchField,
+        SearchRow {
+            area,
+            text: screen.query(),
+            cursor: screen.query_cursor(),
+            placeholder: "Type / to search, or repo:, author:@me, reviewer:@me, vote:none",
+            active: screen.mode == PrMode::Search,
+            pending: false,
+            clearable: false,
+            trailer: screen
+                .active_view
+                .as_ref()
+                .map_or_else(String::new, |view| format!("\u{2022} {view}")),
+            layer: PointerLayer::Modal,
+            selectable: SelectableSurface::Overlay,
+        },
     );
 }
 

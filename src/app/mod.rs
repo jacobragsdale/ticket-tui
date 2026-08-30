@@ -678,10 +678,19 @@ impl App {
         if self.shell_overlay_open() {
             return self.handle_overlay_mouse(mouse);
         }
+        // The bar belongs to the shell: its tabs, and the two controls at its
+        // right end, are answered here rather than by whichever screen is
+        // showing \u{2014} `Actions` and `?` open over every tab.
         if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
             && let Some(region) = self.shell.hit_regions.resolve(mouse.column, mouse.row)
-            && let PointerTarget::SelectTab { index } = region.target
-            && let Some(tab) = TabId::ALL.get(index).copied()
+            && let Some(target) = match region.target {
+                PointerTarget::SelectTab { index } => {
+                    TabId::ALL.get(index).copied().map(BarTarget::Tab)
+                }
+                PointerTarget::OpenPalette => Some(BarTarget::Command(CommandId::Palette)),
+                PointerTarget::OpenHelp => Some(BarTarget::Command(CommandId::Help)),
+                _ => None,
+            }
         {
             self.shell.pointer.set_position(mouse.column, mouse.row);
             // The press that started this click went to the screen, so the
@@ -689,8 +698,16 @@ impl App {
             // would read as a drag.
             self.shell.pointer.clear_press();
             self.shell.pointer.clear_selection();
-            self.select_tab(tab);
-            return PointerUpdate::none(true);
+            return match target {
+                BarTarget::Tab(tab) => {
+                    self.select_tab(tab);
+                    PointerUpdate::none(true)
+                }
+                BarTarget::Command(id) => PointerUpdate {
+                    action: self.run_tab_command(id),
+                    redraw: true,
+                },
+            };
         }
         let (shell, screen) = self.screen();
         let update = screen.handle_mouse(shell, mouse);
@@ -708,4 +725,11 @@ impl App {
     pub fn handle_resize(&mut self) {
         self.shell.handle_resize();
     }
+}
+
+/// What a click on the tab bar asks for: another tab, or one of the two
+/// controls at its right end.
+enum BarTarget {
+    Tab(TabId),
+    Command(CommandId),
 }

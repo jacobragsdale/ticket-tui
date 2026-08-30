@@ -52,6 +52,158 @@ pub(super) fn register_close_button(shell: &mut Shell, area: Rect, layer: Pointe
     ));
 }
 
+/// The one-row search every tab opens with: a prompt glyph, the query or the
+/// placeholder, and a `[×]` at the right end of the tabs that offer one.
+pub(super) struct SearchRow<'a> {
+    pub area: Rect,
+    pub text: &'a str,
+    pub cursor: usize,
+    pub placeholder: &'a str,
+    /// Whether the row has the keyboard: the glyph goes `›` and the row takes the
+    /// surface ground.
+    pub active: bool,
+    /// Whether a search is still running, which the prompt cell spins for.
+    pub pending: bool,
+    /// Whether the row offers a clear button once there is something to
+    /// clear.
+    pub clearable: bool,
+    /// What the row is searching inside, when it is not the whole tab: the
+    /// saved view a pull request list is filtered by, the pipeline whose runs
+    /// these are. Muted, at the right end of the row.
+    pub trailer: String,
+    pub layer: PointerLayer,
+    pub selectable: SelectableSurface,
+}
+
+/// The prompt cell, the field and the clear button, on one row. The field's
+/// rect is the `SearchField` target and the selectable surface, so a click
+/// places the caret and a drag across it selects, as they did when the row
+/// was a box three rows tall.
+pub(super) fn render_search_row(frame: &mut Frame<'_>, shell: &mut Shell, row: SearchRow<'_>) {
+    let SearchRow {
+        area,
+        text,
+        cursor,
+        placeholder,
+        active,
+        pending,
+        clearable,
+        trailer,
+        layer,
+        selectable,
+    } = row;
+    if area.width < 4 || area.height == 0 {
+        return;
+    }
+    let area = Rect::new(area.x, area.y, area.width, 1);
+    // The ground says the row has the keyboard. A palette with no surface
+    // colour — `mono` — reverses it instead, so the state still reads.
+    if active {
+        let style = if theme().surface == Color::Reset {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default().bg(theme().surface)
+        };
+        frame.render_widget(Block::default().style(style), area);
+    }
+    let (glyph, glyph_style) = if pending {
+        (
+            spinner_frame().to_string(),
+            Style::default().fg(theme().accent),
+        )
+    } else if active {
+        (
+            "›".to_owned(),
+            Style::default()
+                .fg(theme().accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        ("/".to_owned(), Style::default().fg(theme().muted))
+    };
+    frame.render_widget(
+        Line::styled(glyph, glyph_style),
+        Rect::new(area.x, area.y, 1, 1),
+    );
+
+    let clear = u16::from(clearable && !text.is_empty() && area.width > 8) * 3;
+    // The breadcrumb only fits where it leaves the query most of the row.
+    let trailer_width = u16::try_from(trailer.chars().count())
+        .unwrap_or(u16::MAX)
+        .saturating_add(1);
+    let trailer_width = if trailer.is_empty() || area.width < trailer_width.saturating_add(32) {
+        0
+    } else {
+        trailer_width
+    };
+    let field = Rect::new(
+        area.x.saturating_add(2),
+        area.y,
+        area.width
+            .saturating_sub(2)
+            .saturating_sub(clear)
+            .saturating_sub(trailer_width),
+        1,
+    );
+    if trailer_width > 0 {
+        frame.render_widget(
+            Line::styled(trailer, Style::default().fg(theme().muted)).right_aligned(),
+            Rect::new(field.right(), area.y, trailer_width, 1),
+        );
+    }
+    let line = if text.is_empty() && !active {
+        Line::styled(placeholder.to_owned(), Style::default().fg(theme().muted))
+    } else {
+        Line::styled(text.to_owned(), Style::default().fg(theme().text))
+    };
+    // The caret stays on screen in a query longer than the row.
+    let cursor_offset = u16::try_from(cursor).unwrap_or(u16::MAX);
+    let scroll = cursor_offset.saturating_sub(field.width.saturating_sub(1));
+    frame.render_widget(Paragraph::new(line).scroll((0, scroll)), field);
+    if clear > 0 {
+        render_control(
+            frame,
+            shell,
+            Rect::new(field.right().saturating_add(trailer_width), area.y, 3, 1),
+            "[×]",
+            PointerTarget::ClearQuery,
+            layer,
+            true,
+        );
+    }
+    shell.hit_regions.push(region(
+        field,
+        PointerTarget::SearchField,
+        layer,
+        Some(selectable),
+        None,
+    ));
+    capture_selectable(frame, shell, selectable, field, false);
+    if active {
+        frame.set_cursor_position((
+            field
+                .x
+                .saturating_add(cursor_offset.saturating_sub(scroll))
+                .min(field.right().saturating_sub(1)),
+            field.y,
+        ));
+    }
+}
+
+/// The frame a braille spinner is on this instant. Nothing schedules a
+/// repaint for it: it turns on the wake-ups the work itself causes, so an
+/// idle screen still paints nothing.
+pub(super) fn spinner_frame() -> char {
+    const FRAMES: [char; 10] = [
+        '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}',
+        '\u{2827}', '\u{2807}', '\u{280f}',
+    ];
+    let ticks = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() / 100);
+    FRAMES[usize::try_from(ticks % 10).unwrap_or(0)]
+}
+
 /// The filter field at the top of a picker, and the caret in it: the text as
 /// typed, or `placeholder` while nothing has been. Clicking it places the
 /// caret, and dragging across it selects.

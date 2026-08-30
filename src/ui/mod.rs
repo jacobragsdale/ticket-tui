@@ -43,9 +43,9 @@ mod widgets;
 
 use details::{assigned_to_me_style, field_line, render_details, state_glyph};
 use overlays::{
-    ListOverlay, column_rows, link_line, overlay_line, render_chips, render_column_overlay,
-    render_facet_bar, render_facet_menu, render_filter_overlay, render_help_popup,
-    render_info_overlay, render_list_overlay, render_palette, render_sort_popup,
+    ListOverlay, column_rows, link_line, overlay_line, pill_style, render_chips,
+    render_column_overlay, render_facet_bar, render_facet_menu, render_filter_overlay,
+    render_help_popup, render_info_overlay, render_list_overlay, render_palette, render_sort_popup,
     render_sprint_overlay, render_views_overlay, terminate_underline,
 };
 use pickers::{
@@ -60,9 +60,9 @@ use table::{
 };
 pub use theme::{Theme, ThemeChoice, chosen_theme, set_theme, theme};
 use widgets::{
-    capture_selectable, paint_hover, paint_selection, register_buttons, register_close_button,
-    render_control, render_modal_frame, render_query_field, render_scrollbar, row_on_screen,
-    wrapped_rows,
+    SearchRow, capture_selectable, paint_hover, paint_selection, register_buttons,
+    register_close_button, render_control, render_modal_frame, render_query_field,
+    render_scrollbar, render_search_row, row_on_screen, wrapped_rows,
 };
 
 const WIDE_BREAKPOINT: u16 = 110;
@@ -204,6 +204,43 @@ pub(crate) fn render_tab_bar(
         x = x.saturating_add(width);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    render_bar_controls(frame, shell, area, x);
+}
+
+/// `Actions` and `?` at the right end of the tab bar, as far from the tabs as
+/// the row is wide. They open on every tab, so they belong to the bar rather
+/// than to one screen's search row. The narrower the terminal, the fewer of
+/// them there is room for, and neither ever paints over a tab.
+fn render_bar_controls(frame: &mut Frame<'_>, shell: &mut Shell, area: Rect, used: u16) {
+    const ACTIONS: &str = " Actions ";
+    const HELP: &str = " ? ";
+    let mut right = area.right();
+    let mut spans = Vec::new();
+    for (label, target) in [
+        (HELP, PointerTarget::OpenHelp),
+        (ACTIONS, PointerTarget::OpenPalette),
+    ] {
+        let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+        let Some(x) = right.checked_sub(width).filter(|x| *x > used) else {
+            break;
+        };
+        shell.hit_regions.push(region(
+            Rect::new(x, area.y, width, 1),
+            target,
+            PointerLayer::Base,
+            None,
+            None,
+        ));
+        spans.insert(0, Span::styled(label, pill_style(false, false)));
+        right = x;
+    }
+    if spans.is_empty() {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
+        Rect::new(right, area.y, area.right().saturating_sub(right), 1),
+    );
 }
 
 /// How much of a tab's name the bar has room for.
@@ -228,7 +265,7 @@ fn render_pass(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, shell: &mut 
     let chip_height =
         u16::from(screen.finished_hidden() || !screen.overflow_filter_tokens().is_empty());
     let sections = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(chip_height),
         Constraint::Fill(1),
@@ -288,119 +325,22 @@ fn render_search(
     shell: &mut Shell,
     area: Rect,
 ) {
-    let active = screen.mode == WorkItemMode::Search;
-    let title = if screen.search_pending {
-        " Search (matching…) "
-    } else {
-        " Search / "
-    };
-    let mut block = focused_block(title, active);
-    let actions_width = 11;
-    let help_width = 4;
-    let mut right_title = String::new();
-    if area.width >= 48 {
-        right_title.push_str("[Actions] ");
-    }
-    if area.width >= 36 {
-        right_title.push_str("[?]");
-    }
-    if !right_title.is_empty() {
-        block = block.title(Line::from(right_title.clone()).right_aligned());
-    }
-    let inner = block.inner(area);
-    let clear = if !screen.query().is_empty() && inner.width > 4 {
-        3
-    } else {
-        0
-    };
-    let field = Rect::new(
-        inner.x,
-        inner.y,
-        inner.width.saturating_sub(clear),
-        inner.height.max(1),
+    render_search_row(
+        frame,
+        shell,
+        SearchRow {
+            area,
+            text: screen.query(),
+            cursor: screen.query_cursor(),
+            placeholder: "Type / to search, or pick State, Type, Tags, or Assignee below",
+            active: screen.mode == WorkItemMode::Search,
+            pending: screen.search_pending,
+            clearable: true,
+            trailer: String::new(),
+            layer: PointerLayer::Base,
+            selectable: SelectableSurface::Search,
+        },
     );
-    let text = if screen.query().is_empty() && !active {
-        Line::styled(
-            "Type / to search, or pick State, Type, Tags, or Assignee below",
-            Style::default().fg(theme().muted),
-        )
-    } else {
-        Line::from(screen.query())
-    };
-    let cursor_offset = u16::try_from(screen.query_cursor()).unwrap_or(u16::MAX);
-    let horizontal_scroll = cursor_offset.saturating_sub(field.width.saturating_sub(1));
-    frame.render_widget(
-        Paragraph::new(text)
-            .block(block)
-            .scroll((0, horizontal_scroll)),
-        area,
-    );
-    if clear > 0 {
-        let clear_area = Rect::new(
-            inner.x.saturating_add(inner.width.saturating_sub(3)),
-            inner.y,
-            3,
-            1,
-        );
-        render_control(
-            frame,
-            shell,
-            clear_area,
-            "[×]",
-            PointerTarget::ClearQuery,
-            PointerLayer::Base,
-            true,
-        );
-    }
-    shell.hit_regions.push(region(
-        field,
-        PointerTarget::SearchField,
-        PointerLayer::Base,
-        Some(SelectableSurface::Search),
-        None,
-    ));
-    if area.width >= 48 {
-        let actions = Rect::new(
-            area.x
-                .saturating_add(area.width.saturating_sub(actions_width + help_width)),
-            area.y,
-            actions_width.saturating_sub(1),
-            1,
-        );
-        shell.hit_regions.push(region(
-            actions,
-            PointerTarget::OpenPalette,
-            PointerLayer::Base,
-            None,
-            None,
-        ));
-    }
-    if area.width >= 36 {
-        let help = Rect::new(
-            area.x.saturating_add(area.width.saturating_sub(5)),
-            area.y,
-            3,
-            1,
-        );
-        shell.hit_regions.push(region(
-            help,
-            PointerTarget::OpenHelp,
-            PointerLayer::Base,
-            None,
-            None,
-        ));
-    }
-    capture_selectable(frame, shell, SelectableSurface::Search, field, false);
-
-    if active {
-        let cursor_x = field
-            .x
-            .saturating_add(cursor_offset.saturating_sub(horizontal_scroll));
-        frame.set_cursor_position((
-            cursor_x.min(field.x.saturating_add(field.width.saturating_sub(1))),
-            field.y,
-        ));
-    }
 }
 
 fn render_content(

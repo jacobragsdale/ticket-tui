@@ -3,7 +3,7 @@
 //! on the right.
 
 use super::*;
-use crate::app::repos::{RepoColumn, RepoRow, ReposScreen};
+use crate::app::repos::{RepoColumn, RepoMode, RepoRow, ReposScreen};
 use crate::command::CommandId;
 use crate::model::Jump;
 use crate::ui::details::section_line;
@@ -16,7 +16,7 @@ pub(crate) fn render(
     area: Rect,
 ) {
     let sections = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(1),
     ])
@@ -27,17 +27,21 @@ pub(crate) fn render(
 }
 
 fn render_search(frame: &mut Frame<'_>, screen: &ReposScreen, shell: &mut Shell, area: Rect) {
-    let block = focused_block(" Search / ", false);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    render_query_field(
+    render_search_row(
         frame,
         shell,
-        inner,
-        screen.query(),
-        screen.query_cursor(),
-        "Type / to search, or local:cloned, local:dirty, branch:, disabled:",
-        PointerTarget::SearchField,
+        SearchRow {
+            area,
+            text: screen.query(),
+            cursor: screen.query_cursor(),
+            placeholder: "Type / to search, or local:cloned, local:dirty, branch:, disabled:",
+            active: screen.mode == RepoMode::Search,
+            pending: false,
+            clearable: false,
+            trailer: String::new(),
+            layer: PointerLayer::Modal,
+            selectable: SelectableSurface::Overlay,
+        },
     );
 }
 

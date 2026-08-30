@@ -209,8 +209,6 @@ impl WorkItemsScreen {
                 self.place_caret(shell, TextEditor::Search, column, row);
             }
             PointerTarget::ClearQuery => self.set_query(shell, String::new()),
-            PointerTarget::OpenPalette => return self.run_command(shell, CommandId::Palette),
-            PointerTarget::OpenHelp => return self.run_command(shell, CommandId::Help),
             PointerTarget::CloseOverlay => self.close_overlay(shell),
             PointerTarget::NarrowTickets => {
                 shell.narrow_details = false;
@@ -436,7 +434,9 @@ impl WorkItemsScreen {
                 self.scroll_surface(surface, if page_down { step } else { -step });
             }
             PointerTarget::ScrollbarThumb { .. } => {}
-            PointerTarget::PaneDivider => {}
+            // The tab bar's own controls: the shell answers these before a
+            // screen sees them.
+            PointerTarget::PaneDivider | PointerTarget::OpenPalette | PointerTarget::OpenHelp => {}
         }
         AppAction::None
     }

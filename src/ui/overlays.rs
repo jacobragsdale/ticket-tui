@@ -346,18 +346,21 @@ pub(super) fn truncate_pill(value: &str, max: usize) -> String {
     }
 }
 
+/// A pill on the facet bar, or a control on the tab bar: a filled chip that
+/// says whether it carries a filter, and reverses while the cursor is on it.
+///
+/// Every distinction survives `mono`, where each colour is `Reset`: the
+/// cursor reverses, an active filter goes bold, and a chip nobody has touched
+/// is plain.
 pub(super) fn pill_style(selected: bool, active: bool) -> Style {
+    let chip = Style::default().bg(theme().surface);
     if selected {
-        Style::default()
-            .fg(theme().text)
-            .bg(theme().selected_background)
-            .add_modifier(Modifier::BOLD)
+        chip.fg(theme().text)
+            .add_modifier(Modifier::REVERSED | Modifier::BOLD)
     } else if active {
-        Style::default()
-            .fg(theme().text)
-            .bg(theme().selected_background)
+        chip.fg(theme().accent).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(theme().muted)
+        chip.fg(theme().body)
     }
 }
 

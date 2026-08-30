@@ -1304,6 +1304,19 @@ its parent back. A work item nobody broke down shows nothing at all in any of
 the three places, never `0/0`. The bar is drawn from two different glyphs
 rather than two colours, so it reads the same under `NO_COLOR`.
 
+The search is one row under the tab bar, not a box three rows tall: a `/`
+prompt in the muted colour with the placeholder beside it, a bold `›` and the
+surface ground while it has the keyboard, a braille spinner in the prompt cell
+while a search is still running, and a `[×]` at the right end once there is a
+query to clear. Where a tab is searching inside something — a saved pull
+request view, the runs of one pipeline — that name reads muted at the right end
+of the row. `Actions` and `?` are chips at the right end of the tab bar rather
+than titles on the search box, because both open over every tab; the shell
+answers them, as it does a click on a tab. The facet pills below are filled
+chips: the one the cursor is on reverses, one carrying a filter reads in the
+accent, and the rest are muted — distinctions that survive `NO_COLOR`, where
+the first two become reverse and bold.
+
 Every pane wears the same frame: the theme's corners — rounded in `terminal`,
 `terminal-light` and `custom`, plain under `NO_COLOR` — the accent and a bold
 name while it has the focus, and the neutral border colour when it has not.

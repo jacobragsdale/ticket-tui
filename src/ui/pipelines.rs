@@ -22,7 +22,7 @@ pub(crate) fn render(
     // it, so the watcher is asked for the timeline of whatever is on screen.
     screen.sync_focus(shell);
     let sections = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(1),
     ])
@@ -203,30 +203,36 @@ fn render_cancel_confirm(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, sh
 }
 
 fn render_search(frame: &mut Frame<'_>, screen: &PipelinesScreen, shell: &mut Shell, area: Rect) {
-    let title = match screen.level() {
-        Level::Pipelines => " Search / ".to_owned(),
-        Level::Runs(_) => format!(
-            " Search / \u{2022} {} ",
-            screen
-                .open_pipeline()
-                .map_or_else(|| "runs".to_owned(), |pipeline| pipeline.name.clone())
+    let (placeholder, trailer) = match screen.level() {
+        Level::Pipelines => (
+            "Type / to search pipelines, or folder:, repo:, result:",
+            String::new(),
+        ),
+        Level::Runs(_) => (
+            "Type / to search runs, or branch:, result:, reason:, by:@me",
+            format!(
+                "\u{2022} {}",
+                screen
+                    .open_pipeline()
+                    .map_or_else(|| "runs".to_owned(), |pipeline| pipeline.name.clone())
+            ),
         ),
     };
-    let block = focused_block(title, false);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let placeholder = match screen.level() {
-        Level::Pipelines => "Type / to search pipelines, or folder:, repo:, result:",
-        Level::Runs(_) => "Type / to search runs, or branch:, result:, reason:, by:@me",
-    };
-    render_query_field(
+    render_search_row(
         frame,
         shell,
-        inner,
-        screen.query(),
-        screen.query_cursor(),
-        placeholder,
-        PointerTarget::SearchField,
+        SearchRow {
+            area,
+            text: screen.query(),
+            cursor: screen.query_cursor(),
+            placeholder,
+            active: screen.mode == PipelineMode::Search,
+            pending: false,
+            clearable: false,
+            trailer,
+            layer: PointerLayer::Modal,
+            selectable: SelectableSurface::Overlay,
+        },
     );
 }
 

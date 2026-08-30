@@ -41,8 +41,8 @@ fn the_table_thumb_is_painted_where_it_can_be_grabbed_and_reaches_the_bottom() {
     app.work_items.set_show_finished(&mut app.shell, true);
     for offset in [0, 45, 90] {
         app.work_items.table.offset = offset;
-        // 30 rows of terminal, one of them the tab bar, leave the table body
-        // exactly 20 rows tall.
+        // 30 rows of terminal, less the tab bar, the search row, the facet
+        // row and the footer, leave the table body exactly 22 rows tall.
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let metrics = app
@@ -50,10 +50,10 @@ fn the_table_thumb_is_painted_where_it_can_be_grabbed_and_reaches_the_bottom() {
             .hit_regions
             .scroll(ScrollSurface::Table)
             .expect("an overflowing table registers its scrollbar");
-        assert_eq!((metrics.content, metrics.viewport), (100, 20));
+        assert_eq!((metrics.content, metrics.viewport), (100, 22));
         let track = metrics.track;
-        assert_eq!(track.height, 20);
-        let thumb = metrics.thumb().expect("100 rows overflow 20");
+        assert_eq!(track.height, 22);
+        let thumb = metrics.thumb().expect("100 rows overflow 22");
         assert_eq!(
             painted_thumb(&terminal, track),
             Some((track.y + thumb.y, thumb.height)),
@@ -392,5 +392,82 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
     assert!(
         divider(&stacked).y > before.y,
         "the stacked divider moved down"
+    );
+}
+
+#[test]
+fn the_search_is_one_row_with_a_prompt_that_says_whether_it_has_the_keyboard() {
+    let mut app = App::new(vec![ticket()]);
+    let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let idle = target_rect(&app, |target| matches!(target, PointerTarget::SearchField));
+    assert_eq!(idle.height, 1, "one row, not a box three rows tall");
+    assert_eq!(idle.y, 1, "directly under the tab bar");
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        buffer[(idle.x - 2, idle.y)].symbol(),
+        "/",
+        "the prompt glyph"
+    );
+    assert_eq!(
+        buffer[(idle.x, idle.y)].fg,
+        theme().muted,
+        "the placeholder is muted"
+    );
+
+    app.work_items
+        .run_command(&mut app.shell, crate::command::CommandId::Search);
+    app.work_items
+        .set_query(&mut app.shell, "state:doing".into());
+    let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let active = target_rect(&app, |target| matches!(target, PointerTarget::SearchField));
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        buffer[(active.x - 2, active.y)].symbol(),
+        "\u{203a}",
+        "the glyph says the row has the keyboard"
+    );
+    if theme() == Theme::mono() {
+        assert!(
+            buffer[(active.x, active.y)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "with no palette to tint the ground, the row reverses"
+        );
+    } else {
+        assert_eq!(
+            buffer[(active.x, active.y)].bg,
+            theme().surface,
+            "the row takes the surface ground while it is active"
+        );
+    }
+    assert!(
+        app.shell
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::ClearQuery))
+            .is_some_and(|region| region.rect.y == active.y),
+        "the clear button sits on the same row as the query"
+    );
+}
+
+#[test]
+fn the_tab_bar_carries_the_two_controls_that_open_over_every_tab() {
+    let mut app = App::new(vec![ticket()]);
+    render_text(120, 20, &mut app);
+    let palette = target_rect(&app, |target| matches!(target, PointerTarget::OpenPalette));
+    let help = target_rect(&app, |target| matches!(target, PointerTarget::OpenHelp));
+    assert_eq!((palette.y, help.y), (0, 0), "both are on the tab bar");
+    assert!(palette.right() <= help.x, "Actions then ?");
+
+    app.select_tab(crate::app::TabId::Repos);
+    render_text(120, 20, &mut app);
+    let help = target_rect(&app, |target| matches!(target, PointerTarget::OpenHelp));
+    let action = click(&mut app, help.x, help.y);
+    assert_eq!(action, crate::app::AppAction::None);
+    assert_eq!(
+        app.work_items.mode,
+        WorkItemMode::Help,
+        "the help opens over another tab too"
     );
 }
