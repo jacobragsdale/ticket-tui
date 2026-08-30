@@ -859,12 +859,19 @@ knowing what it is filing:
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Type** is the type the parent's own type breaks down into. The project's
-process answers that where it can — the types come back in the order the process
-lists them, so the one after the parent's is what sits under it — and where the
-list has not been read yet, the Basic process's own breakdown does: an Epic into
-Issues, an Issue into Tasks, and a Task into more Tasks. A type with nothing
-obvious under it keeps its own, because a child of the same type is always
+**Type** is the type the parent's own type breaks down into: an Epic into
+Issues, an Issue into Tasks. Which process the project works to answers that,
+and the app works it out from the types the project offers rather than from the
+order they arrived in — `GET /<project>/_apis/wit/workitemtypes` answers in an
+order of its own, and an org whose list reads `Issue, Epic, Task` had an Epic
+filed under an Issue for it. The four stock breakdowns are held in the app —
+Basic `Epic → Issue → Task`, Agile `Epic → Feature → User Story → Task`, Scrum
+`Epic → Feature → Product Backlog Item → Task`, CMMI `Epic → Feature →
+Requirement → Task` — and the project gets the one naming most of the types it
+offers. An Agile project has an Issue as well, but four of its own chain's names
+beat three of Basic's; a tie, and a project whose types have not been read yet,
+goes to Basic. A type with nothing under it keeps its own, and so does one whose
+child the project does not offer, because a child of the same type is always
 defensible and an empty Type field never is. **Parent** is fixed: it reads as
 the work item rather than as its id, takes nothing typed at it, and opens no
 picker. **Iteration** and **Area** are the parent's, because a child is planned

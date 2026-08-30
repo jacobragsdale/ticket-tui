@@ -201,16 +201,30 @@ pub struct TypePicker {
     pub field: FormFieldId,
 }
 
-/// The Basic process's breakdown of one type into the type under it, which is
-/// what a project whose own types have not been read yet is assumed to use. A
-/// type this says nothing about has no obvious child.
+/// How each stock process breaks work down, top to bottom: Basic, Agile, Scrum
+/// and CMMI. `GET /<project>/_apis/wit/workitemtypes` answers in an order of
+/// its own that is not a hierarchy — an org's list can read `Issue, Epic,
+/// Task` — so the breakdown is held here rather than read out of that list.
+///
+/// Basic comes first because it wins a tie, which is what a project whose own
+/// types have not been read yet is assumed to use.
+const WORK_ITEM_BREAKDOWNS: [&[&str]; 4] = [
+    &["Epic", "Issue", "Task"],
+    &["Epic", "Feature", "User Story", "Task"],
+    &["Epic", "Feature", "Product Backlog Item", "Task"],
+    &["Epic", "Feature", "Requirement", "Task"],
+];
+
+/// The breakdown of one type into the type under it, in a process that breaks
+/// work down this way. A type the chain says nothing about has no obvious
+/// child, and neither has the last type in it.
 #[must_use]
-pub(super) fn basic_child_work_item_type(parent_type: &str) -> Option<&'static str> {
-    match parent_type {
-        "Epic" => Some("Issue"),
-        "Issue" | "Task" => Some("Task"),
-        _ => None,
-    }
+fn child_in(breakdown: &[&'static str], parent_type: &str) -> Option<&'static str> {
+    breakdown
+        .iter()
+        .position(|name| *name == parent_type)
+        .and_then(|at| breakdown.get(at + 1))
+        .copied()
 }
 
 /// Whether one of the people already gathered is this one, so nobody is
@@ -1131,22 +1145,46 @@ impl WorkItemsScreen {
         options
     }
 
-    /// What breaking one work item down produces. The project's own process
-    /// answers it where it can — the types come back in the order the process
-    /// lists them, so the one after this is what sits under it — and where it
-    /// cannot, the Basic process's own breakdown does: an Epic into Issues, an
-    /// Issue into Tasks, and a Task into more Tasks. A type with nothing
-    /// obvious under it keeps its own, because a child of the same type is
-    /// always defensible and an empty Type field never is.
+    /// Which of the stock breakdowns this project works to: the one naming the
+    /// most of the types it offers. An Agile project answers to four of its own
+    /// chain's names and to only three of Basic's, though it does have an
+    /// Issue; a Basic one is the other way round. A tie goes to the first
+    /// chain, so a project whose types have not been read yet, or whose process
+    /// shares no name with any of them, is taken to work the everyday
+    /// Epic/Issue/Task way.
+    #[must_use]
+    fn work_item_breakdown(&self) -> &'static [&'static str] {
+        let mut best = WORK_ITEM_BREAKDOWNS[0];
+        let mut matched = 0;
+        for breakdown in WORK_ITEM_BREAKDOWNS {
+            let count = breakdown
+                .iter()
+                .filter(|name| self.lists_work_item_type(name))
+                .count();
+            if count > matched {
+                (best, matched) = (breakdown, count);
+            }
+        }
+        best
+    }
+
+    /// Whether the project's own list of types names this one.
+    #[must_use]
+    fn lists_work_item_type(&self, name: &str) -> bool {
+        self.work_item_types.iter().any(|known| known == name)
+    }
+
+    /// What breaking one work item down produces, as the process this project
+    /// works to breaks work down: an Epic into Issues and an Issue into Tasks
+    /// under Basic, an Epic into Features and a User Story into Tasks under
+    /// Agile. A type with nothing under it keeps its own, and so does one whose
+    /// child the project's own list does not offer, because a child of the same
+    /// type is always defensible and an empty Type field never is.
     #[must_use]
     pub(super) fn child_work_item_type(&self, parent_type: &str) -> String {
-        self.work_item_types
-            .iter()
-            .position(|name| name == parent_type)
-            .and_then(|at| self.work_item_types.get(at + 1))
-            .cloned()
-            .or_else(|| basic_child_work_item_type(parent_type).map(ToOwned::to_owned))
-            .unwrap_or_else(|| parent_type.to_owned())
+        child_in(self.work_item_breakdown(), parent_type)
+            .filter(|child| self.work_item_types.is_empty() || self.lists_work_item_type(child))
+            .map_or_else(|| parent_type.to_owned(), ToOwned::to_owned)
     }
 
     /// The work item type picker, over the type the form names now.

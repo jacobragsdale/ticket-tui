@@ -316,24 +316,89 @@ fn escape_keeps_the_draft_and_opening_the_form_again_brings_it_back() {
     );
 }
 
+/// The type the child form fills in over a parent of this type, with the
+/// project's own types read as they came back from Azure DevOps.
+fn child_type_under(parent_type: &str, types: &[&str]) -> String {
+    let mut app = parent_app(parent_type);
+    app.work_items
+        .set_work_item_types(types.iter().map(|name| (*name).to_owned()).collect());
+    press(&mut app, KeyCode::Char('N'));
+    app.work_items
+        .form
+        .as_ref()
+        .expect("the child form is open")
+        .value(FormFieldId::Type)
+        .to_owned()
+}
+
 #[test]
 fn the_child_form_files_the_type_the_parents_own_type_breaks_down_into() {
+    // The order `GET /_apis/wit/workitemtypes` answers in is the process's own
+    // and is no hierarchy: this one lists the Issue before the Epic it hangs
+    // under. Reading the next name out of it filed an Epic under an Issue.
+    let basic = ["Issue", "Epic", "Task"];
     for (parent_type, child_type) in [("Epic", "Issue"), ("Issue", "Task"), ("Task", "Task")] {
-        let mut app = parent_app(parent_type);
-        app.work_items
-            .set_work_item_types(vec!["Epic".into(), "Issue".into(), "Task".into()]);
-        press(&mut app, KeyCode::Char('N'));
-
         assert_eq!(
-            app.work_items
-                .form
-                .as_ref()
-                .expect("the child form is open")
-                .value(FormFieldId::Type),
+            child_type_under(parent_type, &basic),
             child_type,
-            "the process lists {child_type} under {parent_type}"
+            "a Basic project breaks a {parent_type} down into a {child_type} \
+             whatever order its types came back in"
         );
     }
+}
+
+#[test]
+fn a_project_on_another_process_breaks_its_work_down_that_processs_way() {
+    let agile = [
+        "Bug",
+        "Epic",
+        "Feature",
+        "Issue",
+        "Task",
+        "Test Case",
+        "User Story",
+    ];
+    for (parent_type, child_type) in [
+        ("Epic", "Feature"),
+        ("Feature", "User Story"),
+        ("User Story", "Task"),
+    ] {
+        assert_eq!(
+            child_type_under(parent_type, &agile),
+            child_type,
+            "Agile breaks a {parent_type} down into a {child_type}, though its \
+             types name an Issue as Basic's do"
+        );
+    }
+
+    let scrum = [
+        "Bug",
+        "Epic",
+        "Feature",
+        "Impediment",
+        "Product Backlog Item",
+        "Task",
+    ];
+    for (parent_type, child_type) in [
+        ("Epic", "Feature"),
+        ("Feature", "Product Backlog Item"),
+        ("Product Backlog Item", "Task"),
+    ] {
+        assert_eq!(
+            child_type_under(parent_type, &scrum),
+            child_type,
+            "Scrum breaks a {parent_type} down into a {child_type}"
+        );
+    }
+}
+
+#[test]
+fn a_child_type_the_project_does_not_offer_leaves_the_parents_own_type() {
+    assert_eq!(
+        child_type_under("Epic", &["Epic", "Task"]),
+        "Epic",
+        "a project with no Issue in it is filed no Issue"
+    );
 }
 
 #[test]
