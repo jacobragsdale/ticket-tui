@@ -29,6 +29,8 @@ const ADO_RESOURCE: &str = "499b84ac-1321-427f-aa17-267ca6975798";
 const API_VERSION: &str = "7.1";
 /// Comments are still behind a preview flag on every 7.x API version.
 const COMMENTS_API_VERSION: &str = "7.1-preview.4";
+/// So is connection data, which refuses a plain `7.1` outright.
+const CONNECTION_DATA_API_VERSION: &str = "7.1-preview";
 /// Largest id batch the work items endpoint accepts.
 const BATCH_SIZE: usize = 200;
 /// Revisions read per updates request, and the page size that endpoint takes.
@@ -931,17 +933,23 @@ impl AzureClient {
         Ok(parse_policy_build(&self.get(url.as_str())?))
     }
 
-    /// The signed-in user's own id, which is what a vote is written under.
-    /// The connection-data endpoint hangs off the organization rather than the
-    /// project, so it is built by hand.
-    pub fn fetch_my_id(&self) -> Result<Option<String>> {
+    /// Where the signed-in user's own id is read from. The connection-data
+    /// endpoint hangs off the organization rather than the project, so it is
+    /// built by hand, and it is preview-only: a plain `7.1` is refused with a
+    /// 400 rather than answered.
+    fn my_id_url(&self) -> Result<String> {
         let mut url = Url::parse(&self.config.base_url())
             .with_context(|| format!("invalid Azure DevOps URL {}", self.config.base_url()))?;
         url.path_segments_mut()
             .map_err(|()| anyhow!("Azure DevOps URL cannot carry a path"))?
             .extend(["_apis", "connectionData"]);
-        url.set_query(Some(&version_query()));
-        let response = self.get(url.as_str())?;
+        url.set_query(Some(&format!("api-version={CONNECTION_DATA_API_VERSION}")));
+        Ok(url.into())
+    }
+
+    /// The signed-in user's own id, which is what a vote is written under.
+    pub fn fetch_my_id(&self) -> Result<Option<String>> {
+        let response = self.get(&self.my_id_url()?)?;
         Ok(response["authenticatedUser"]["id"]
             .as_str()
             .map(str::to_owned))
@@ -3245,6 +3253,16 @@ mod tests {
             "https://dev.azure.com/demo/Fabrikam%20Fiber/_apis/wit/workitems/$User%20Story\
              ?$expand=relations&api-version=7.1",
             "a space is escaped either side of the type; the dollar is not"
+        );
+    }
+
+    #[test]
+    fn the_connection_data_url_asks_for_the_preview_version_a_vote_depends_on() {
+        assert_eq!(
+            client(config()).my_id_url().unwrap(),
+            "https://dev.azure.com/demo/_apis/connectionData?api-version=7.1-preview",
+            "connectionData is preview-only: a plain 7.1 is a 400, and the vote \
+             that reads the signed-in user's id from it fails with it"
         );
     }
 
