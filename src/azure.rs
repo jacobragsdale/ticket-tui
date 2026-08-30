@@ -230,13 +230,8 @@ pub struct SyncBatch {
 
 impl AzureClient {
     pub fn connect(config: AzureConfig) -> Result<Self> {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(90)))
-            .build()
-            .into();
         Ok(Self {
-            agent,
+            agent: agent(),
             config,
             authorization: RefCell::new(authorization_header()?),
             throttled_until: Cell::new(None),
@@ -1630,6 +1625,23 @@ fn version_query() -> String {
     format!("api-version={API_VERSION}")
 }
 
+/// The agent every request goes out on.
+///
+/// Redirects are not followed. An organization backed by a Microsoft account
+/// answers an expired token with a 302 to the sign-in page rather than a 401,
+/// and following it only trades a redirect this code can recognise for a page
+/// of HTML it cannot: the hop drops the `Authorization` header, so the sign-in
+/// page answers `203` and the token is never seen to have expired. Left where
+/// it lands, the 302 is what tells [`AzureClient::send`] to mint a new one.
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .max_redirects(0)
+        .timeout_global(Some(Duration::from_secs(90)))
+        .build()
+        .into()
+}
+
 /// The headers every Azure DevOps request carries, whatever its method.
 fn authorized<Body>(
     builder: ureq::RequestBuilder<Body>,
@@ -1840,6 +1852,35 @@ fn profile_display_name(profile: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Whether a status means the credentials are spent rather than the request
+/// being wrong. A 401 is the plain way to say it. An organization backed by a
+/// Microsoft account says it with a redirect to the sign-in page instead, and
+/// that page — reached only if something followed the redirect — answers `203
+/// Non-Authoritative Information` with HTML. None of the three is data, and
+/// every one of them is worth a fresh token: the REST API has no other reason
+/// to redirect, since both hosts it uses are addressed directly.
+const fn signed_out(status: u16) -> bool {
+    status == 401 || status == 203 || (status >= 300 && status < 400)
+}
+
+/// The `message` Azure DevOps puts in a JSON fault, when it sent one. A
+/// refusal worth repeating to the person at the keyboard is always JSON; a
+/// redirect answers with a page of markup that says only what the status
+/// already said.
+fn json_message(text: &str) -> Option<String> {
+    serde_json::from_str::<Value>(text)
+        .ok()?
+        .get("message")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// What Azure DevOps said went wrong: its own `message`, or the front of the
+/// body when it sent something else.
+fn failure_message(text: &str) -> String {
+    json_message(text).unwrap_or_else(|| text.trim().chars().take(200).collect())
+}
+
 fn read_json(mut response: ureq::http::Response<ureq::Body>, url: &str) -> Result<Value> {
     let status = response.status().as_u16();
     // Read before the body, which takes the response apart.
@@ -1850,33 +1891,29 @@ fn read_json(mut response: ureq::http::Response<ureq::Body>, url: &str) -> Resul
         .limit(BODY_LIMIT)
         .read_to_string()
         .with_context(|| format!("failed to read the response body from {url}"))?;
+    // Throttling first: it is the one refusal that is neither the caller's
+    // fault nor worth reporting, only worth waiting out.
+    if THROTTLED_STATUSES.contains(&status) {
+        return Err(anyhow::Error::new(Throttled::new(
+            retry_after,
+            status,
+            url,
+            failure_message(&text),
+        )));
+    }
+    // Before the success range, because one of the ways Azure DevOps says
+    // "sign in again" lands inside it.
+    if signed_out(status) {
+        let detail = json_message(&text).map_or_else(String::new, |said| format!(": {said}"));
+        return Err(anyhow::Error::new(RejectedCredentials(format!(
+            "Azure DevOps rejected the credentials ({status}); run `az login` and retry{detail}"
+        ))));
+    }
     if !(200..300).contains(&status) {
-        let message = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| text.chars().take(200).collect());
-        // Throttling first: it is the one refusal that is neither the caller's
-        // fault nor worth reporting, only worth waiting out.
-        if THROTTLED_STATUSES.contains(&status) {
-            return Err(anyhow::Error::new(Throttled::new(
-                retry_after,
-                status,
-                url,
-                message,
-            )));
-        }
-        if status == 401 || status == 302 {
-            return Err(anyhow::Error::new(RejectedCredentials(format!(
-                "Azure DevOps rejected the credentials ({status}); run `az login` and retry: {message}"
-            ))));
-        }
         return Err(anyhow::Error::new(RequestRejected::new(
-            status, url, message,
+            status,
+            url,
+            failure_message(&text),
         )));
     }
     // A success with nothing in it is an answer rather than a broken one: a
@@ -2986,6 +3023,16 @@ mod tests {
         );
     }
 
+    /// The redirect an expired token draws has to be left where it lands. Were
+    /// it followed, the hop would drop the `Authorization` header and the
+    /// sign-in page's HTML would come back looking like a broken payload
+    /// rather than like a token to replace, and the TUI would go on failing
+    /// every pull until it was restarted.
+    #[test]
+    fn the_sign_in_redirect_is_not_followed() {
+        assert_eq!(agent().config().max_redirects(), 0);
+    }
+
     #[test]
     fn only_a_refused_token_is_worth_retrying_with_a_fresh_one() {
         let url = "https://dev.azure.com/demo/_apis/wit/workitems";
@@ -2998,6 +3045,29 @@ mod tests {
             );
             assert!(format!("{error:#}").contains("token expired"), "{error:#}");
         }
+
+        // What an expired token really draws, body and all: a bare redirect to
+        // the sign-in page, and — if anything followed it — that page itself.
+        let redirect = read_json(
+            response(302, "<html><head><title>Object moved</title></head></html>"),
+            url,
+        )
+        .expect_err("a redirect is not data");
+        assert!(rejected_credentials(&redirect), "{redirect:#}");
+        assert_eq!(
+            format!("{redirect:#}"),
+            "Azure DevOps rejected the credentials (302); run `az login` and retry",
+            "the advice is the whole message: a redirect's markup says nothing the status did not"
+        );
+        let sign_in = read_json(
+            response(203, "<!DOCTYPE html><html><title>Sign In</title></html>"),
+            url,
+        )
+        .expect_err("the sign-in page is not data");
+        assert!(
+            rejected_credentials(&sign_in),
+            "203 is Azure DevOps saying sign in, not a success: {sign_in:#}"
+        );
 
         let error = read_json(response(500, r#"{"message":"boom"}"#), url).unwrap_err();
         assert!(
