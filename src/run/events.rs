@@ -29,6 +29,9 @@ pub(super) fn run_terminal(
         redraw |= persist_session(app, repository);
         redraw |= config_watch.poll(app);
         redraw |= app.shell.tick();
+        // A spinner has to be repainted to turn. Nothing in flight and
+        // nothing is repainted: an idle app draws no frames at all.
+        redraw |= spinning(app);
         if redraw {
             terminal.draw(|frame| ticket_tui::ui::render(frame, app))?;
             sync_mouse_pointer(app, &mut mouse_pointer);
@@ -42,9 +45,10 @@ pub(super) fn run_terminal(
 
         let timeout = if app.work_items.search_pending || app.shell.reload_pending {
             Duration::from_millis(33)
-        } else if app.repos.busy() {
-            // Four times a second, which is how often the git glyph turns.
-            Duration::from_millis(250)
+        } else if spinning(app) {
+            // Ten times a second, which is how often a spinner turns, and
+            // only while there is one on screen to turn.
+            Duration::from_millis(100)
         } else {
             // The loop has to wake for the next scheduled pull as well as for
             // an expiring notification.
@@ -232,4 +236,14 @@ pub(super) fn handle_action(
         },
     }
     false
+}
+
+/// Whether anything on screen has a spinner turning on it: a pull in flight,
+/// a git job, the details fetch, or a row waiting on an edit. Nothing running
+/// and the loop goes back to waking a second at a time.
+fn spinning(app: &App) -> bool {
+    app.shell.sync_pending
+        || app.repos.busy()
+        || app.work_items.details_pending.is_some()
+        || app.shell.flashing()
 }

@@ -532,6 +532,7 @@ impl WorkItemsScreen {
                 UndoRole::Undoing(None) => {}
             }
         }
+        shell.flash_row(key.clone());
         if !self.record_bulk_outcome(shell, &key, None) {
             shell.set_status(landed);
         }
@@ -638,6 +639,7 @@ impl WorkItemsScreen {
         {
             self.set_ticket(index, pending.original);
         }
+        shell.flash_row(rejection.key.clone());
         if !self.record_bulk_outcome(shell, &rejection.key, Some(rejection.failure())) {
             shell.set_error(rejection.notification());
         }

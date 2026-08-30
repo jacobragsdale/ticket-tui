@@ -1060,8 +1060,8 @@ the pull nor an edit.
 | `G` | `git fetch --prune` in the clone |
 | `P` | `git pull --ff-only` in the clone |
 
-While one runs, the row reads `◐ cloning…`, `fetching…` or `pulling…` where its
-status goes, with a glyph that turns four times a second; the status is re-read
+While one runs, the row reads `⠮ cloning…`, `fetching…` or `pulling…` where its
+status goes, with the same spinner every other wait uses; the status is re-read
 when it finishes, and a notification says what happened — `Cloned ticket-tui`,
 or git's own last line when it failed.
 
@@ -1309,6 +1309,16 @@ Completed and Removed states count as done, so a cut work item stops holding
 its parent back. A work item nobody broke down shows nothing at all in any of
 the three places, never `0/0`. The bar is drawn from filled and hollow glyphs
 rather than two colours, so it reads the same under `NO_COLOR`.
+
+One braille spinner (`⠋⠛⠻⠺⠾⠼⠮⠯⠇⠏`, ten frames off the wall clock at 100 ms)
+stands for every wait: the search prompt while a search is still running, the
+status bar while a pull is in flight, the details pane while it is fetching
+comments and history, a Repos row while git is working, and a log that is
+following a run still going. Nothing turns while nothing is running: the loop
+wakes ten times a second and repaints only while one of those is true, and an
+idle app draws no frames at all. When an edit lands, or is taken back, the
+row's gutter goes accent and reversed for a fifth of a second — long enough to
+catch a row several away from the cursor, and gone on the next frame.
 
 An overlay is a layer in front of the screen, not more of it: while one is
 open every cell behind it gives up its colour and its weight, and gets them

@@ -33,6 +33,11 @@ pub(crate) struct Notification {
     pub(crate) expires_at: Instant,
 }
 
+/// How long a row stays flagged after an edit of it lands or is taken back.
+/// Two frames at the spinner's cadence: long enough to catch the eye on a row
+/// that may be several away from the cursor, short enough not to linger.
+pub(super) const FLASH_DURATION: Duration = Duration::from_millis(220);
+
 pub(super) const INFO_NOTIFICATION_DURATION: Duration = Duration::from_secs(4);
 pub(super) const ERROR_NOTIFICATION_DURATION: Duration = Duration::from_secs(8);
 
@@ -226,6 +231,8 @@ pub struct Shell {
     /// Where the rows come from — the organization and project, how often they
     /// are pulled, and the scope narrowing them — as the database overlay
     /// reports it. `None` until the run resolves a project.
+    /// The row an edit has just landed on, and how long it stays flagged.
+    pub(crate) flash: Option<(TicketKey, Instant)>,
     pub(crate) sync_source: Option<String>,
     /// The same project, as the agent context publishes it. `None` until the
     /// run resolves one.
@@ -278,6 +285,7 @@ impl Default for Shell {
             future: Vec::new(),
             offline_reason: None,
             sync_enabled: false,
+            flash: None,
             sync_source: None,
             sync_target: None,
             synced_at: None,
@@ -591,11 +599,16 @@ impl Shell {
 
     #[must_use]
     pub fn next_wakeup(&self) -> Option<Duration> {
-        self.notification.as_ref().map(|notification| {
+        let notification = self.notification.as_ref().map(|notification| {
             notification
                 .expires_at
                 .saturating_duration_since(Instant::now())
-        })
+        });
+        let flash = self
+            .flash
+            .as_ref()
+            .map(|(_, until)| until.saturating_duration_since(Instant::now()));
+        [notification, flash].into_iter().flatten().min()
     }
 
     #[must_use]
@@ -659,6 +672,29 @@ impl Shell {
     pub const fn set_content_layout(&mut self, area: Rect, divider: Option<DividerOrientation>) {
         self.content_area = area;
         self.divider = divider;
+    }
+
+    /// Flags one row: the edit on it has landed, or been taken back. The row
+    /// paints its marker in the accent until the flash runs out, which the
+    /// loop wakes for the way it wakes for an expiring notification.
+    pub fn flash_row(&mut self, key: TicketKey) {
+        self.flash = Some((key, Instant::now() + FLASH_DURATION));
+    }
+
+    /// Whether a row is flagged this instant.
+    #[must_use]
+    pub fn flashing(&self) -> bool {
+        self.flash
+            .as_ref()
+            .is_some_and(|(_, until)| Instant::now() < *until)
+    }
+
+    /// Whether this row is the one flagged this instant.
+    #[must_use]
+    pub fn flashing_row(&self, key: &TicketKey) -> bool {
+        self.flash
+            .as_ref()
+            .is_some_and(|(flashed, until)| flashed == key && Instant::now() < *until)
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
@@ -765,15 +801,24 @@ impl Shell {
     }
 
     pub fn tick(&mut self) -> bool {
+        let mut redraw = false;
         if self
             .notification
             .as_ref()
             .is_some_and(|notification| Instant::now() >= notification.expires_at)
         {
             self.notification = None;
-            return true;
+            redraw = true;
         }
-        false
+        if self
+            .flash
+            .as_ref()
+            .is_some_and(|(_, until)| Instant::now() >= *until)
+        {
+            self.flash = None;
+            redraw = true;
+        }
+        redraw
     }
 
     pub(super) fn toggle_focus(&mut self) {

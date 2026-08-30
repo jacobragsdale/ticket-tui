@@ -387,7 +387,8 @@ fn the_log_pane_paints_every_marker_and_says_what_it_is_following() {
 
     let text = render_text(140, 60, &mut app);
     assert!(
-        text.contains("Log \u{00b7} cargo test \u{00b7} 7 lines \u{00b7} following"),
+        text.contains("Log \u{00b7} cargo test \u{00b7} 7 lines \u{00b7} ")
+            && text.contains(" following "),
         "the title names the node, the size and the state: {text}"
     );
     assert!(text.contains("Starting: cargo test"), "{text}");

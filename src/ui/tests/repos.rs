@@ -103,10 +103,13 @@ fn clicking_clone_runs_it_and_a_running_job_says_so_in_the_column() {
     let text = render_text(170, 44, &mut app);
     assert!(text.contains("cloning\u{2026}"), "{text}");
     assert!(
-        ['\u{25d0}', '\u{25d3}', '\u{25d1}', '\u{25d2}']
-            .iter()
-            .any(|glyph| text.contains(*glyph)),
-        "with a glyph that turns while it runs: {text}"
+        [
+            '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}', '\u{2826}',
+            '\u{2827}', '\u{2807}', '\u{280f}'
+        ]
+        .iter()
+        .any(|glyph| text.contains(*glyph)),
+        "with the same spinner every other wait uses: {text}"
     );
 }
 

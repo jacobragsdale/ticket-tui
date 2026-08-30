@@ -64,7 +64,7 @@ use widgets::{
     CLOSE_LABEL, Control, ControlKind, SearchRow, button_row, capture_selectable, dim_behind,
     paint_hover, paint_selection, register_buttons, register_close_button, render_control,
     render_modal_frame, render_query_field, render_scrollbar, render_search_row, render_status_bar,
-    row_on_screen, wrapped_rows,
+    row_on_screen, spinner_frame, wrapped_rows,
 };
 
 const WIDE_BREAKPOINT: u16 = 110;

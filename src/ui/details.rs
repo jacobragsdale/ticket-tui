@@ -211,7 +211,7 @@ pub(super) fn render_details(
         lines.push(section_line("History", width));
         if loading_details {
             lines.push(Line::styled(
-                "  Loading comments and history…",
+                format!("  {} Loading comments and history", spinner_frame()),
                 Style::default().fg(theme().muted),
             ));
         }

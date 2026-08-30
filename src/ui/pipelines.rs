@@ -702,15 +702,20 @@ fn render_log(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut S
                 .unwrap_or_default()
         })
         .unwrap_or_default();
+    // A log following a run that is still going spins; one following a run
+    // that has finished has nothing left to wait for and says so plainly.
+    let running = screen
+        .selected_run(shell)
+        .is_some_and(|row| row.run.status == RunStatus::InProgress);
+    let following = match (screen.log_following(), running) {
+        (true, true) => format!("{} following", spinner_frame()),
+        (true, false) => "following".to_owned(),
+        (false, _) => "scrolled".to_owned(),
+    };
     let title = format!(
-        " Log \u{00b7} {} \u{00b7} {} lines \u{00b7} {} ",
+        " Log \u{00b7} {} \u{00b7} {} lines \u{00b7} {following} ",
         node.unwrap_or_else(|| "nothing chosen".to_owned()),
         lines.len(),
-        if screen.log_following() {
-            "following"
-        } else {
-            "scrolled"
-        }
     );
     let block = focused_block(title, shell.focus == Focus::Details).padding(Padding::horizontal(1));
     let pane = inside_border(area);

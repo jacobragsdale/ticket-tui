@@ -350,6 +350,7 @@ pub(super) fn render_table(
             ticket,
             checked: screen.is_row_selected(&ticket.key),
             bookmarked: screen.is_bookmarked(&ticket.key),
+            flashing: shell.flashing_row(&ticket.key),
             context: RowContext {
                 tone: RowTone::of(&ticket.state),
                 mine: shell.is_mine(ticket),
@@ -363,7 +364,7 @@ pub(super) fn render_table(
     let marker = |index: usize| {
         rows.get(index.saturating_sub(offset))
             .map_or_else(Line::default, |row| {
-                row_marker_line(row.checked, row.bookmarked)
+                row_marker_line(row.checked, row.bookmarked, row.flashing)
             })
     };
     let mut cell = |index: usize, column: SortField| {
@@ -443,6 +444,8 @@ struct PaintedRow<'a> {
     ticket: &'a Ticket,
     checked: bool,
     bookmarked: bool,
+    /// Whether an edit of this row has just landed or just been taken back.
+    flashing: bool,
     context: RowContext,
 }
 
@@ -837,19 +840,27 @@ pub(super) fn changed_style(plain: Style, stale: bool) -> Style {
     plain
 }
 
-pub(super) fn row_marker_line(checked: bool, bookmarked: bool) -> Line<'static> {
+pub(super) fn row_marker_line(checked: bool, bookmarked: bool, flashing: bool) -> Line<'static> {
     let check = if checked { "[x]" } else { "[ ]" };
     let star = if bookmarked { "*" } else { " " };
+    // An edit that has just landed, or just been taken back, leaves the row's
+    // gutter in the accent for a couple of frames: a row several away from
+    // the cursor still says that something happened to it.
+    let gutter = if flashing {
+        Style::default()
+            .fg(theme().accent)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default()
+    };
     Line::from(vec![
-        Span::raw(check),
+        Span::styled(check, gutter),
         Span::styled(
             star,
             if bookmarked {
-                Style::default()
-                    .fg(theme().accent)
-                    .add_modifier(Modifier::BOLD)
+                gutter.fg(theme().accent).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme().muted)
+                gutter.fg(theme().muted)
             },
         ),
     ])

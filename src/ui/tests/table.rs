@@ -612,3 +612,35 @@ fn a_palette_lends_the_selected_row_its_text_colour_and_leaves_the_coded_cells_a
     );
     assert_ne!(below.0, selection, "the rows around it are untouched");
 }
+
+#[test]
+fn an_edit_that_lands_flashes_its_row_once_and_the_flash_runs_out() {
+    let mut app = App::new(vec![
+        ticket(),
+        ticket_at(10_002, "Beta", "Issue", "To Do", "2025-12-02T00:00:00Z"),
+    ]);
+    let gutter = |app: &mut App| {
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let body = table_body(app);
+        let cell = &terminal.backend().buffer()[(body.x + 3, body.y + 1)];
+        (cell.fg, cell.modifier)
+    };
+    let quiet = gutter(&mut app);
+    assert!(!quiet.1.contains(Modifier::REVERSED));
+
+    app.shell.flash_row(app.work_items.tickets()[1].key.clone());
+    let flashed = gutter(&mut app);
+    assert_eq!(flashed.0, theme().accent, "the row that changed is flagged");
+    assert!(
+        flashed.1.contains(Modifier::REVERSED),
+        "and stands out without colour"
+    );
+    assert!(
+        app.shell.next_wakeup().is_some(),
+        "the loop wakes to take the flash away again"
+    );
+
+    app.shell.flash = None;
+    assert_eq!(gutter(&mut app), quiet, "and it leaves nothing behind");
+}
