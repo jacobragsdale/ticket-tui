@@ -1304,6 +1304,20 @@ its parent back. A work item nobody broke down shows nothing at all in any of
 the three places, never `0/0`. The bar is drawn from two different glyphs
 rather than two colours, so it reads the same under `NO_COLOR`.
 
+An overlay is a layer in front of the screen, not more of it: while one is
+open every cell behind it gives up its colour and its weight, and gets them
+back when it closes — unless the theme says otherwise, which is what `mono`
+says. The help and the command palette take about 70% of the terminal each
+way, clamped to what they hold and never smaller than they were before there
+was room to grow; the pickers keep the anchored geometry that hangs them off
+the field they edit. A modal's close button is a muted `×` in the top-right
+corner of its frame, its title is bold, and its buttons are chips: ` Cancel `
+on the surface ground, and the action the overlay exists for — ` Save `,
+` Delete `, ` Create ` — filled with the accent, or reversed where the palette
+has no colour to fill with. A list overlay marks the row under the cursor with
+an accent `›` on the surface ground and puts the key that runs it against
+the right-hand edge in the muted colour.
+
 The bottom row is a two-segment status bar. On the left, what the keys do on
 this tab and in this mode, cut where one hint ends rather than in the middle of
 a key when the row is narrow — the `?` overlay carries the rest. On the right,

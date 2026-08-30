@@ -183,8 +183,8 @@ fn the_comment_prompt_opens_empty_and_names_the_work_item() {
     let prompt = render_text(80, 20, &mut app);
     assert!(prompt.contains("Comment on #10001"), "{prompt}");
     assert!(prompt.contains("Comment:"), "{prompt}");
-    assert!(prompt.contains("[Save]"), "{prompt}");
-    assert!(prompt.contains("[Cancel]"), "{prompt}");
+    assert!(prompt.contains(" Save "), "{prompt}");
+    assert!(prompt.contains(" Cancel "), "{prompt}");
     assert!(
         prompt.contains("Enter post"),
         "the footer explains the prompt: {prompt}"
@@ -227,8 +227,8 @@ fn the_delete_confirmation_names_the_work_item_the_children_and_the_recycle_bin(
         confirm.contains("recycle bin"),
         "a soft delete is recoverable, and the overlay says so: {confirm}"
     );
-    assert!(confirm.contains("[Delete]"), "{confirm}");
-    assert!(confirm.contains("[Cancel]"), "{confirm}");
+    assert!(confirm.contains(" Delete "), "{confirm}");
+    assert!(confirm.contains(" Cancel "), "{confirm}");
     assert!(
         confirm.contains("d delete  Esc cancel"),
         "the footer says what confirms it: {confirm}"

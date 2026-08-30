@@ -33,8 +33,8 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
         form.contains("what needs doing"),
         "an empty field says what it is for: {form}"
     );
-    assert!(form.contains("[Create]"), "{form}");
-    assert!(form.contains("[Cancel]"), "{form}");
+    assert!(form.contains(" Create "), "{form}");
+    assert!(form.contains(" Cancel "), "{form}");
     assert!(
         form.contains("Ctrl-S create"),
         "the footer explains the form: {form}"
@@ -150,8 +150,8 @@ fn the_title_prompt_renders_a_prefilled_field_with_save_and_cancel() {
     let prompt = render_text(80, 20, &mut app);
     assert!(prompt.contains("Title \u{b7} #10001"), "{prompt}");
     assert!(prompt.contains("Title: Fix ticket search"), "{prompt}");
-    assert!(prompt.contains("[Save]"), "{prompt}");
-    assert!(prompt.contains("[Cancel]"), "{prompt}");
+    assert!(prompt.contains(" Save "), "{prompt}");
+    assert!(prompt.contains(" Cancel "), "{prompt}");
     assert!(
         prompt.contains("Enter save"),
         "the footer explains the prompt: {prompt}"

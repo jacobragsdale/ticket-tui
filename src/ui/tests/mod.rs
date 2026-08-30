@@ -156,8 +156,8 @@ fn render_text(width: u16, height: u16, app: &mut App) -> String {
     text
 }
 
-/// The rows inside the modal frame on screen, located from the `[\u{d7}]` every
-/// frame paints on its top-right corner. The last interior column is dropped
+/// The rows inside the modal frame on screen, located from the close button
+/// every frame paints on its top-right corner. The last interior column is dropped
 /// with them: that one is the overlay's own scrollbar track, which draws the
 /// same `\u{2502}` the panes behind it do.
 fn modal_interior(text: &str) -> Option<Vec<String>> {
@@ -170,9 +170,12 @@ fn modal_interior(text: &str) -> Option<Vec<String>> {
         corner(corners.bottom_left),
     );
     let rows: Vec<Vec<char>> = text.lines().map(|line| line.chars().collect()).collect();
+    // The row with a corner on it and the close button after it: the chip bar
+    // has an `×` of its own, and it is not a modal.
     let (top, close) = rows.iter().enumerate().find_map(|(y, row)| {
         let line: String = row.iter().collect();
-        let byte = line.find("[\u{d7}]")?;
+        let corner = line.find(top_left)?;
+        let byte = corner + line[corner..].find(crate::ui::widgets::CLOSE_LABEL)?;
         Some((y, line[..byte].chars().count()))
     })?;
     let left = rows[top][..close]

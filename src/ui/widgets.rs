@@ -11,6 +11,38 @@ use super::*;
 /// rows that go on showing through. It belongs here rather than at each call
 /// site, because every overlay wants it and forgetting it is invisible until
 /// somebody opens that one pane.
+/// What the close button on a modal frame reads, and how wide it is. The
+/// hit region and the tests find the frame by it.
+pub(super) const CLOSE_LABEL: &str = " × ";
+
+/// Washes out everything outside `modal` so the overlay reads as the layer in
+/// front of the screen rather than as more of it: every cell keeps its text
+/// and its ground and gives up its colour and its weight.
+///
+/// Runs before the modal paints, so nothing it draws is touched, and the
+/// hover and selection passes come later still.
+pub(super) fn dim_behind(frame: &mut Frame<'_>, modal: Rect) {
+    if !theme().dim_behind_modals {
+        return;
+    }
+    let area = frame.area();
+    let muted = theme().muted;
+    let buffer = frame.buffer_mut();
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if modal.contains(Position::new(x, y)) {
+                continue;
+            }
+            let cell = &mut buffer[(x, y)];
+            let style = cell
+                .style()
+                .fg(muted)
+                .remove_modifier(Modifier::BOLD | Modifier::REVERSED);
+            cell.set_style(style);
+        }
+    }
+}
+
 pub(super) fn render_modal_frame(
     frame: &mut Frame<'_>,
     layer: PointerLayer,
@@ -18,13 +50,14 @@ pub(super) fn render_modal_frame(
     area: Rect,
     title: &str,
 ) -> Rect {
+    dim_behind(frame, area);
     frame.render_widget(Clear, area);
     let block = Block::default()
         .title(Line::styled(
             title.to_owned(),
             Style::default().add_modifier(Modifier::BOLD),
         ))
-        .title(Line::from("[×]").right_aligned())
+        .title(Line::styled(CLOSE_LABEL, Style::default().fg(theme().muted)).right_aligned())
         .borders(Borders::ALL)
         .border_type(theme().border_type)
         // A gutter on the left; the column on the right is where a list's own
@@ -283,11 +316,14 @@ pub(super) fn render_search_row(frame: &mut Frame<'_>, shell: &mut Shell, row: S
         render_control(
             frame,
             shell,
-            Rect::new(field.right().saturating_add(trailer_width), area.y, 3, 1),
-            "[×]",
-            PointerTarget::ClearQuery,
-            layer,
-            true,
+            Control {
+                area: Rect::new(field.right().saturating_add(trailer_width), area.y, 3, 1),
+                label: CLOSE_LABEL,
+                target: PointerTarget::ClearQuery,
+                layer,
+                kind: ControlKind::Glyph,
+                enabled: true,
+            },
         );
     }
     shell.hit_regions.push(region(
@@ -398,6 +434,19 @@ pub(super) fn row_on_screen(
 
 /// One click target per button on one row. Each is as wide as the pane
 /// paints it: the label with a space either side.
+/// A row of chips standing for the keys they name. Each label carries its own
+/// padding \u{2014} ` Approve ` \u{2014} and the cell after it is the gap to the next, which
+/// is the width [`register_buttons`] steps by.
+pub(super) fn button_row(buttons: &[(&str, PointerTarget)]) -> Line<'static> {
+    let chip = control_style(ControlKind::Chip, false, true);
+    Line::from(
+        buttons
+            .iter()
+            .flat_map(|(label, _)| [Span::styled((*label).to_owned(), chip), Span::raw(" ")])
+            .collect::<Vec<_>>(),
+    )
+}
+
 pub(super) fn register_buttons(
     shell: &mut Shell,
     inner: Rect,
@@ -407,7 +456,7 @@ pub(super) fn register_buttons(
 ) {
     let mut x = inner.x;
     for (label, target) in buttons {
-        let width = u16::try_from(label.chars().count() + 2).unwrap_or(u16::MAX);
+        let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
         if x.saturating_add(width) > inner.x.saturating_add(inner.width) {
             break;
         }
@@ -418,31 +467,74 @@ pub(super) fn register_buttons(
             None,
             None,
         ));
-        x = x.saturating_add(width);
+        x = x.saturating_add(width).saturating_add(1);
     }
 }
 
-pub(super) fn render_control(
-    frame: &mut Frame<'_>,
-    shell: &mut Shell,
-    area: Rect,
-    label: &str,
-    target: PointerTarget,
-    layer: PointerLayer,
-    enabled: bool,
-) {
-    let hovered = shell.hovered() == Some(&target);
-    let style = if !enabled {
-        Style::default().fg(theme().muted)
-    } else if hovered {
-        Style::default()
+/// How a control is painted. Every kind keeps the width its label always had,
+/// so the hit regions and the rows they sit on are unchanged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ControlKind {
+    /// A glyph on its own — a sort arrow, a column's `<`/`>`, the search
+    /// row's clear.
+    Glyph,
+    /// An action with a word on it, on the surface ground.
+    Chip,
+    /// The action the overlay exists for, filled with the accent.
+    Primary,
+}
+
+/// How one control reads: disabled, under the pointer, or waiting.
+pub(super) fn control_style(kind: ControlKind, hovered: bool, enabled: bool) -> Style {
+    if !enabled {
+        return Style::default().fg(theme().muted);
+    }
+    if hovered {
+        return Style::default()
             .fg(theme().text)
             .bg(theme().selected_background)
-            .add_modifier(Modifier::REVERSED)
-    } else {
-        Style::default().fg(theme().accent)
-    };
-    frame.render_widget(Paragraph::new(label).style(style), area);
+            .add_modifier(Modifier::REVERSED);
+    }
+    match kind {
+        ControlKind::Glyph => Style::default().fg(theme().accent),
+        ControlKind::Chip => Style::default().fg(theme().text).bg(theme().surface),
+        // A palette with no colour to fill with reverses instead, so the
+        // action an overlay is for still leads under NO_COLOR.
+        ControlKind::Primary if theme().accent == Color::Reset => {
+            Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        }
+        ControlKind::Primary => Style::default()
+            .fg(theme().surface)
+            .bg(theme().accent)
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+/// One control: where it goes, what it says, what it does, and how it reads.
+pub(super) struct Control<'a> {
+    pub area: Rect,
+    pub label: &'a str,
+    pub target: PointerTarget,
+    pub layer: PointerLayer,
+    pub kind: ControlKind,
+    /// A control nobody can use yet is muted and registers no hit region.
+    pub enabled: bool,
+}
+
+pub(super) fn render_control(frame: &mut Frame<'_>, shell: &mut Shell, control: Control<'_>) {
+    let Control {
+        area,
+        label,
+        target,
+        layer,
+        kind,
+        enabled,
+    } = control;
+    let hovered = shell.hovered() == Some(&target);
+    frame.render_widget(
+        Paragraph::new(label).style(control_style(kind, hovered, enabled)),
+        area,
+    );
     if enabled {
         shell
             .hit_regions

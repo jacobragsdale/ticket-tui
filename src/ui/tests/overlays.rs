@@ -234,3 +234,63 @@ fn every_overlay_paints_over_the_panes_behind_it() {
         );
     }
 }
+
+#[test]
+fn a_modal_washes_out_what_is_behind_it_and_leaves_nothing_behind_when_it_closes() {
+    if !theme().dim_behind_modals {
+        return;
+    }
+    let mut app = App::new(vec![ticket()]);
+    let sample = |app: &mut App| {
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let body = table_body(app);
+        let cell = &terminal.backend().buffer()[(body.x + 7, body.y)];
+        (cell.fg, cell.modifier)
+    };
+    let (before, _) = sample(&mut app);
+    assert_eq!(before, theme().link, "the id cell reads as a link");
+
+    app.work_items.mode = WorkItemMode::Palette;
+    let (behind, modifier) = sample(&mut app);
+    assert_eq!(
+        behind,
+        theme().muted,
+        "the row behind the modal is washed out"
+    );
+    assert!(
+        !modifier.contains(Modifier::BOLD),
+        "and gives up its weight"
+    );
+
+    app.work_items.mode = WorkItemMode::Browse;
+    assert_eq!(
+        sample(&mut app).0,
+        before,
+        "closing it leaves no paint behind"
+    );
+}
+
+#[test]
+fn the_help_takes_a_share_of_a_big_screen_and_still_fits_a_small_one() {
+    let mut app = App::new(vec![ticket()]);
+    app.work_items.mode = WorkItemMode::Help;
+
+    render_text(140, 42, &mut app);
+    let big = target_rect(&app, |target| matches!(target, PointerTarget::OverlayBody));
+    assert!(
+        (26..=32).contains(&big.height),
+        "about 70% of a 140x42 terminal's height: {big:?}"
+    );
+    assert!(
+        (74..=98).contains(&big.width),
+        "and as wide as the help itself, never past 70%: {big:?}"
+    );
+
+    render_text(60, 24, &mut app);
+    let small = target_rect(&app, |target| matches!(target, PointerTarget::OverlayBody));
+    assert!(
+        small.width <= 58 && small.height <= 22,
+        "and it still fits a small one: {small:?}"
+    );
+}

@@ -63,16 +63,19 @@ pub(super) fn render_sort_controls(frame: &mut Frame<'_>, shell: &mut Shell, inn
         render_control(
             frame,
             shell,
-            Rect::new(
-                inner.x.saturating_add(inner.width.saturating_sub(offset)),
-                y,
-                3,
-                1,
-            ),
-            label,
-            PointerTarget::SortSetDirection(direction),
-            PointerLayer::Modal,
-            true,
+            Control {
+                area: Rect::new(
+                    inner.x.saturating_add(inner.width.saturating_sub(offset)),
+                    y,
+                    3,
+                    1,
+                ),
+                label,
+                target: PointerTarget::SortSetDirection(direction),
+                layer: PointerLayer::Modal,
+                kind: ControlKind::Glyph,
+                enabled: true,
+            },
         );
     }
 }
@@ -82,10 +85,6 @@ pub(super) fn render_help_popup(
     screen: &mut WorkItemsScreen,
     shell: &mut Shell,
 ) {
-    let height = frame.area().height.saturating_sub(2).min(18);
-    // Wide enough that a command's title and help sit on one row.
-    let area = centered_rect(frame.area(), 78, height);
-    frame.render_widget(Clear, area);
     let mut lines = vec![
         Line::styled("Navigation", Style::default().add_modifier(Modifier::BOLD)),
         Line::from("  ↑/↓, j/k        Move ticket, family row, or details"),
@@ -166,13 +165,32 @@ pub(super) fn render_help_popup(
             Style::default().fg(theme().muted),
         ),
     ]);
+    // A share of the screen rather than a fixed box: on a wide terminal the
+    // help fills it, and on a small one it is what it always was. Wide enough
+    // that a command's title and its help sit on one row.
+    let widest = lines
+        .iter()
+        .map(|line| line.width().saturating_add(4))
+        .max()
+        .unwrap_or(78);
+    let area = ratio_rect(
+        frame.area(),
+        (70, 70),
+        (
+            u16::try_from(widest).unwrap_or(u16::MAX),
+            u16::try_from(lines.len().saturating_add(2)).unwrap_or(u16::MAX),
+        ),
+        (78, 18),
+    );
+    dim_behind(frame, area);
+    frame.render_widget(Clear, area);
     let help = Text::from(lines);
     let block = Block::default()
         .title(Line::styled(
             " Help ",
             Style::default().add_modifier(Modifier::BOLD),
         ))
-        .title(Line::from("[×]").right_aligned())
+        .title(Line::styled(CLOSE_LABEL, Style::default().fg(theme().muted)).right_aligned())
         .borders(Borders::ALL)
         .border_type(theme().border_type)
         .padding(Padding::left(1))
@@ -421,8 +439,11 @@ pub(super) fn render_list_overlay(
         .take(viewport)
         .map(|(index, line)| overlay_line(line, index == selected))
         .collect();
-    frame.render_widget(Paragraph::new(Text::from(lines)), area);
-    let hit_width = row_hit_width.unwrap_or_else(|| area.width.saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)),
+        Rect::new(area.x, area.y, overlay_row_width(area), area.height),
+    );
+    let hit_width = row_hit_width.unwrap_or_else(|| overlay_row_width(area));
     let visible = scroll..content.min(scroll.saturating_add(viewport));
     for (logical, y) in visible.clone().zip(area.y..) {
         shell.hit_regions.push(region(
@@ -723,16 +744,19 @@ pub(super) fn render_column_controls(
         render_control(
             frame,
             shell,
-            Rect::new(
-                inner.x.saturating_add(inner.width.saturating_sub(offset)),
-                y,
-                3,
-                1,
-            ),
-            label,
-            target,
-            PointerLayer::Modal,
-            enabled,
+            Control {
+                area: Rect::new(
+                    inner.x.saturating_add(inner.width.saturating_sub(offset)),
+                    y,
+                    3,
+                    1,
+                ),
+                label,
+                target,
+                layer: PointerLayer::Modal,
+                kind: ControlKind::Glyph,
+                enabled,
+            },
         );
     }
 }
@@ -743,10 +767,15 @@ pub(super) fn render_palette(
     shell: &mut Shell,
 ) {
     let commands = screen.palette_commands();
-    let height = u16::try_from(commands.len().saturating_add(4))
-        .unwrap_or(u16::MAX)
-        .min(16);
-    let area = centered_rect(frame.area(), 56, height.max(6));
+    let area = ratio_rect(
+        frame.area(),
+        (70, 70),
+        (
+            72,
+            u16::try_from(commands.len().saturating_add(4)).unwrap_or(u16::MAX),
+        ),
+        (56, 6),
+    );
     let inner = render_modal_frame(frame, modal_layer(screen), shell, area, " Commands ");
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
     let (text, cursor) = (
@@ -768,12 +797,12 @@ pub(super) fn render_palette(
         .iter()
         .enumerate()
         .map(|(index, command)| {
-            let marker = if index == selected { "›" } else { " " };
-            Line::from(format!(
-                "{marker} {:<28} {}",
+            overlay_row(
+                index == selected,
                 command.title,
-                command.key_label()
-            ))
+                &command.key_label(),
+                overlay_row_width(list_area),
+            )
         })
         .collect();
     render_list_overlay(
@@ -848,20 +877,26 @@ pub(super) fn render_views_overlay(
         render_control(
             frame,
             shell,
-            Rect::new(chunks[1].x, chunks[1].y, 6, 1),
-            "[Save]",
-            PointerTarget::SaveView,
-            PointerLayer::Modal,
-            !name.trim().is_empty(),
+            Control {
+                area: Rect::new(chunks[1].x, chunks[1].y, 6, 1),
+                label: " Save ",
+                target: PointerTarget::SaveView,
+                layer: PointerLayer::Modal,
+                kind: ControlKind::Primary,
+                enabled: !name.trim().is_empty(),
+            },
         );
         render_control(
             frame,
             shell,
-            Rect::new(chunks[1].x.saturating_add(7), chunks[1].y, 8, 1),
-            "[Cancel]",
-            PointerTarget::CancelNaming,
-            PointerLayer::Modal,
-            true,
+            Control {
+                area: Rect::new(chunks[1].x.saturating_add(7), chunks[1].y, 8, 1),
+                label: " Cancel ",
+                target: PointerTarget::CancelNaming,
+                layer: PointerLayer::Modal,
+                kind: ControlKind::Chip,
+                enabled: true,
+            },
         );
         return;
     }
@@ -869,20 +904,26 @@ pub(super) fn render_views_overlay(
         render_control(
             frame,
             shell,
-            Rect::new(inner.x, inner.y, 14, 1),
-            "[Save current]",
-            PointerTarget::SaveView,
-            PointerLayer::Modal,
-            true,
+            Control {
+                area: Rect::new(inner.x, inner.y, 14, 1),
+                label: " Save current ",
+                target: PointerTarget::SaveView,
+                layer: PointerLayer::Modal,
+                kind: ControlKind::Chip,
+                enabled: true,
+            },
         );
         render_control(
             frame,
             shell,
-            Rect::new(inner.x.saturating_add(15), inner.y, 8, 1),
-            "[Delete]",
-            PointerTarget::DeleteView,
-            PointerLayer::Modal,
-            screen.can_delete_focused_view(),
+            Control {
+                area: Rect::new(inner.x.saturating_add(15), inner.y, 8, 1),
+                label: " Delete ",
+                target: PointerTarget::DeleteView,
+                layer: PointerLayer::Modal,
+                kind: ControlKind::Chip,
+                enabled: screen.can_delete_focused_view(),
+            },
         );
     }
     let list = Rect::new(
@@ -1092,10 +1133,46 @@ pub(super) fn overlay_line(line: Line<'_>, selected: bool) -> Line<'_> {
     if selected {
         line.style(
             Style::default()
-                .bg(theme().selected_background)
+                .bg(theme().surface)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
         line
     }
+}
+
+/// The width a list overlay lays its rows out in: everything but the column
+/// its own scrollbar tracks down the right-hand edge.
+pub(super) const fn overlay_row_width(area: Rect) -> u16 {
+    area.width.saturating_sub(1)
+}
+
+/// One row of a list overlay: the cursor's `›` in the accent, what the row is,
+/// and the key that runs it against the right-hand edge in the muted colour.
+///
+/// The line's own style is set by [`overlay_line`] afterwards and patches
+/// underneath these, so the marker and the key keep their colours on the row
+/// the cursor is on.
+pub(super) fn overlay_row(marked: bool, label: &str, key: &str, width: u16) -> Line<'static> {
+    let marker = if marked {
+        Span::styled(
+            "› ",
+            Style::default()
+                .fg(theme().accent)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw("  ")
+    };
+    let room = usize::from(width)
+        .saturating_sub(2)
+        .saturating_sub(key.chars().count())
+        .saturating_sub(1);
+    let label: String = label.chars().take(room).collect();
+    Line::from(vec![
+        marker,
+        Span::raw(format!("{label:<room$}")),
+        Span::raw(" "),
+        Span::styled(key.to_owned(), Style::default().fg(theme().muted)),
+    ])
 }

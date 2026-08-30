@@ -79,8 +79,8 @@ fn the_details_pane_heads_a_run_with_what_it_was_and_where_it_came_from() {
     assert!(text.contains("Jacob Ragsdale"), "{text}");
     assert!(text.contains("Queued"), "{text}");
     assert!(
-        text.contains("[Cancel]") && text.contains("[Retry]"),
-        "the controls are drawn, muted until #687: {text}"
+        text.contains(" Cancel ") && text.contains(" Retry "),
+        "the controls are drawn as chips: {text}"
     );
 }
 

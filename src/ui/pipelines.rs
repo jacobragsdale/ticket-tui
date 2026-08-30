@@ -535,14 +535,11 @@ fn render_run_details(
         Line::from(""),
     ];
     let buttons: [(&str, PointerTarget); 2] = [
-        ("[Cancel]", PointerTarget::RunCommand(CommandId::CancelRun)),
-        ("[Retry]", PointerTarget::RunCommand(CommandId::RetryRun)),
+        (" Cancel ", PointerTarget::RunCommand(CommandId::CancelRun)),
+        (" Retry ", PointerTarget::RunCommand(CommandId::RetryRun)),
     ];
     let buttons_index = lines.len();
-    lines.push(Line::from(vec![
-        Span::styled(" [Cancel] ", Style::default().fg(theme().muted)),
-        Span::styled(" [Retry] ", Style::default().fg(theme().muted)),
-    ]));
+    lines.push(button_row(&buttons));
     // Where this run came from and what it carried, each one a jump.
     let jumps = screen.run_jumps(shell);
     if !jumps.is_empty() {

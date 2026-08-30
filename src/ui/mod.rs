@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect, Spacing};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect, Spacing};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::merge::MergeStrategy;
 use ratatui::text::{Line, Span, Text};
@@ -43,10 +43,11 @@ mod widgets;
 
 use details::{assigned_to_me_style, field_line, render_details, state_glyph};
 use overlays::{
-    ListOverlay, column_rows, link_line, overlay_line, pill_style, render_chips,
-    render_column_overlay, render_facet_bar, render_facet_menu, render_filter_overlay,
-    render_help_popup, render_info_overlay, render_list_overlay, render_palette, render_sort_popup,
-    render_sprint_overlay, render_views_overlay, terminate_underline,
+    ListOverlay, column_rows, link_line, overlay_line, overlay_row, overlay_row_width, pill_style,
+    render_chips, render_column_overlay, render_facet_bar, render_facet_menu,
+    render_filter_overlay, render_help_popup, render_info_overlay, render_list_overlay,
+    render_palette, render_sort_popup, render_sprint_overlay, render_views_overlay,
+    terminate_underline,
 };
 use pickers::{
     render_assignee_picker, render_delete_confirm, render_edit_menu, render_form,
@@ -60,9 +61,10 @@ use table::{
 };
 pub use theme::{Theme, ThemeChoice, chosen_theme, set_theme, theme};
 use widgets::{
-    SearchRow, capture_selectable, paint_hover, paint_selection, register_buttons,
-    register_close_button, render_control, render_modal_frame, render_query_field,
-    render_scrollbar, render_search_row, render_status_bar, row_on_screen, wrapped_rows,
+    CLOSE_LABEL, Control, ControlKind, SearchRow, button_row, capture_selectable, dim_behind,
+    paint_hover, paint_selection, register_buttons, register_close_button, render_control,
+    render_modal_frame, render_query_field, render_scrollbar, render_search_row, render_status_bar,
+    row_on_screen, wrapped_rows,
 };
 
 const WIDE_BREAKPOINT: u16 = 110;
@@ -621,6 +623,22 @@ fn overlay_width(anchor: OverlayAnchor, rows: &[Line<'_>], centered: u16, area: 
     // Two columns of frame, one for the scrollbar, and one to breathe.
     let fitted = u16::try_from(longest.saturating_add(4)).unwrap_or(u16::MAX);
     fitted.clamp(ANCHORED_MIN_WIDTH.min(area.width), area.width)
+}
+
+/// A modal sized as a share of the screen rather than to a fixed number of
+/// cells: `percent` of the screen each way, never larger than the `content`
+/// it holds needs, and never smaller than `least`, which is what it was
+/// before there was room to grow.
+fn ratio_rect(area: Rect, percent: (u16, u16), content: (u16, u16), least: (u16, u16)) -> Rect {
+    let pick = |span: u16, percent: u16, content: u16, least: u16| {
+        let share = u16::try_from(u32::from(span) * u32::from(percent) / 100).unwrap_or(span);
+        share.min(content).max(least.min(span))
+    };
+    centered_rect(
+        area,
+        pick(area.width, percent.0, content.0, least.0),
+        pick(area.height, percent.1, content.1, least.1),
+    )
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {

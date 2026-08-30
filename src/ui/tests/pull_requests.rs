@@ -56,8 +56,8 @@ fn the_details_pane_carries_every_section_the_epic_asks_for() {
     assert!(text.contains("Completion"), "{text}");
     assert!(text.contains("Auto-complete: off"), "{text}");
     assert!(
-        text.contains("[Approve]") && text.contains("[Abandon]"),
-        "every button is drawn, muted until its ticket: {text}"
+        text.contains(" Approve ") && text.contains(" Abandon "),
+        "every button is drawn as a chip: {text}"
     );
 }
 

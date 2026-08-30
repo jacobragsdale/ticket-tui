@@ -467,25 +467,18 @@ fn render_details(
     lines.push(Line::from(format!("  Merge: {}", row.request.merge_status)));
     lines.push(Line::from(""));
     let buttons: [(&str, PointerTarget); 6] = [
-        ("[Approve]", PointerTarget::RunCommand(CommandId::ApprovePr)),
-        ("[Suggest]", PointerTarget::RunCommand(CommandId::SuggestPr)),
-        ("[Wait]", PointerTarget::RunCommand(CommandId::WaitPr)),
-        ("[Reject]", PointerTarget::RunCommand(CommandId::RejectPr)),
+        (" Approve ", PointerTarget::RunCommand(CommandId::ApprovePr)),
+        (" Suggest ", PointerTarget::RunCommand(CommandId::SuggestPr)),
+        (" Wait ", PointerTarget::RunCommand(CommandId::WaitPr)),
+        (" Reject ", PointerTarget::RunCommand(CommandId::RejectPr)),
         (
-            "[Complete]",
+            " Complete ",
             PointerTarget::RunCommand(CommandId::CompletePr),
         ),
-        ("[Abandon]", PointerTarget::RunCommand(CommandId::AbandonPr)),
+        (" Abandon ", PointerTarget::RunCommand(CommandId::AbandonPr)),
     ];
     let buttons_index = lines.len();
-    lines.push(Line::from(
-        buttons
-            .iter()
-            .map(|(button, _)| {
-                Span::styled(format!(" {button} "), Style::default().fg(theme().muted))
-            })
-            .collect::<Vec<_>>(),
-    ));
+    lines.push(button_row(&buttons));
     // A title or a comment wraps, so every target is placed by the row its
     // line landed on rather than by the line's index; and the pane scrolls,
     // because a discussion can be longer than the terminal.

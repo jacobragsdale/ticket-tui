@@ -19,12 +19,12 @@ pub(super) fn render_edit_menu(
         .iter()
         .enumerate()
         .map(|(index, entry)| {
-            let marker = if index == selected { "\u{203a}" } else { " " };
-            Line::from(format!(
-                "{marker} {:<20} {}",
+            overlay_row(
+                index == selected,
                 entry.label,
-                key_label_for(entry.command)
-            ))
+                &key_label_for(entry.command),
+                overlay_row_width(inner),
+            )
         })
         .collect();
     render_list_overlay(
@@ -455,20 +455,26 @@ pub(super) fn render_prompt(
     render_control(
         frame,
         shell,
-        Rect::new(chunks[1].x, chunks[1].y, 6, 1),
-        "[Save]",
-        PointerTarget::SubmitPrompt,
-        PointerLayer::Modal,
-        savable,
+        Control {
+            area: Rect::new(chunks[1].x, chunks[1].y, 6, 1),
+            label: " Save ",
+            target: PointerTarget::SubmitPrompt,
+            layer: PointerLayer::Modal,
+            kind: ControlKind::Primary,
+            enabled: savable,
+        },
     );
     render_control(
         frame,
         shell,
-        Rect::new(chunks[1].x.saturating_add(7), chunks[1].y, 8, 1),
-        "[Cancel]",
-        PointerTarget::CancelPrompt,
-        PointerLayer::Modal,
-        true,
+        Control {
+            area: Rect::new(chunks[1].x.saturating_add(7), chunks[1].y, 8, 1),
+            label: " Cancel ",
+            target: PointerTarget::CancelPrompt,
+            layer: PointerLayer::Modal,
+            kind: ControlKind::Chip,
+            enabled: true,
+        },
     );
 }
 
@@ -666,20 +672,26 @@ pub(super) fn render_form(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, s
     render_control(
         frame,
         shell,
-        Rect::new(buttons.x, buttons.y, 8, 1),
-        "[Create]",
-        PointerTarget::SubmitForm,
-        PointerLayer::Modal,
-        submittable,
+        Control {
+            area: Rect::new(buttons.x, buttons.y, 8, 1),
+            label: " Create ",
+            target: PointerTarget::SubmitForm,
+            layer: PointerLayer::Modal,
+            kind: ControlKind::Primary,
+            enabled: submittable,
+        },
     );
     render_control(
         frame,
         shell,
-        Rect::new(buttons.x.saturating_add(9), buttons.y, 8, 1),
-        "[Cancel]",
-        PointerTarget::CancelForm,
-        PointerLayer::Modal,
-        true,
+        Control {
+            area: Rect::new(buttons.x.saturating_add(9), buttons.y, 8, 1),
+            label: " Cancel ",
+            target: PointerTarget::CancelForm,
+            layer: PointerLayer::Modal,
+            kind: ControlKind::Chip,
+            enabled: true,
+        },
     );
 }
 
@@ -740,19 +752,25 @@ pub(super) fn render_delete_confirm(
     render_control(
         frame,
         shell,
-        Rect::new(buttons.x, buttons.y, 8, 1),
-        "[Delete]",
-        PointerTarget::ConfirmDelete,
-        PointerLayer::Modal,
-        true,
+        Control {
+            area: Rect::new(buttons.x, buttons.y, 8, 1),
+            label: " Delete ",
+            target: PointerTarget::ConfirmDelete,
+            layer: PointerLayer::Modal,
+            kind: ControlKind::Primary,
+            enabled: true,
+        },
     );
     render_control(
         frame,
         shell,
-        Rect::new(buttons.x.saturating_add(9), buttons.y, 8, 1),
-        "[Cancel]",
-        PointerTarget::CancelDelete,
-        PointerLayer::Modal,
-        true,
+        Control {
+            area: Rect::new(buttons.x.saturating_add(9), buttons.y, 8, 1),
+            label: " Cancel ",
+            target: PointerTarget::CancelDelete,
+            layer: PointerLayer::Modal,
+            kind: ControlKind::Chip,
+            enabled: true,
+        },
     );
 }
