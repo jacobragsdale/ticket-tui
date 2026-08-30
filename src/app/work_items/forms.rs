@@ -466,7 +466,7 @@ impl WorkItemsScreen {
     /// moves on to the next field. Submitting is deliberately not bound here —
     /// `Ctrl-S` and `[Create]` do that — so a stray `Enter` halfway down a form
     /// never files a half-typed work item.
-    fn activate_form_field(&mut self, shell: &mut Shell) -> AppAction {
+    pub(super) fn activate_form_field(&mut self, shell: &mut Shell) -> AppAction {
         let Some(field) = self.form.as_ref().and_then(FormOverlay::focused) else {
             return AppAction::None;
         };

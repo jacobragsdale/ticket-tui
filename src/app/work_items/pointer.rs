@@ -215,8 +215,19 @@ impl WorkItemsScreen {
             PointerTarget::NodeQuery => {
                 self.place_caret(shell, TextEditor::Node, column, row);
             }
+            // A row carrying a `▾` is a dropdown, so a click drops it down,
+            // the way a click on a details-pane value opens its editor.
+            // Anything else takes the caret where the click landed.
             PointerTarget::FormField { index } => {
                 self.focus_form_field(index);
+                if self
+                    .form
+                    .as_ref()
+                    .and_then(FormOverlay::focused)
+                    .is_some_and(|field| field.picker_kind().is_some())
+                {
+                    return self.activate_form_field(shell);
+                }
                 self.place_caret(shell, TextEditor::Form, column, row);
             }
             PointerTarget::SubmitForm => return self.submit_form(shell),

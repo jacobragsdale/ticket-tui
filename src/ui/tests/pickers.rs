@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
+fn the_new_work_item_form_draws_every_field_and_a_click_focuses_or_drops_one_down() {
     let mut app = App::new(vec![ticket_at(
         10_001,
         "Fix ticket search",
@@ -62,7 +62,12 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
     assert_eq!(
         app.work_items.form.as_ref().unwrap().focused().unwrap().id,
         FormFieldId::Tags,
-        "clicking a row focuses it"
+        "clicking a typed row focuses it"
+    );
+    assert_eq!(
+        app.work_items.mode,
+        WorkItemMode::Form,
+        "and opens nothing over it"
     );
 
     let iteration = app
@@ -80,7 +85,11 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
         .map(|region| (region.rect.x, region.rect.y))
         .expect("the Iteration row is clickable too");
     click(&mut app, x, y);
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        app.work_items.mode,
+        WorkItemMode::NodePicker,
+        "a row carrying a chevron drops down on the click itself"
+    );
     let picker = render_text(90, 24, &mut app);
     assert!(
         picker.contains("Iteration \u{b7} New work item"),
@@ -103,6 +112,64 @@ fn the_new_work_item_form_draws_every_field_and_clicking_one_focuses_it() {
     click(&mut app, x, y);
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert!(app.work_items.form.is_none());
+}
+
+#[test]
+fn clicking_the_type_row_of_the_child_form_drops_the_type_picker_down() {
+    let mut app = App::new(vec![ticket_at(
+        595,
+        "Tech debt and architecture foundation",
+        "Epic",
+        "To Do",
+        "2026-03-03T00:00:00Z",
+    )]);
+    app.shell.enable_sync();
+    app.work_items
+        .set_work_item_types(vec!["Issue".into(), "Epic".into(), "Task".into()]);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+    render_text(90, 24, &mut app);
+
+    let type_row = app
+        .work_items
+        .form
+        .as_ref()
+        .and_then(|form| form.index_of(FormFieldId::Type))
+        .expect("the form has a Type row");
+    let (x, y) = app
+        .shell
+        .hit_regions
+        .find_target(
+            |target| matches!(target, PointerTarget::FormField { index } if *index == type_row),
+        )
+        .map(|region| (region.rect.x, region.rect.y))
+        .expect("the Type row is clickable");
+    click(&mut app, x, y);
+
+    assert_eq!(app.work_items.mode, WorkItemMode::TypePicker);
+    let picker = render_text(90, 24, &mut app);
+    assert!(
+        picker.contains("Task"),
+        "the picker offers the project's own types: {picker}"
+    );
+
+    let (x, y) = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::TypeOption { .. }))
+        .map(|region| (region.rect.x, region.rect.y))
+        .expect("every type is clickable");
+    click(&mut app, x, y);
+
+    assert_eq!(
+        app.work_items.mode,
+        WorkItemMode::Form,
+        "the choice hands back to the form"
+    );
+    assert!(
+        app.work_items.form.is_some(),
+        "which is still holding what was typed into it"
+    );
 }
 
 #[test]

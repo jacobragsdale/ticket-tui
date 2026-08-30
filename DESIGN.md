@@ -774,8 +774,10 @@ the assignee list, each writing its choice back into the field and returning to
 the form. `Enter` on a typed field moves on to the next one; submitting is
 deliberately not bound to it, so a stray `Enter` halfway down the form never
 files a half-typed work item. `Ctrl-S` or `[Create]` files it, `Esc` or
-`[Cancel]` closes it. Clicking a field focuses it and puts the caret where the
-click landed, and the two buttons are clickable.
+`[Cancel]` closes it. Clicking a typed field focuses it and puts the caret where
+the click landed; clicking a `▾` row drops that picker down, because a chevron
+that answers only the keyboard is a chevron that lies. The two buttons are
+clickable.
 
 The defaults are the ones that are usually right. **Type** starts at `Issue`,
 the Basic process's everyday unit of work, and the picker lists the project's
@@ -1410,8 +1412,8 @@ table, details pane, help, or overlay by three rows or lines and does not
 change keyboard focus or the selected ticket. Left-click activates the
 visible control under the pointer on release: search, filter pills, sort
 headers, ticket rows, checkboxes, bookmark markers,
-underlined IDs and URLs, details-pane field values, tabs, overlay rows, and
-close/action buttons. A field value in the details pane — the title, the state,
+underlined IDs and URLs, details-pane field values, tabs, overlay rows, form
+rows, and close/action buttons. A field value in the details pane — the title, the state,
 the assignee, the priority, the tags, the iteration, or the area — opens its
 editor as a dropdown hung under the value that was clicked, left edge on it and
 width fitted to the longest entry. A field with too little room below opens its
