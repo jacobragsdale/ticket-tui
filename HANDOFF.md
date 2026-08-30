@@ -19,10 +19,10 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
   does one full pull automatically — and a running `ticket-tui` binary from
   before the bump refuses to open the file until it is rebuilt.
 
-## The module tree (#661, #662)
+## The module tree (#661, #662, #698)
 
-`src/app.rs` and `src/ui.rs` are directory modules; every file is under 1,500
-lines. `App` is `{ shell, tab, work_items, repos, pull_requests, pipelines }`:
+`src/app.rs`, `src/ui.rs` and `src/run.rs` are directory modules; every file is
+under 1,500 lines. `App` is `{ shell, tab, work_items, repos, pull_requests, pipelines }`:
 `Shell` is the state every screen shares and each tab is a `Screen`. A screen
 method that needs the shell takes `shell: &mut Shell` (or `&Shell`) as its
 first argument after the receiver; nothing else reaches across.
@@ -49,6 +49,17 @@ first argument after the receiver; nothing else reaches across.
                         approvals — cadences that stretch, and no SQLite at all
     src/local.rs        the local-repos thread: the workspace scan and the three
                         git commands the Repos tab runs — also no SQLite
+    src/main.rs         opens the module below and reports what it returns
+    src/run/mod.rs      run: the database, the workers, the terminal, and back
+        engines.rs      the sync, details, local and reload workers, and the
+                        agent context file they publish through
+        events.rs       the event loop and the actions it hands back
+        dispatch.rs     every request that leaves the run, and its timer
+        polling.rs      one non-blocking pass over each worker's channel
+        editor.rs       the description round trip through $VISUAL/$EDITOR/vi
+        desktop.rs      the clipboard and the browser
+        pointer.rs      the mouse pointer shape, and what the hover means
+        tests/          the same split, over one fake Azure DevOps
     src/ui/mod.rs       render, render_screen, the layout, the theme, anchoring
         details.rs      the details pane and the family tree it draws
         overlays.rs     the list overlays, chips and facet bar

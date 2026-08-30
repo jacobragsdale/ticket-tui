@@ -1,0 +1,478 @@
+//! Reading the background workers: one non-blocking pass over each channel,
+//! applying whatever came back to the app.
+
+use super::*;
+
+/// What a finished watch says: the glyph, the build number, how it went, and
+/// how long it took.
+fn run_finished_summary(run: &Run) -> String {
+    let glyph = match run.result {
+        Some(RunResult::Succeeded) => "\u{2713}",
+        Some(RunResult::PartiallySucceeded) => "\u{25d1}",
+        Some(RunResult::Failed) => "\u{2717}",
+        _ => "\u{2298}",
+    };
+    let word = match run.result {
+        Some(RunResult::Succeeded) => "succeeded",
+        Some(RunResult::PartiallySucceeded) => "partly succeeded",
+        Some(RunResult::Failed) => "failed",
+        _ => "was canceled",
+    };
+    let duration = match (run.start_time, run.finish_time) {
+        (Some(start), Some(finish)) => {
+            let seconds = start.seconds_until(finish).max(0);
+            format!(" \u{00b7} {}m {:02}s", seconds / 60, seconds % 60)
+        }
+        _ => String::new(),
+    };
+    format!("{glyph} Build {} {word}{duration}", run.build_number)
+}
+
+/// Reads the workspace while the Repos tab is showing, and folds in whatever
+/// the local thread has found or done. Nothing here is written to SQLite: what
+/// is on this machine is not the project's business, and a rescan is cheap.
+pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
+    let Some(worker) = runtime.local.worker.as_ref() else {
+        return false;
+    };
+    let showing = app.tab == TabId::Repos;
+    let opened = showing && !runtime.local.showing;
+    runtime.local.showing = showing;
+    let due = runtime
+        .local
+        .scanned
+        .is_none_or(|at| at.elapsed() >= LOCAL_SCAN_CADENCE);
+    if showing
+        && (opened || due)
+        && let Some(workspace) = app.shell.workspace().map(std::path::Path::to_path_buf)
+    {
+        runtime.local.scanned = Some(Instant::now());
+        let repos = app
+            .shell
+            .repos()
+            .iter()
+            .map(|repo| local::RepoKey {
+                id: repo.id.clone(),
+                remote: local::normalise_remote(&repo.remote_url),
+                name: repo.name.clone(),
+            })
+            .collect();
+        let _ = worker.send(LocalRequest::Scan { workspace, repos });
+    }
+    // Drained first, so the events can be answered without holding a borrow of
+    // the thread that sent them.
+    let events: Vec<LocalEvent> = std::iter::from_fn(|| worker.try_event()).collect();
+    // A running job redraws on its own, so its glyph turns.
+    let redraw = !events.is_empty() || app.repos.busy();
+    for event in events {
+        match event {
+            LocalEvent::Scanned(local) => app.repos.set_local(local),
+            LocalEvent::Started { repo_id, job } => app.repos.set_job(&repo_id, Some(job)),
+            LocalEvent::Finished {
+                repo_id,
+                job,
+                message,
+                error,
+            } => {
+                app.repos.set_job(&repo_id, None);
+                if error {
+                    // A pull git will not fast-forward wants a real git
+                    // client, or the repository's own page.
+                    app.shell.set_error(match job {
+                        GitJob::Pulling => format!("{message} \u{2014} o opens the repository"),
+                        _ => message,
+                    });
+                } else {
+                    app.shell.set_news(message);
+                }
+                // Whatever git did, the workspace is not what it was.
+                runtime.local.scanned = None;
+            }
+            LocalEvent::Stopped => runtime.local.worker = None,
+        }
+    }
+    redraw
+}
+
+/// Tells the pipeline watcher what is worth polling and folds in what it has
+/// seen. None of it is written to SQLite: the next pull is what persists a run,
+/// and until then the screen shows what the watcher has and the file has not.
+pub(super) fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
+    let Some(watcher) = runtime.pipelines.as_ref() else {
+        return false;
+    };
+    let showing = app.tab == TabId::Pipelines;
+    // Which run the details pane is on decides whose timeline is worth
+    // reading, so the watcher is told whenever the cursor settles somewhere
+    // else.
+    let focus = showing.then(|| app.pipelines.focused_run()).flatten();
+    let node = focus.and_then(|_| app.pipelines.log_target());
+    if (focus, node) != runtime.watching_run {
+        runtime.watching_run = (focus, node);
+        let _ = watcher.send(
+            focus.map_or(WatchRequest::Blur, |run_id| WatchRequest::Focus {
+                run_id,
+                node,
+            }),
+        );
+    }
+    let watched = app.pipelines.watched_runs();
+    if watched != runtime.watched_runs {
+        for run in &watched {
+            if !runtime.watched_runs.contains(run) {
+                let _ = watcher.send(WatchRequest::Watch(*run));
+            }
+        }
+        for run in &runtime.watched_runs {
+            if !watched.contains(run) {
+                let _ = watcher.send(WatchRequest::Unwatch(*run));
+            }
+        }
+        runtime.watched_runs = watched;
+    }
+    if showing != runtime.watching_tab {
+        runtime.watching_tab = showing;
+        let _ = watcher.send(WatchRequest::TabShowing(showing));
+        app.shell.set_watch_state(Some(if showing {
+            format!("polling live runs every {}s", LIVE_RUNS_CADENCE.as_secs())
+        } else {
+            format!(
+                "idle · every {}s while showing",
+                LIVE_RUNS_CADENCE.as_secs()
+            )
+        }));
+    }
+    let mut redraw = false;
+    while let Some(event) = watcher.try_event() {
+        redraw = true;
+        match event {
+            WatchEvent::LiveRuns(runs) => app.pipelines.merge_live_runs(runs, &app.shell),
+            WatchEvent::Approvals(approvals) => app.pipelines.set_approvals(approvals),
+            WatchEvent::RunWorkItems { run_id, work_items } => {
+                app.pipelines.set_run_work_items(run_id, work_items);
+            }
+            // A watched run has stopped: say so wherever the user is, which is
+            // the whole point of having watched it.
+            WatchEvent::RunFinished(run) => {
+                let summary = run_finished_summary(&run);
+                if matches!(run.result, Some(RunResult::Failed)) {
+                    app.shell.set_error(summary);
+                } else {
+                    // Eight seconds, like an error: it is news whether it went
+                    // well or badly, and you may have looked away.
+                    app.shell.set_news(summary);
+                }
+                app.pipelines.unwatch_run(run.id);
+                app.pipelines.merge_live_runs(vec![run], &app.shell);
+            }
+            WatchEvent::Timeline { run_id, records } => {
+                app.pipelines.set_timeline(run_id, records);
+            }
+            WatchEvent::LogLines {
+                run_id,
+                log_id,
+                from_line,
+                lines,
+                finished,
+            } => app
+                .pipelines
+                .append_log(run_id, log_id, from_line, lines, finished),
+            WatchEvent::Throttled(wait) => app.shell.set_watch_state(Some(format!(
+                "holding off {}s — Azure DevOps asked",
+                wait.as_secs()
+            ))),
+            WatchEvent::Failed(error) => {
+                app.shell.set_watch_state(Some(format!("failing: {error}")));
+            }
+            WatchEvent::Stopped => {
+                runtime.pipelines = None;
+                app.shell.set_watch_state(Some("stopped".to_owned()));
+                break;
+            }
+        }
+    }
+    redraw
+}
+
+/// Applies whatever the sync worker has finished. A pull it completed wrote the
+/// database itself, so its signature is recorded here and the watcher below
+/// leaves it alone instead of reloading behind us.
+pub(super) fn poll_sync(
+    app: &mut App,
+    repository: &mut SqliteTicketRepository,
+    runtime: &mut SyncRuntime,
+) -> bool {
+    let mut redraw = false;
+    while let Some(event) = runtime.worker.as_ref().and_then(SyncHandle::try_event) {
+        redraw = true;
+        match event {
+            SyncEvent::PullRequestUpdated(result) => match result {
+                Ok(updated) => app
+                    .pull_requests
+                    .apply_pull_request(&mut app.shell, *updated),
+                Err(refusal) => app.shell.set_error(refusal),
+            },
+            SyncEvent::PullRequestCommented(result) => match result {
+                Ok((id, thread)) => app.pull_requests.apply_comment(&mut app.shell, id, thread),
+                Err(refusal) => app.shell.set_error(refusal),
+            },
+            SyncEvent::Voted(result) => match result {
+                Ok((id, _)) => app.pull_requests.vote_accepted(id),
+                Err((id, refusal)) => {
+                    app.pull_requests
+                        .vote_rejected(&mut app.shell, id, &refusal);
+                }
+            },
+            SyncEvent::ApprovalAnswered(result) => match result {
+                Ok(id) => {
+                    app.pipelines.approval_answered(&id);
+                    app.shell.set_status("Approval sent");
+                }
+                Err(refusal) => app.shell.set_error(refusal),
+            },
+            SyncEvent::Branches { repo_id, branches } => {
+                app.pipelines.set_branches(&repo_id, branches);
+            }
+            // A run this session started, cancelled or retried. It is not
+            // optimistic: what comes back is the run Azure DevOps made.
+            SyncEvent::RunStarted(result) => match result {
+                Ok(run) => app.pipelines.accept_run(&mut app.shell, run),
+                Err(refusal) => app.shell.set_error(refusal),
+            },
+            SyncEvent::DisplayName(name) => {
+                if let Err(error) = repository.set_meta(db::ME_DISPLAY_NAME_KEY, &name) {
+                    app.shell
+                        .set_error(format!("Could not record the signed-in name: {error:#}"));
+                }
+                app.shell
+                    .set_me(resolve_me(Some(name), std::env::var("TICKET_TUI_ME").ok()));
+            }
+            SyncEvent::Finished {
+                origin,
+                outcome,
+                pause,
+            } => {
+                let now = Instant::now();
+                let throttled = match &outcome {
+                    SyncOutcome::Throttled { retry_after } => Some(*retry_after),
+                    _ => None,
+                };
+                // A pull that reached Azure DevOps clears whatever backoff a run
+                // of throttles built up, before the pause below pushes the next
+                // one out again. Only throttles in a row keep doubling.
+                if throttled.is_none() {
+                    runtime.scheduler.finish(now);
+                }
+                match outcome {
+                    SyncOutcome::Pulled {
+                        snapshot,
+                        mode,
+                        count,
+                    } => {
+                        let extras = PulledExtras::of(&snapshot);
+                        app.apply_snapshot(*snapshot);
+                        app.shell.finish_sync();
+                        stamp_database(app, repository);
+                        if origin == PullOrigin::User {
+                            app.shell
+                                .set_status(runtime.status_for(mode, count, extras));
+                        }
+                    }
+                    // Nothing moved in Azure DevOps, so nothing was written and
+                    // there is nothing to reload. The signature stays as it was:
+                    // if another process wrote the file while this pull was out,
+                    // the watcher is free to notice it now.
+                    SyncOutcome::Unchanged => {
+                        app.shell.finish_sync();
+                        if origin == PullOrigin::User {
+                            app.shell.set_status("Nothing changed");
+                        }
+                    }
+                    // A timer pull that keeps failing the same way says so in
+                    // the table title rather than in a toast every minute.
+                    SyncOutcome::Failed(error) => {
+                        if app.shell.fail_sync(&error, origin == PullOrigin::User) {
+                            app.shell.set_error(format!("Sync failed: {error}"));
+                        }
+                    }
+                    // Throttling is the service working as designed. Nothing is
+                    // announced: the title says how long the timer is holding
+                    // off, and the pause below books when it stops.
+                    SyncOutcome::Throttled { .. } => {}
+                }
+                // The longer of the two waits wins: a pull turned away outright
+                // and a budget that ran out on the way through are the same
+                // request to be left alone, asked for twice.
+                if let Some(retry_after) = throttled.into_iter().chain(pause).max() {
+                    let until = runtime.scheduler.pause(now, retry_after);
+                    app.shell.pause_sync(until);
+                }
+            }
+            SyncEvent::Edited(result) => match *result {
+                Ok(applied) => {
+                    app.work_items.apply_edit(&mut app.shell, applied);
+                    // The worker wrote that row itself, so the watcher below is
+                    // told about it rather than reloading behind us.
+                    stamp_database(app, repository);
+                }
+                Err(rejection) => {
+                    // A stale copy is worth a pull: the refused field is about
+                    // to arrive with whatever else moved.
+                    if rejection.conflict {
+                        start_sync(app, runtime);
+                    }
+                    app.work_items.reject_edit(&mut app.shell, &rejection);
+                }
+            },
+            // The worker wrote these rows itself, so the signature moves with
+            // them and the watcher below leaves the file alone. Only this work
+            // item's comments and history change: the table, the search, and
+            // every other row stay exactly as they were.
+            SyncEvent::Details(outcome) => {
+                app.work_items.details_pending = None;
+                match *outcome {
+                    DetailsOutcome::Fetched(update) => {
+                        runtime.details.finish();
+                        app.work_items.apply_details(update);
+                        stamp_database(app, repository);
+                    }
+                    DetailsOutcome::Failed { key, message } => {
+                        if runtime.details.fail(key) {
+                            app.shell.set_error(format!(
+                                "Could not read comments and history: {message}"
+                            ));
+                        }
+                    }
+                }
+            }
+            SyncEvent::Identities(identities) => {
+                app.work_items.merge_identities(&mut app.shell, identities)
+            }
+            // The worker inserted this comment itself, so the signature moves
+            // with it and the watcher below leaves the file alone. Nothing else
+            // about the work item changed: its own `details_rev` is untouched,
+            // so the next details fetch still settles the discussion.
+            SyncEvent::Commented(result) => match *result {
+                Ok(comment) => {
+                    app.work_items.apply_comment(&mut app.shell, comment);
+                    stamp_database(app, repository);
+                }
+                Err(rejection) => app.work_items.reject_comment(
+                    &mut app.shell,
+                    &rejection.key,
+                    &rejection.message,
+                ),
+            },
+            SyncEvent::ClassificationNodes(nodes) => {
+                app.work_items.merge_classification_nodes(nodes)
+            }
+            SyncEvent::WorkItemTypes(types) => app.work_items.merge_work_item_types(types),
+            // The worker stored this work item itself, so the signature moves
+            // with it and the watcher below leaves the file alone.
+            SyncEvent::Created(result) => match *result {
+                Ok(created) => {
+                    app.work_items
+                        .apply_created(&mut app.shell, created.ticket, created.relations);
+                    stamp_database(app, repository);
+                }
+                Err(rejection) => app
+                    .work_items
+                    .reject_create(&mut app.shell, &rejection.message),
+            },
+            // The worker rewrote both halves of this work item's hierarchy
+            // link itself, so the signature moves with them and the watcher
+            // below leaves the file alone.
+            SyncEvent::Reparented(result) => match *result {
+                Ok(applied) => {
+                    app.work_items.apply_reparent(&mut app.shell, applied);
+                    stamp_database(app, repository);
+                }
+                Err(rejection) => {
+                    // A stale copy is worth a pull for the same reason an edit
+                    // is: the family the picker was built from has moved on.
+                    if rejection.conflict {
+                        start_sync(app, runtime);
+                    }
+                    app.work_items.reject_reparent(&mut app.shell, &rejection);
+                }
+            },
+            // The worker took this work item out of the file itself, so the
+            // signature moves with it and the watcher below leaves it alone.
+            SyncEvent::Deleted(result) => match *result {
+                Ok(key) => {
+                    app.work_items.apply_deleted(&mut app.shell, &key);
+                    stamp_database(app, repository);
+                }
+                Err(rejection) => {
+                    app.work_items
+                        .reject_delete(&mut app.shell, &rejection.key, &rejection.message)
+                }
+            },
+            SyncEvent::Stopped => {
+                runtime.stop(app, "the Azure DevOps sync worker stopped");
+            }
+        }
+    }
+    redraw
+}
+
+/// Another process writing the database — an agent running `ticket-tui edit`,
+/// or `ticket-tui sync` in another terminal — still reloads the rows from
+/// SQLite.
+pub(super) fn poll_watch(
+    app: &mut App,
+    repository: &SqliteTicketRepository,
+    reloader: &mut ReloadEngine,
+) -> bool {
+    let signature = db::data_signature(repository.path());
+    if signature == app.shell.data_signature
+        || app.shell.reload_pending
+        || app.shell.sync_pending
+        || app.work_items.edits_pending()
+        || app.work_items.comments_pending()
+        || app.work_items.creates_pending()
+        || app.work_items.reparents_pending()
+        || app.work_items.deletes_pending()
+        || app.work_items.details_pending.is_some()
+    {
+        return false;
+    }
+    app.shell.mark_stale();
+    start_reload(app, repository, reloader, "Database changed; reloading…");
+    true
+}
+
+pub(super) fn persist_session(app: &mut App, repository: &SqliteTicketRepository) -> bool {
+    if !app.shell.session_dirty {
+        return false;
+    }
+    let path = session::path_for(repository.path());
+    match session::save(&path, &app.snapshot_session()) {
+        Ok(()) => app.shell.session_dirty = false,
+        Err(error) => app
+            .shell
+            .set_error(format!("Could not save session: {error:#}")),
+    }
+    true
+}
+
+pub(super) fn poll_reload(
+    app: &mut App,
+    repository: &SqliteTicketRepository,
+    reloader: &mut ReloadEngine,
+) -> bool {
+    let Some(result) = reloader.try_result() else {
+        return false;
+    };
+    app.shell.reload_pending = false;
+    match result {
+        Ok(snapshot) => {
+            let count = snapshot.ticket_count();
+            app.apply_snapshot(snapshot);
+            stamp_database(app, repository);
+            app.shell.set_status(format!("Reloaded {count} tickets"));
+        }
+        Err(error) => app.shell.set_error(format!("Reload failed: {error}")),
+    }
+    true
+}
