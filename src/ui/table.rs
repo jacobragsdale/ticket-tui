@@ -307,6 +307,9 @@ pub(super) fn render_table(
             screen.sort_direction.symbol()
         )
     };
+    // The narrowest layout wears the pane switcher on this border instead of
+    // the name, so the title here is what the wider ones show; what the table
+    // is doing is shortened to fit the bottom border beside it.
     let (title, status) = if area.width < NARROW_BREAKPOINT {
         let short_order = if screen.query().is_empty() {
             screen.sort_direction.symbol()
@@ -317,7 +320,7 @@ pub(super) fn render_table(
             }
         };
         (
-            " [Tickets] [Details] ".to_owned(),
+            " Tickets ".to_owned(),
             format!("{count}/{total} · {short_order}"),
         )
     } else {
@@ -399,10 +402,6 @@ pub(super) fn render_table(
         cell: &mut cell,
     };
     render_list_table(frame, shell, area, &mut spec);
-
-    if area.width < NARROW_BREAKPOINT {
-        register_narrow_tabs(shell, area);
-    }
 
     let inner = geometry.inner;
     if count == 0 && inner.height > 2 {

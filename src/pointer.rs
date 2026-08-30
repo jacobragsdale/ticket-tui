@@ -256,7 +256,35 @@ pub enum PointerTarget {
     ScrollbarThumb {
         surface: ScrollSurface,
     },
-    PaneDivider,
+    /// The seam between two panes, carrying which of the app's splits it
+    /// moves: every tab draws the same seams, so the target says which one
+    /// rather than which tab it was drawn on.
+    PaneDivider {
+        split: PaneSplit,
+    },
+}
+
+/// Which stored split a seam moves. The workspace seam is the one every tab
+/// puts between its list and the details of whatever the cursor is on; the
+/// details seam divides the details pane itself, as the pipelines log divides
+/// it under its run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaneSplit {
+    Workspace,
+    Details,
+}
+
+impl PaneSplit {
+    pub(crate) const ALL: [Self; 2] = [Self::Workspace, Self::Details];
+
+    /// Where this split's seam sits in the shell's table of them.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Workspace => 0,
+            Self::Details => 1,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -462,7 +490,11 @@ pub enum DragKind {
         surface: ScrollSurface,
         grab: i16,
     },
-    Divider,
+    /// A seam being moved, which one it is carried from the press: the same
+    /// drag serves every split the app draws.
+    Divider {
+        split: PaneSplit,
+    },
 }
 
 #[derive(Clone, Debug)]

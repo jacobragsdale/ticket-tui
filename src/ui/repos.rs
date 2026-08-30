@@ -46,15 +46,26 @@ fn render_search(frame: &mut Frame<'_>, screen: &ReposScreen, shell: &mut Shell,
 }
 
 fn render_content(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut Shell, area: Rect) {
-    let split = if area.width >= WIDE_BREAKPOINT {
-        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(area)
-    } else {
-        Layout::horizontal([Constraint::Fill(1)]).split(area)
-    };
-    render_table(frame, screen, shell, split[0]);
-    if split.len() > 1 {
-        render_details(frame, screen, shell, split[1]);
+    struct Panes<'a>(&'a mut ReposScreen);
+    impl PanePair for Panes<'_> {
+        fn first(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+            render_table(frame, self.0, shell, area);
+        }
+
+        fn second(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+            render_details(frame, self.0, shell, area);
+        }
     }
+    render_workspace(
+        frame,
+        shell,
+        area,
+        &PaneNames {
+            list: "Repos",
+            details: "Repository",
+        },
+        &mut Panes(screen),
+    );
 }
 
 fn render_table(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut Shell, area: Rect) {

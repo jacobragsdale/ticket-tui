@@ -192,15 +192,32 @@ fn render_content(
     work_item_titles: &[(i64, String)],
     area: Rect,
 ) {
-    let split = if area.width >= WIDE_BREAKPOINT {
-        Layout::horizontal([Constraint::Percentage(58), Constraint::Percentage(42)]).split(area)
-    } else {
-        Layout::horizontal([Constraint::Fill(1)]).split(area)
-    };
-    render_table(frame, screen, shell, split[0]);
-    if split.len() > 1 {
-        render_details(frame, screen, shell, work_item_titles, split[1]);
+    struct Panes<'a> {
+        screen: &'a mut PullRequestsScreen,
+        work_item_titles: &'a [(i64, String)],
     }
+    impl PanePair for Panes<'_> {
+        fn first(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+            render_table(frame, self.screen, shell, area);
+        }
+
+        fn second(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+            render_details(frame, self.screen, shell, self.work_item_titles, area);
+        }
+    }
+    render_workspace(
+        frame,
+        shell,
+        area,
+        &PaneNames {
+            list: "Pull requests",
+            details: "Pull request",
+        },
+        &mut Panes {
+            screen,
+            work_item_titles,
+        },
+    );
 }
 
 fn render_table(

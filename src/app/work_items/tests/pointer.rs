@@ -9,14 +9,19 @@ fn clicking_the_pane_divider_neither_acts_nor_selects_text() {
         width: 1,
         height: 10,
     };
-    app.shell.set_content_layout(
-        Rect {
-            x: 0,
-            y: 4,
-            width: 130,
-            height: 20,
+    app.shell.set_seam(
+        PaneSplit::Workspace,
+        PaneSeam {
+            orientation: DividerOrientation::Vertical,
+            workspace: Rect {
+                x: 0,
+                y: 4,
+                width: 130,
+                height: 20,
+            },
+            first_min: 40,
+            second_min: 30,
         },
-        Some(DividerOrientation::Vertical),
     );
     // A selectable pane sits under the divider; pressing the divider must
     // still not start a selection in it.
@@ -34,7 +39,9 @@ fn clicking_the_pane_divider_neither_acts_nor_selects_text() {
     ));
     app.shell.hit_regions.push(crate::pointer::region(
         rect,
-        PointerTarget::PaneDivider,
+        PointerTarget::PaneDivider {
+            split: PaneSplit::Workspace,
+        },
         crate::pointer::PointerLayer::Base,
         None,
         None,
@@ -80,6 +87,10 @@ fn clicking_the_pane_divider_neither_acts_nor_selects_text() {
     assert_eq!(
         restored.shell.pane_split_stacked,
         DEFAULT_PANE_SPLIT_STACKED
+    );
+    assert_eq!(
+        restored.shell.pane_split_details,
+        DEFAULT_PANE_SPLIT_DETAILS
     );
     assert!(restored.shell.session_dirty);
 }

@@ -780,6 +780,10 @@ impl PullRequestsScreen {
             CommandId::CommentPr => self.open_comment(shell),
             CommandId::ToggleClosedPrs => self.show_closed = !self.show_closed,
             CommandId::Quit => shell.should_quit = true,
+            // The panes are the shell's: every tab shows the same two and
+            // arranges them the same way.
+            CommandId::ToggleDetails => shell.toggle_narrow_details(),
+            CommandId::ResetPaneSplit => shell.reset_pane_split(),
             // Nothing this screen answers. The first four are the shared
             // overlays, which `App` opens over whichever tab is showing before
             // the screen sees them; the rest are other tabs' verbs, with no
@@ -813,7 +817,6 @@ impl PullRequestsScreen {
             | CommandId::UndoEdit
             | CommandId::Sort
             | CommandId::ToggleDensity
-            | CommandId::ToggleDetails
             | CommandId::ToggleSearchOrder
             | CommandId::ToggleBookmark
             | CommandId::CopyId
@@ -835,7 +838,6 @@ impl PullRequestsScreen {
             | CommandId::Approvals
             | CommandId::SaveView
             | CommandId::SprintSummary
-            | CommandId::ResetPaneSplit
             | CommandId::SetStaleThreshold => {}
         }
         AppAction::None
@@ -873,7 +875,7 @@ impl Screen for PullRequestsScreen {
                 let count = self.visible(shell).len();
                 self.cursor.move_by(isize::MAX, count);
             }
-            KeyCode::Tab => shell.focus = Focus::Details,
+            KeyCode::Tab => shell.toggle_focus(),
             KeyCode::Esc if !self.query.is_empty() => {
                 self.query.clear();
                 self.active_view = None;

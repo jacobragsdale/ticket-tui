@@ -2,6 +2,7 @@
 
 mod details;
 mod overlays;
+mod panes;
 mod pickers;
 mod pipelines;
 mod pull_requests;
@@ -222,11 +223,12 @@ fn layouts_render_both_panes_and_expose_hit_regions_at_every_breakpoint() {
     assert!(table.contains("[Details]"));
     assert!(!table.contains("ID / Type / State"));
 
+    // Whichever pane is showing wears the switcher, so the way back to the
+    // other one is on screen in both directions.
     app.shell.narrow_details = true;
     let details = render_text(60, 20, &mut app);
-    assert!(details.contains("Details"));
-    assert!(!details.contains("[Tickets]"));
-    assert!(!details.contains("[Details]"));
+    assert!(details.contains("[Tickets]"));
+    assert!(details.contains("[Details]"));
     assert!(details.contains("Fix ticket search"));
     app.shell.narrow_details = false;
 

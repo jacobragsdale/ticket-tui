@@ -473,7 +473,7 @@ pub const COMMANDS: &[Command] = &[
         title: "Toggle details pane",
         keys: &[key('d')],
         help: "Below 70 columns",
-        scope: Scope::Tabs(&[TabId::WorkItems]),
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::ToggleSearchOrder,
@@ -629,7 +629,7 @@ pub const COMMANDS: &[Command] = &[
         title: "Reset pane split",
         keys: &[],
         help: "Restore the 62/56 layout",
-        scope: Scope::Tabs(&[TabId::WorkItems]),
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::SetStaleThreshold,
@@ -991,6 +991,8 @@ mod tests {
                 CommandId::HistoryBack,
                 CommandId::HistoryForward,
                 CommandId::Quit,
+                CommandId::ToggleDetails,
+                CommandId::ResetPaneSplit,
             ],
             TabId::PullRequests => &[
                 CommandId::Search,
@@ -1009,6 +1011,8 @@ mod tests {
                 CommandId::CommentPr,
                 CommandId::ToggleClosedPrs,
                 CommandId::Quit,
+                CommandId::ToggleDetails,
+                CommandId::ResetPaneSplit,
             ],
             TabId::Pipelines => &[
                 CommandId::Search,
@@ -1022,6 +1026,8 @@ mod tests {
                 CommandId::RetryRun,
                 CommandId::WatchRun,
                 CommandId::Quit,
+                CommandId::ToggleDetails,
+                CommandId::ResetPaneSplit,
             ],
             // The work items screen matches exhaustively and answers
             // everything except the other tabs' verbs, which are exactly the

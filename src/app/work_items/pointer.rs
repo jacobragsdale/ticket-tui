@@ -63,139 +63,6 @@ impl WorkItemsScreen {
         }
     }
 
-    pub fn handle_mouse(&mut self, shell: &mut Shell, mouse: MouseEvent) -> PointerUpdate {
-        shell.pointer.set_position(mouse.column, mouse.row);
-        match mouse.kind {
-            MouseEventKind::ScrollUp => self.handle_wheel(shell, mouse.column, mouse.row, -3),
-            MouseEventKind::ScrollDown => self.handle_wheel(shell, mouse.column, mouse.row, 3),
-            MouseEventKind::Down(MouseButton::Left) => shell.handle_press(mouse.column, mouse.row),
-            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved
-                if shell.pointer.is_pressed() =>
-            {
-                self.handle_drag(shell, mouse.column, mouse.row)
-            }
-            MouseEventKind::Moved => shell.handle_hover(mouse.column, mouse.row),
-            MouseEventKind::Up(MouseButton::Left) => {
-                self.handle_release(shell, mouse.column, mouse.row)
-            }
-            _ => PointerUpdate::none(false),
-        }
-    }
-
-    fn handle_drag(&mut self, shell: &mut Shell, column: u16, row: u16) -> PointerUpdate {
-        let hover = shell
-            .hit_regions
-            .resolve(column, row)
-            .map(|region| region.target.clone());
-        let hover_changed = hover != shell.pointer.hover;
-        shell.pointer.hover = hover;
-        if !shell.pointer.moved_from_origin(column, row)
-            && matches!(shell.pointer.drag(), DragKind::None)
-        {
-            return PointerUpdate::none(hover_changed);
-        }
-        match shell.pointer.drag() {
-            DragKind::Scrollbar { surface, grab } => {
-                self.drag_scrollbar(shell, surface, row, grab);
-                PointerUpdate::none(true)
-            }
-            DragKind::Text => {
-                shell.update_text_drag(column, row);
-                PointerUpdate::none(true)
-            }
-            DragKind::Divider => {
-                shell.drag_divider(column, row);
-                PointerUpdate::none(true)
-            }
-            DragKind::Cancelled => PointerUpdate::none(hover_changed),
-            DragKind::None => {
-                if matches!(
-                    shell.pointer.press_target(),
-                    Some(PointerTarget::PaneDivider)
-                ) {
-                    shell.pointer.set_drag(DragKind::Divider);
-                    shell.drag_divider(column, row);
-                    PointerUpdate::none(true)
-                } else if let Some(surface) = shell.pointer.press_scrollbar() {
-                    let grab = shell.scrollbar_grab(surface, shell.pointer.press_origin());
-                    shell
-                        .pointer
-                        .set_drag(DragKind::Scrollbar { surface, grab });
-                    self.drag_scrollbar(shell, surface, row, grab);
-                    PointerUpdate::none(true)
-                } else if let Some(surface) = shell.pointer.press_selectable() {
-                    shell.pointer.set_drag(DragKind::Text);
-                    if let Some(origin) = shell.pointer.press_origin()
-                        && let Some(snapshot) = shell.hit_regions.selectable(surface)
-                        && let Some(start) = snapshot.pos_at(origin.0, origin.1)
-                    {
-                        shell.pointer.selection = Some(TextSelection {
-                            surface,
-                            start,
-                            end: start,
-                        });
-                    }
-                    shell.update_text_drag(column, row);
-                    PointerUpdate::none(true)
-                } else {
-                    shell.pointer.set_drag(DragKind::Cancelled);
-                    PointerUpdate::none(hover_changed)
-                }
-            }
-        }
-    }
-
-    fn handle_release(&mut self, shell: &mut Shell, column: u16, row: u16) -> PointerUpdate {
-        let drag = shell.pointer.drag();
-        let target = shell.pointer.press_target().cloned();
-        let selection = shell.pointer.selection;
-        shell.pointer.clear_press();
-        shell.handle_hover(column, row);
-        match drag {
-            DragKind::Text => {
-                if let Some(selection) = selection.filter(|selection| !selection.is_empty())
-                    && let Some(snapshot) = shell.hit_regions.selectable(selection.surface)
-                {
-                    let text = crate::pointer::extract_selected_text(snapshot, &selection);
-                    if !text.is_empty() {
-                        return PointerUpdate::action(AppAction::Copy {
-                            text,
-                            content: CopiedContent::Text,
-                        });
-                    }
-                }
-                PointerUpdate::none(true)
-            }
-            DragKind::Divider => {
-                shell.session_dirty = true;
-                PointerUpdate::none(true)
-            }
-            DragKind::Scrollbar { .. } | DragKind::Cancelled => PointerUpdate::none(true),
-            DragKind::None => {
-                if let Some(target) = target {
-                    PointerUpdate::action(self.activate_target(shell, target, column, row))
-                } else {
-                    PointerUpdate::none(true)
-                }
-            }
-        }
-    }
-
-    fn handle_wheel(
-        &mut self,
-        shell: &mut Shell,
-        column: u16,
-        row: u16,
-        delta: i32,
-    ) -> PointerUpdate {
-        let hover_changed = shell.refresh_hover();
-        let Some(surface) = shell.hit_regions.resolve_scroll(column, row) else {
-            return PointerUpdate::none(hover_changed);
-        };
-        let changed = self.scroll_surface(surface, delta);
-        PointerUpdate::none(changed || hover_changed)
-    }
-
     pub(super) fn activate_target(
         &mut self,
         shell: &mut Shell,
@@ -210,16 +77,6 @@ impl WorkItemsScreen {
             }
             PointerTarget::ClearQuery => self.set_query(shell, String::new()),
             PointerTarget::CloseOverlay => self.close_overlay(shell),
-            PointerTarget::NarrowTickets => {
-                shell.narrow_details = false;
-                shell.focus = Focus::Tickets;
-            }
-            PointerTarget::NarrowDetails => {
-                shell.narrow_details = true;
-                if !shell.focus.is_details_pane() {
-                    shell.focus = Focus::Details;
-                }
-            }
             PointerTarget::FocusTickets => {
                 shell.focus = Focus::Tickets;
                 shell.narrow_details = false;
@@ -431,12 +288,17 @@ impl WorkItemsScreen {
             PointerTarget::ScrollbarTrack { surface, page_down } => {
                 let step =
                     i32::try_from(self.scroll_state(surface).page_step()).unwrap_or(i32::MAX);
-                self.scroll_surface(surface, if page_down { step } else { -step });
+                self.scroll_state_mut(surface)
+                    .scroll_by(if page_down { step } else { -step });
             }
             PointerTarget::ScrollbarThumb { .. } => {}
-            // The tab bar's own controls: the shell answers these before a
-            // screen sees them.
-            PointerTarget::PaneDivider | PointerTarget::OpenPalette | PointerTarget::OpenHelp => {}
+            // The seam and the two chips beside it are the pane system's, and
+            // the bar's two controls are the shell's: none reaches a screen.
+            PointerTarget::PaneDivider { .. }
+            | PointerTarget::NarrowTickets
+            | PointerTarget::NarrowDetails
+            | PointerTarget::OpenPalette
+            | PointerTarget::OpenHelp => {}
         }
         AppAction::None
     }
@@ -524,27 +386,5 @@ impl WorkItemsScreen {
                 }
             }
         }
-    }
-
-    fn drag_scrollbar(&mut self, shell: &mut Shell, surface: ScrollSurface, row: u16, grab: i16) {
-        let Some(metrics) = shell.hit_regions.scroll(surface) else {
-            return;
-        };
-        let Some(thumb) = metrics.thumb() else {
-            return;
-        };
-        let pointer = i32::from(row) - i32::from(grab);
-        let track_y = i32::from(metrics.track.y);
-        let rel = pointer.saturating_sub(track_y).max(0) as usize;
-        let offset = crate::pointer::offset_from_thumb(
-            rel.min(thumb.travel),
-            thumb.travel,
-            thumb.max_offset,
-        );
-        self.scroll_state_mut(surface).scroll_to(offset);
-    }
-
-    fn scroll_surface(&mut self, surface: ScrollSurface, delta: i32) -> bool {
-        self.scroll_state_mut(surface).scroll_by(delta)
     }
 }

@@ -88,6 +88,8 @@ pub struct Session {
     pub pane_split_wide: u16,
     #[serde(default = "stacked_split")]
     pub pane_split_stacked: u16,
+    #[serde(default = "details_split")]
+    pub pane_split_details: u16,
     #[serde(default = "stale_days")]
     pub stale_days: u16,
     /// The flat shape a pre-tabs file carries, folded into the work items tab
@@ -162,6 +164,12 @@ const fn stacked_split() -> u16 {
     crate::app::DEFAULT_PANE_SPLIT_STACKED
 }
 
+/// The same for the seam inside the details pane, which sessions written
+/// before that pane had one carry nothing for.
+const fn details_split() -> u16 {
+    crate::app::DEFAULT_PANE_SPLIT_DETAILS
+}
+
 /// Sessions written before the Changed column flagged neglected work carry no
 /// threshold, so they fall back to the built-in fortnight.
 const fn stale_days() -> u16 {
@@ -182,6 +190,7 @@ impl Default for Session {
             selected: None,
             pane_split_wide: wide_split(),
             pane_split_stacked: stacked_split(),
+            pane_split_details: details_split(),
             stale_days: stale_days(),
             flat: FlatSession::default(),
         }

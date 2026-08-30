@@ -39,7 +39,7 @@ use crate::pointer::{
     DragKind, PointerState, ScrollState, ScrollSurface, SelectableSurface, TextEditor, TextPos,
     TextSelection,
 };
-pub use crate::pointer::{EditableField, HitRegions, OverlayAnchor, PointerTarget};
+pub use crate::pointer::{EditableField, HitRegions, OverlayAnchor, PaneSplit, PointerTarget};
 use crate::search::{SearchEngine, SearchMatch};
 use crate::session::{NamedView, Session, TabSession};
 use crate::sprint::{self, SprintSummary, SummaryRow, SummaryRowKind};
@@ -65,8 +65,8 @@ pub use repos::ReposScreen;
 pub use screen::{Screen, TabId};
 pub(crate) use shell::relative_age;
 pub use shell::{
-    DEFAULT_PANE_SPLIT_STACKED, DEFAULT_PANE_SPLIT_WIDE, DividerOrientation, Focus,
-    NotificationLevel, PointerUpdate, Shell, SyncStatus,
+    DEFAULT_PANE_SPLIT_DETAILS, DEFAULT_PANE_SPLIT_STACKED, DEFAULT_PANE_SPLIT_WIDE,
+    DividerOrientation, Focus, NotificationLevel, PaneSeam, PointerUpdate, Shell, SyncStatus,
 };
 use shell::{MAX_SPLIT_PERCENT, MIN_SPLIT_PERCENT};
 pub use work_items::{
@@ -591,6 +591,7 @@ impl App {
                 .map(|ticket| ticket.key.clone()),
             pane_split_wide: self.shell.pane_split_wide,
             pane_split_stacked: self.shell.pane_split_stacked,
+            pane_split_details: self.shell.pane_split_details,
             stale_days: self.work_items.remembered_stale_days(),
             ..Session::default()
         };
@@ -608,6 +609,9 @@ impl App {
             .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
         self.shell.pane_split_stacked = session
             .pane_split_stacked
+            .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
+        self.shell.pane_split_details = session
+            .pane_split_details
             .clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
         self.work_items
             .restore_shared(session.stale_days, session.show_finished, &session);

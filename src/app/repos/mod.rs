@@ -388,7 +388,7 @@ impl ReposScreen {
         let jumps = self.jumps(shell);
         self.jump_cursor = self.jump_cursor.min(jumps.len().saturating_sub(1));
         match key.code {
-            KeyCode::Tab | KeyCode::Esc => shell.focus = Focus::Tickets,
+            KeyCode::Tab | KeyCode::Esc => shell.focus_list(),
             KeyCode::Down | KeyCode::Char('j') => {
                 if jumps.is_empty() {
                     self.details.scroll_by(1);
@@ -444,6 +444,10 @@ impl ReposScreen {
             CommandId::HistoryBack => return AppAction::HistoryBack,
             CommandId::HistoryForward => return AppAction::HistoryForward,
             CommandId::Quit => shell.should_quit = true,
+            // The panes are the shell's: every tab shows the same two and
+            // arranges them the same way.
+            CommandId::ToggleDetails => shell.toggle_narrow_details(),
+            CommandId::ResetPaneSplit => shell.reset_pane_split(),
             // Nothing this screen answers. The first four are the shared
             // overlays, which `App` opens over whichever tab is showing before
             // the screen sees them; the rest are other tabs' verbs, with no
@@ -476,7 +480,6 @@ impl ReposScreen {
             | CommandId::UndoEdit
             | CommandId::Sort
             | CommandId::ToggleDensity
-            | CommandId::ToggleDetails
             | CommandId::ToggleSearchOrder
             | CommandId::ToggleFinished
             | CommandId::ToggleBookmark
@@ -504,7 +507,6 @@ impl ReposScreen {
             | CommandId::Approvals
             | CommandId::SaveView
             | CommandId::SprintSummary
-            | CommandId::ResetPaneSplit
             | CommandId::SetStaleThreshold => {}
         }
         AppAction::None
@@ -613,7 +615,7 @@ impl Screen for ReposScreen {
                 self.cursor.move_by(isize::MAX, count);
                 self.jump_cursor = 0;
             }
-            KeyCode::Tab => shell.focus = Focus::Details,
+            KeyCode::Tab => shell.toggle_focus(),
             KeyCode::Esc if !self.query.is_empty() => {
                 self.query.clear();
                 self.cursor.reset();

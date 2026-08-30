@@ -23,7 +23,14 @@ impl MousePointerShape {
 }
 
 pub(super) fn sync_mouse_pointer(app: &App, current: &mut MousePointerShape) {
-    let desired = mouse_pointer_for_hover(app.shell.hovered(), app.shell.divider_orientation());
+    // Which way the seam under the pointer runs is the seam's business, not
+    // the layout's: a tab can draw more than one, running different ways.
+    let hovered = app.shell.hovered();
+    let seam = match hovered {
+        Some(PointerTarget::PaneDivider { split }) => app.shell.seam_orientation(*split),
+        _ => None,
+    };
+    let desired = mouse_pointer_for_hover(hovered, seam);
     if desired == *current {
         return;
     }
@@ -32,6 +39,8 @@ pub(super) fn sync_mouse_pointer(app: &App, current: &mut MousePointerShape) {
     }
 }
 
+/// The shape for one hover: `divider` is which way the seam under the pointer
+/// runs, for a hover that is on one.
 pub(super) fn mouse_pointer_for_hover(
     target: Option<&PointerTarget>,
     divider: Option<DividerOrientation>,
@@ -43,7 +52,7 @@ pub(super) fn mouse_pointer_for_hover(
             | PointerTarget::EditField { .. }
             | PointerTarget::RunCommand(_),
         ) => MousePointerShape::Link,
-        Some(PointerTarget::PaneDivider) => match divider {
+        Some(PointerTarget::PaneDivider { .. }) => match divider {
             Some(DividerOrientation::Vertical) => MousePointerShape::ColResize,
             Some(DividerOrientation::Horizontal) => MousePointerShape::RowResize,
             None => MousePointerShape::Default,

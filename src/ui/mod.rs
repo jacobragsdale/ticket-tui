@@ -12,8 +12,8 @@ use time::OffsetDateTime;
 
 use crate::app::{
     App, ChildProgress, DividerOrientation, Focus, FormOverlay, HitRegions, NotificationLevel,
-    PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PromptField, RowDensity, Screen, SearchOrder, Shell,
-    SyncStatus, TabId, UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
+    PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PaneSeam, PaneSplit, PromptField, RowDensity, Screen,
+    SearchOrder, Shell, SyncStatus, TabId, UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
 };
 use crate::command::{COMMANDS, Command, Scope, key_label_for};
 use crate::filter::{FacetTarget, FilterField, WorkItemSchema};
@@ -31,6 +31,7 @@ use crate::timestamp::Timestamp;
 
 mod details;
 mod overlays;
+mod panes;
 mod pickers;
 pub(crate) mod pipelines;
 pub(crate) mod pull_requests;
@@ -49,6 +50,7 @@ use overlays::{
     render_palette, render_sort_popup, render_sprint_overlay, render_views_overlay,
     terminate_underline,
 };
+use panes::{PaneNames, PanePair, render_inner_split, render_workspace};
 use pickers::{
     render_assignee_picker, render_delete_confirm, render_edit_menu, render_form,
     render_node_picker, render_parent_picker, render_priority_picker, render_prompt,
@@ -103,6 +105,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
 fn paint(frame: &mut Frame<'_>, app: &mut App) {
     app.shell.hit_regions = HitRegions::default();
+    app.shell.clear_seams();
     let area = frame.area();
     if area.width < 36 || area.height < 11 {
         frame.render_widget(
@@ -369,128 +372,38 @@ fn render_search(
     );
 }
 
+/// The work items workspace: the tickets table, and the details of the ticket
+/// under the cursor. Drawn through the same pane system every other tab uses.
 fn render_content(
     frame: &mut Frame<'_>,
     screen: &mut WorkItemsScreen,
     shell: &mut Shell,
     area: Rect,
 ) {
-    if area.width >= WIDE_BREAKPOINT {
-        shell.set_content_layout(area, Some(DividerOrientation::Vertical));
-        let panes = Layout::horizontal([
-            Constraint::Percentage(shell.pane_split_wide),
-            Constraint::Fill(1),
-        ])
-        .spacing(Spacing::Overlap(1))
-        .split(area);
-        render_table(frame, screen, shell, panes[0]);
-        render_details(frame, screen, shell, panes[1]);
-        render_divider(
-            frame,
-            shell,
-            panes[0],
-            panes[1],
-            DividerOrientation::Vertical,
-        );
-    } else if area.width >= NARROW_BREAKPOINT {
-        shell.set_content_layout(area, Some(DividerOrientation::Horizontal));
-        let panes = Layout::vertical([
-            Constraint::Percentage(shell.pane_split_stacked),
-            Constraint::Fill(1),
-        ])
-        .spacing(Spacing::Overlap(1))
-        .split(area);
-        render_table(frame, screen, shell, panes[0]);
-        render_details(frame, screen, shell, panes[1]);
-        render_divider(
-            frame,
-            shell,
-            panes[0],
-            panes[1],
-            DividerOrientation::Horizontal,
-        );
-    } else {
-        shell.set_content_layout(area, None);
-        if shell.narrow_details {
-            render_details(frame, screen, shell, area);
-        } else {
-            render_table(frame, screen, shell, area);
+    struct Panes<'a>(&'a mut WorkItemsScreen);
+    impl PanePair for Panes<'_> {
+        fn first(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+            render_table(frame, self.0, shell, area);
+        }
+
+        fn second(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+            render_details(frame, self.0, shell, area);
         }
     }
-}
-
-/// Registers the border the two panes share as the draggable divider, and
-/// gives it the neutral border colour: the seam belongs to neither pane, so a
-/// focused pane does not paint half of it in the accent. The glyphs are the
-/// merged ones the panes have already drawn. Hovering reverses it through the
-/// usual hover pass.
-fn render_divider(
-    frame: &mut Frame<'_>,
-    shell: &mut Shell,
-    first: Rect,
-    second: Rect,
-    orientation: DividerOrientation,
-) {
-    let Some(rect) = divider_rect(first, second, orientation) else {
-        return;
-    };
-    let buffer = frame.buffer_mut();
-    for y in rect.y..rect.bottom() {
-        for x in rect.x..rect.right() {
-            let cell = &mut buffer[(x, y)];
-            let style = cell.style().fg(theme().border);
-            cell.set_style(style);
-        }
-    }
-    shell.hit_regions.push(region(
-        rect,
-        PointerTarget::PaneDivider,
-        PointerLayer::Base,
-        None,
-        None,
-    ));
-}
-
-/// The one border column, or row, the two panes share.
-fn divider_rect(first: Rect, second: Rect, orientation: DividerOrientation) -> Option<Rect> {
-    let rect = match orientation {
-        DividerOrientation::Vertical => Rect {
-            x: second.x,
-            y: first.y,
-            width: first.right().checked_sub(second.x)?,
-            height: first.height,
+    render_workspace(
+        frame,
+        shell,
+        area,
+        &PaneNames {
+            list: "Tickets",
+            details: "Details",
         },
-        DividerOrientation::Horizontal => Rect {
-            x: first.x,
-            y: second.y,
-            width: first.width,
-            height: first.bottom().checked_sub(second.y)?,
-        },
-    };
-    (rect.width > 0 && rect.height > 0).then_some(rect)
+        &mut Panes(screen),
+    );
 }
 
 fn render_footer(frame: &mut Frame<'_>, screen: &WorkItemsScreen, shell: &Shell, area: Rect) {
     render_status_bar(frame, shell, area, screen.footer_hint(shell));
-}
-
-fn register_narrow_tabs(shell: &mut Shell, area: Rect) {
-    let tickets = Rect::new(area.x.saturating_add(1), area.y, 9, 1);
-    let details = Rect::new(area.x.saturating_add(11), area.y, 9, 1);
-    shell.hit_regions.push(region(
-        tickets,
-        PointerTarget::NarrowTickets,
-        PointerLayer::Base,
-        None,
-        None,
-    ));
-    shell.hit_regions.push(region(
-        details,
-        PointerTarget::NarrowDetails,
-        PointerLayer::Base,
-        None,
-        None,
-    ));
 }
 
 /// The layer a modal on the work items screen sits on: the facet menu is a

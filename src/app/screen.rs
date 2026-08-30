@@ -1,15 +1,19 @@
 //! `Screen`: what a tab is. The shell hands one of these every event and every
-//! frame, and knows nothing else about it. Today `WorkItemsScreen` is the only
-//! implementor; Repos, Pull requests and Pipelines join it behind the tab bar.
+//! frame, and knows nothing else about it. All four tabs implement it, and the
+//! mouse is read here rather than by any of them, so a press, a drag and a
+//! click mean the same thing wherever they land.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};
 
-use super::{AppAction, PointerUpdate, Shell};
+use super::{AppAction, CopiedContent, PointerUpdate, Shell};
 use crate::columns::ColumnLayout;
 use crate::model::Jump;
-use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
+use crate::pointer::{
+    DragKind, PointerTarget, ScrollState, ScrollSurface, TextEditor, TextSelection,
+    extract_selected_text, offset_from_thumb,
+};
 use crate::session::TabSession;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
@@ -88,42 +92,166 @@ pub trait Screen {
     /// Text pasted into whichever editor the screen has open.
     fn handle_paste(&mut self, shell: &mut Shell, pasted: &str);
 
-    /// One mouse event. The default is the plain reading of it — hover, a
-    /// click on whatever region is under the pointer, and the wheel over
-    /// whichever surface it is on — which is all a list screen needs. A screen
-    /// with text selection and draggable furniture overrides it.
+    /// One mouse event, read the same way on every tab: hover, a press that
+    /// arms whatever is under it, a drag that moves a seam, a scrollbar thumb
+    /// or a text selection, and a release that acts on what the press armed.
+    ///
+    /// A click lands on release rather than on press, so a press that moves
+    /// away is not a click, and it acts on what was pressed rather than on
+    /// whatever the pointer has wandered onto by the time the button is up.
     fn handle_mouse(&mut self, shell: &mut Shell, mouse: MouseEvent) -> PointerUpdate {
         shell.pointer.set_position(mouse.column, mouse.row);
         match mouse.kind {
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                    -3
-                } else {
-                    3
-                };
-                let surface = shell
-                    .hit_regions
-                    .resolve(mouse.column, mouse.row)
-                    .and_then(|region| region.scroll);
-                let moved =
-                    surface.is_some_and(|surface| self.scroll_state_mut(surface).scroll_by(delta));
-                PointerUpdate::none(moved)
+            MouseEventKind::ScrollUp => self.handle_wheel(shell, mouse.column, mouse.row, -3),
+            MouseEventKind::ScrollDown => self.handle_wheel(shell, mouse.column, mouse.row, 3),
+            MouseEventKind::Down(MouseButton::Left) => shell.handle_press(mouse.column, mouse.row),
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved
+                if shell.pointer.is_pressed() =>
+            {
+                self.handle_drag(shell, mouse.column, mouse.row)
             }
-            // Acted on release rather than press, the way the work items
-            // screen does it: a press that moves away is not a click.
+            MouseEventKind::Moved => shell.handle_hover(mouse.column, mouse.row),
             MouseEventKind::Up(MouseButton::Left) => {
-                let Some(target) = shell
-                    .hit_regions
-                    .resolve(mouse.column, mouse.row)
-                    .map(|region| region.target.clone())
-                else {
-                    return PointerUpdate::none(false);
-                };
-                let action = self.activate_target(shell, target, mouse.column, mouse.row);
-                PointerUpdate::action(action)
+                self.handle_release(shell, mouse.column, mouse.row)
             }
-            _ => PointerUpdate::none(shell.refresh_hover()),
+            _ => PointerUpdate::none(false),
         }
+    }
+
+    /// The wheel over whichever scrolling surface is under the pointer.
+    fn handle_wheel(
+        &mut self,
+        shell: &mut Shell,
+        column: u16,
+        row: u16,
+        delta: i32,
+    ) -> PointerUpdate {
+        let hover_changed = shell.refresh_hover();
+        let Some(surface) = shell.hit_regions.resolve_scroll(column, row) else {
+            return PointerUpdate::none(hover_changed);
+        };
+        let changed = self.scroll_state_mut(surface).scroll_by(delta);
+        PointerUpdate::none(changed || hover_changed)
+    }
+
+    /// The pointer moving with the button down. What a drag does is settled
+    /// once, on the first move away from the press, and held until the button
+    /// comes up.
+    fn handle_drag(&mut self, shell: &mut Shell, column: u16, row: u16) -> PointerUpdate {
+        let hover = shell
+            .hit_regions
+            .resolve(column, row)
+            .map(|region| region.target.clone());
+        let hover_changed = hover != shell.pointer.hover;
+        shell.pointer.hover = hover;
+        if !shell.pointer.moved_from_origin(column, row)
+            && matches!(shell.pointer.drag(), DragKind::None)
+        {
+            return PointerUpdate::none(hover_changed);
+        }
+        match shell.pointer.drag() {
+            DragKind::Scrollbar { surface, grab } => {
+                self.drag_scrollbar(shell, surface, row, grab);
+                PointerUpdate::none(true)
+            }
+            DragKind::Text => {
+                shell.update_text_drag(column, row);
+                PointerUpdate::none(true)
+            }
+            DragKind::Divider { split } => {
+                shell.drag_divider(split, column, row);
+                PointerUpdate::none(true)
+            }
+            DragKind::Cancelled => PointerUpdate::none(hover_changed),
+            DragKind::None => {
+                if let Some(PointerTarget::PaneDivider { split }) = shell.pointer.press_target() {
+                    let split = *split;
+                    shell.pointer.set_drag(DragKind::Divider { split });
+                    shell.drag_divider(split, column, row);
+                    PointerUpdate::none(true)
+                } else if let Some(surface) = shell.pointer.press_scrollbar() {
+                    let grab = shell.scrollbar_grab(surface, shell.pointer.press_origin());
+                    shell
+                        .pointer
+                        .set_drag(DragKind::Scrollbar { surface, grab });
+                    self.drag_scrollbar(shell, surface, row, grab);
+                    PointerUpdate::none(true)
+                } else if let Some(surface) = shell.pointer.press_selectable() {
+                    shell.pointer.set_drag(DragKind::Text);
+                    if let Some(origin) = shell.pointer.press_origin()
+                        && let Some(snapshot) = shell.hit_regions.selectable(surface)
+                        && let Some(start) = snapshot.pos_at(origin.0, origin.1)
+                    {
+                        shell.pointer.selection = Some(TextSelection {
+                            surface,
+                            start,
+                            end: start,
+                        });
+                    }
+                    shell.update_text_drag(column, row);
+                    PointerUpdate::none(true)
+                } else {
+                    shell.pointer.set_drag(DragKind::Cancelled);
+                    PointerUpdate::none(hover_changed)
+                }
+            }
+        }
+    }
+
+    /// The button coming up: a finished drag, or the click the press armed.
+    fn handle_release(&mut self, shell: &mut Shell, column: u16, row: u16) -> PointerUpdate {
+        let drag = shell.pointer.drag();
+        let target = shell.pointer.press_target().cloned();
+        let selection = shell.pointer.selection;
+        shell.pointer.clear_press();
+        shell.handle_hover(column, row);
+        match drag {
+            DragKind::Text => {
+                if let Some(selection) = selection.filter(|selection| !selection.is_empty())
+                    && let Some(snapshot) = shell.hit_regions.selectable(selection.surface)
+                {
+                    let text = extract_selected_text(snapshot, &selection);
+                    if !text.is_empty() {
+                        return PointerUpdate::action(AppAction::Copy {
+                            text,
+                            content: CopiedContent::Text,
+                        });
+                    }
+                }
+                PointerUpdate::none(true)
+            }
+            DragKind::Divider { .. } => {
+                shell.session_dirty = true;
+                PointerUpdate::none(true)
+            }
+            DragKind::Scrollbar { .. } | DragKind::Cancelled => PointerUpdate::none(true),
+            DragKind::None => {
+                let Some(target) = target else {
+                    return PointerUpdate::none(true);
+                };
+                // The chips that switch panes belong to the pane system, not
+                // to a screen, so every tab switches the same way.
+                if shell.activate_pane_target(&target) {
+                    return PointerUpdate::none(true);
+                }
+                PointerUpdate::action(self.activate_target(shell, target, column, row))
+            }
+        }
+    }
+
+    /// The thumb of one scrollbar, dragged to wherever the pointer has it.
+    fn drag_scrollbar(&mut self, shell: &mut Shell, surface: ScrollSurface, row: u16, grab: i16) {
+        let Some(metrics) = shell.hit_regions.scroll(surface) else {
+            return;
+        };
+        let Some(thumb) = metrics.thumb() else {
+            return;
+        };
+        let pointer = i32::from(row) - i32::from(grab);
+        let track_y = i32::from(metrics.track.y);
+        let rel = pointer.saturating_sub(track_y).max(0) as usize;
+        let offset = offset_from_thumb(rel.min(thumb.travel), thumb.travel, thumb.max_offset);
+        self.scroll_state_mut(surface).scroll_to(offset);
     }
 
     /// A click on one of the hit regions the screen registered while painting.

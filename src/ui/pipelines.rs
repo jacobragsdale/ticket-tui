@@ -242,18 +242,37 @@ fn render_content(
     shell: &mut Shell,
     area: Rect,
 ) {
-    let split = if area.width >= WIDE_BREAKPOINT {
-        Layout::horizontal([Constraint::Percentage(62), Constraint::Percentage(38)]).split(area)
-    } else {
-        Layout::horizontal([Constraint::Fill(1)]).split(area)
+    struct Panes<'a>(&'a mut PipelinesScreen);
+    impl PanePair for Panes<'_> {
+        fn first(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+            match self.0.level() {
+                Level::Pipelines => render_pipeline_table(frame, self.0, shell, area),
+                Level::Runs(_) => render_run_table(frame, self.0, shell, area),
+            }
+        }
+
+        fn second(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+            render_details(frame, self.0, shell, area);
+        }
+    }
+    // The list is whichever level is open: the pipelines, or one pipeline's
+    // runs. The chips the narrow layout wears say which.
+    let list = match screen.level() {
+        Level::Pipelines => "Pipelines".to_owned(),
+        Level::Runs(_) => screen
+            .open_pipeline()
+            .map_or_else(|| "Runs".to_owned(), |pipeline| pipeline.name.clone()),
     };
-    match screen.level() {
-        Level::Pipelines => render_pipeline_table(frame, screen, shell, split[0]),
-        Level::Runs(_) => render_run_table(frame, screen, shell, split[0]),
-    }
-    if split.len() > 1 {
-        render_details(frame, screen, shell, split[1]);
-    }
+    render_workspace(
+        frame,
+        shell,
+        area,
+        &PaneNames {
+            list: &list,
+            details: "Run",
+        },
+        &mut Panes(screen),
+    );
 }
 
 fn render_pipeline_table(
@@ -469,15 +488,23 @@ fn render_details(
     area: Rect,
 ) {
     // `l` gives the log the whole pane; otherwise the run and its timeline
-    // take the top half and the log the bottom.
+    // take the first half and the log the second, either side of a seam that
+    // drags like every other.
     if screen.log_full_pane() {
         render_log(frame, screen, shell, area);
         return;
     }
-    let halves =
-        Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)]).split(area);
-    render_run_details(frame, screen, shell, halves[0]);
-    render_log(frame, screen, shell, halves[1]);
+    struct Halves<'a>(&'a mut PipelinesScreen);
+    impl PanePair for Halves<'_> {
+        fn first(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+            render_run_details(frame, self.0, shell, area);
+        }
+
+        fn second(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+            render_log(frame, self.0, shell, area);
+        }
+    }
+    render_inner_split(frame, shell, area, &mut Halves(screen));
 }
 
 fn render_run_details(

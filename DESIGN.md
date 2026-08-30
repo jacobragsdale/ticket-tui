@@ -1005,6 +1005,12 @@ screen keeps its own query, cursor and scroll while another is showing, and a
 tab wears a badge after its name when it has something waiting. Repos, Pull
 requests and Pipelines say which ticket fills them in until it lands.
 
+All four are drawn by one pane system: the same two panes, the same three
+arrangements as the terminal narrows, and the same draggable seam between them,
+described under [Controls](#controls). The split, which
+pane is showing below 70 columns, and the focus are the shell's rather than any
+screen's, so switching tabs keeps the layout you were working in.
+
 `[` and `]` walk back and forward through everywhere the run has been,
 switching tabs as they go: a work item, then its repository, then back. A
 reference in a details pane — the family tree's rows today — is underlined and
@@ -1252,7 +1258,7 @@ anything on tab `1`.
 | `y` | Copy selected (or current) ticket IDs |
 | `[` / `]` | Jump to the previous or next recently viewed ticket |
 | `Tab` | Toggle focus between tickets and details |
-| `d` | Toggle the details screen when the terminal is under 70 columns |
+| `d` | Toggle the details pane when the terminal is under 70 columns; on every tab |
 | `Enter` | Select the family cursor ticket; with details focused, edit the field under the pointer, or open the work item |
 | `o` | Open the selected ticket in the system browser |
 | `r` | Sync from Azure DevOps now, without waiting for the timer |
@@ -1376,6 +1382,21 @@ above. A rule under the table header separates the column names from the rows,
 and the details pane is padded a column in from each side, with the scrollbar
 in a column of its own at the edge.
 
+Every tab is arranged by the same pane system, so all four look and behave
+alike. Each shows a list and the details of whatever its cursor is on, and the
+width decides how: side by side from 110 columns, stacked between 70 and 110,
+and one at a time below 70. The one-pane layout wears the two chips that swap
+them on its top border where the pane's name would go — ` [Repos] [Repository] `,
+` [Pipelines] [Run] ` — the pane on screen in the accent and the other waiting
+to be clicked; `d` switches between them from the keyboard on every tab, and
+`Tab` brings the pane it moves the focus to on screen with it. The
+seam between the panes is draggable on every tab, and the split is the shell's
+rather than a screen's, so a tab opens arranged the way the last one was left,
+and the session file remembers it. A pane divided again inside itself follows
+the same rules: the pipelines log is stacked under its run in a tall pane, sits
+beside it in a short wide one, and stands down altogether where there is room
+for neither, leaving `l` to bring it up whole.
+
 Mouse input stays captured so the TUI can provide its own pointer controls
 without restoring terminal drag-select. Wheel scrolling moves the hovered
 table, details pane, help, or overlay by three rows or lines and does not
@@ -1395,10 +1416,12 @@ selects it and copies the plain text on release, a field value included. Bracket
 the caret in search, the command palette, the named-view editor, and the title,
 tags, and comment prompts.
 Scrollbar tracks page by a viewport-minus-one step; thumbs can be
-dragged. Dragging the border the Tickets and Details panes share resizes
-them, both side by side and stacked; the tickets pane keeps at least 40 columns
-and details at least 30 side by side, and each keeps six rows when stacked.
-`Reset pane split` in the command palette restores the built-in layout.
+dragged. Dragging the border two panes share resizes them, on every tab and in
+both arrangements; the list keeps at least 40 columns and the details pane at
+least 30 side by side, and each keeps six rows when stacked. A seam inside a
+pane — the pipelines log under its run — drags the same way, and keeps less
+either side because it is dividing one pane's worth of room. `Reset pane split`
+in the command palette, on any tab, restores the built-in layout.
 Right-click, double-click, and horizontal wheel gestures are not
 used. Terminals supporting OSC 22 show a browser-style pointer over external
 URL targets and over the details-pane values that can be edited, which underline

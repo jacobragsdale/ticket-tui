@@ -868,7 +868,7 @@ impl Screen for PipelinesScreen {
                     return AppAction::None;
                 }
                 KeyCode::Tab | KeyCode::Esc => {
-                    shell.focus = Focus::Tickets;
+                    shell.focus_list();
                     return AppAction::None;
                 }
                 _ => {}
@@ -876,7 +876,7 @@ impl Screen for PipelinesScreen {
         }
         match key.code {
             KeyCode::Tab => {
-                shell.focus = Focus::Details;
+                shell.toggle_focus();
                 self.sync_focus(shell);
             }
             KeyCode::Down | KeyCode::Char('j') => {
@@ -1296,6 +1296,10 @@ impl PipelinesScreen {
             CommandId::RetryRun => return self.retry_run(shell),
             CommandId::WatchRun => self.watch_selected(shell),
             CommandId::Quit => shell.should_quit = true,
+            // The panes are the shell's: every tab shows the same two and
+            // arranges them the same way.
+            CommandId::ToggleDetails => shell.toggle_narrow_details(),
+            CommandId::ResetPaneSplit => shell.reset_pane_split(),
             // Nothing this screen answers. The first four are the shared
             // overlays, which `App` opens over whichever tab is showing before
             // the screen sees them; the rest are other tabs' verbs, with no
@@ -1328,7 +1332,6 @@ impl PipelinesScreen {
             | CommandId::UndoEdit
             | CommandId::Sort
             | CommandId::ToggleDensity
-            | CommandId::ToggleDetails
             | CommandId::ToggleSearchOrder
             | CommandId::ToggleFinished
             | CommandId::ToggleBookmark
@@ -1356,7 +1359,6 @@ impl PipelinesScreen {
             | CommandId::ToggleClosedPrs
             | CommandId::SaveView
             | CommandId::SprintSummary
-            | CommandId::ResetPaneSplit
             | CommandId::SetStaleThreshold => {}
         }
         AppAction::None

@@ -41,13 +41,25 @@ pub(super) const FLASH_DURATION: Duration = Duration::from_millis(220);
 pub(super) const INFO_NOTIFICATION_DURATION: Duration = Duration::from_secs(4);
 pub(super) const ERROR_NOTIFICATION_DURATION: Duration = Duration::from_secs(8);
 
-/// Which way the draggable pane divider runs in the current layout.
+/// Which way a draggable pane seam runs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DividerOrientation {
-    /// A column between the tickets and details panes (wide layout).
+    /// A column between two panes side by side.
     Vertical,
-    /// A row between the stacked tickets and details panes.
+    /// A row between two stacked panes.
     Horizontal,
+}
+
+/// One seam on screen this frame, as the renderer registered it: which way it
+/// runs, the workspace its position is a percentage of, and the cells each
+/// pane keeps while it is dragged. Every seam the app draws is one of these,
+/// so dragging one is the same work wherever it was drawn.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaneSeam {
+    pub orientation: DividerOrientation,
+    pub workspace: Rect,
+    pub first_min: u16,
+    pub second_min: u16,
 }
 
 #[derive(Debug)]
@@ -72,24 +84,21 @@ impl PointerUpdate {
     }
 }
 
-/// Percentage of the workspace given to the tickets pane when the panes sit
+/// Percentage of the workspace given to the list pane when the panes sit
 /// side by side, and when they are stacked.
 pub const DEFAULT_PANE_SPLIT_WIDE: u16 = 62;
 
 pub const DEFAULT_PANE_SPLIT_STACKED: u16 = 56;
 
+/// Percentage of the details pane given to its first half, for a tab that
+/// divides it again: the pipelines run above its log.
+pub const DEFAULT_PANE_SPLIT_DETAILS: u16 = 55;
+
 /// Safety rails for a stored or dragged split, applied on top of the cell
-/// minimums below.
+/// minimums the renderer registers with each seam.
 pub(crate) const MIN_SPLIT_PERCENT: u16 = 20;
 
 pub(crate) const MAX_SPLIT_PERCENT: u16 = 80;
-
-/// Cells each pane keeps while the divider is dragged.
-const MIN_TICKETS_COLUMNS: u16 = 40;
-
-const MIN_DETAILS_COLUMNS: u16 = 30;
-
-const MIN_PANE_ROWS: u16 = 6;
 
 /// Compact wording for a wait still to come, coarse on purpose: the exact
 /// second the timer comes back is nobody's business, and a title that ticks
@@ -178,11 +187,16 @@ impl SyncStatus {
 #[derive(Debug)]
 pub struct Shell {
     pub focus: Focus,
+    /// Whether the layout that shows one pane at a time is showing the
+    /// details rather than the list. Shared by every tab, so switching tabs
+    /// stays on the pane you were reading.
     pub narrow_details: bool,
     pub pane_split_wide: u16,
     pub pane_split_stacked: u16,
-    pub(crate) content_area: Rect,
-    pub(crate) divider: Option<DividerOrientation>,
+    pub pane_split_details: u16,
+    /// The seams on screen this frame, by [`PaneSplit::index`]. Registered by
+    /// the pane renderer and read by the drag.
+    pub(crate) seams: [Option<PaneSeam>; PaneSplit::ALL.len()],
     pub reload_pending: bool,
     pub should_quit: bool,
     pub session_dirty: bool,
@@ -261,8 +275,8 @@ impl Default for Shell {
             narrow_details: false,
             pane_split_wide: DEFAULT_PANE_SPLIT_WIDE,
             pane_split_stacked: DEFAULT_PANE_SPLIT_STACKED,
-            content_area: Rect::ZERO,
-            divider: None,
+            pane_split_details: DEFAULT_PANE_SPLIT_DETAILS,
+            seams: [None; PaneSplit::ALL.len()],
             reload_pending: false,
             should_quit: false,
             session_dirty: false,
@@ -467,32 +481,103 @@ impl Shell {
         self.stale = false;
     }
 
+    /// Which way the seam between a tab's list and its details runs, or
+    /// `None` in the layout that shows one pane at a time and has no seam.
     #[must_use]
-    pub const fn content_area(&self) -> Rect {
-        self.content_area
+    pub fn divider_orientation(&self) -> Option<DividerOrientation> {
+        self.seam_orientation(PaneSplit::Workspace)
+    }
+
+    /// The seam one split drew this frame, if it drew one.
+    #[must_use]
+    pub(crate) fn seam(&self, split: PaneSplit) -> Option<PaneSeam> {
+        self.seams[split.index()]
     }
 
     #[must_use]
-    pub const fn divider_orientation(&self) -> Option<DividerOrientation> {
-        self.divider
+    pub fn seam_orientation(&self, split: PaneSplit) -> Option<DividerOrientation> {
+        self.seam(split).map(|seam| seam.orientation)
     }
 
-    /// Moves the divider under the pointer: the tickets pane keeps everything up
-    /// to the pointer, the details pane the rest.
-    pub(super) fn drag_divider(&mut self, column: u16, row: u16) {
-        match self.divider {
-            Some(DividerOrientation::Vertical) => {
-                let span = self.content_area.width;
-                let cells = column.saturating_sub(self.content_area.x);
-                self.pane_split_wide =
-                    split_percent(cells, span, MIN_TICKETS_COLUMNS, MIN_DETAILS_COLUMNS);
+    /// Records a seam the renderer has just laid out, so a drag on it knows
+    /// what it is moving. Called as the frame is painted, before the panes
+    /// either side of it are drawn.
+    pub(crate) fn set_seam(&mut self, split: PaneSplit, seam: PaneSeam) {
+        self.seams[split.index()] = Some(seam);
+    }
+
+    /// Forgets last frame's seams, the way the hit regions are forgotten: a
+    /// layout with no room for a seam registers none, and there is nothing
+    /// left over to drag.
+    pub(crate) fn clear_seams(&mut self) {
+        self.seams = [None; PaneSplit::ALL.len()];
+    }
+
+    /// Moves a seam to the pointer: the first pane keeps everything up to it,
+    /// the second the rest. Which stored split that percentage is depends on
+    /// the seam, so the same drag serves every pane in the app.
+    pub(super) fn drag_divider(&mut self, split: PaneSplit, column: u16, row: u16) {
+        let Some(seam) = self.seam(split) else {
+            return;
+        };
+        let percent = match seam.orientation {
+            DividerOrientation::Vertical => split_percent(
+                column.saturating_sub(seam.workspace.x),
+                seam.workspace.width,
+                seam.first_min,
+                seam.second_min,
+            ),
+            DividerOrientation::Horizontal => split_percent(
+                row.saturating_sub(seam.workspace.y),
+                seam.workspace.height,
+                seam.first_min,
+                seam.second_min,
+            ),
+        };
+        *self.split_percent_mut(split, seam.orientation) = percent;
+    }
+
+    /// The stored percentage a seam moves: the workspace keeps one for each
+    /// way it can be arranged, and the details pane one of its own.
+    fn split_percent_mut(&mut self, split: PaneSplit, orientation: DividerOrientation) -> &mut u16 {
+        match (split, orientation) {
+            (PaneSplit::Workspace, DividerOrientation::Vertical) => &mut self.pane_split_wide,
+            (PaneSplit::Workspace, DividerOrientation::Horizontal) => &mut self.pane_split_stacked,
+            (PaneSplit::Details, _) => &mut self.pane_split_details,
+        }
+    }
+
+    /// The percentage the first pane of a split gets.
+    #[must_use]
+    pub(crate) const fn split_percent(
+        &self,
+        split: PaneSplit,
+        orientation: DividerOrientation,
+    ) -> u16 {
+        match (split, orientation) {
+            (PaneSplit::Workspace, DividerOrientation::Vertical) => self.pane_split_wide,
+            (PaneSplit::Workspace, DividerOrientation::Horizontal) => self.pane_split_stacked,
+            (PaneSplit::Details, _) => self.pane_split_details,
+        }
+    }
+
+    /// The two chips the one-pane layout switches with, which are the pane
+    /// system's rather than any screen's. Answers whether it took the click.
+    pub(crate) fn activate_pane_target(&mut self, target: &PointerTarget) -> bool {
+        match target {
+            PointerTarget::NarrowTickets => {
+                self.narrow_details = false;
+                self.focus = Focus::Tickets;
+                true
             }
-            Some(DividerOrientation::Horizontal) => {
-                let span = self.content_area.height;
-                let cells = row.saturating_sub(self.content_area.y);
-                self.pane_split_stacked = split_percent(cells, span, MIN_PANE_ROWS, MIN_PANE_ROWS);
+            PointerTarget::NarrowDetails => {
+                self.narrow_details = true;
+                if !self.focus.is_details_pane() {
+                    self.focus = Focus::Details;
+                }
+                true
             }
-            None => {}
+            _ => false,
         }
     }
 
@@ -546,7 +631,7 @@ impl Shell {
             let selectable = match region.target {
                 // Neither drags text: one resizes the panes, and the other is
                 // the empty space around a dropdown.
-                PointerTarget::PaneDivider | PointerTarget::DismissOverlay => None,
+                PointerTarget::PaneDivider { .. } | PointerTarget::DismissOverlay => None,
                 _ => selectable,
             };
             self.pointer.hover = Some(region.target.clone());
@@ -563,7 +648,7 @@ impl Shell {
         self.pointer.clear_selection();
         if matches!(
             self.pointer.drag(),
-            DragKind::Text | DragKind::Cancelled | DragKind::Divider
+            DragKind::Text | DragKind::Cancelled | DragKind::Divider { .. }
         ) {
             self.pointer.set_drag(DragKind::Cancelled);
         }
@@ -644,6 +729,7 @@ impl Shell {
     pub(super) fn reset_pane_split(&mut self) {
         self.pane_split_wide = DEFAULT_PANE_SPLIT_WIDE;
         self.pane_split_stacked = DEFAULT_PANE_SPLIT_STACKED;
+        self.pane_split_details = DEFAULT_PANE_SPLIT_DETAILS;
         self.session_dirty = true;
         self.set_status("Reset pane split");
     }
@@ -665,13 +751,6 @@ impl Shell {
     #[must_use]
     pub fn selection(&self) -> Option<TextSelection> {
         self.pointer.selection
-    }
-
-    /// Records the workspace the panes were last split inside, and which way the
-    /// divider runs there. The narrow layout passes `None`: it has no divider.
-    pub const fn set_content_layout(&mut self, area: Rect, divider: Option<DividerOrientation>) {
-        self.content_area = area;
-        self.divider = divider;
     }
 
     /// Flags one row: the edit on it has landed, or been taken back. The row
@@ -819,6 +898,14 @@ impl Shell {
             redraw = true;
         }
         redraw
+    }
+
+    /// Puts the keyboard back on the list pane, and the list back on screen
+    /// where only one pane fits: leaving the details pane should not leave the
+    /// keyboard on a pane that is no longer drawn.
+    pub(super) fn focus_list(&mut self) {
+        self.focus = Focus::Tickets;
+        self.narrow_details = false;
     }
 
     pub(super) fn toggle_focus(&mut self) {

@@ -285,7 +285,7 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
 fn divider(app: &App) -> Rect {
     app.shell
         .hit_regions
-        .find_target(|target| matches!(target, PointerTarget::PaneDivider))
+        .find_target(|target| matches!(target, PointerTarget::PaneDivider { .. }))
         .expect("pane divider")
         .rect
 }
@@ -314,7 +314,12 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
     );
 
     app.handle_mouse(mouse(MouseEventKind::Moved, before.x, before.y + 1));
-    assert_eq!(app.shell.hovered(), Some(&PointerTarget::PaneDivider));
+    assert_eq!(
+        app.shell.hovered(),
+        Some(&PointerTarget::PaneDivider {
+            split: crate::pointer::PaneSplit::Workspace
+        })
+    );
     let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     assert!(
@@ -355,7 +360,11 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
         render_text(130, 30, &mut app);
         divider(&app)
     };
-    let content = app.shell.content_area();
+    let content = app
+        .shell
+        .seam(crate::pointer::PaneSplit::Workspace)
+        .expect("a seam knows the workspace it divides")
+        .workspace;
     // The panes share the divider column, so the tickets pane runs from the
     // content's left edge to the far side of the seam.
     assert!(

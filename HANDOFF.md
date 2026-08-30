@@ -18,8 +18,10 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
   panes, the one-row search, the two-segment status bar, dimmed modals with
   chip buttons, the details pane's badge row and rules, and one spinner for
   every wait are all on `main`.
+- **Every tab is drawn by one pane system** (2026-08-29; see "One pane system"
+  below): the same two panes, three layouts and draggable seam on all four.
 - The gate is `cargo fmt --check`, `cargo clippy --all-targets --all-features
-  -D warnings`, `cargo test --all-targets` (542 lib + 28 bin tests) and
+  -D warnings`, `cargo test --all-targets` (548 lib + 28 bin tests) and
   `cargo build --release`, with the test run repeated under `NO_COLOR=1`,
   `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` — the theme
   matrix, which is real because `Theme::from_env` reads the variable.
@@ -37,7 +39,8 @@ method that needs the shell takes `shell: &mut Shell` (or `&Shell`) as its
 first argument after the receiver; nothing else reaches across.
 
     src/app/mod.rs      App, AppAction, and the event entry points
-        screen.rs       the Screen trait every tab implements
+        screen.rs       the Screen trait every tab implements, and the mouse
+                        pipeline it reads for all of them
         shell.rs        focus, the pointer, the notification, the layout, sync
         work_items/     the work items screen
             mod.rs      WorkItemsScreen, WorkItemMode, the key map, the footer
@@ -47,7 +50,7 @@ first argument after the receiver; nothing else reaches across.
             forms.rs    the new-work-item form
             history.rs  bookmarks, the checked set, copy, export, the session
             pickers.rs  state, priority, assignee, parent, node, type pickers
-            pointer.rs  hover, press, drag, release, the divider
+            pointer.rs  what a click on a work-item target does
             query.rs    the search box, filters, facets, columns, commands
             views.rs    saved and built-in views, the sprint summary, staleness
             tests/      the same split, plus tests/deletes.rs
@@ -70,6 +73,8 @@ first argument after the receiver; nothing else reaches across.
         pointer.rs      the mouse pointer shape, and what the hover means
         tests/          the same split, over one fake Azure DevOps
     src/ui/mod.rs       render, render_screen, the layout, the theme, anchoring
+        panes.rs        the pane system every tab is arranged by: the three
+                        layouts, the draggable seam, the narrow switcher
         details.rs      the details pane and the family tree it draws
         overlays.rs     the list overlays, chips and facet bar
         pickers.rs      pickers, the prompt, the form, the delete confirmation
@@ -345,3 +350,41 @@ Not done, deliberately: Nerd Font icons, images, `tachyonfx`, and any change to
 the keys or the hit-region model. `pane_split_wide` is still 62 by default; a
 session that has dragged the divider keeps what it dragged, and `Reset pane
 split` in the palette puts it back.
+
+## One pane system, 2026-08-29
+
+The work items tab could be resized by dragging the border between its panes;
+the other three drew a fixed split — 55/45, 58/42, 62/38 — with no seam, no
+stacked layout, and no details pane at all below 110 columns. Now there is one
+way to draw and manage a pane, and all four tabs go through it.
+
+- `src/ui/panes.rs` owns the arrangement. `render_workspace` picks the layout
+  from the width — side by side from 110, stacked from 70, one pane below that
+  — registers the seam, paints both halves and draws the seam over the border
+  they share. A tab passes a `PanePair` (its list and its details) and what to
+  call them; two closures could not, because both halves want the screen.
+- `render_inner_split` is the same seam inside one pane, for the pipelines log
+  under its run. It follows the pane's shape rather than the terminal's: it
+  stacks in a tall pane, sits side by side in a short wide one, and stands down
+  where there is room for neither, leaving `l` to show the log whole.
+- `PointerTarget::PaneDivider` carries a `PaneSplit` (`Workspace` or
+  `Details`), and `Shell` keeps a `PaneSeam` per split — orientation, the
+  workspace it divides, and the cells each side keeps — registered every frame
+  by the renderer. `drag_divider(split, ..)` reads it and writes the matching
+  percentage, so one drag serves every seam. The third percentage,
+  `pane_split_details`, is in the session file with the other two.
+- The mouse pipeline moved from `WorkItemsScreen` into the `Screen` trait, so
+  press, drag and release mean the same thing on every tab: seams drag, text
+  selects, scrollbar thumbs work, and a click acts on what was pressed rather
+  than on whatever the pointer has wandered onto.
+- The narrow switcher is the pane system's: it repaints the top border and
+  writes ` [Repos] [Repository] ` chips over it, on whichever pane is showing.
+  It used to be the tickets table's title, which meant the details pane below
+  70 columns had no way back to the list with the mouse.
+- `Toggle details pane` (`d`) and `Reset pane split` are global commands now,
+  answered by all four screens, and `Tab` goes through `Shell::toggle_focus` /
+  `focus_list` everywhere: below 70 columns it used to move the focus to a
+  details pane that was not on screen.
+
+The tabs' fixed splits are gone: every tab opens at 62/56 and keeps what it was
+last dragged to, on whichever tab dragged it.

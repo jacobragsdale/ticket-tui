@@ -41,20 +41,29 @@ fn mouse_pointer_sequences_set_and_reset_link_hover() {
     );
     assert_eq!(
         mouse_pointer_for_hover(
-            Some(&PointerTarget::PaneDivider),
+            Some(&PointerTarget::PaneDivider {
+                split: ticket_tui::pointer::PaneSplit::Workspace
+            }),
             Some(DividerOrientation::Vertical)
         ),
         MousePointerShape::ColResize
     );
     assert_eq!(
         mouse_pointer_for_hover(
-            Some(&PointerTarget::PaneDivider),
+            Some(&PointerTarget::PaneDivider {
+                split: ticket_tui::pointer::PaneSplit::Workspace
+            }),
             Some(DividerOrientation::Horizontal)
         ),
         MousePointerShape::RowResize
     );
     assert_eq!(
-        mouse_pointer_for_hover(Some(&PointerTarget::PaneDivider), None),
+        mouse_pointer_for_hover(
+            Some(&PointerTarget::PaneDivider {
+                split: ticket_tui::pointer::PaneSplit::Workspace
+            }),
+            None
+        ),
         MousePointerShape::Default,
         "the narrow layout has no divider to resize"
     );
