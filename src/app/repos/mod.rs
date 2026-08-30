@@ -665,12 +665,10 @@ impl Screen for ReposScreen {
                 }
                 return AppAction::Follow(jump);
             }
-            // Every URL line copies what it says.
-            PointerTarget::CopyText(text) => {
-                return AppAction::Copy {
-                    text,
-                    content: CopiedContent::Url,
-                };
+            // The URL chips, and the path of the clone, copy what they stand
+            // for; the target says which, so the status line can name it.
+            PointerTarget::CopyText { text, content } => {
+                return AppAction::Copy { text, content };
             }
             PointerTarget::SearchField => {
                 self.mode = RepoMode::Search;

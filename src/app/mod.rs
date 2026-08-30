@@ -206,6 +206,7 @@ pub enum CopiedContent {
     Title,
     MarkdownLink,
     Summary,
+    Path,
 }
 
 impl CopiedContent {
@@ -218,6 +219,7 @@ impl CopiedContent {
             Self::Title => "title",
             Self::MarkdownLink => "markdown link",
             Self::Summary => "summary",
+            Self::Path => "path",
         }
     }
 }

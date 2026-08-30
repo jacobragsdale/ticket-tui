@@ -196,9 +196,13 @@ pub enum PointerTarget {
     },
     /// The filter field of the assignee picker.
     AssigneeQuery,
-    /// A line that copies what it says when it is clicked: a repository's
-    /// URLs today.
-    CopyText(String),
+    /// A control that copies a string when it is clicked: the Repos pane's
+    /// URL chips and the path of a clone. What it carries is named, so the
+    /// status line can say whether a url or a path went to the clipboard.
+    CopyText {
+        text: String,
+        content: crate::app::CopiedContent,
+    },
     /// A button that stands for a keystroke: clicking it runs the command the
     /// key would have.
     RunCommand(crate::command::CommandId),

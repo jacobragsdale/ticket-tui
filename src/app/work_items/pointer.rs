@@ -235,7 +235,7 @@ impl WorkItemsScreen {
             PointerTarget::SelectTab { .. }
             | PointerTarget::TreeRow { .. }
             | PointerTarget::ApprovalRow { .. }
-            | PointerTarget::CopyText(_)
+            | PointerTarget::CopyText { .. }
             | PointerTarget::RunCommand(_) => {}
             PointerTarget::DismissOverlay => self.close_overlay(shell),
             PointerTarget::PromptInput => {

@@ -3,6 +3,7 @@
 //! on the right.
 
 use super::*;
+use crate::app::CopiedContent;
 use crate::app::repos::{RepoColumn, RepoMode, RepoRow, ReposScreen};
 use crate::command::CommandId;
 use crate::model::Jump;
@@ -204,23 +205,44 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
         Line::from(""),
         section_line("URLs", inner.width),
     ];
-    let url_start = lines.len();
-    let urls = [
-        ("Web", row.repo.web_url.clone()),
-        ("HTTPS", row.repo.remote_url.clone()),
-        ("SSH", row.repo.ssh_url.clone()),
+    // A URL is long, wraps badly in a narrow pane, and is never read here:
+    // it is wanted on the clipboard. So the section is three chips, not three
+    // lines of text.
+    let copies: [(&str, PointerTarget); 3] = [
+        (
+            " Copy web ",
+            PointerTarget::CopyText {
+                text: row.repo.web_url.clone(),
+                content: CopiedContent::Url,
+            },
+        ),
+        (
+            " Copy HTTPS ",
+            PointerTarget::CopyText {
+                text: row.repo.remote_url.clone(),
+                content: CopiedContent::Url,
+            },
+        ),
+        (
+            " Copy SSH ",
+            PointerTarget::CopyText {
+                text: row.repo.ssh_url.clone(),
+                content: CopiedContent::Url,
+            },
+        ),
     ];
-    for (label, url) in &urls {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  {label:<6}"), Style::default().fg(theme().muted)),
-            Span::styled(url.clone(), Style::default().fg(theme().link)),
-        ]));
-    }
+    let copies_index = lines.len();
+    lines.push(button_row(&copies));
     lines.push(Line::from(""));
     lines.push(section_line("Local", inner.width));
+    // The path stays on the pane — it is short enough to read, and it is what
+    // a shell command wants next — and copies itself on a click.
+    let mut path_line: Option<(usize, String)> = None;
     match row.local.as_ref() {
         Some(local) => {
-            lines.push(Line::from(format!("  {}", local.path.display())));
+            let path = local.path.display().to_string();
+            path_line = Some((lines.len(), path.clone()));
+            lines.push(Line::from(format!("  {path}")));
             let mut status = vec![Span::raw("  ")];
             status.extend(local_line(&row).spans);
             // Nothing here is watched, so how old the reading is matters.
@@ -341,17 +363,29 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
         );
     }
 
-    // Every URL line copies what it says.
-    for (index, (_, url)) in urls.iter().enumerate() {
-        if let Some(y) = row_on_screen(inner, &rows, url_start + index, offset) {
-            shell.hit_regions.push(region(
-                Rect::new(inner.x, y, inner.width, 1),
-                PointerTarget::CopyText(url.clone()),
-                PointerLayer::Base,
-                None,
-                None,
-            ));
-        }
+    // The chips that copy the URLs, and the path, which copies itself. The
+    // path's target is only as wide as the text, so the pointer reverses the
+    // path rather than the row it sits on.
+    if let Some(y) = row_on_screen(inner, &rows, copies_index, offset) {
+        register_buttons(shell, inner, y, PointerLayer::Base, &copies);
+    }
+    if let Some((index, path)) = path_line
+        && let Some(y) = row_on_screen(inner, &rows, index, offset)
+    {
+        let x = inner.x.saturating_add(2);
+        let width = u16::try_from(path.chars().count())
+            .unwrap_or(u16::MAX)
+            .min(inner.width.saturating_sub(2));
+        shell.hit_regions.push(region(
+            Rect::new(x, y, width, 1),
+            PointerTarget::CopyText {
+                text: path,
+                content: CopiedContent::Path,
+            },
+            PointerLayer::Base,
+            None,
+            None,
+        ));
     }
     for (index, (_, jump)) in jumps.iter().enumerate() {
         if let Some(y) = row_on_screen(inner, &rows, jump_start + index, offset) {

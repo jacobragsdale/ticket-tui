@@ -1028,7 +1028,6 @@ this machine — `main ✓` clean, `feat/x *` dirty, `main ↑2 ↓1` ahead and 
 `—` not cloned.
 
 The details pane carries the name and project, the default branch and size, the
-three URLs (each copies what it says on click, and `y` copies the ssh one), the
 local copy — its path, its status, and when the workspace was last read — and
 what is open against the repository: its active
 pull requests and the pipelines that build it, each a jump: `Tab` moves the
@@ -1036,6 +1035,12 @@ focus to the pane, `j`/`k` walk the references, `Enter` follows the one they are
 on, and a click does both at once. `[` comes back, here as everywhere. `[Clone]`, or
 `[Fetch]` and `[Pull]` where there is a clone, run what they say on a click.
 `o` opens the repository's page, and so does clicking its name.
+
+Nothing on the pane prints a URL: they are long, they wrap, and they are wanted
+on the clipboard rather than read. The URLs section is a row of chips instead —
+` Copy web `, ` Copy HTTPS `, ` Copy SSH ` — and the path of the clone copies
+itself on a click, over just the text it covers. `y` still copies the ssh URL,
+and the status line names what went to the clipboard: a url, or a path.
 
 Its grammar: `name:`, `branch:`, `local:` (`cloned`, `dirty`, `ahead`,
 `behind`, `missing`) and `disabled:`.

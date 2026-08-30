@@ -37,7 +37,14 @@ fn the_details_pane_carries_the_urls_the_local_copy_and_what_is_open() {
     assert!(text.contains("Default branch"), "{text}");
     assert!(text.contains("2.0 MB"), "the size reads in units: {text}");
     assert!(text.contains("URLs"), "{text}");
-    assert!(text.contains("git@ssh.dev.azure.com"), "{text}");
+    assert!(
+        text.contains("Copy web") && text.contains("Copy HTTPS") && text.contains("Copy SSH"),
+        "the URLs are chips that copy them: {text}"
+    );
+    assert!(
+        !text.contains("git@ssh.dev.azure.com") && !text.contains("_git/ticket-tui"),
+        "and no URL is printed: {text}"
+    );
     assert!(text.contains("Local"), "{text}");
     assert!(
         text.contains("/Users/jacob/Development/ticket-tui"),
@@ -114,7 +121,7 @@ fn clicking_clone_runs_it_and_a_running_job_says_so_in_the_column() {
 }
 
 #[test]
-fn clicking_a_url_copies_it_and_y_copies_the_ssh_one() {
+fn clicking_a_copy_chip_copies_that_url_and_y_copies_the_ssh_one() {
     let mut app = repos_app();
     app.repos.cursor.focus(3);
     render_text(170, 44, &mut app);
@@ -123,11 +130,11 @@ fn clicking_a_url_copies_it_and_y_copies_the_ssh_one() {
         .shell
         .hit_regions
         .find_target(
-            |target| matches!(target, PointerTarget::CopyText(text) if text.starts_with("git@")),
+            |target| matches!(target, PointerTarget::CopyText { text, .. } if text.starts_with("git@")),
         )
-        .expect("the ssh line copies")
+        .expect("the ssh chip copies")
         .rect;
-    let action = click(&mut app, ssh.x + 10, ssh.y);
+    let action = click(&mut app, ssh.x + 2, ssh.y);
     assert!(
         matches!(action, crate::app::AppAction::Copy { ref text, .. } if text.starts_with("git@")),
         "got {action:?}"
@@ -137,6 +144,44 @@ fn clicking_a_url_copies_it_and_y_copies_the_ssh_one() {
     assert!(
         matches!(action, crate::app::AppAction::Copy { ref text, .. } if text.starts_with("git@")),
         "y copies the ssh URL too, got {action:?}"
+    );
+}
+
+#[test]
+fn clicking_the_path_of_a_clone_copies_the_path() {
+    let mut app = repos_app();
+    app.repos.cursor.focus(3);
+    render_text(170, 44, &mut app);
+
+    let path = app
+        .shell
+        .hit_regions
+        .find_target(|target| {
+            matches!(
+                target,
+                PointerTarget::CopyText {
+                    content: crate::app::CopiedContent::Path,
+                    ..
+                }
+            )
+        })
+        .expect("the path copies")
+        .rect;
+    assert_eq!(
+        u32::from(path.width),
+        "/Users/jacob/Development/ticket-tui".chars().count() as u32,
+        "the target is the text, not the whole row"
+    );
+    let action = click(&mut app, path.x + 2, path.y);
+    assert!(
+        matches!(
+            action,
+            crate::app::AppAction::Copy {
+                ref text,
+                content: crate::app::CopiedContent::Path,
+            } if text == "/Users/jacob/Development/ticket-tui"
+        ),
+        "got {action:?}"
     );
 }
 
@@ -152,31 +197,48 @@ fn the_repos_tab_reads_at_every_breakpoint() {
 }
 
 #[test]
-fn the_clone_button_is_where_it_is_painted_even_when_a_url_wraps() {
+fn the_buttons_are_where_they_are_painted_even_when_the_path_wraps() {
     let mut app = repos_app();
-    // home-server, which is not on this machine.
-    app.repos.cursor.focus(1);
-    // A pane narrow enough that the URLs above the button wrap.
+    app.repos.cursor.focus(3);
+    // A clone deep enough that its path wraps in a narrow pane, pushing every
+    // target under it down a row.
+    let mut local = crate::app::repos::tests::local("main", false, 0, 0);
+    local.path = std::path::PathBuf::from(
+        "/Users/jacob/Development/a-rather-deeply-nested-workspace/ticket-tui",
+    );
+    app.repos.set_local(vec![("aaa-111".to_owned(), local)]);
     let mut terminal = Terminal::new(TestBackend::new(110, 44)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
-    let painted = find_buffer_text_in(
-        terminal.backend().buffer(),
-        Rect::new(0, 0, 110, 44),
-        "[Clone]",
-    )
-    .expect("the button is painted");
-    let button = target_rect(&app, |target| {
-        matches!(
-            target,
-            PointerTarget::RunCommand(crate::command::CommandId::CloneRepo)
-        )
-    });
-    assert_eq!(
-        button.y, painted.1,
-        "the click target is on the row the button is on"
-    );
-    assert!(
-        button.x <= painted.0 && painted.0 < button.x + button.width,
-        "and covers it: {button:?} vs {painted:?}"
-    );
+    let buffer = terminal.backend().buffer().clone();
+    let whole = Rect::new(0, 0, 110, 44);
+
+    for (label, wanted) in [
+        (
+            "Copy SSH",
+            target_rect(
+                &app,
+                |target| matches!(target, PointerTarget::CopyText { text, .. } if text.starts_with("git@")),
+            ),
+        ),
+        (
+            "[Fetch]",
+            target_rect(&app, |target| {
+                matches!(
+                    target,
+                    PointerTarget::RunCommand(crate::command::CommandId::FetchRepo)
+                )
+            }),
+        ),
+    ] {
+        let painted = find_buffer_text_in(&buffer, whole, label)
+            .unwrap_or_else(|| panic!("{label} is painted"));
+        assert_eq!(
+            wanted.y, painted.1,
+            "{label}: the click target is on the row it is painted on"
+        );
+        assert!(
+            wanted.x <= painted.0 && painted.0 < wanted.x + wanted.width,
+            "{label}: and covers it: {wanted:?} vs {painted:?}"
+        );
+    }
 }
