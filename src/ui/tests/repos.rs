@@ -34,7 +34,10 @@ fn the_details_pane_carries_the_urls_the_local_copy_and_what_is_open() {
     app.repos.cursor.focus(3);
     let text = render_text(170, 44, &mut app);
 
-    assert!(text.contains("Default branch"), "{text}");
+    assert!(
+        text.contains("Default branch main"),
+        "a name wider than the value column still keeps a space: {text}"
+    );
     assert!(text.contains("2.0 MB"), "the size reads in units: {text}");
     assert!(text.contains("URLs"), "{text}");
     assert!(

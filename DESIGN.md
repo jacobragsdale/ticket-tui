@@ -1291,7 +1291,9 @@ cells use, then the family breadcrumb, tags, project and revision, child
 progress, and the work-item URL — scrolls away with everything under it, in
 this order: the family tree, Related, Planning, Description, History, and
 Comments. Every field below the badge row reads as a muted label in a column of
-its own with the value beside it, so the values line up down the pane, and each
+its own with the value beside it, so the values line up down the pane; a label
+too wide for that column — `Default branch` on the Repos pane — pushes its
+value along instead, behind one space rather than into it. Each
 section is headed by a rule (`── Planning ────`) rather than by another bold
 line, which is what tells a heading from a field name without colour. The scrollbar
 therefore measures the whole pane and its thumb reaches the bottom, `End` lands

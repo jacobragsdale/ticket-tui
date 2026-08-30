@@ -1,6 +1,21 @@
 use super::*;
 use crate::columns::ColumnLayout;
-use crate::ui::details::{changed_field_line, with_cursor_style};
+use crate::ui::details::{changed_field_line, field_line, with_cursor_style};
+
+#[test]
+fn a_field_name_keeps_a_space_between_it_and_its_value_however_long_it_is() {
+    let short = field_line("Size", "2.0 MB");
+    assert_eq!(
+        short.spans[0].content, "Size       ",
+        "a short name is padded to the column every value starts in"
+    );
+
+    let long = field_line("Default branch", "main");
+    assert_eq!(
+        long.spans[0].content, "Default branch ",
+        "one wider than the column pushes its value along, but not into it"
+    );
+}
 
 #[test]
 fn the_details_changed_line_says_how_long_a_stale_work_item_has_sat() {

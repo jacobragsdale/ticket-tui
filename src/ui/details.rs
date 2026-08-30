@@ -898,14 +898,17 @@ pub(super) fn field_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'
 }
 
 /// One field's name, muted and padded to the column its value starts in. A
-/// label longer than the column keeps its own width and pushes its value
-/// along, which is what a `Project / Revision` does.
+/// label as wide as the column, or wider, keeps its own width and pushes its
+/// value along — behind one space, so a name and its value never run together
+/// the way `Default branch` and `main` once did.
 pub(super) fn field_label(label: &str) -> Span<'static> {
     let width = usize::from(FIELD_VALUE_COLUMN);
-    Span::styled(
-        format!("{label:<width$}"),
-        Style::default().fg(theme().muted),
-    )
+    let padded = if label.chars().count() >= width {
+        format!("{label} ")
+    } else {
+        format!("{label:<width$}")
+    };
+    Span::styled(padded, Style::default().fg(theme().muted))
 }
 
 /// One change on one revision: how long ago it landed, who made it, and what
