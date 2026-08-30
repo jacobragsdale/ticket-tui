@@ -25,4 +25,15 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-targets
+      # The renderer tests assert through the theme's tokens, so the suite is
+      # run again in each palette that changes what a token holds.
+      - run: cargo test --all-targets
+        env:
+          NO_COLOR: 1
+      - run: cargo test --all-targets
+        env:
+          TICKET_TUI_THEME: terminal-light
+      - run: cargo test --all-targets
+        env:
+          TICKET_TUI_THEME: mono
       - run: cargo build --release

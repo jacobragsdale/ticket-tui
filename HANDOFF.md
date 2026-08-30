@@ -8,18 +8,21 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
 
 - **The four-tab roadmap is done**: Epics 656 (#661–#667), 657 (#669–#673),
   658 (#674–#679), 659 (#680–#689) and 660 (#690–#694) are all closed, as is
-  #668. `cargo fmt --check`, `cargo clippy --all-targets --all-features -D
-  warnings`, `cargo test --all-targets` (533 lib + 28 bin tests, and again under
-  `NO_COLOR=1`) and `cargo build --release` are clean.
+  #668, and the gate below was green when it closed.
 - **A review round followed the roadmap** (evening of 2026-08-29; see "Review
   round" below): the four tabs were read end to end as a QA pass, and what it
   found is fixed and on `main`.
-- **A look-and-feel round is under way** (Epic #701, Issues #702–#710, planned in
-  `LOOK_AND_FEEL_PLAN.md`). #702 shipped the theme engine: `config.toml`,
-  the `terminal` / `terminal-light` / `mono` / `custom` themes, `--theme`,
-  the palette the `theme` tool writes, and live reload. Next in order: #706
-  table layout, #703 frame, #704 search row, #705 status bar, #707 overlays,
-  #708 details, #709 motion, #710 docs.
+- **The look-and-feel round is done** (Epic #701, Issues #702–#710, planned in
+  `LOOK_AND_FEEL_PLAN.md`; see "Look and feel, 2026-08-29" below). The theme
+  engine, the table's width rule, the rounded frame with one seam between
+  panes, the one-row search, the two-segment status bar, dimmed modals with
+  chip buttons, the details pane's badge row and rules, and one spinner for
+  every wait are all on `main`.
+- The gate is `cargo fmt --check`, `cargo clippy --all-targets --all-features
+  -D warnings`, `cargo test --all-targets` (542 lib + 28 bin tests) and
+  `cargo build --release`, with the test run repeated under `NO_COLOR=1`,
+  `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` — the theme
+  matrix, which is real because `Theme::from_env` reads the variable.
 - Database schema is `PRAGMA user_version = 17`. A schema bump drops and
   rebuilds rather than migrating, so the first launch of a build that raises it
   does one full pull automatically — and a running `ticket-tui` binary from
@@ -303,3 +306,42 @@ Ghostty sends while hovering.
   without the vote.
 - The help popup wrapped its longest rows; the empty table said "No tickets
   in this database" when all 100 were merely finished and hidden.
+
+
+## Look and feel, 2026-08-29 (Epic #701)
+
+Nine issues, each its own commit, in the order the plan set. What each changed
+and why is in its ADO comment; the shape of it:
+
+- **#702 theme engine.** `config.toml` in `$XDG_CONFIG_HOME/ticket-tui/`, the
+  `terminal` / `terminal-light` / `mono` / `custom` presets, `--theme`,
+  `TICKET_TUI_THEME`, the palette the `theme` tool writes, and live reload.
+- **#706 table layout.** A table drops its right-most optional column while the
+  flexible one would fall under `min_flexible_width` (24 for a title, 16 for a
+  repository name, 20 for a pipeline). The scrollbar has its own column, so a
+  cell is never painted over. State cells carry the family tree's glyph, Pri
+  reads `P1`. `TableLayout::auto_hide` is gone: nothing turned it back on.
+- **#703 frame.** The theme's corners, `border`/`border_focused`, and one
+  border column shared between neighbouring panes (`Spacing::Overlap(1)` and
+  `MergeStrategy::Fuzzy` — `Exact` cannot merge rounded corners). A list
+  pane's counts moved to its bottom border, except where that border is the
+  seam. The details panes are padded and their scrollbars have their own
+  column.
+- **#704 search row.** One row, not a box three rows tall, on every tab;
+  `Actions` and `?` are the tab bar's, and the shell answers them.
+- **#705 status bar.** `Shell::sync_status()` replaced `activity_label()`; the
+  footer is hints on the left and the sync state on the right, on every tab.
+- **#707 overlays.** Dimmed behind, sized by share of the screen, chip buttons
+  with the primary action filled, an accent `›` and a muted key label on list
+  rows.
+- **#708 details.** A badge row instead of two prose lines, section rules,
+  an aligned label column, a fractional progress bar.
+- **#709 motion.** One braille spinner for every wait, turning only while
+  something is in flight, and a flash on the row an edit lands on.
+- **#710 docs.** This file, the README screenshot, DESIGN.md, and the theme
+  matrix in the gate.
+
+Not done, deliberately: Nerd Font icons, images, `tachyonfx`, and any change to
+the keys or the hit-region model. `pane_split_wide` is still 62 by default; a
+session that has dragged the divider keeps what it dragged, and `Reset pane
+split` in the palette puts it back.

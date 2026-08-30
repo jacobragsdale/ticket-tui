@@ -11,27 +11,32 @@ field changed in the TUI is written straight back over the REST API. Everything
 else it does is local.
 
 ```
- 1 Work items  2 Repos  3 Pull requests  4 Pipelines
-┌ Search / ───────────────────────────────────────────────────────────[Actions] [?]┐
-│Type / to search, or pick State, Type, Tags, or Assignee below                    │
-└──────────────────────────────────────────────────────────────────────────────────┘
+ 1 Work items  2 Repos  3 Pull requests  4 Pipelines                       Actions  ?
+/ Type / to search, or pick State, Type, Tags, or Assignee below
  State ▾   Type ▾   Tags ▾   Assignee ▾   +
-┌ Tickets 105/105 · Title ↑ ───────────────────────────────────────────────────────┐
-│       ID      Title↑                     State      Type           Pri Changed   │
-│                                                                                  │
-│› [ ]  643     [Discuss] In-TUI agent cha Done       [Issue]          4         9┃│
-│  [ ]  655     A hand-typed backslash in  Done       [Issue]          2         9││
-│  [ ]  618     Add a comment              Done       [Issue]          2        20││
-│  [ ]  691     Agent context v3: the acti Done       [Issue]          2         4││
-│  [ ]  624     Agent integration          Done       [Epic]           3         9││
-└──────────────────────────────────────────────────────────────────────────────────┘
-────────────────────────────────────────────────────────────────────────────────────
-┌ Details ─────────────────────────────────────────────────────────────────────────┐
-│[Discuss] In-TUI agent chat pane about the selected ticket                       ┃│
-│ID / Type / State: 643 · [Issue] · Done                                          ││
-│Family: Epic 624  Agent integration › this                                       ││
-└──────────────────────────────────────────────────────────────────────────────────┘
-         ↑↓/jk move  / search  click/drag copy  wheel scroll  ? help  q quit
+╭ Tickets 116/116 · Changed ↑ ───────────────────────────────────────────────────────╮
+│       ID      Title                       State      Type           Pri Changed↑   │
+│────────────────────────────────────────────────────────────────────────────────────│
+│  [ ]  599     Serialize session enums wit ✓ Done     [Issue]         P1         1d┃│
+│  [ ]  596     Remove demo seed data, sche ✓ Done     [Issue]         P1         1d││
+│  [ ]  602     Update README, CI, and the  ✓ Done     [Issue]         P1         1d││
+│  [ ]  633     Colour the State column by  ✓ Done     [Issue]         P1         1d││
+│  [ ]  634     Colour type badges for ever ✓ Done     [Issue]         P2         1d││
+│› [ ]  600     Factor overlay list renderi ✓ Done     [Issue]         P1         1d││
+│  [ ]  597     Introduce ScrollState and T ✓ Done     [Issue]         P1         1d││
+│  [ ]  635     Dim completed work items in ✓ Done     [Issue]         P2         1d││
+│  [ ]  636     Show the leaf of area and i ✓ Done     [Issue]         P3         1d││
+├ Details ───────────────────────────────────────────────────────────────────────────┤
+│ Factor overlay list rendering into one helper                                     ┃│
+│ #600 · [Issue] · ✓ Done · P1 · Jacob Ragsdale                                     ││
+│ Family     Epic 595  Tech debt and architecture foundation › this                 ││
+│ Tags       [tech-debt]                                                            ││
+│ Project    jacobragsdale / development · r5                                       ││
+│ https://dev.azure.com/jacobragsdale/development/_workitems/edit/600               ││
+│                                                                                   ││
+│ ── Family ────────────────────────────────────────────────────────────────────────││
+╰────────────────────────────────────────────────────────────────────────────────────╯
+ ↑↓/jk move  / search  click/drag copy  wheel scroll   development  ● Synced just now
 ```
 
 ## Run it

@@ -1,5 +1,13 @@
 # Look-and-feel plan
 
+**Shipped.** Every slice below is on `main` (Epic #701, Issues #702–#710, one
+commit each); where the build departed from the plan, the issue's comment says
+why. The two worth knowing: the panes' shared border merges with
+`MergeStrategy::Fuzzy` rather than `Exact`, because there is no rounded `┬`;
+and a pane stacked over another keeps its counts in its name, because the pane
+below paints the row its bottom border would have used. `HANDOFF.md` has the
+summary.
+
 Research (2026-08-29) into what polished Ratatui apps do, how ticket-tui looks
 against them, and a sliced plan to close the gap without touching core
 behaviour. Keys, hit regions, sync, editing and the database are out of scope;

@@ -1866,3 +1866,18 @@ cargo build --release
 ```
 
 CI exercises these checks on current macOS and Linux runners.
+
+The renderer tests assert through the theme's tokens rather than through
+colour names, so the suite is run again in each palette that changes what a
+token holds:
+
+```console
+NO_COLOR=1 cargo test --all-targets
+TICKET_TUI_THEME=terminal-light cargo test --all-targets
+TICKET_TUI_THEME=mono cargo test --all-targets
+```
+
+`Theme::from_env` reads both variables, so a run under one of them paints in
+that palette from end to end — which is what makes the matrix worth running:
+a colour that reads on one ground and vanishes on another fails there rather
+than on somebody's screen.

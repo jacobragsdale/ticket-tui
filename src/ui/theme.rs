@@ -165,7 +165,9 @@ impl Theme {
                 Color::Magenta,
                 Color::Green,
                 AMBER,
-                Color::DarkGray,
+                // Not `DarkGray`: that is this palette's muted colour, and a
+                // tag hashed onto it would read as a disabled one.
+                Color::Indexed(52),
             ],
             border_type: BorderType::Rounded,
             dim_behind_modals: true,
@@ -273,13 +275,26 @@ impl Theme {
     }
 
     /// The theme the environment asks for before any file is read: `mono`
-    /// under `NO_COLOR`, the terminal's own colours otherwise.
+    /// under `NO_COLOR`, otherwise whichever preset `TICKET_TUI_THEME` names,
+    /// and the terminal's own colours when it names none.
+    ///
+    /// A run resolves its theme properly once `config.toml` has been read;
+    /// this is what the first frame paints with, and what a test run paints
+    /// with from end to end. `custom` needs the file, so it lands here as
+    /// `terminal`.
     #[must_use]
     pub fn from_env() -> Self {
         if std::env::var_os("NO_COLOR").is_some() {
-            Self::mono()
-        } else {
-            Self::terminal()
+            return Self::mono();
+        }
+        match std::env::var("TICKET_TUI_THEME")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("terminal-light" | "terminal_light" | "light") => Self::terminal_light(),
+            Some("mono" | "monochrome") => Self::mono(),
+            _ => Self::terminal(),
         }
     }
 }
