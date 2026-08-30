@@ -544,7 +544,7 @@ fn render_run_details(
     let jumps = screen.run_jumps(shell);
     if !jumps.is_empty() {
         lines.push(Line::from(""));
-        lines.push(section_line("Related"));
+        lines.push(section_line("Related", inner.width));
     }
     let jump_start = lines.len();
     for (label, jump) in &jumps {
@@ -565,7 +565,7 @@ fn render_run_details(
     }
     if !timeline.is_empty() {
         lines.push(Line::from(""));
-        lines.push(section_line("Timeline"));
+        lines.push(section_line("Timeline", inner.width));
     }
     let tree_start = lines.len();
     lines.extend(timeline_lines(

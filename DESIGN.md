@@ -1274,10 +1274,15 @@ palette lists the commands of the tab that is showing and runs its choice
 there, and the columns editor edits that tab's columns.
 
 The details pane is one scrolling document rather than a pinned heading over a
-scrolling body. Its heading — title, ID / Type / State, the family breadcrumb,
-assignee and priority, tags, project and revision, child progress, and the
-work-item URL — scrolls away with everything under it, in this order: the
-family tree, Related, Planning, Description, History, and Comments. The scrollbar
+scrolling body. Its heading — the title, then a badge row reading
+`#600 · [Issue] · ✓ Done · P1 · Jacob Ragsdale` in the colours the table's own
+cells use, then the family breadcrumb, tags, project and revision, child
+progress, and the work-item URL — scrolls away with everything under it, in
+this order: the family tree, Related, Planning, Description, History, and
+Comments. Every field below the badge row reads as a muted label in a column of
+its own with the value beside it, so the values line up down the pane, and each
+section is headed by a rule (`── Planning ────`) rather than by another bold
+line, which is what tells a heading from a field name without colour. The scrollbar
 therefore measures the whole pane and its thumb reaches the bottom, `End` lands
 on the last comment, and a field value stays clickable wherever the scroll has
 carried it. Moving the family cursor scrolls the tree back into view when the
@@ -1295,13 +1300,14 @@ no such links, and the agent context lists the same links on the selected work
 item, each saying whether the database holds it.
 
 A work item with children reports how far they have got. The heading reads
-`Children: 3/7 done` with a six-cell bar beside it, every family-tree row that
+`Children   3/7 done` with a six-cell bar beside it, drawn in fractional
+blocks so `3/7` and `4/7` are different pictures, every family-tree row that
 is itself a parent trails its own ` 3/7`, and the optional Progress table
 column shows the same ratio. All three count direct children only — an Epic
 reads over its Features rather than over every Task underneath them — and both
 Completed and Removed states count as done, so a cut work item stops holding
 its parent back. A work item nobody broke down shows nothing at all in any of
-the three places, never `0/0`. The bar is drawn from two different glyphs
+the three places, never `0/0`. The bar is drawn from filled and hollow glyphs
 rather than two colours, so it reads the same under `NO_COLOR`.
 
 An overlay is a layer in front of the screen, not more of it: while one is

@@ -384,7 +384,7 @@ fn render_details(
         }
         lines.push(Line::from(""));
     }
-    lines.push(section_line("Reviewers"));
+    lines.push(section_line("Reviewers", inner.width));
     if row.request.reviewers.is_empty() {
         lines.push(Line::styled(
             "  Nobody yet",
@@ -410,7 +410,7 @@ fn render_details(
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(section_line("Related"));
+    lines.push(section_line("Related", inner.width));
     let jump_start = lines.len();
     for (label, jump) in &jumps {
         let what = match jump {
@@ -430,7 +430,7 @@ fn render_details(
     }
     if !row.request.threads.is_empty() {
         lines.push(Line::from(""));
-        lines.push(section_line("Discussion"));
+        lines.push(section_line("Discussion", inner.width));
         for thread in &row.request.threads {
             lines.push(Line::from(vec![
                 Span::styled(
@@ -456,7 +456,7 @@ fn render_details(
         }
     }
     lines.push(Line::from(""));
-    lines.push(section_line("Completion"));
+    lines.push(section_line("Completion", inner.width));
     lines.push(Line::from(format!(
         "  Auto-complete: {}",
         row.request

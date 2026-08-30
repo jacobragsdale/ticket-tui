@@ -325,10 +325,10 @@ fn the_details_header_counts_the_children_and_a_childless_one_says_nothing() {
     assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_001);
 
     let epic = render_text(130, 30, &mut app);
-    assert!(epic.contains("Children: 2/3 done"), "{epic}");
+    assert!(epic.contains("Children   2/3 done"), "{epic}");
     assert!(
-        epic.contains("▆▆▆▆░░"),
-        "the bar is two different glyphs, so it reads under NO_COLOR too: {epic}"
+        epic.contains("████░░"),
+        "the bar is filled and hollow glyphs, so it reads under NO_COLOR too: {epic}"
     );
 
     for _ in 0..4 {
@@ -352,9 +352,9 @@ fn an_epic_whose_children_have_all_finished_fills_its_bar() {
         .set_workspace_graph(&mut app.shell, progress_graph());
 
     let text = render_text(130, 30, &mut app);
-    assert!(text.contains("Children: 3/3 done"), "{text}");
+    assert!(text.contains("Children   3/3 done"), "{text}");
     assert!(
-        text.contains("▆▆▆▆▆▆"),
+        text.contains("██████"),
         "every child off the board fills the bar: {text}"
     );
 }
@@ -466,7 +466,7 @@ fn details_render_family_tree_without_other_links() {
     assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_002);
 
     let text = render_text(60, 36, &mut app);
-    assert!(text.contains("Family: Feature 10001  Auth rewrite › this"));
+    assert!(text.contains("Family     Feature 10001  Auth rewrite › this"));
     assert!(text.contains("0/1 closed"));
     assert!(text.contains("10001"));
     assert!(text.contains("10002"));
@@ -756,7 +756,7 @@ fn every_details_field_is_clickable_on_its_own_value() {
         (EditableField::Title, "Fix ticket search"),
         (EditableField::State, "Active"),
         (EditableField::Assignee, "Avery Chen"),
-        (EditableField::Priority, "1"),
+        (EditableField::Priority, "P1"),
         (EditableField::Tags, "[rust] [search]"),
         (EditableField::Area, "Atlas\\Platform"),
         (EditableField::Iteration, "Atlas\\Sprint 1"),
@@ -783,13 +783,10 @@ fn every_details_field_is_clickable_on_its_own_value() {
         !elsewhere.contains(Modifier::UNDERLINED),
         "and only the value under the pointer"
     );
-    assert_eq!(
-        assignee.y, priority.y,
-        "both sit on the Assignee / Priority line"
-    );
+    assert_eq!(assignee.y, priority.y, "both sit on the badge row");
     assert!(
-        assignee.x + assignee.width < priority.x,
-        "and each is its own target: {assignee:?} then {priority:?}"
+        priority.x + priority.width < assignee.x,
+        "and each is its own target: {priority:?} then {assignee:?}"
     );
 
     let mut unassigned = App::new(vec![{
@@ -864,11 +861,13 @@ fn the_heading_scrolls_away_and_its_fields_travel_with_it() {
     let before = edit_field_rect(&app, EditableField::Assignee);
     assert_eq!(text_at(&terminal, before), "Avery Chen");
 
-    app.work_items.details.scroll_to(2);
+    // The badge row is the second line of the heading, so one row of scroll
+    // is as far as it goes before it is off the top of the pane.
+    app.work_items.details.scroll_to(1);
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let after = edit_field_rect(&app, EditableField::Assignee);
     assert_eq!(
-        after.y + 2,
+        after.y + 1,
         before.y,
         "the heading scrolls with everything under it"
     );

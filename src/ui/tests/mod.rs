@@ -308,7 +308,7 @@ fn the_database_overlay_reports_the_last_sync() {
     app.shell.enable_sync();
     app.shell.finish_sync();
     let synced = render_text(90, 24, &mut app);
-    assert!(synced.contains("Sync: just now"), "{synced}");
+    assert!(synced.contains("Sync       just now"), "{synced}");
 
     app.shell.fail_sync("network unreachable", true);
     assert!(render_text(90, 24, &mut app).contains("failed"));

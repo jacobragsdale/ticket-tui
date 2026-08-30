@@ -73,18 +73,17 @@ pub(super) fn render_details(
         title_style,
         search_match_style(title_style),
     ));
-    lines.push(ticket_identity_line(&ticket, &mut highlighter));
-    if has_family {
-        lines.push(family_breadcrumb_line(screen, &family));
-    }
-    lines.push(ticket_assignment_line(
+    lines.push(ticket_badge_line(
         &ticket,
         shell.is_mine(&ticket),
         &mut highlighter,
     ));
+    if has_family {
+        lines.push(family_breadcrumb_line(screen, &family));
+    }
     lines.push(tags_field_line(&ticket.tags, &mut highlighter));
     lines.push(field_line(
-        "Project / Revision",
+        "Project",
         format!(
             "{} / {} · r{}",
             ticket.key.organization, ticket.project, ticket.revision
@@ -106,6 +105,7 @@ pub(super) fn render_details(
         lines.push(family_section_line(
             screen.child_progress(&ticket.key),
             family_focused,
+            width,
         ));
         for entry in screen.visible_family_tree() {
             let related = screen.ticket_by_key(&entry.key);
@@ -142,7 +142,7 @@ pub(super) fn render_details(
     // open — `o` still opens the work item, and the browser has the rest.
     let artifacts = screen.artifacts_for(&ticket.key);
     if !artifacts.is_empty() {
-        lines.push(section_line("Related"));
+        lines.push(section_line("Related", width));
         for artifact in &artifacts {
             let (line, jump) = artifact_line(artifact, shell);
             if let (Ok(index), Some(jump)) = (u16::try_from(lines.len()), jump.clone()) {
@@ -153,12 +153,12 @@ pub(super) fn render_details(
         lines.push(Line::default());
     }
 
-    lines.push(section_line("Planning"));
+    lines.push(section_line("Planning", width));
     if let Ok(line) = u16::try_from(lines.len()) {
         field_hits.push((
             line,
             EditableField::Area,
-            columns("Area: "),
+            FIELD_VALUE_COLUMN,
             columns(&ticket.area_path),
         ));
     }
@@ -171,7 +171,7 @@ pub(super) fn render_details(
         field_hits.push((
             line,
             EditableField::Iteration,
-            columns("Iteration: "),
+            FIELD_VALUE_COLUMN,
             columns(&ticket.iteration_path),
         ));
     }
@@ -184,7 +184,7 @@ pub(super) fn render_details(
     lines.push(changed_field_line(&ticket, screen.stale_age_days(&ticket)));
 
     lines.push(Line::default());
-    lines.push(section_line("Description"));
+    lines.push(section_line("Description", width));
     if let Some(reason) = ticket.reason.as_deref() {
         lines.push(field_line("Reason", reason));
         lines.push(Line::default());
@@ -208,7 +208,7 @@ pub(super) fn render_details(
     if loading_details || !history.is_empty() {
         let now = OffsetDateTime::now_utc();
         lines.push(Line::default());
-        lines.push(section_line("History"));
+        lines.push(section_line("History", width));
         if loading_details {
             lines.push(Line::styled(
                 "  Loading comments and history…",
@@ -220,7 +220,7 @@ pub(super) fn render_details(
     let comments = screen.comments_for(&ticket.key);
     if !comments.is_empty() {
         lines.push(Line::default());
-        lines.push(section_line("Comments"));
+        lines.push(section_line("Comments", width));
         for comment in comments {
             let who = comment.author.as_deref().unwrap_or("unknown");
             lines.push(Line::from(format!(
@@ -357,29 +357,38 @@ pub(super) struct FamilyHit {
     jumpable: bool,
 }
 
-pub(super) fn family_section_line(progress: Option<ChildProgress>, focused: bool) -> Line<'static> {
-    let heading = family_heading_style(focused);
+/// The family's own heading: the same rule every section wears, with how far
+/// its children have got written into it, and the cursor's ground on the whole
+/// row while the tree has the keyboard.
+pub(super) fn family_section_line(
+    progress: Option<ChildProgress>,
+    focused: bool,
+    width: u16,
+) -> Line<'static> {
     let Some(progress) = progress else {
-        return Line::styled("Family", heading);
+        return section_line("Family", width);
     };
-    let mut count = Style::default().fg(state_color(StateCategory::Completed));
+    let count = format!("{} closed", progress.ratio());
+    let rule = Style::default().fg(theme().header);
+    let tail = usize::from(width)
+        .saturating_sub(3)
+        .saturating_sub("Family · ".chars().count())
+        .saturating_sub(count.chars().count())
+        .saturating_sub(1);
+    let mut line = Line::from(vec![
+        Span::styled("── ", rule),
+        Span::styled("Family", rule.add_modifier(Modifier::BOLD)),
+        Span::styled(" · ", rule),
+        Span::styled(
+            count,
+            Style::default().fg(state_color(StateCategory::Completed)),
+        ),
+        Span::styled(format!(" {}", "─".repeat(tail)), rule),
+    ]);
     if focused {
-        count = with_cursor_style(count);
+        line = line.style(with_cursor_style(Style::default()));
     }
-    Line::from(vec![
-        Span::styled("Family · ", heading),
-        Span::styled(format!("{} closed", progress.ratio()), count),
-    ])
-}
-
-pub(super) fn family_heading_style(focused: bool) -> Style {
-    let mut style = Style::default()
-        .fg(theme().accent)
-        .add_modifier(Modifier::BOLD);
-    if focused {
-        style = with_cursor_style(style);
-    }
-    style
+    line
 }
 
 pub(super) fn family_row_style(is_current: bool, is_cursor: bool) -> Style {
@@ -595,10 +604,7 @@ pub(super) fn family_breadcrumb_line(
     screen: &WorkItemsScreen,
     family: &FamilySnapshot,
 ) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        "Family: ",
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
+    let mut spans = vec![field_label("Family")];
     if let Some(parent) = family.parent() {
         let ticket = screen.ticket_by_key(parent);
         let type_label = ticket.map_or("?", |ticket| ticket.work_item_type.as_str());
@@ -676,26 +682,49 @@ pub(super) fn visible_row_y(area: Rect, logical: u16, scroll: u16) -> Option<u16
     Some(area.y.saturating_add(offset))
 }
 
-pub(super) fn ticket_identity_line(
+/// The badge row under the title: what the work item is, where it has got to,
+/// how urgent it is and whose it is, in the colours the table's own cells use,
+/// so the two read as one thing seen twice.
+pub(super) fn ticket_badge_line(
     ticket: &Ticket,
+    mine: bool,
     highlighter: &mut QueryHighlighter,
 ) -> Line<'static> {
+    let dot = || Span::styled(" · ", Style::default().fg(theme().muted));
     let id = ticket.key.id.to_string();
     let state = state_style(&ticket.state);
-    let mut spans = vec![Span::styled(
-        "ID / Type / State: ",
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
-    spans.extend(highlight_searchable(&id, Style::default(), highlighter).spans);
-    spans.push(Span::raw(" · "));
+    let mut spans = vec![Span::styled("#", Style::default().fg(theme().muted))];
+    spans.extend(highlight_searchable(&id, Style::default().fg(theme().muted), highlighter).spans);
+    spans.push(dot());
     spans.extend(type_badge_spans(
         &ticket.work_item_type,
         RowTone::Normal,
         highlighter,
     ));
-    spans.push(Span::raw(" · "));
+    spans.push(dot());
+    spans.push(Span::styled(
+        format!("{} ", state_glyph(StateCategory::of(&ticket.state))),
+        state,
+    ));
     spans.extend(highlight_searchable(&ticket.state, state, highlighter).spans);
+    spans.push(dot());
+    spans.push(Span::styled(
+        priority_badge(ticket.priority),
+        priority_style(ticket.priority),
+    ));
+    spans.push(dot());
+    spans.extend(match ticket.assigned_to.as_deref() {
+        Some(name) if mine => highlight_searchable(name, assigned_to_me_style(), highlighter).spans,
+        Some(name) => highlight_searchable(name, Style::default(), highlighter).spans,
+        None => Line::styled(UNASSIGNED_LABEL, Style::default().fg(theme().muted)).spans,
+    });
     Line::from(spans)
+}
+
+/// `P1`, or the dash that stands for a work item nobody has ranked — the same
+/// cell the table's Pri column paints.
+pub(super) fn priority_badge(priority: Option<i64>) -> String {
+    priority.map_or_else(|| "—".to_owned(), |priority| format!("P{priority}"))
 }
 
 /// The signed-in user's own work. Bold carries the emphasis where NO_COLOR
@@ -706,38 +735,12 @@ pub(super) fn assigned_to_me_style() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-pub(super) fn ticket_assignment_line(
-    ticket: &Ticket,
-    mine: bool,
-    highlighter: &mut QueryHighlighter,
-) -> Line<'static> {
-    let priority = ticket
-        .priority
-        .map_or_else(|| "—".into(), |priority| priority.to_string());
-    let assignee_line = match ticket.assigned_to.as_deref() {
-        Some(name) if mine => highlight_searchable(name, assigned_to_me_style(), highlighter),
-        Some(name) => highlight_searchable(name, Style::default(), highlighter),
-        None => Line::styled("Unassigned", Style::default().fg(theme().muted)),
-    };
-    let mut spans = vec![Span::styled(
-        "Assignee / Priority: ",
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
-    spans.extend(assignee_line.spans);
-    spans.push(Span::raw(" · "));
-    spans.push(Span::styled(priority, priority_style(ticket.priority)));
-    Line::from(spans)
-}
-
 pub(super) fn highlighted_field_line(
     label: &'static str,
     value: &str,
     highlighter: &mut QueryHighlighter,
 ) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        format!("{label}: "),
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
+    let mut spans = vec![field_label(label)];
     spans.extend(highlight_searchable(value, Style::default(), highlighter).spans);
     Line::from(spans)
 }
@@ -746,10 +749,7 @@ pub(super) fn tags_field_line(
     tags: &[String],
     highlighter: &mut QueryHighlighter,
 ) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        "Tags: ",
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
+    let mut spans = vec![field_label("Tags")];
     if tags.is_empty() {
         spans.push(Span::styled("—", Style::default().fg(theme().muted)));
     } else {
@@ -781,20 +781,27 @@ pub(super) fn columns(text: &str) -> u16 {
 /// share a line and are two separate spans on it.
 pub(super) fn metadata_field_spans(ticket: &Ticket, has_family: bool) -> Vec<FieldSpan> {
     let separator = columns(" \u{b7} ");
-    let state_x = columns("ID / Type / State: ")
+    let state = &ticket.state;
+    let glyph = columns(state_glyph(StateCategory::of(state))).saturating_add(1);
+    // Along the badge row: `#600 · [Issue] · ✓ Done · P1 · Jacob Ragsdale`.
+    let state_x = columns("#")
         .saturating_add(columns(&ticket.key.id.to_string()))
         .saturating_add(separator)
         .saturating_add(columns(&ticket.work_item_type))
         .saturating_add(2)
+        .saturating_add(separator)
+        .saturating_add(glyph);
+    let priority = priority_badge(ticket.priority);
+    let priority_x = state_x
+        .saturating_add(columns(state))
         .saturating_add(separator);
-    // The breadcrumb sits between the identity line and the assignment line
-    // whenever the work item has a family.
-    let assignment = 2u16.saturating_add(has_family.into());
     let assignee = ticket.assigned_to.as_deref().unwrap_or(UNASSIGNED_LABEL);
-    let assignee_x = columns("Assignee / Priority: ");
-    let priority = ticket
-        .priority
-        .map_or_else(|| "\u{2014}".to_owned(), |priority| priority.to_string());
+    let assignee_x = priority_x
+        .saturating_add(columns(&priority))
+        .saturating_add(separator);
+    // The breadcrumb sits under the badge row whenever the work item has a
+    // family, and the tags under whichever of the two came last.
+    let tags = 2u16.saturating_add(has_family.into());
     vec![
         FieldSpan {
             field: EditableField::Title,
@@ -806,26 +813,24 @@ pub(super) fn metadata_field_spans(ticket: &Ticket, has_family: bool) -> Vec<Fie
             field: EditableField::State,
             line: 1,
             x: state_x,
-            width: columns(&ticket.state),
+            width: columns(state),
+        },
+        FieldSpan {
+            field: EditableField::Priority,
+            line: 1,
+            x: priority_x,
+            width: columns(&priority),
         },
         FieldSpan {
             field: EditableField::Assignee,
-            line: assignment,
+            line: 1,
             x: assignee_x,
             width: columns(assignee),
         },
         FieldSpan {
-            field: EditableField::Priority,
-            line: assignment,
-            x: assignee_x
-                .saturating_add(columns(assignee))
-                .saturating_add(separator),
-            width: columns(&priority),
-        },
-        FieldSpan {
             field: EditableField::Tags,
-            line: assignment.saturating_add(1),
-            x: columns("Tags: "),
+            line: tags,
+            x: FIELD_VALUE_COLUMN,
             width: tags_run_width(&ticket.tags),
         },
     ]
@@ -889,13 +894,18 @@ pub(super) fn changed_field_line(ticket: &Ticket, stale_for: Option<i64>) -> Lin
 }
 
 pub(super) fn field_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
-    Line::from(vec![
-        Span::styled(
-            format!("{label}: "),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(value.into()),
-    ])
+    Line::from(vec![field_label(label), Span::raw(value.into())])
+}
+
+/// One field's name, muted and padded to the column its value starts in. A
+/// label longer than the column keeps its own width and pushes its value
+/// along, which is what a `Project / Revision` does.
+pub(super) fn field_label(label: &str) -> Span<'static> {
+    let width = usize::from(FIELD_VALUE_COLUMN);
+    Span::styled(
+        format!("{label:<width$}"),
+        Style::default().fg(theme().muted),
+    )
 }
 
 /// One change on one revision: how long ago it landed, who made it, and what
@@ -994,11 +1004,23 @@ fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
-pub(super) fn section_line(title: &'static str) -> Line<'static> {
-    Line::styled(
-        title,
-        Style::default()
-            .fg(theme().accent)
-            .add_modifier(Modifier::BOLD),
-    )
+/// A section heading drawn as a rule across the pane — `── Planning ────` —
+/// so a heading is told from a pane title and from a bold field label by its
+/// shape rather than by its colour, which is what `NO_COLOR` leaves.
+pub(super) fn section_line(title: &'static str, width: u16) -> Line<'static> {
+    let rule = Style::default().fg(theme().header);
+    let head = "── ";
+    let tail = usize::from(width)
+        .saturating_sub(head.chars().count())
+        .saturating_sub(title.chars().count())
+        .saturating_sub(1);
+    Line::from(vec![
+        Span::styled(head, rule),
+        Span::styled(title, rule.add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {}", "─".repeat(tail)), rule),
+    ])
 }
+
+/// The column a field's value starts in. Labels and values line up down the
+/// pane rather than every value starting wherever its own label ended.
+pub(super) const FIELD_VALUE_COLUMN: u16 = 11;

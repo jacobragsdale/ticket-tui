@@ -1,7 +1,7 @@
 use super::*;
 use crate::columns::{ColumnId, ColumnLayout, TableLayout};
 use crate::pointer::SelectableSurface;
-use crate::ui::details::ticket_assignment_line;
+use crate::ui::details::ticket_badge_line;
 use crate::ui::table::tag_color;
 
 #[test]
@@ -174,27 +174,34 @@ fn my_own_work_items_stand_out_in_the_table_and_the_details_pane() {
         assert_ne!(their_fg, theme().accent);
     }
 
+    // The badge row's last span is the assignee, whoever it is.
     let ticket = ticket();
     let mut highlighter = QueryHighlighter::new("");
-    let mine = ticket_assignment_line(&ticket, true, &mut highlighter);
-    let theirs = ticket_assignment_line(&ticket, false, &mut highlighter);
+    let mine = ticket_badge_line(&ticket, true, &mut highlighter);
+    let theirs = ticket_badge_line(&ticket, false, &mut highlighter);
+    let last = |line: &Line<'static>| line.spans.last().cloned().expect("an assignee");
 
-    assert_eq!(mine.spans[1].content, "Avery Chen");
-    assert_eq!(mine.spans[1].style.fg, Some(theme().accent));
-    assert!(mine.spans[1].style.add_modifier.contains(Modifier::BOLD));
-    assert_eq!(theirs.spans[1].content, "Avery Chen");
-    assert!(!theirs.spans[1].style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(last(&mine).content, "Avery Chen");
+    assert_eq!(last(&mine).style.fg, Some(theme().accent));
+    assert!(last(&mine).style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(last(&theirs).content, "Avery Chen");
+    assert!(!last(&theirs).style.add_modifier.contains(Modifier::BOLD));
 
     let mut highlighter = QueryHighlighter::new("chen");
-    let matched = ticket_assignment_line(&ticket, true, &mut highlighter);
-    let name: String = matched.spans[1..]
+    let matched = ticket_badge_line(&ticket, true, &mut highlighter);
+    let name: String = matched
+        .spans
         .iter()
+        .rev()
         .take_while(|span| span.content.as_ref() != " · ")
         .map(|span| span.content.as_ref())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
         .collect();
     assert_eq!(name, "Avery Chen");
     assert!(
-        matched.spans[1..].iter().any(|span| {
+        matched.spans.iter().any(|span| {
             span.style.add_modifier.contains(Modifier::UNDERLINED) && span.content.contains("Chen")
         }),
         "the search match must still show through the mine styling: {matched:?}"

@@ -776,19 +776,35 @@ pub(super) fn child_progress_line(progress: ChildProgress) -> Line<'static> {
             .add_modifier(Modifier::BOLD);
     }
     Line::from(vec![
-        Span::styled("Children: ", Style::default().add_modifier(Modifier::BOLD)),
+        field_label("Children"),
         Span::styled(format!("{} done", progress.ratio()), value),
         Span::raw("  "),
         Span::styled(progress_bar(progress, PROGRESS_BAR_CELLS), value),
     ])
 }
 
-/// The bar itself: filled cells for the share that is finished, hollow ones
-/// for the rest.
+/// The bar itself: whole blocks for the share that is finished, one partial
+/// block for what is left over, and hollow cells for the rest. Eight steps to
+/// a cell, so a bar six cells wide still tells `3/7` from `4/7`.
 pub(super) fn progress_bar(progress: ChildProgress, width: usize) -> String {
-    let filled = progress.filled_cells(width);
-    let mut bar = "\u{2586}".repeat(filled);
-    bar.push_str(&"\u{2591}".repeat(width.saturating_sub(filled)));
+    const PARTS: [&str; 8] = [
+        "\u{258f}", "\u{258e}", "\u{258d}", "\u{258c}", "\u{258b}", "\u{258a}", "\u{2589}",
+        "\u{2588}",
+    ];
+    let eighths = progress.filled_eighths(width);
+    let whole = eighths / 8;
+    let rest = eighths % 8;
+    let mut bar = "\u{2588}".repeat(whole);
+    if rest > 0 {
+        bar.push_str(PARTS[rest - 1]);
+    }
+    bar.push_str(
+        &"\u{2591}".repeat(
+            width
+                .saturating_sub(whole)
+                .saturating_sub(usize::from(rest > 0)),
+        ),
+    );
     bar
 }
 

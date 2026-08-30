@@ -585,8 +585,10 @@ fn clicking_a_field_opens_its_editor_anchored_under_the_value() {
 
 #[test]
 fn an_anchored_dropdown_is_drawn_under_the_field_and_dismissed_by_a_click_away() {
+    // Wide enough that a value in the middle of the badge row has room for a
+    // dropdown under it, and the last one on the row has not.
     let mut app = issue_app();
-    render_text(130, 40, &mut app);
+    render_text(160, 40, &mut app);
     let field = edit_field_rect(&app, EditableField::Assignee);
     assert!(matches!(
         click(&mut app, field.x, field.y),
@@ -594,7 +596,7 @@ fn an_anchored_dropdown_is_drawn_under_the_field_and_dismissed_by_a_click_away()
     ));
     assert_eq!(app.work_items.mode, WorkItemMode::AssigneePicker);
 
-    let mut terminal = Terminal::new(TestBackend::new(130, 40)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let buffer = terminal.backend().buffer();
     assert_eq!(
@@ -613,22 +615,23 @@ fn an_anchored_dropdown_is_drawn_under_the_field_and_dismissed_by_a_click_away()
         "the candidates hang below the field: {first:?} under {field:?}"
     );
 
-    // A field near the right edge keeps its dropdown on screen.
+    // The same value on a narrower terminal has no room under it, and the
+    // dropdown is pulled left to stay on screen.
     app.work_items.mode = WorkItemMode::Browse;
     render_text(130, 40, &mut app);
-    let state = edit_field_rect(&app, EditableField::State);
-    click(&mut app, state.x, state.y);
+    let assignee = edit_field_rect(&app, EditableField::Assignee);
+    click(&mut app, assignee.x, assignee.y);
     let mut terminal = Terminal::new(TestBackend::new(130, 40)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let corner = find_buffer_text_in(
         terminal.backend().buffer(),
-        Rect::new(0, state.y + 1, 130, 1),
+        Rect::new(0, assignee.y + 1, 130, 1),
         ratatui::widgets::BorderType::border_symbols(theme().border_type).top_left,
     )
-    .expect("the state dropdown is drawn on the row under the value");
+    .expect("the dropdown is drawn on the row under the value");
     assert!(
-        corner.0 < state.x,
-        "and pulled left to stay on screen: {corner:?} for {state:?}"
+        corner.0 < assignee.x,
+        "and pulled left to stay on screen: {corner:?} for {assignee:?}"
     );
 
     // Everything outside the dropdown closes it and reaches nothing else.

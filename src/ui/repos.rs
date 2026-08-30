@@ -201,7 +201,7 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
                 .map_or_else(|| "\u{2014}".to_owned(), size_label),
         ),
         Line::from(""),
-        section_line("URLs"),
+        section_line("URLs", inner.width),
     ];
     let url_start = lines.len();
     let urls = [
@@ -216,7 +216,7 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(section_line("Local"));
+    lines.push(section_line("Local", inner.width));
     match row.local.as_ref() {
         Some(local) => {
             lines.push(Line::from(format!("  {}", local.path.display())));
@@ -252,7 +252,7 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
         }
     }
     lines.push(Line::from(""));
-    lines.push(section_line("Open against it"));
+    lines.push(section_line("Open against it", inner.width));
     let jump_start = lines.len();
     if jumps.is_empty() {
         lines.push(Line::styled(
