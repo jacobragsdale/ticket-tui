@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 use crate::app::{
     App, ChildProgress, DividerOrientation, Focus, FormOverlay, HitRegions, NotificationLevel,
     PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PromptField, RowDensity, Screen, SearchOrder, Shell,
-    TabId, UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
+    SyncStatus, TabId, UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
 };
 use crate::command::{COMMANDS, Command, Scope, key_label_for};
 use crate::filter::{FacetTarget, FilterField, WorkItemSchema};
@@ -62,7 +62,7 @@ pub use theme::{Theme, ThemeChoice, chosen_theme, set_theme, theme};
 use widgets::{
     SearchRow, capture_selectable, paint_hover, paint_selection, register_buttons,
     register_close_button, render_control, render_modal_frame, render_query_field,
-    render_scrollbar, render_search_row, row_on_screen, wrapped_rows,
+    render_scrollbar, render_search_row, render_status_bar, row_on_screen, wrapped_rows,
 };
 
 const WIDE_BREAKPOINT: u16 = 110;
@@ -153,25 +153,31 @@ pub(crate) fn render_tab_bar(
 ) {
     // Every tab stays on the bar and stays clickable however narrow the
     // terminal is: the names shorten first, and then go altogether.
+    // The name and the badge are painted apart \u{2014} the badge is what is waiting
+    // on that tab, and it reads in the warning colour wherever the tab sits.
     let written = |tab: TabId, badge: Option<&String>, style: NameStyle| {
         let name = match style {
             NameStyle::Full => tab.label(),
             NameStyle::Short => tab.short_label(),
             NameStyle::Number => "",
         };
-        match (name, badge) {
-            ("", None) => format!(" {} ", tab.number()),
-            ("", Some(badge)) => format!(" {} {badge} ", tab.number()),
-            (name, None) => format!(" {} {name} ", tab.number()),
-            (name, Some(badge)) => format!(" {} {name} {badge} ", tab.number()),
-        }
+        let head = if name.is_empty() {
+            format!(" {} ", tab.number())
+        } else {
+            format!(" {} {name} ", tab.number())
+        };
+        let badge = badge.map_or_else(String::new, |badge| format!("{badge} "));
+        (head, badge)
     };
     let style = [NameStyle::Full, NameStyle::Short, NameStyle::Number]
         .into_iter()
         .find(|style| {
             let width: usize = tabs
                 .iter()
-                .map(|(tab, _, badge)| written(*tab, badge.as_ref(), *style).chars().count())
+                .map(|(tab, _, badge)| {
+                    let (head, badge) = written(*tab, badge.as_ref(), *style);
+                    head.chars().count() + badge.chars().count()
+                })
                 .sum();
             width <= usize::from(area.width)
         })
@@ -181,19 +187,23 @@ pub(crate) fn render_tab_bar(
     let mut x = area.x;
     for (tab, active, badge) in tabs {
         let (tab, active) = (*tab, *active);
-        let label = written(tab, badge.as_ref(), style);
-        let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+        let (head, badge) = written(tab, badge.as_ref(), style);
+        let width = u16::try_from(head.chars().count() + badge.chars().count()).unwrap_or(u16::MAX);
         if x.saturating_add(width) > area.x.saturating_add(area.width) {
             break;
         }
         let style = if active {
-            Style::default()
-                .fg(theme().accent)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            tab_chip_style()
         } else {
             Style::default().fg(theme().muted)
         };
-        spans.push(Span::styled(label, style));
+        spans.push(Span::styled(head, style));
+        if !badge.is_empty() {
+            spans.push(Span::styled(
+                badge,
+                style.fg(theme().warning).add_modifier(Modifier::BOLD),
+            ));
+        }
         shell.hit_regions.push(region(
             Rect::new(x, area.y, width, 1),
             PointerTarget::SelectTab { index: tab.index() },
@@ -205,6 +215,20 @@ pub(crate) fn render_tab_bar(
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
     render_bar_controls(frame, shell, area, x);
+}
+
+/// The tab that is showing: the accent on the surface ground, and reversed
+/// where the palette has no ground to give it \u{2014} `mono`, where every colour is
+/// `Reset` and weight alone would not be enough.
+fn tab_chip_style() -> Style {
+    let style = Style::default()
+        .fg(theme().accent)
+        .add_modifier(Modifier::BOLD);
+    if theme().surface == Color::Reset {
+        style.add_modifier(Modifier::REVERSED)
+    } else {
+        style.bg(theme().surface)
+    }
 }
 
 /// `Actions` and `?` at the right end of the tab bar, as far from the tabs as
@@ -445,22 +469,7 @@ fn divider_rect(first: Rect, second: Rect, orientation: DividerOrientation) -> O
 }
 
 fn render_footer(frame: &mut Frame<'_>, screen: &WorkItemsScreen, shell: &Shell, area: Rect) {
-    let (text, style) = if let Some((message, level)) = shell.notification() {
-        let color = match level {
-            NotificationLevel::Info => theme().info,
-            NotificationLevel::Error => theme().error,
-        };
-        (message, Style::default().fg(color))
-    } else {
-        let text = screen.footer_hint(shell);
-        (text, Style::default().fg(theme().muted))
-    };
-    frame.render_widget(
-        Paragraph::new(text)
-            .alignment(Alignment::Center)
-            .style(style),
-        area,
-    );
+    render_status_bar(frame, shell, area, screen.footer_hint(shell));
 }
 
 fn register_narrow_tabs(shell: &mut Shell, area: Rect) {

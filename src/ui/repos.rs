@@ -380,25 +380,5 @@ fn size_label(bytes: i64) -> String {
 }
 
 fn render_footer(frame: &mut Frame<'_>, screen: &ReposScreen, shell: &Shell, area: Rect) {
-    let (text, style) = shell.notification().map_or_else(
-        || {
-            (
-                screen.footer_hint(shell),
-                Style::default().fg(theme().muted),
-            )
-        },
-        |(message, level)| {
-            let color = match level {
-                NotificationLevel::Info => theme().info,
-                NotificationLevel::Error => theme().error,
-            };
-            (message, Style::default().fg(color))
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(text)
-            .alignment(Alignment::Center)
-            .style(style),
-        area,
-    );
+    render_status_bar(frame, shell, area, screen.footer_hint(shell));
 }

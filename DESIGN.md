@@ -1304,6 +1304,19 @@ its parent back. A work item nobody broke down shows nothing at all in any of
 the three places, never `0/0`. The bar is drawn from two different glyphs
 rather than two colours, so it reads the same under `NO_COLOR`.
 
+The bottom row is a two-segment status bar. On the left, what the keys do on
+this tab and in this mode, cut where one hint ends rather than in the middle of
+a key when the row is narrow — the `?` overlay carries the rest. On the right,
+how the sync is going: `⠮ Syncing…` while a pull is in flight, `● Synced 2m`
+after one, `! Sync failed`, `◌ Stale` when another writer has changed the
+database, `◌ Sync paused 2m` while Azure DevOps is throttling, and `⊘ Offline`
+for a run with no project to pull from — in the success, error, warning and
+muted colours, with the project's name beside it when the row is wide enough.
+A notification takes the left segment over with a leading `✓` or `✗` and
+expires as it always did; it never covers the sync, which is on screen
+whatever else is being said. The tickets pane's title says nothing about the
+sync any more.
+
 The search is one row under the tab bar, not a box three rows tall: a `/`
 prompt in the muted colour with the placeholder beside it, a bold `›` and the
 surface ground while it has the keyboard, a braille spinner in the prompt cell
@@ -1312,7 +1325,10 @@ query to clear. Where a tab is searching inside something — a saved pull
 request view, the runs of one pipeline — that name reads muted at the right end
 of the row. `Actions` and `?` are chips at the right end of the tab bar rather
 than titles on the search box, because both open over every tab; the shell
-answers them, as it does a click on a tab. The facet pills below are filled
+answers them, as it does a click on a tab. On the bar itself the tab showing
+reads in the accent on the surface ground, bold — reversed under `NO_COLOR`,
+where there is no ground — the others are muted, and a badge saying what is
+waiting on a tab reads in the warning colour wherever that tab sits. The facet pills below are filled
 chips: the one the cursor is on reverses, one carrying a filter reads in the
 accent, and the rest are muted — distinctions that survive `NO_COLOR`, where
 the first two become reverse and bold.

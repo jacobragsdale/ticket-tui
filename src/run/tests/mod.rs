@@ -15,7 +15,7 @@ use super::*;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 use tempfile::tempdir;
-use ticket_tui::app::{FormFieldId, NotificationLevel, WorkItemMode};
+use ticket_tui::app::{FormFieldId, NotificationLevel, SyncStatus, WorkItemMode};
 use ticket_tui::azure::{RequestRejected, SyncBatch, Throttled};
 use ticket_tui::edit::FieldEdit;
 use ticket_tui::model::{

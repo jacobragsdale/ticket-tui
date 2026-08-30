@@ -307,9 +307,6 @@ pub(super) fn render_table(
             screen.sort_direction.symbol()
         )
     };
-    let activity = shell
-        .activity_label()
-        .map_or_else(String::new, |label| format!(" · {label}"));
     let (title, status) = if area.width < NARROW_BREAKPOINT {
         let short_order = if screen.query().is_empty() {
             screen.sort_direction.symbol()
@@ -321,12 +318,12 @@ pub(super) fn render_table(
         };
         (
             " [Tickets] [Details] ".to_owned(),
-            format!("{count}/{total} · {short_order}{activity}"),
+            format!("{count}/{total} · {short_order}"),
         )
     } else {
         (
             " Tickets ".to_owned(),
-            format!("{count}/{total} · {ordering}{activity}"),
+            format!("{count}/{total} · {ordering}"),
         )
     };
 

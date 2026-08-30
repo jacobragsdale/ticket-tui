@@ -256,7 +256,7 @@ fn layouts_render_both_panes_and_expose_hit_regions_at_every_breakpoint() {
 }
 
 #[test]
-fn the_table_title_reports_the_sync_state_in_both_layouts() {
+fn the_status_bar_reports_the_sync_state_at_every_width() {
     let mut app = App::new(vec![ticket()]);
     assert!(
         !render_text(130, 12, &mut app).contains("Sync"),
@@ -268,7 +268,7 @@ fn the_table_title_reports_the_sync_state_in_both_layouts() {
     for width in [60, 130] {
         assert!(
             render_text(width, 12, &mut app).contains("Syncing…"),
-            "the narrow title keeps step at width {width}"
+            "the narrow bar keeps step at width {width}"
         );
     }
 
@@ -292,7 +292,7 @@ fn the_table_title_reports_the_sync_state_in_both_layouts() {
     app.shell.begin_sync();
     assert!(
         render_text(130, 12, &mut app).contains("Syncing…"),
-        "a pull in flight is the most urgent thing the title can say"
+        "a pull in flight is the most urgent thing the bar can say"
     );
 }
 
@@ -511,4 +511,51 @@ fn issue_app() -> App {
     );
     app.work_items.set_state_catalog(catalog);
     app
+}
+
+#[test]
+fn a_notification_takes_the_hints_over_and_leaves_the_sync_where_it_is() {
+    let mut app = App::new(vec![ticket()]);
+    app.shell.enable_sync();
+    app.shell.finish_sync();
+    let quiet = render_text(130, 12, &mut app);
+    let bar = quiet.lines().last().expect("a status bar").to_owned();
+    assert!(bar.contains("move"), "the hints read on the left: {bar}");
+    assert!(bar.contains("\u{25cf} Synced just now"), "{bar}");
+
+    app.shell.set_status("Saved view 'Mine'");
+    let text = render_text(130, 12, &mut app);
+    let bar = text.lines().last().expect("a status bar").to_owned();
+    assert!(bar.contains("\u{2713} Saved view 'Mine'"), "{bar}");
+    assert!(
+        bar.contains("\u{25cf} Synced just now"),
+        "a notification never hides the sync segment: {bar}"
+    );
+    assert!(!bar.contains("move"), "it does take the hints over: {bar}");
+}
+
+#[test]
+fn the_hints_are_cut_where_one_ends_rather_than_mid_key() {
+    let mut app = App::new(vec![ticket()]);
+    let narrow = render_text(60, 12, &mut app);
+    let bar = narrow.lines().last().expect("a status bar").to_owned();
+    assert!(
+        bar.contains("\u{2191}\u{2193}/jk move"),
+        "the first hint always fits: {bar}"
+    );
+    assert!(
+        !bar.contains("wheel scr\u{200b}"),
+        "and no hint is cut in half: {bar}"
+    );
+    let hint = crate::app::Screen::footer_hint(&app.work_items, &app.shell);
+    for word in hint.split("  ") {
+        let word = word.trim();
+        if bar.contains(word) {
+            continue;
+        }
+        assert!(
+            !word.split_whitespace().any(|part| bar.contains(part)),
+            "a hint that did not fit left nothing behind: {word:?} in {bar}"
+        );
+    }
 }

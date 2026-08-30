@@ -33,7 +33,7 @@ fn a_scheduled_pull_replaces_the_tickets_and_the_table_title_follows_it() {
     runtime.scheduler.schedule_now(Instant::now());
 
     assert!(dispatch_due_pull(&mut app, &mut runtime));
-    assert_eq!(app.shell.activity_label().as_deref(), Some("Syncing…"));
+    assert_eq!(app.shell.sync_status(), SyncStatus::Syncing);
     assert!(
         !dispatch_due_pull(&mut app, &mut runtime),
         "the timer never queues a second pull behind one in flight"
@@ -42,10 +42,7 @@ fn a_scheduled_pull_replaces_the_tickets_and_the_table_title_follows_it() {
     await_sync(&mut app, &mut repository, &mut runtime);
     assert_eq!(app.work_items.tickets().len(), 1);
     assert_eq!(app.work_items.tickets()[0].key.id, 9);
-    assert_eq!(
-        app.shell.activity_label().as_deref(),
-        Some("Synced just now")
-    );
+    assert_eq!(app.shell.sync_status().label(), "Synced just now");
     assert!(
         app.shell.notification().is_none(),
         "a timer pull says so in the title, not in a toast"
@@ -77,9 +74,9 @@ fn a_pull_that_finds_nothing_says_so_and_reloads_nothing() {
         Some("Nothing changed")
     );
     assert_eq!(
-        app.shell.activity_label().as_deref(),
-        Some("Synced just now"),
-        "the pull still happened, so the title moves"
+        app.shell.sync_status().label(),
+        "Synced just now",
+        "the pull still happened, so the status bar moves"
     );
     assert_eq!(
         app.work_items.tickets().len(),
@@ -137,7 +134,7 @@ fn a_failed_pull_keeps_the_tickets_and_reports_the_same_error_once() {
         .expect("the first failure is reported");
     assert!(message.contains("network unreachable"), "{message}");
     assert_eq!(level, NotificationLevel::Error);
-    assert_eq!(app.shell.activity_label().as_deref(), Some("Sync failed"));
+    assert_eq!(app.shell.sync_status(), SyncStatus::Failed);
 
     app.shell.set_status("still browsing");
     runtime.scheduler.schedule_now(Instant::now());
@@ -148,7 +145,7 @@ fn a_failed_pull_keeps_the_tickets_and_reports_the_same_error_once() {
         Some("still browsing"),
         "the same timer failure is not raised again"
     );
-    assert_eq!(app.shell.activity_label().as_deref(), Some("Sync failed"));
+    assert_eq!(app.shell.sync_status(), SyncStatus::Failed);
 }
 
 #[test]
@@ -169,10 +166,7 @@ fn a_throttled_pull_pauses_the_timer_and_says_so_instead_of_failing() {
         3,
         "a throttled pull changes nothing"
     );
-    assert_eq!(
-        app.shell.activity_label().as_deref(),
-        Some("Sync paused 2m")
-    );
+    assert_eq!(app.shell.sync_status().label(), "Sync paused 2m");
     assert_eq!(
         app.shell.notification().map(|(message, _)| message),
         Some("still browsing"),

@@ -66,7 +66,7 @@ pub use screen::{Screen, TabId};
 pub(crate) use shell::relative_age;
 pub use shell::{
     DEFAULT_PANE_SPLIT_STACKED, DEFAULT_PANE_SPLIT_WIDE, DividerOrientation, Focus,
-    NotificationLevel, PointerUpdate, Shell,
+    NotificationLevel, PointerUpdate, Shell, SyncStatus,
 };
 use shell::{MAX_SPLIT_PERCENT, MIN_SPLIT_PERCENT};
 pub use work_items::{

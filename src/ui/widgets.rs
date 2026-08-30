@@ -52,6 +52,125 @@ pub(super) fn register_close_button(shell: &mut Shell, area: Rect, layer: Pointe
     ));
 }
 
+/// The footer: what the keys do on the left, how the sync is going on the
+/// right. A notification takes the left segment over until it expires and
+/// never covers the right one, so the sync state is on screen whatever else
+/// is being said.
+pub(super) fn render_status_bar(frame: &mut Frame<'_>, shell: &Shell, area: Rect, hint: &str) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let status = shell.sync_status();
+    let (glyph, tone) = sync_glyph(&status);
+    let mut right = vec![
+        Span::styled(glyph, Style::default().fg(tone)),
+        Span::raw(" "),
+        Span::styled(status.label(), Style::default().fg(tone)),
+        Span::raw(" "),
+    ];
+    let width = |spans: &[Span<'_>]| {
+        u16::try_from(
+            spans
+                .iter()
+                .map(|span| span.content.chars().count())
+                .sum::<usize>(),
+        )
+        .unwrap_or(u16::MAX)
+    };
+    // The project only earns its place once the hints have room of their own.
+    if let Some(project) = shell.project_label()
+        && area.width
+            > width(&right)
+                .saturating_add(u16::try_from(project.chars().count()).unwrap_or(u16::MAX))
+                .saturating_add(32)
+    {
+        right.insert(
+            0,
+            Span::styled(project.to_owned(), Style::default().fg(theme().muted)),
+        );
+        right.insert(1, Span::raw("  "));
+    }
+    let right_width = width(&right).min(area.width);
+    frame.render_widget(
+        Line::from(right).right_aligned(),
+        Rect::new(
+            area.right().saturating_sub(right_width),
+            area.y,
+            right_width,
+            1,
+        ),
+    );
+
+    let left = Rect::new(
+        area.x.saturating_add(1),
+        area.y,
+        area.width
+            .saturating_sub(1)
+            .saturating_sub(right_width)
+            .saturating_sub(1),
+        1,
+    );
+    if left.width == 0 {
+        return;
+    }
+    let (text, style) = match shell.notification() {
+        Some((message, NotificationLevel::Info)) => {
+            (format!("✓ {message}"), Style::default().fg(theme().info))
+        }
+        Some((message, NotificationLevel::Error)) => {
+            (format!("✗ {message}"), Style::default().fg(theme().error))
+        }
+        None => (
+            trim_hints(hint, left.width),
+            Style::default().fg(theme().muted),
+        ),
+    };
+    frame.render_widget(Line::styled(text, style), left);
+}
+
+/// The glyph and the colour one sync state reads in. `Syncing` spins on the
+/// wake-ups the pull itself causes.
+fn sync_glyph(status: &SyncStatus) -> (String, Color) {
+    match status {
+        SyncStatus::Syncing | SyncStatus::Reloading => {
+            (spinner_frame().to_string(), theme().accent)
+        }
+        SyncStatus::Synced(_) => ("●".to_owned(), theme().success),
+        SyncStatus::Failed => ("!".to_owned(), theme().error),
+        SyncStatus::Paused(_) | SyncStatus::Stale => ("◌".to_owned(), theme().warning),
+        SyncStatus::Offline => ("⊘".to_owned(), theme().muted),
+        SyncStatus::Waiting => ("○".to_owned(), theme().muted),
+    }
+}
+
+/// As many whole hints as `width` holds, cut where one ends rather than in
+/// the middle of a key. The `?` overlay has the rest of them.
+fn trim_hints(hint: &str, width: u16) -> String {
+    let width = usize::from(width);
+    if hint.chars().count() <= width {
+        return hint.to_owned();
+    }
+    let mut kept = String::new();
+    for part in hint.split("  ") {
+        if part.is_empty() {
+            continue;
+        }
+        let next = if kept.is_empty() {
+            part.chars().count()
+        } else {
+            kept.chars().count() + 2 + part.chars().count()
+        };
+        if next > width {
+            break;
+        }
+        if !kept.is_empty() {
+            kept.push_str("  ");
+        }
+        kept.push_str(part);
+    }
+    kept
+}
+
 /// The one-row search every tab opens with: a prompt glyph, the query or the
 /// placeholder, and a `[×]` at the right end of the tabs that offer one.
 pub(super) struct SearchRow<'a> {

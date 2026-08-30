@@ -132,6 +132,42 @@ fn split_percent(cells: u16, span: u16, first_min: u16, second_min: u16) -> u16 
     u16::try_from(percent.clamp(low, high)).unwrap_or(MIN_SPLIT_PERCENT)
 }
 
+/// What the status bar says about the sync. The glyph and the colour are the
+/// renderer's; this is the state, and the words for it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SyncStatus {
+    /// Nothing to pull from: no organization configured, or a database
+    /// another project filled.
+    Offline,
+    Syncing,
+    Reloading,
+    /// Azure DevOps asked to be left alone, and for how much longer.
+    Paused(String),
+    Failed,
+    Stale,
+    /// The sync is on and nothing has come back yet.
+    Waiting,
+    /// How long ago the last pull finished.
+    Synced(String),
+}
+
+impl SyncStatus {
+    /// What the bar writes after the glyph.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Offline => "Offline".to_owned(),
+            Self::Syncing => "Syncing…".to_owned(),
+            Self::Reloading => "Reloading…".to_owned(),
+            Self::Paused(left) => format!("Sync paused {left}"),
+            Self::Failed => "Sync failed".to_owned(),
+            Self::Stale => "Stale".to_owned(),
+            Self::Waiting => "Not synced".to_owned(),
+            Self::Synced(age) => format!("Synced {age}"),
+        }
+    }
+}
+
 /// What every screen sits inside. A screen is handed one of these on
 /// each event, and reads and writes it rather than owning any of it.
 #[derive(Debug)]
@@ -374,29 +410,41 @@ impl Shell {
         self.future.retain(|held| held != jump);
     }
 
-    /// What the table title appends after the sort order, most urgent first.
+    /// What the status bar's right-hand segment reports, most urgent first.
     #[must_use]
-    pub fn activity_label(&self) -> Option<String> {
+    pub fn sync_status(&self) -> SyncStatus {
         if self.sync_enabled && self.sync_pending {
-            return Some("Syncing…".into());
+            return SyncStatus::Syncing;
         }
         if self.reload_pending {
-            return Some("Reloading…".into());
+            return SyncStatus::Reloading;
         }
         if self.sync_enabled
             && let Some(left) = self.sync_pause_left()
         {
-            return Some(format!("Sync paused {}", remaining_wait(left)));
+            return SyncStatus::Paused(remaining_wait(left));
         }
         if self.sync_enabled && self.sync_error.is_some() {
-            return Some("Sync failed".into());
+            return SyncStatus::Failed;
         }
         if self.stale {
-            return Some("Stale".into());
+            return SyncStatus::Stale;
         }
-        self.synced_at
-            .filter(|_| self.sync_enabled)
-            .map(|at| format!("Synced {}", relative_age(at.elapsed())))
+        if !self.sync_enabled {
+            return SyncStatus::Offline;
+        }
+        self.synced_at.map_or(SyncStatus::Waiting, |at| {
+            SyncStatus::Synced(relative_age(at.elapsed()))
+        })
+    }
+
+    /// The project the rows come from, for the status bar to name beside the
+    /// sync state when the row is wide enough for it.
+    #[must_use]
+    pub fn project_label(&self) -> Option<&str> {
+        self.sync_target
+            .as_ref()
+            .map(|target| target.project.as_str())
     }
 
     /// A pull has started.

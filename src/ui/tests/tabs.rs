@@ -45,10 +45,15 @@ fn the_tab_bar_names_four_tabs_and_marks_the_one_showing_at_every_breakpoint() {
         active.add_modifier.contains(Modifier::BOLD),
         "the tab showing is bold"
     );
-    assert!(
-        active.add_modifier.contains(Modifier::REVERSED),
-        "and stands out without colour"
-    );
+    if theme().surface == Color::Reset {
+        assert!(
+            active.add_modifier.contains(Modifier::REVERSED),
+            "with no ground to sit on it reverses instead"
+        );
+    } else {
+        assert_eq!(active.bg, Some(theme().surface), "and sits on the surface");
+        assert_eq!(active.fg, Some(theme().accent));
+    }
     let inactive_x = u16::try_from(row_text(&terminal, 0, 120).find("2 Repos").unwrap()).unwrap();
     let inactive = buffer[(inactive_x, 0)].style();
     assert!(
