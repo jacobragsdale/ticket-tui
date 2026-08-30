@@ -128,11 +128,17 @@ pub(super) fn render_help_popup(
             .filter(|command| !command.keys.is_empty() && command.scope == Scope::Global)
             .map(described),
     );
-    // Then a section per tab, for the keys that only work on one of them.
+    // Then a section per tab, for the keys that do not work on all of them. A
+    // command two tabs share is listed under both, because it does a different
+    // thing on each.
     for tab in TabId::ALL {
         let owned: Vec<Line<'_>> = COMMANDS
             .iter()
-            .filter(|command| !command.keys.is_empty() && command.scope == Scope::Tab(tab))
+            .filter(|command| {
+                !command.keys.is_empty()
+                    && command.scope != Scope::Global
+                    && command.scope.covers(tab)
+            })
             .map(described)
             .collect();
         if owned.is_empty() {

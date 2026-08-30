@@ -124,7 +124,10 @@ pub const fn ctrl(ch: char) -> Key {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Scope {
     Global,
-    Tab(TabId),
+    /// The tabs whose `run_command` answers this command. More than one when
+    /// two screens read the same verb their own way — `Copy ID` is the work
+    /// item's number on one tab and the repository's clone URL on another.
+    Tabs(&'static [TabId]),
 }
 
 /// One action, defined once: its palette title, its bindings, its help text,
@@ -144,7 +147,7 @@ impl Scope {
     pub fn covers(self, tab: TabId) -> bool {
         match self {
             Self::Global => true,
-            Self::Tab(owner) => owner == tab,
+            Self::Tabs(owners) => owners.contains(&tab),
         }
     }
 }
@@ -180,14 +183,14 @@ pub const COMMANDS: &[Command] = &[
         title: "Open filter bar",
         keys: &[key('f')],
         help: "Space toggles values",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::MoreFilters,
         title: "More filters",
         keys: &[key('F')],
         help: "Priority, project, area…",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::Columns,
@@ -201,231 +204,231 @@ pub const COMMANDS: &[Command] = &[
         title: "Named views",
         keys: &[key('v')],
         help: "Save and restore",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::EditMenu,
         title: "Actions\u{2026}",
         keys: &[key('e')],
         help: "Change a field",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::ChangeState,
         title: "Change state",
         keys: &[key('S')],
         help: "Move the work item",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::CloneRepo,
         title: "Clone repository",
         keys: &[key('C')],
         help: "Into the workspace",
-        scope: Scope::Tab(TabId::Repos),
+        scope: Scope::Tabs(&[TabId::Repos]),
     },
     Command {
         id: CommandId::FetchRepo,
         title: "Fetch",
         keys: &[key('G')],
         help: "git fetch --prune",
-        scope: Scope::Tab(TabId::Repos),
+        scope: Scope::Tabs(&[TabId::Repos]),
     },
     Command {
         id: CommandId::PullRepo,
         title: "Pull",
         keys: &[key('P')],
         help: "Fast-forward only",
-        scope: Scope::Tab(TabId::Repos),
+        scope: Scope::Tabs(&[TabId::Repos]),
     },
     Command {
         id: CommandId::ApprovePr,
         title: "Approve",
         keys: &[key('a')],
         help: "Vote on the pull request",
-        scope: Scope::Tab(TabId::PullRequests),
+        scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::SuggestPr,
         title: "Approve with suggestions",
         keys: &[key('A')],
         help: "",
-        scope: Scope::Tab(TabId::PullRequests),
+        scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::WaitPr,
         title: "Wait for author",
         keys: &[key('w')],
         help: "",
-        scope: Scope::Tab(TabId::PullRequests),
+        scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::RejectPr,
         title: "Reject",
         keys: &[key('x')],
         help: "",
-        scope: Scope::Tab(TabId::PullRequests),
+        scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::UndoVote,
         title: "Undo last vote",
         keys: &[key('u')],
         help: "Put the previous vote back",
-        scope: Scope::Tab(TabId::PullRequests),
+        scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::CompletePr,
         title: "Complete",
         keys: &[key('C')],
         help: "Merge it, after a short form",
-        scope: Scope::Tab(TabId::PullRequests),
+        scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::AbandonPr,
         title: "Abandon",
         keys: &[key('X')],
         help: "Asks once more",
-        scope: Scope::Tab(TabId::PullRequests),
+        scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::AutoCompletePr,
         title: "Toggle auto-complete",
         keys: &[key('t')],
         help: "Complete when the policies pass",
-        scope: Scope::Tab(TabId::PullRequests),
+        scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::CommentPr,
         title: "Comment",
         keys: &[key('n')],
         help: "One line, as a new thread",
-        scope: Scope::Tab(TabId::PullRequests),
+        scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::ToggleClosedPrs,
         title: "Show or hide closed pull requests",
         keys: &[],
         help: "Completed and abandoned",
-        scope: Scope::Tab(TabId::PullRequests),
+        scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::RunPipeline,
         title: "Run pipeline",
         keys: &[key('t')],
         help: "Pick a branch and start it",
-        scope: Scope::Tab(TabId::Pipelines),
+        scope: Scope::Tabs(&[TabId::Pipelines]),
     },
     Command {
         id: CommandId::CancelRun,
         title: "Cancel run",
         keys: &[key('x')],
         help: "Asks once more",
-        scope: Scope::Tab(TabId::Pipelines),
+        scope: Scope::Tabs(&[TabId::Pipelines]),
     },
     Command {
         id: CommandId::RetryRun,
         title: "Retry failed jobs",
         keys: &[key('R')],
         help: "On a run that failed or was canceled",
-        scope: Scope::Tab(TabId::Pipelines),
+        scope: Scope::Tabs(&[TabId::Pipelines]),
     },
     Command {
         id: CommandId::WatchRun,
         title: "Watch run",
         keys: &[key('W')],
         help: "Say when it stops, on any tab",
-        scope: Scope::Tab(TabId::Pipelines),
+        scope: Scope::Tabs(&[TabId::Pipelines]),
     },
     Command {
         id: CommandId::Approvals,
         title: "Approvals",
         keys: &[key('A')],
         help: "What is waiting on a person",
-        scope: Scope::Tab(TabId::Pipelines),
+        scope: Scope::Tabs(&[TabId::Pipelines]),
     },
     Command {
         id: CommandId::EditTitle,
         title: "Edit title",
         keys: &[],
         help: "Rename the work item",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::EditPriority,
         title: "Edit priority",
         keys: &[],
         help: "1\u{2013}4, or clear it",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::EditTags,
         title: "Edit tags",
         keys: &[],
         help: "Semicolon separated",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::EditAssignee,
         title: "Change assignee",
         keys: &[key('a')],
         help: "Pick who owns it",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::EditIteration,
         title: "Change iteration",
         keys: &[],
         help: "Move it to a sprint",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::EditArea,
         title: "Change area",
         keys: &[],
         help: "Move it in the area tree",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::SetParent,
         title: "Set parent\u{2026}",
         keys: &[],
         help: "File it under another work item",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::RemoveParent,
         title: "Remove parent",
         keys: &[],
         help: "Detach it from its family",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::EditDescription,
         title: "Edit description",
         keys: &[],
         help: "Opens your $EDITOR",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::AddComment,
         title: "Add comment",
         keys: &[],
         help: "One line on the discussion",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::NewWorkItem,
         title: "New work item",
         keys: &[key('n')],
         help: "Ctrl-S creates it",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::NewChild,
         title: "New child",
         keys: &[key('N')],
         help: "Under the selected one",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     // Deliberately unbound. Every other editor is a keypress away because the
     // worst it can do is a wrong value somebody types over; this one takes the
@@ -435,49 +438,49 @@ pub const COMMANDS: &[Command] = &[
         title: "Delete work item…",
         keys: &[],
         help: "To the recycle bin",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::UndoEdit,
         title: "Undo last edit",
         keys: &[key('u')],
         help: "Put the value back",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::SaveView,
         title: "Save current view",
         keys: &[key('V')],
         help: "",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::Sort,
         title: "Sort tickets",
         keys: &[key('s')],
         help: "Choose field and direction",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::ToggleDensity,
         title: "Toggle row density",
         keys: &[],
         help: "",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::ToggleDetails,
         title: "Toggle details pane",
         keys: &[key('d')],
         help: "Below 70 columns",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::ToggleSearchOrder,
         title: "Toggle search order",
         keys: &[],
         help: "Relevance or fields",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::ToggleFinished,
@@ -486,7 +489,7 @@ pub const COMMANDS: &[Command] = &[
         title: "Show finished tickets",
         keys: &[],
         help: "Done and Removed rows",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::Open,
@@ -500,7 +503,7 @@ pub const COMMANDS: &[Command] = &[
         title: "Toggle bookmark",
         keys: &[key('m')],
         help: "",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::HistoryBack,
@@ -521,70 +524,70 @@ pub const COMMANDS: &[Command] = &[
         title: "Copy ID",
         keys: &[key('y')],
         help: "Selected or current tickets",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems, TabId::Repos]),
     },
     Command {
         id: CommandId::CopyUrl,
         title: "Copy URL",
         keys: &[],
         help: "",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems, TabId::Repos]),
     },
     Command {
         id: CommandId::CopyTitle,
         title: "Copy title",
         keys: &[],
         help: "",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::CopyMarkdown,
         title: "Copy Markdown link",
         keys: &[],
         help: "",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::CopySummary,
         title: "Copy summary",
         keys: &[],
         help: "",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::ExportJson,
         title: "Export selected as JSON",
         keys: &[],
         help: "",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::ExportCsv,
         title: "Export selected as CSV",
         keys: &[],
         help: "",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::SelectAll,
         title: "Select all visible",
         keys: &[],
         help: "",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::ClearSelection,
         title: "Clear selection",
         keys: &[],
         help: "",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::SprintSummary,
         title: "Sprint summary",
         keys: &[],
         help: "Who has what this iteration",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::DatabaseInfo,
@@ -626,14 +629,14 @@ pub const COMMANDS: &[Command] = &[
         title: "Reset pane split",
         keys: &[],
         help: "Restore the 62/56 layout",
-        scope: Scope::Global,
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::SetStaleThreshold,
         title: "Set stale threshold",
         keys: &[],
         help: "7, 14, 21, or 30 days",
-        scope: Scope::Tab(TabId::WorkItems),
+        scope: Scope::Tabs(&[TabId::WorkItems]),
     },
 ];
 
@@ -760,15 +763,20 @@ pub const fn finished_title(finished_hidden: bool) -> &'static str {
 /// The command as the palette should list it right now. Only the finished
 /// toggle differs from its entry in [`COMMANDS`], and it is reworded before
 /// the query is matched so a command is found under the words it is showing.
-fn worded(command: Command, finished_hidden: bool) -> Command {
-    if command.id == CommandId::ToggleFinished {
-        Command {
-            title: finished_title(finished_hidden),
-            ..command
-        }
-    } else {
-        command
-    }
+fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
+    let title = match command.id {
+        CommandId::ToggleFinished => finished_title(finished_hidden),
+        // Four screens share one verb; each opens a different thing, and the
+        // palette should say which.
+        CommandId::Open => match tab {
+            TabId::WorkItems => "Open ticket in browser",
+            TabId::Repos => "Open repository in browser",
+            TabId::PullRequests => "Open pull request in browser",
+            TabId::Pipelines => "Open run in browser",
+        },
+        _ => return command,
+    };
+    Command { title, ..command }
 }
 
 #[must_use]
@@ -779,7 +787,7 @@ pub fn matching_commands(query: &str, finished_hidden: bool, tab: TabId) -> Vec<
         .copied()
         .filter(|command| command.scope.covers(tab))
         .filter(Command::in_palette)
-        .map(|command| worded(command, finished_hidden))
+        .map(|command| worded(command, finished_hidden, tab))
         .filter(|command| {
             query.is_empty()
                 || command.title.to_ascii_lowercase().contains(&query)
@@ -934,7 +942,7 @@ mod tests {
         // may not mean two things anywhere a person could press it.
         let overlaps = |left: Scope, right: Scope| match (left, right) {
             (Scope::Global, _) | (_, Scope::Global) => true,
-            (Scope::Tab(a), Scope::Tab(b)) => a == b,
+            (Scope::Tabs(a), Scope::Tabs(b)) => a.iter().any(|tab| b.contains(tab)),
         };
         let mut bound: Vec<(Key, Scope)> = Vec::new();
         for command in COMMANDS {
@@ -964,5 +972,113 @@ mod tests {
             .find(|command| command.id == CommandId::Palette)
             .expect("palette command");
         assert_eq!(palette.key_label(), "p / :");
+    }
+
+    /// Every command a screen answers, mirroring the `run_command` match in
+    /// `app/<tab>/mod.rs`. The four shared overlays are left out: `App` opens
+    /// each of those over whichever tab is showing, so every tab answers them.
+    fn answered_by(tab: TabId) -> &'static [CommandId] {
+        match tab {
+            TabId::Repos => &[
+                CommandId::Search,
+                CommandId::Open,
+                CommandId::CopyUrl,
+                CommandId::CopyId,
+                CommandId::CloneRepo,
+                CommandId::FetchRepo,
+                CommandId::PullRepo,
+                CommandId::Sync,
+                CommandId::HistoryBack,
+                CommandId::HistoryForward,
+                CommandId::Quit,
+            ],
+            TabId::PullRequests => &[
+                CommandId::Search,
+                CommandId::Open,
+                CommandId::Sync,
+                CommandId::HistoryBack,
+                CommandId::HistoryForward,
+                CommandId::ApprovePr,
+                CommandId::SuggestPr,
+                CommandId::WaitPr,
+                CommandId::RejectPr,
+                CommandId::UndoVote,
+                CommandId::CompletePr,
+                CommandId::AbandonPr,
+                CommandId::AutoCompletePr,
+                CommandId::CommentPr,
+                CommandId::ToggleClosedPrs,
+                CommandId::Quit,
+            ],
+            TabId::Pipelines => &[
+                CommandId::Search,
+                CommandId::Open,
+                CommandId::Sync,
+                CommandId::HistoryBack,
+                CommandId::HistoryForward,
+                CommandId::RunPipeline,
+                CommandId::Approvals,
+                CommandId::CancelRun,
+                CommandId::RetryRun,
+                CommandId::WatchRun,
+                CommandId::Quit,
+            ],
+            // The work items screen matches exhaustively and answers
+            // everything except the other tabs' verbs, which are exactly the
+            // commands no other tab shares with it.
+            TabId::WorkItems => &[],
+        }
+    }
+
+    /// The overlays `App` opens over any tab before the screen sees them.
+    const SHARED: [CommandId; 4] = [
+        CommandId::Help,
+        CommandId::Palette,
+        CommandId::Columns,
+        CommandId::DatabaseInfo,
+    ];
+
+    #[test]
+    fn no_tab_offers_a_command_its_screen_does_not_answer() {
+        // A palette entry that does nothing reads as broken rather than as out
+        // of scope, so a command's scope may only name a tab whose
+        // `run_command` has an arm for it. Widening a scope without writing
+        // that arm fails here.
+        for tab in TabId::ALL {
+            if tab == TabId::WorkItems {
+                continue;
+            }
+            let answered = answered_by(tab);
+            for command in matching_commands("", true, tab) {
+                assert!(
+                    answered.contains(&command.id) || SHARED.contains(&command.id),
+                    "the {} palette offers {:?}, which that screen does not answer",
+                    tab.label(),
+                    command.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_scope_names_every_tab_that_answers_the_command() {
+        // The other direction: a screen that answers a command must be offered
+        // it. Catches a scope narrowed past a tab that still has the arm.
+        for tab in TabId::ALL {
+            if tab == TabId::WorkItems {
+                continue;
+            }
+            for id in answered_by(tab) {
+                let command = COMMANDS
+                    .iter()
+                    .find(|command| command.id == *id)
+                    .expect("every answered command is in the table");
+                assert!(
+                    command.scope.covers(tab),
+                    "the {} screen answers {id:?}, but its scope does not reach that tab",
+                    tab.label()
+                );
+            }
+        }
     }
 }

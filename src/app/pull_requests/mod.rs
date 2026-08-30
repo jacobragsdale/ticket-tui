@@ -778,11 +778,65 @@ impl PullRequestsScreen {
             CommandId::AbandonPr => self.confirm_abandon(shell),
             CommandId::AutoCompletePr => return self.toggle_auto_complete(shell),
             CommandId::CommentPr => self.open_comment(shell),
-            CommandId::ToggleClosedPrs | CommandId::ToggleFinished => {
-                self.show_closed = !self.show_closed;
-            }
+            CommandId::ToggleClosedPrs => self.show_closed = !self.show_closed,
             CommandId::Quit => shell.should_quit = true,
-            _ => {}
+            // Nothing this screen answers. The first four are the shared
+            // overlays, which `App` opens over whichever tab is showing before
+            // the screen sees them; the rest are other tabs' verbs, with no
+            // meaning for a pull request. Neither group is offered in the palette
+            // here or bound to a key on this tab. Listing them out keeps the
+            // match exhaustive, so a command added later cannot be quietly
+            // ignored on this tab the way a `_` arm would swallow it.
+            CommandId::Help
+            | CommandId::Palette
+            | CommandId::Columns
+            | CommandId::DatabaseInfo
+            | CommandId::ToggleFinished
+            | CommandId::Filters
+            | CommandId::MoreFilters
+            | CommandId::Views
+            | CommandId::EditMenu
+            | CommandId::ChangeState
+            | CommandId::EditTitle
+            | CommandId::EditPriority
+            | CommandId::EditTags
+            | CommandId::EditAssignee
+            | CommandId::EditIteration
+            | CommandId::EditArea
+            | CommandId::SetParent
+            | CommandId::RemoveParent
+            | CommandId::EditDescription
+            | CommandId::AddComment
+            | CommandId::NewWorkItem
+            | CommandId::NewChild
+            | CommandId::DeleteWorkItem
+            | CommandId::UndoEdit
+            | CommandId::Sort
+            | CommandId::ToggleDensity
+            | CommandId::ToggleDetails
+            | CommandId::ToggleSearchOrder
+            | CommandId::ToggleBookmark
+            | CommandId::CopyId
+            | CommandId::CopyUrl
+            | CommandId::CopyTitle
+            | CommandId::CopyMarkdown
+            | CommandId::CopySummary
+            | CommandId::ExportJson
+            | CommandId::ExportCsv
+            | CommandId::SelectAll
+            | CommandId::ClearSelection
+            | CommandId::CloneRepo
+            | CommandId::FetchRepo
+            | CommandId::PullRepo
+            | CommandId::RunPipeline
+            | CommandId::CancelRun
+            | CommandId::RetryRun
+            | CommandId::WatchRun
+            | CommandId::Approvals
+            | CommandId::SaveView
+            | CommandId::SprintSummary
+            | CommandId::ResetPaneSplit
+            | CommandId::SetStaleThreshold => {}
         }
         AppAction::None
     }

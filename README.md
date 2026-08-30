@@ -1196,9 +1196,14 @@ anything on tab `1`.
 
 The help overlay's key sections and the palette's key labels are generated from
 the same command table these keys are bound in, so a binding reads the same way
-everywhere. Each command carries the scope it belongs to — global, or one tab —
-which is what groups them under headings in the help and keeps another tab's
-keys out of the palette. `?`, `p`/`:`, `c` and `i` open on every tab: the
+everywhere. Each command carries the scope it belongs to — global, or the tabs
+that answer it — which is what groups them under headings in the help and keeps
+another tab's keys out of the palette. A scope names a tab only when that tab's
+screen has an arm for the command, so the palette never offers an entry that
+would do nothing; two tests hold that in both directions, and a command two
+tabs share is listed under both help headings because it does a different thing
+on each. `Open` is worded for what it opens — a ticket, a repository, a pull
+request, or a run. `?`, `p`/`:`, `c` and `i` open on every tab: the
 palette lists the commands of the tab that is showing and runs its choice
 there, and the columns editor edits that tab's columns.
 
