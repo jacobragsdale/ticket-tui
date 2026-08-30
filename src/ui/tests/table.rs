@@ -64,7 +64,7 @@ fn states_and_types_stay_distinct_while_completed_rows_fade() {
     ]);
     // How a finished row is painted, so it has to be on the table to look at.
     app.work_items.set_show_finished(&mut app.shell, true);
-    if theme() != &Theme::new(true) {
+    if theme() != Theme::mono() {
         // NO_COLOR renders every colour as Reset, so only compare palettes.
         let states = column_cell_colors(&mut app, SortField::State, 3);
         assert_distinct_and_legible(&states[..2]);
@@ -285,7 +285,7 @@ fn the_changed_cell_flags_work_left_untouched_and_never_finished_work() {
 fn tag_colours_are_stable_and_shared_by_the_table_and_details() {
     assert_eq!(tag_color("tech-debt"), tag_color("TECH-DEBT"));
     assert_eq!(tag_color("Rust"), tag_color("rust"));
-    if theme() != &Theme::new(true) {
+    if theme() != Theme::mono() {
         // NO_COLOR renders every colour as Reset, so only compare palettes.
         let colors: Vec<Color> = ["docs", "flaky", "perf", "rust"]
             .iter()

@@ -19,6 +19,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tempfile = "3.23.0"
 time = { version = "0.3.47", features = ["formatting", "macros", "parsing"] }
+toml = "0.9"
 ureq = { version = "3", features = ["json"] }
 url = "2.5.7"
 

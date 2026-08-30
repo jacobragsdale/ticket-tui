@@ -8,6 +8,7 @@ pub(super) fn run_terminal(
     repository: &mut SqliteTicketRepository,
     runtime: &mut SyncRuntime,
     context_publisher: &mut AgentContextPublisher,
+    config_watch: &mut ConfigWatch,
 ) -> Result<()> {
     let mut terminal = ratatui::init();
     let _restore = TerminalRestore;
@@ -26,6 +27,7 @@ pub(super) fn run_terminal(
         redraw |= dispatch_due_pull(app, runtime);
         redraw |= dispatch_due_details(app, runtime);
         redraw |= persist_session(app, repository);
+        redraw |= config_watch.poll(app);
         redraw |= app.shell.tick();
         if redraw {
             terminal.draw(|frame| ticket_tui::ui::render(frame, app))?;

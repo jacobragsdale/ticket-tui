@@ -492,7 +492,7 @@ fn the_edit_menu_and_the_state_picker_render_their_rows_and_state_colours() {
             "bold carries the distinction where NO_COLOR leaves no palette"
         );
     }
-    if theme() != &Theme::new(true) {
+    if theme() != Theme::mono() {
         assert_distinct_and_legible(&colours.iter().map(|(fg, _)| *fg).collect::<Vec<_>>());
     }
 

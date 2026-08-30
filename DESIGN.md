@@ -159,6 +159,62 @@ through 7, 14, 21, and 30 days, has the last word for the rest of the run, and
 is what gets saved. See [Stale-item
 highlighting](#stale-item-highlighting).
 
+### `--theme`, `TICKET_TUI_THEME` and `config.toml`
+
+Which palette the TUI paints with:
+
+```console
+cargo run --release -- --theme terminal-light
+```
+
+There are four. `terminal` is the default: the sixteen ANSI colours, so
+whatever palette the terminal itself is set to shows through, over SSH too.
+`terminal-light` swaps the few of those that vanish on a white ground.
+`mono` is what the standard `NO_COLOR` variable selects, and `NO_COLOR` beats
+everything else: every colour reset, so weight and glyphs carry each
+distinction alone. `custom` is built from a palette in
+`$XDG_CONFIG_HOME/ticket-tui/config.toml` (`~/.config/ticket-tui/config.toml`
+by default, on macOS as well):
+
+```toml
+[theme]
+preset = "custom"          # optional: terminal · terminal-light · mono · custom
+
+[theme.custom]             # what `theme apply` writes, in its own words
+name = "neon-void"
+appearance = "dark"
+bg = "#05060a"
+bg_deep = "#000000"
+surface = "#0b0d14"
+overlay = "#171b28"
+fg = "#dfe6ff"
+subtle = "#aab4dd"
+muted = "#626c9c"
+accent = "#c07cff"
+red = "#ff5f87"
+green = "#4ef5a4"
+yellow = "#ffd75f"
+blue = "#61a8ff"
+cyan = "#4fe8ff"
+orange = "#ff9e5e"
+teal = "#29e0c8"
+```
+
+The table is the vocabulary of the `theme` tool, which applies one palette to
+every program on the machine and has ticket-tui as one of its targets; a
+palette written by hand works the same way. `preset` may be left out: a file
+with a `[theme.custom]` table paints with it, and a file without one paints
+with `terminal`. The flag wins over `TICKET_TUI_THEME`, both win over the
+file, and a name that is none of the four is a startup error naming them.
+The file is optional; a file that does not parse, or a `custom` preset with no
+palette, is reported in the footer and the theme stays as it was.
+
+A running ticket-tui reads the file again whenever it changes — it looks at
+the file's clock once a second, on wake-ups the event loop makes anyway — so
+`theme pick` repaints the app live, and the footer says which palette it is
+now showing. A theme chosen by the flag or the variable keeps winning over the
+file for the whole run.
+
 ### `--workspace` and `TICKET_TUI_WORKSPACE`
 
 Where the Repos tab looks for clones and makes new ones:
@@ -1349,10 +1405,14 @@ switched on, after which the choice is saved with the rest of the layout. A
 parent whose children have all finished goes green and bold, in the Progress
 column and in the details heading alike. A hovered row is tinted with a
 256-colour background rather than repainted, so its coloured cells keep their own
-foregrounds; hovered controls reverse instead. Setting the standard `NO_COLOR`
-environment variable selects the monochrome theme, where weight carries the same
-distinctions: badges keep their brackets, finished rows dim instead of fading,
-state glyphs and your own work items go bold, and a hovered row reverses.
+foregrounds; hovered controls reverse instead. Those are the `terminal` theme's
+colours; the `custom` theme maps a palette from `config.toml` onto the same
+roles — state, type, priority and tag colours included — and `terminal-light`
+keeps them readable on a white ground (see [`--theme`](#--theme-ticket_tui_theme-and-configtoml)).
+Setting the standard `NO_COLOR` environment variable selects the `mono` theme,
+where weight carries the same distinctions: badges keep their brackets,
+finished rows dim instead of fading, state glyphs and your own work items go
+bold, and a hovered row reverses.
 
 `V` opens the views. Five built-in ones are listed under a **Built-in**
 heading, above whatever you have saved: **Mine** (`assignee:@me`),

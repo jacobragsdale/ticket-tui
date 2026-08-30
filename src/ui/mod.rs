@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::sync::OnceLock;
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -38,6 +37,7 @@ pub(crate) mod repos;
 mod table;
 #[cfg(test)]
 mod tests;
+pub mod theme;
 mod widgets;
 
 use details::{assigned_to_me_style, field_line, render_details};
@@ -57,6 +57,7 @@ use table::{
     render_table, search_match_style, state_category_style, state_color, state_style,
     tag_badge_spans, type_badge_spans,
 };
+pub use theme::{Theme, ThemeChoice, chosen_theme, set_theme, theme};
 use widgets::{
     capture_selectable, paint_hover, paint_selection, register_buttons, register_close_button,
     render_control, render_modal_frame, render_query_field, render_scrollbar, row_on_screen,
@@ -84,122 +85,6 @@ const SPRINT_OVERLAY_MIN_WIDTH: u16 = 42;
 const SPRINT_OVERLAY_MAX_WIDTH: u16 = 72;
 
 const SPRINT_OVERLAY_MAX_HEIGHT: u16 = 24;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Theme {
-    accent: Color,
-    muted: Color,
-    text: Color,
-    body: Color,
-    link: Color,
-    selected_background: Color,
-    /// A dimmer wash than `selected_background`, laid under a hovered row so
-    /// its colour-coded cells keep their own foregrounds.
-    hover_background: Color,
-    info: Color,
-    /// What the Changed column paints work nobody has touched in weeks. It is
-    /// deliberately not one of the state colours: staleness is a fact about
-    /// the clock, not about where the work item sits in the workflow.
-    warning: Color,
-    error: Color,
-    scrollbar: Color,
-    search_match: Color,
-    state_proposed: Color,
-    state_in_progress: Color,
-    state_resolved: Color,
-    state_completed: Color,
-    state_removed: Color,
-    type_epic: Color,
-    type_feature: Color,
-    type_story: Color,
-    type_task: Color,
-    type_bug: Color,
-    type_test: Color,
-    priority_critical: Color,
-    priority_high: Color,
-    priority_normal: Color,
-    /// Restrained badge colours a tag is hashed into, so one tag always reads
-    /// the same wherever it appears.
-    tag_palette: [Color; 6],
-}
-
-impl Theme {
-    const fn new(monochrome: bool) -> Self {
-        if monochrome {
-            Self {
-                accent: Color::Reset,
-                muted: Color::Reset,
-                text: Color::Reset,
-                body: Color::Reset,
-                link: Color::Reset,
-                selected_background: Color::Reset,
-                hover_background: Color::Reset,
-                info: Color::Reset,
-                warning: Color::Reset,
-                error: Color::Reset,
-                scrollbar: Color::Reset,
-                search_match: Color::Reset,
-                state_proposed: Color::Reset,
-                state_in_progress: Color::Reset,
-                state_resolved: Color::Reset,
-                state_completed: Color::Reset,
-                state_removed: Color::Reset,
-                type_epic: Color::Reset,
-                type_feature: Color::Reset,
-                type_story: Color::Reset,
-                type_task: Color::Reset,
-                type_bug: Color::Reset,
-                type_test: Color::Reset,
-                priority_critical: Color::Reset,
-                priority_high: Color::Reset,
-                priority_normal: Color::Reset,
-                tag_palette: [Color::Reset; 6],
-            }
-        } else {
-            Self {
-                accent: Color::Cyan,
-                muted: Color::DarkGray,
-                text: Color::White,
-                body: Color::Gray,
-                link: Color::Blue,
-                selected_background: Color::DarkGray,
-                hover_background: Color::Indexed(237),
-                info: Color::Yellow,
-                warning: Color::Yellow,
-                error: Color::Red,
-                scrollbar: Color::DarkGray,
-                search_match: Color::Yellow,
-                state_proposed: Color::Blue,
-                state_in_progress: Color::Yellow,
-                state_resolved: Color::Magenta,
-                state_completed: Color::Green,
-                state_removed: Color::DarkGray,
-                type_epic: Color::Yellow,
-                type_feature: Color::Magenta,
-                type_story: Color::Blue,
-                type_task: Color::Cyan,
-                type_bug: Color::Red,
-                type_test: Color::Green,
-                priority_critical: Color::Red,
-                priority_high: Color::Yellow,
-                priority_normal: Color::Blue,
-                tag_palette: [
-                    Color::Cyan,
-                    Color::Blue,
-                    Color::Magenta,
-                    Color::Green,
-                    Color::Yellow,
-                    Color::White,
-                ],
-            }
-        }
-    }
-}
-
-fn theme() -> &'static Theme {
-    static THEME: OnceLock<Theme> = OnceLock::new();
-    THEME.get_or_init(|| Theme::new(std::env::var_os("NO_COLOR").is_some()))
-}
 
 /// Paints the frame: the tab bar, then the active screen under it. Painted
 /// twice when the pointer has moved onto something, because what is under it

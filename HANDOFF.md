@@ -9,11 +9,17 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
 - **The four-tab roadmap is done**: Epics 656 (#661–#667), 657 (#669–#673),
   658 (#674–#679), 659 (#680–#689) and 660 (#690–#694) are all closed, as is
   #668. `cargo fmt --check`, `cargo clippy --all-targets --all-features -D
-  warnings`, `cargo test --all-targets` (516 lib + 28 bin tests, and again under
+  warnings`, `cargo test --all-targets` (533 lib + 28 bin tests, and again under
   `NO_COLOR=1`) and `cargo build --release` are clean.
 - **A review round followed the roadmap** (evening of 2026-08-29; see "Review
   round" below): the four tabs were read end to end as a QA pass, and what it
   found is fixed and on `main`.
+- **A look-and-feel round is under way** (Epic #701, Issues #702–#710, planned in
+  `LOOK_AND_FEEL_PLAN.md`). #702 shipped the theme engine: `config.toml`,
+  the `terminal` / `terminal-light` / `mono` / `custom` themes, `--theme`,
+  the palette the `theme` tool writes, and live reload. Next in order: #706
+  table layout, #703 frame, #704 search row, #705 status bar, #707 overlays,
+  #708 details, #709 motion, #710 docs.
 - Database schema is `PRAGMA user_version = 17`. A schema bump drops and
   rebuilds rather than migrating, so the first launch of a build that raises it
   does one full pull automatically — and a running `ticket-tui` binary from

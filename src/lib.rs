@@ -5,6 +5,7 @@ pub mod classification;
 pub mod cli;
 pub mod columns;
 pub mod command;
+pub mod config;
 pub mod db;
 pub mod edit;
 pub mod export;

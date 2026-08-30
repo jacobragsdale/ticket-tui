@@ -1,7 +1,87 @@
 //! Reading the background workers: one non-blocking pass over each channel,
 //! applying whatever came back to the app.
 
+use std::time::SystemTime;
+
 use super::*;
+
+/// How often the loop looks at `config.toml`'s clock. It wakes at least this
+/// often anyway, so the look costs one `stat` a second and no wake-ups.
+const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// `config.toml`, watched: the theme it names is painted when the run starts
+/// and again whenever the file changes, so `theme pick` repaints a running
+/// ticket-tui the way it repaints an editor. A theme chosen by `--theme` or
+/// `TICKET_TUI_THEME` keeps winning over the file for the whole run.
+pub(super) struct ConfigWatch {
+    path: PathBuf,
+    chosen: Option<ThemeChoice>,
+    /// The file's clock as last read, `None` while there is no file.
+    modified: Option<SystemTime>,
+    checked_at: Option<Instant>,
+}
+
+impl ConfigWatch {
+    pub(super) fn new(path: PathBuf, chosen: Option<ThemeChoice>) -> Self {
+        Self {
+            path,
+            chosen,
+            modified: None,
+            checked_at: None,
+        }
+    }
+
+    /// Looks at the file's clock once a second and repaints from it when it
+    /// has moved. Reports whether the screen changed.
+    pub(super) fn poll(&mut self, app: &mut App) -> bool {
+        if self
+            .checked_at
+            .is_some_and(|at| at.elapsed() < CONFIG_POLL_INTERVAL)
+        {
+            return false;
+        }
+        self.checked_at = Some(Instant::now());
+        if self.modified_now() == self.modified {
+            return false;
+        }
+        self.reload(app, true)
+    }
+
+    /// Reads the file and paints the theme it settles on. A file that cannot
+    /// be read or does not parse is reported and leaves the theme as it was;
+    /// `announce` says the new theme's name in the footer, which a change
+    /// mid-run wants and the first paint does not.
+    pub(super) fn reload(&mut self, app: &mut App, announce: bool) -> bool {
+        self.modified = self.modified_now();
+        let config = match ticket_tui::config::load(&self.path) {
+            Ok(config) => config,
+            Err(error) => {
+                app.shell
+                    .set_error(format!("Could not read config.toml: {error:#}"));
+                return true;
+            }
+        };
+        let no_color = env::var_os("NO_COLOR").is_some();
+        let painted = ThemeChoice::resolve(no_color, self.chosen, &config)
+            .and_then(|choice| choice.theme(&config));
+        match painted {
+            Ok((theme, label)) => {
+                set_theme(theme);
+                if announce {
+                    app.shell.set_status(format!("Theme: {label}"));
+                }
+            }
+            Err(error) => app.shell.set_error(format!("Theme: {error:#}")),
+        }
+        true
+    }
+
+    fn modified_now(&self) -> Option<SystemTime> {
+        fs::metadata(&self.path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    }
+}
 
 /// What a finished watch says: the glyph, the build number, how it went, and
 /// how long it took.

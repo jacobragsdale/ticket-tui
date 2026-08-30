@@ -62,6 +62,10 @@ pub struct Cli {
     /// remembers, then 14
     #[arg(long, value_name = "DAYS")]
     pub stale_days: Option<u16>,
+    /// Colour theme: terminal, terminal-light, mono, or custom (the palette in
+    /// config.toml); defaults to TICKET_TUI_THEME, then what config.toml says
+    #[arg(long, value_name = "NAME")]
+    pub theme: Option<String>,
     /// Directory the Repos tab looks for clones in and makes new ones under;
     /// defaults to TICKET_TUI_WORKSPACE, then ~/Development
     #[arg(long, global = true, value_name = "PATH", value_hint = ValueHint::DirPath)]

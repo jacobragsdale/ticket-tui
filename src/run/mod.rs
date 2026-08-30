@@ -37,6 +37,7 @@ use ticket_tui::sync::{
     SyncHandle, SyncMode, SyncOutcome, SyncRequest, SyncScheduler,
 };
 use ticket_tui::timestamp::Timestamp;
+use ticket_tui::ui::{ThemeChoice, chosen_theme, set_theme};
 use ticket_tui::watch::{
     AzureWatchConnector, LIVE_RUNS_CADENCE, LogTarget, WatchEvent, WatchHandle, WatchRequest,
 };
@@ -71,6 +72,10 @@ pub(super) fn run() -> Result<()> {
     let refresh = resolve_refresh(cli.refresh, std::env::var("TICKET_TUI_REFRESH").ok())?;
     let stale_days =
         resolve_stale_days(cli.stale_days, std::env::var("TICKET_TUI_STALE_DAYS").ok())?;
+    let theme_choice = chosen_theme(
+        cli.theme.as_deref(),
+        std::env::var("TICKET_TUI_THEME").ok().as_deref(),
+    )?;
     let database_path = cli.database.clone().unwrap_or_else(default_database_path);
     let mut repository = SqliteTicketRepository::open(&database_path)?;
     let schema_was_rebuilt = repository.schema_was_rebuilt();
@@ -204,12 +209,18 @@ pub(super) fn run() -> Result<()> {
         app.shell.set_error(message);
     }
 
+    // The theme is painted from the file last, so a file that cannot be read
+    // is the newest thing in the footer when the screen first appears.
+    let mut config_watch = ConfigWatch::new(ticket_tui::config::default_path(), theme_choice);
+    config_watch.reload(&mut app, false);
+
     let mut context_publisher = AgentContextPublisher::new(repository.path());
     let result = run_terminal(
         &mut app,
         &mut repository,
         &mut runtime,
         &mut context_publisher,
+        &mut config_watch,
     );
     let remove_context = context_publisher.remove();
     if let Err(error) = session::save(&session_path, &app.snapshot_session()) {

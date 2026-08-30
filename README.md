@@ -74,6 +74,13 @@ The database is durable and lives in the platform data directory —
 interface, not a scratch cache: other tools and agent skills read it directly,
 and the TUI publishes a JSON file beside it naming what is on screen.
 
+`~/.config/ticket-tui/config.toml` is optional and holds the colour theme: a
+`[theme.custom]` palette in the vocabulary of the `theme` tool, which applies
+one palette to every program on the machine, writes this file for you, and
+repaints a running ticket-tui when it changes. Without one the
+sixteen ANSI colours of the terminal show through; `--theme terminal-light`
+suits a white ground, and `NO_COLOR` turns colour off.
+
 `ticket-tui` is also a CLI — `list`, `show`, `edit`, `comment`, `create`,
 `repos`, `prs`, `pipelines`, `runs`, `approvals` — so a script or an agent can
 do anything the TUI can.
