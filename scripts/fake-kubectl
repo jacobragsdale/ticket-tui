@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""A kubectl that answers from fixtures: enough for the AKS tab and `ticket-tui pods`."""
+import json, os, signal, sys, time
+
+args = sys.argv[1:]
+def take(flag):
+    if flag in args:
+        i = args.index(flag); v = args[i + 1]; del args[i:i + 2]; return v
+    return None
+context = take("--context")
+args[:] = [a for a in args if not a.startswith("--request-timeout")]
+ns = take("-n")
+container = take("-c")
+all_ns = "--all-namespaces" in args
+if all_ns: args.remove("--all-namespaces")
+log_dir = os.environ.get("FAKE_KUBECTL_LOG")  # every call is appended to calls.log there
+if log_dir:
+    with open(os.path.join(log_dir, "calls.log"), "a") as f:
+        f.write(" ".join(sys.argv[1:]) + "\n")
+
+CONTEXTS = {"aks-qa": "qa", "aks-prod": "prod"}
+if context not in CONTEXTS:
+    sys.stderr.write(f'error: context "{context}" does not exist\n'); sys.exit(1)
+
+def pod(name, ns, owner, image, status, ready=True, restarts=0, containers=None, deleting=False, hash_="7d9f5b"):
+    cs = containers or [("api", image)]
+    statuses = []
+    for cname, cimage in cs:
+        st = {"name": cname, "image": cimage, "ready": ready, "restartCount": restarts}
+        if status == "CrashLoopBackOff":
+            st["state"] = {"waiting": {"reason": "CrashLoopBackOff", "message": "back-off 5m0s"}}
+            st["lastState"] = {"terminated": {"reason": "Error", "exitCode": 1}}
+            st["ready"] = False
+        elif status == "Completed":
+            st["state"] = {"terminated": {"reason": "Completed", "exitCode": 0}}; st["ready"] = False
+        else:
+            st["state"] = {"running": {"startedAt": "2026-08-30T09:00:00Z"}}
+        statuses.append(st)
+    phase = {"Completed": "Succeeded", "Pending": "Pending"}.get(status, "Running")
+    item = {
+        "metadata": {"name": name, "namespace": ns, "creationTimestamp": "2026-08-30T08:00:00Z",
+                     "labels": {"app": owner, "pod-template-hash": hash_},
+                     "ownerReferences": [{"kind": "ReplicaSet", "name": f"{owner}-{hash_}", "controller": True}]},
+        "spec": {"nodeName": "aks-nodepool1-vmss000000", "containers": [{"name": c, "image": i} for c, i in cs]},
+        "status": {"phase": phase, "podIP": "10.244.0.7", "containerStatuses": statuses},
+    }
+    if deleting: item["metadata"]["deletionTimestamp"] = "2026-08-30T12:00:00Z"
+    return item
+
+FIX = {
+  ("qa", "orders"): [
+      pod("orders-api-7d9f5b-abc12", "orders", "orders-api", "myacr.azurecr.io/team/orders-api:1.2.3", "Running", restarts=2),
+      pod("orders-worker-5c4d3e-xyz98", "orders", "orders-worker", "myacr.azurecr.io/team/orders-worker:1.2.3", "CrashLoopBackOff", restarts=17, hash_="5c4d3e"),
+  ],
+  ("qa", "billing"): [
+      pod("billing-api-1a2b3c-qq111", "billing", "billing-api", "myacr.azurecr.io/team/billing-api:0.9.0", "Running",
+          containers=[("api", "myacr.azurecr.io/team/billing-api:0.9.0"), ("proxy", "mcr.microsoft.com/oss/envoy:1.28")], hash_="1a2b3c"),
+  ],
+  ("prod", "orders"): [
+      pod("orders-api-7d9f5b-prd01", "orders", "orders-api", "myacr.azurecr.io/team/orders-api:1.2.2", "Running"),
+      pod("orders-api-7d9f5b-prd02", "orders", "orders-api", "myacr.azurecr.io/team/orders-api:1.2.2", "Running", deleting=True),
+      pod("nightly-report-29-k8s7f", "orders", "nightly-report", "myacr.azurecr.io/team/nightly-report:3", "Completed", hash_="29"),
+  ],
+  ("prod", "billing"): [
+      pod("billing-api-1a2b3c-prd77", "billing", "billing-api", "myacr.azurecr.io/team/billing-api:0.9.0", "Running", hash_="1a2b3c"),
+  ],
+}
+cluster = CONTEXTS[context]
+
+if args[:2] == ["get", "pods"]:
+    if ns == "forbidden":
+        sys.stderr.write(f'Error from server (Forbidden): pods is forbidden: User "jacob" cannot list resource "pods" in API group "" in the namespace "forbidden"\n'); sys.exit(1)
+    items = []
+    for (c, n), pods in FIX.items():
+        if c == cluster and (all_ns or n == ns): items += pods
+    print(json.dumps({"apiVersion": "v1", "kind": "List", "items": items})); sys.exit(0)
+
+if args[:1] == ["logs"]:
+    name = args[1]; previous = "-p" in args
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    tag = f"{container or 'api'}{' previous' if previous else ''}"
+    try:
+        for i in range(1, 10_000):
+            level = "ERROR" if i % 7 == 0 else ("WARN" if i % 5 == 0 else "INFO")
+            print(f"2026-08-30T12:{i//60:02d}:{i%60:02d}Z {level} {name} {tag} line {i}", flush=True)
+            time.sleep(0.3)
+    except (BrokenPipeError, KeyboardInterrupt):
+        pass
+    sys.exit(0)
+
+if args[:2] == ["describe", "pod"]:
+    name = args[2]
+    print(f"Name:         {name}\nNamespace:    {ns}\nNode:         aks-nodepool1-vmss000000\nStatus:       Running\nIP:           10.244.0.7\nContainers:\n  api:\n    Image:  myacr.azurecr.io/team/x:1\nEvents:\n  Normal  Pulled  2m  kubelet  Successfully pulled image"); sys.exit(0)
+
+if args[:2] == ["delete", "pod"]:
+    print(f'pod "{args[2]}" deleted'); sys.exit(0)
+
+if args[:1] == ["exec"]:
+    sys.exit(0)
+
+sys.stderr.write("error: fake kubectl does not know: " + " ".join(sys.argv[1:]) + "\n"); sys.exit(2)

@@ -341,11 +341,13 @@ fn log_title(screen: &AksScreen, row: Option<&PodRow>) -> String {
     } else {
         "scrolled".to_owned()
     };
+    // The state first: a narrow pane cuts the title short, and whether the
+    // log is still arriving is the one thing it has to say.
     format!(
-        " Log \u{00b7} {} \u{00b7} {container}{} \u{00b7} {} lines \u{00b7} {state} ",
+        " Log \u{00b7} {state} \u{00b7} {} lines \u{00b7} {} \u{00b7} {container}{} ",
+        screen.log_lines().len(),
         target.key.name,
         if target.previous { " (previous)" } else { "" },
-        screen.log_lines().len(),
     )
 }
 
