@@ -38,6 +38,10 @@ pub enum CommandId {
     CopyId,
     /// The ACR tab's own copy: the digest of the tag the details pane is on.
     CopyDigest,
+    /// The Key Vault tab's two: read one secret's value onto the screen, and
+    /// copy the one that is showing.
+    RevealSecret,
+    CopyValue,
     CopyUrl,
     CopyTitle,
     CopyMarkdown,
@@ -583,7 +587,13 @@ pub const COMMANDS: &[Command] = &[
         title: "Copy ID",
         keys: &[key('y')],
         help: "Selected or current tickets",
-        scope: Scope::Tabs(&[TabId::WorkItems, TabId::Repos, TabId::Aks, TabId::Acr]),
+        scope: Scope::Tabs(&[
+            TabId::WorkItems,
+            TabId::Repos,
+            TabId::Aks,
+            TabId::Acr,
+            TabId::KeyVault,
+        ]),
     },
     Command {
         id: CommandId::CopyDigest,
@@ -591,6 +601,20 @@ pub const COMMANDS: &[Command] = &[
         keys: &[key('D')],
         help: "The tag the details pane is on",
         scope: Scope::Tabs(&[TabId::Acr]),
+    },
+    Command {
+        id: CommandId::RevealSecret,
+        title: "Reveal secret",
+        keys: &[key('R')],
+        help: "Shows the value here for a minute; nowhere else",
+        scope: Scope::Tabs(&[TabId::KeyVault]),
+    },
+    Command {
+        id: CommandId::CopyValue,
+        title: "Copy secret value",
+        keys: &[key('Y')],
+        help: "Only while it is shown",
+        scope: Scope::Tabs(&[TabId::KeyVault]),
     },
     Command {
         id: CommandId::CopyUrl,
@@ -845,6 +869,8 @@ fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
         // A registry tag is copied as the reference `docker pull` wants, not
         // as a number.
         CommandId::CopyId if tab == TabId::Acr => "Copy pull reference",
+        // And a vault holds names rather than numbers.
+        CommandId::CopyId if tab == TabId::KeyVault => "Copy name",
         // A pod is read live, so the sync key reads the clusters again rather
         // than pulling from Azure DevOps.
         CommandId::Sync if tab == TabId::Aks => "Refresh pods",
@@ -1068,12 +1094,13 @@ mod tests {
                 CommandId::ToggleDetails,
                 CommandId::ResetPaneSplit,
             ],
-            // A tab with no data yet: everything it answers is a verb every
-            // screen has.
             TabId::KeyVault => &[
                 CommandId::Search,
                 CommandId::Open,
                 CommandId::Sync,
+                CommandId::CopyId,
+                CommandId::RevealSecret,
+                CommandId::CopyValue,
                 CommandId::HistoryBack,
                 CommandId::HistoryForward,
                 CommandId::Quit,

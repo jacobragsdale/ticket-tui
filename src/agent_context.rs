@@ -82,11 +82,46 @@ pub struct TagContext {
     pub created: Option<String>,
 }
 
-/// The Key Vault tab, the same way round: C1 fills it in.
+/// The Key Vault tab, the same way round: which level it is on, and what the
+/// cursor and the details pane are showing.
+///
+/// There is no field for a secret's value, and there is not meant to be one: a
+/// value is read for the screen alone, and this file is written to disk.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct KeyVaultContext {
+    /// `vaults` or `items`.
     pub level: String,
+    pub selected_vault: Option<VaultContext>,
+    pub selected_item: Option<VaultItemContext>,
     pub visible_rows: usize,
+    /// Certificates within thirty days of expiring, across every vault whose
+    /// items have been read. The same count the tab bar badges.
+    pub expiring_certificates: usize,
+}
+
+/// One key vault, as an agent reads it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct VaultContext {
+    pub name: String,
+    pub resource_group: String,
+    pub location: String,
+    pub sku: String,
+    /// The data-plane host its items are read from.
+    pub uri: String,
+    pub portal_url: String,
+}
+
+/// One thing a vault holds. `revealed` says whether its value is on screen
+/// this minute; the value itself is nowhere in this document.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct VaultItemContext {
+    /// `secret`, `key`, or `cert`.
+    pub kind: String,
+    pub name: String,
+    pub enabled: bool,
+    pub updated: Option<String>,
+    pub expires: Option<String>,
+    pub revealed: bool,
 }
 
 /// Whether the ACR and Key Vault tabs have a subscription to read at all. An

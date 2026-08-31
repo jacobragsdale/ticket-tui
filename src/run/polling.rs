@@ -279,6 +279,7 @@ pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
             Err(error) => {
                 let refusal = format!("Could not start the subscription worker: {error:#}");
                 app.acr.set_arm_error(refusal.clone());
+                app.key_vault.set_arm_error(refusal.clone());
                 app.shell.set_error(refusal);
             }
         }
@@ -290,12 +291,12 @@ pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
         runtime.arm.showing = showing;
         let _ = worker.send(ArmRequest::TabShowing(showing));
     }
-    // What the registry tab is looking at, and only while it is the one
+    // What the tab on screen is looking at, and only while it is the one
     // showing: a hidden tab is nothing to read for.
-    let focus = if showing == Some(TabId::Acr) {
-        app.acr.focus()
-    } else {
-        None
+    let focus = match showing {
+        Some(TabId::Acr) => app.acr.focus(),
+        Some(TabId::KeyVault) => app.key_vault.focus(),
+        _ => None,
     };
     if focus != runtime.arm.focus {
         runtime.arm.focus = focus.clone();
@@ -305,7 +306,7 @@ pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     // the thread that sent it.
     let events: Vec<ArmEvent> = std::iter::from_fn(|| worker.try_event()).collect();
     // A read in flight redraws on its own, so its spinner turns.
-    let redraw = !events.is_empty() || app.acr.busy();
+    let redraw = !events.is_empty() || app.acr.busy() || app.key_vault.busy();
     for event in events {
         let toast = match event {
             ArmEvent::Subscription(Ok(subscription)) => {
@@ -317,9 +318,12 @@ pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 app.shell.set_arm_state(Some(reason.clone()));
                 Some(reason)
             }
-            // One query answers for both tabs; C1 hands the vaults to the Key
-            // Vault screen, which reads them from this one until then.
-            ArmEvent::Inventory(inventory) => app.acr.set_inventory(inventory),
+            // One query answers for both tabs: each keeps the half it draws,
+            // and a refusal is said once rather than twice.
+            ArmEvent::Inventory(inventory) => {
+                let said = app.key_vault.set_inventory(inventory.clone());
+                app.acr.set_inventory(inventory).or(said)
+            }
             ArmEvent::Repositories {
                 registry,
                 repositories,
@@ -339,6 +343,13 @@ pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 digest,
                 manifest,
             } => app.acr.set_manifest(&registry, &repo, &digest, manifest),
+            ArmEvent::Items { vault, items } => app.key_vault.set_items(&vault, items),
+            // The one event carrying something worth hiding. It goes to the
+            // screen and no further: nothing here logs it, stores it, or puts
+            // it in a notification.
+            ArmEvent::Revealed { vault, name, value } => {
+                app.key_vault.set_revealed(&vault, &name, value)
+            }
             // Throttling is Azure working as designed and passes on its own,
             // so it is said once rather than calling the tab offline.
             ArmEvent::Throttled(wait) => {
@@ -348,7 +359,10 @@ pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 ));
                 None
             }
-            ArmEvent::Failed(reason) => app.acr.set_arm_error(reason),
+            ArmEvent::Failed(reason) => {
+                let said = app.key_vault.set_arm_error(reason.clone());
+                app.acr.set_arm_error(reason).or(said)
+            }
             ArmEvent::Stopped => {
                 runtime.arm.worker = None;
                 runtime.arm.failed_to_start = true;

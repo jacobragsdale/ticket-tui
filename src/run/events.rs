@@ -31,6 +31,9 @@ pub(super) fn run_terminal(
         redraw |= persist_session(app, repository);
         redraw |= config_watch.poll(app);
         redraw |= app.shell.tick();
+        // A revealed secret takes itself off the screen after a minute, which
+        // is a repaint like an expiring notification is.
+        redraw |= app.key_vault.tick();
         // A spinner has to be repainted to turn. Nothing in flight and
         // nothing is repainted: an idle app draws no frames at all.
         redraw |= spinning(app);
@@ -56,6 +59,7 @@ pub(super) fn run_terminal(
             // an expiring notification.
             [
                 app.shell.next_wakeup(),
+                app.key_vault.next_wakeup(),
                 runtime.scheduler.time_until_due(Instant::now()),
                 runtime.details.time_until_due(Instant::now()),
             ]
@@ -260,6 +264,12 @@ pub(super) fn handle_action(
             Ok(()) => app.shell.set_status(copied_status(content)),
             Err(error) => app.shell.set_error(format!("Could not copy: {error:#}")),
         },
+        // The second of the two places a secret is ever read out of, and the
+        // status says what was copied without saying what it was.
+        AppAction::CopySecret(secret) => match copy_to_clipboard(secret.expose()) {
+            Ok(()) => app.shell.set_status("Copied secret value"),
+            Err(error) => app.shell.set_error(format!("Could not copy: {error:#}")),
+        },
         AppAction::WriteFile { path, contents } => match fs::write(&path, contents) {
             Ok(()) => app.shell.set_status(format!("Exported {}", path.display())),
             Err(error) => app
@@ -277,8 +287,9 @@ fn spinning(app: &App) -> bool {
     app.shell.sync_pending
         || app.repos.busy()
         || app.aks.busy()
-        // A drill into a registry, in flight.
+        // A drill into a registry or a vault, in flight.
         || app.acr.busy()
+        || app.key_vault.busy()
         || app.work_items.details_pending.is_some()
         || app.shell.flashing()
 }

@@ -138,6 +138,10 @@ pub enum AppAction {
     /// Something for the subscription worker behind the ACR and Key Vault
     /// tabs. Nothing here waits on it either.
     Arm(crate::arm_watch::ArmRequest),
+    /// Put the secret on screen on the clipboard. It travels as the newtype
+    /// rather than as a `String` so that a `{:?}` of an action — in a log, a
+    /// panic, a test failure — cannot print it.
+    CopySecret(crate::arm::Secret),
     /// Read the pending approvals now rather than at the next poll.
     RefreshApprovals,
     /// Approve or reject one approval, with an optional word about why.
@@ -469,6 +473,7 @@ impl App {
             Jump::PullRequest { .. } => TabId::PullRequests,
             Jump::Pipeline(_) | Jump::Run(_) => TabId::Pipelines,
             Jump::Registry(_) | Jump::Repository { .. } => TabId::Acr,
+            Jump::Vault(_) | Jump::VaultItem { .. } => TabId::KeyVault,
         };
         let previous = self.tab;
         self.select_tab(tab);

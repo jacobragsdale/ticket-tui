@@ -100,6 +100,16 @@ impl Timestamp {
         (later.instant - self.instant).whole_seconds().max(0)
     }
 
+    /// This instant `seconds` later, which is how a query names a date that has
+    /// not arrived yet. A span so long it leaves the calendar keeps the instant
+    /// it started from rather than wrapping.
+    #[must_use]
+    pub fn plus_seconds(self, seconds: i64) -> Self {
+        self.instant
+            .checked_add(time::Duration::seconds(seconds))
+            .map_or(self, Self::from_offset_date_time)
+    }
+
     #[must_use]
     pub fn calendar_date(self) -> String {
         self.instant

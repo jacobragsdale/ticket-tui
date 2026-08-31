@@ -939,7 +939,9 @@ impl WorkItemsScreen {
             | CommandId::RestartPod
             | CommandId::ExecShell
             | CommandId::OpenRepo
-            | CommandId::CopyDigest => AppAction::None,
+            | CommandId::CopyDigest
+            | CommandId::RevealSecret
+            | CommandId::CopyValue => AppAction::None,
             CommandId::SprintSummary => {
                 self.open_sprint_summary();
                 AppAction::None

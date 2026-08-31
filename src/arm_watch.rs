@@ -20,19 +20,24 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::app::TabId;
-use crate::arm::{ArmClient, ArmConfig, ArmSource, Inventory, Manifest, Registry, Repository, Tag};
+use crate::arm::{
+    ArmClient, ArmConfig, ArmSource, Inventory, Manifest, Registry, Repository, Secret, Tag,
+    VaultItem,
+};
 use crate::watch::Cadence;
 
 /// How often the subscription's registries and vaults are read while one of
 /// the two tabs is showing. They change on a human timescale.
 pub const INVENTORY_CADENCE: Duration = Duration::from_secs(60);
 
-/// What the tab on screen is looking at, and so what is worth one read. Key
-/// Vault adds its own arm with C1.
+/// What the tab on screen is looking at, and so what is worth one read.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArmFocus {
     /// One registry's catalog, and the attributes of everything in it.
     Registry(String),
+    /// Everything one vault holds: its secrets, keys and certificates, by
+    /// name. Never their values.
+    Vault(String),
     /// One repository's tags.
     Repository { registry: String, name: String },
     /// What one tag points at.
@@ -52,6 +57,14 @@ pub enum ArmRequest {
     TabShowing(Option<TabId>),
     Focus(ArmFocus),
     Blur,
+    /// One secret's value, because somebody pressed the key that asks for it.
+    /// Read at once rather than at the next poll, answered once, and never
+    /// held here: reading one is audited, so it happens when it is asked for
+    /// and not a moment besides.
+    Reveal {
+        vault: String,
+        name: String,
+    },
     /// Read the inventory now, and everything the focus asks for again.
     Refresh,
     Stop,
@@ -86,6 +99,19 @@ pub enum ArmEvent {
         repo: String,
         digest: String,
         manifest: Result<Manifest, String>,
+    },
+    /// Everything one vault holds, as its listings describe it. A listing
+    /// never carries a value, which is the point of listing one.
+    Items {
+        vault: String,
+        items: Result<Vec<VaultItem>, String>,
+    },
+    /// One secret's value, for the screen that asked and nowhere else. The
+    /// `Debug` this derives is safe only because [`Secret`] redacts itself.
+    Revealed {
+        vault: String,
+        name: String,
+        value: Result<Secret, String>,
     },
     /// Azure asked to be left alone, and for how long. Not an error.
     Throttled(Duration),
@@ -133,6 +159,9 @@ impl ArmWatcher {
             ArmRequest::TabShowing(tab) => self.showing = tab,
             ArmRequest::Focus(focus) => self.focus = Some(focus),
             ArmRequest::Blur => self.focus = None,
+            // Not a statement about what is worth reading: a keystroke, read
+            // here and now, and answered whatever the poll is doing.
+            ArmRequest::Reveal { vault, name } => self.reveal(&vault, &name),
             // Due at once, and everything under it worth reading again.
             ArmRequest::Refresh => {
                 self.inventory = Cadence::new(INVENTORY_CADENCE);
@@ -177,7 +206,8 @@ impl ArmWatcher {
     }
 
     /// Whatever the focus asks for, once per focus. A focus naming a registry
-    /// the inventory has not brought back yet is left for the read that will.
+    /// or a vault the inventory has not brought back yet is left for the read
+    /// that will.
     fn read_focus(&mut self) {
         let Some(focus) = self.focus.clone() else {
             return;
@@ -185,11 +215,32 @@ impl ArmWatcher {
         if self.read.contains(&focus) {
             return;
         }
-        let name = match &focus {
-            ArmFocus::Registry(name)
-            | ArmFocus::Repository { registry: name, .. }
-            | ArmFocus::Tag { registry: name, .. } => name.clone(),
+        if let ArmFocus::Vault(name) = &focus {
+            let Some(vault) = self
+                .held
+                .vaults
+                .iter()
+                .find(|held| held.name == *name)
+                .cloned()
+            else {
+                return;
+            };
+            self.read.push(focus);
+            let items = self.source.items(&vault);
+            self.send(ArmEvent::Items {
+                vault: vault.name,
+                items: items.map_err(|error| said(&error)),
+            });
+            return;
+        }
+        // Everything else names a registry, whatever else it names besides.
+        let (ArmFocus::Registry(name)
+        | ArmFocus::Repository { registry: name, .. }
+        | ArmFocus::Tag { registry: name, .. }) = &focus
+        else {
+            return;
         };
+        let name = name.clone();
         let Some(registry) = self
             .held
             .registries
@@ -219,7 +270,28 @@ impl ArmWatcher {
                     manifest: manifest.map_err(|error| said(&error)),
                 });
             }
+            // Answered above, where the vaults rather than the registries are
+            // looked in.
+            ArmFocus::Vault(_) => {}
         }
+    }
+
+    /// One secret's value, on the keystroke that asked for it. Nothing is kept
+    /// here — not the value, not the fact that it was read — so the next press
+    /// is another read and the thread holds no secret between them.
+    fn reveal(&self, vault: &str, name: &str) {
+        let value = match self.held.vaults.iter().find(|held| held.name == vault) {
+            Some(held) => self
+                .source
+                .secret_value(held, name)
+                .map_err(|error| said(&error)),
+            None => Err(format!("{vault} is not one of the vaults read")),
+        };
+        self.send(ArmEvent::Revealed {
+            vault: vault.to_owned(),
+            name: name.to_owned(),
+            value,
+        });
     }
 
     /// One registry's catalog, then one attributes call per repository in it,
@@ -384,6 +456,7 @@ fn watch(mut watcher: ArmWatcher, requests: &Receiver<ArmRequest>) {
 mod tests {
     use super::*;
     use crate::arm::tests::FakeArm;
+    use crate::arm::{ItemKind, Vault};
     use crate::timestamp::ts;
 
     fn registry(name: &str) -> Registry {
@@ -433,11 +506,26 @@ mod tests {
                 ),
                 ArmEvent::Tags { repo, .. } => format!("tags {repo}"),
                 ArmEvent::Manifest { digest, .. } => format!("manifest {digest}"),
+                ArmEvent::Items { vault, .. } => format!("items {vault}"),
+                ArmEvent::Revealed { name, .. } => format!("revealed {name}"),
                 ArmEvent::Throttled(wait) => format!("throttled {}", wait.as_secs()),
                 ArmEvent::Failed(reason) => format!("failed {reason}"),
                 ArmEvent::Stopped => "stopped".to_owned(),
             })
             .collect()
+    }
+
+    fn vault(name: &str) -> Vault {
+        Vault {
+            id: format!(
+                "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/{name}"
+            ),
+            name: name.to_owned(),
+            resource_group: "rg".to_owned(),
+            location: "westeurope".to_owned(),
+            sku: "standard".to_owned(),
+            uri: format!("https://{name}.vault.azure.net/"),
+        }
     }
 
     fn stocked() -> FakeArm {
@@ -620,6 +708,109 @@ mod tests {
                 "repository no metadata_read scope".to_owned(),
             ],
             "the catalog lists two, and one refusal is enough to know the second will refuse too"
+        );
+    }
+
+    #[test]
+    fn a_vault_focus_lists_what_it_holds_once_and_a_poll_never_asks_for_a_value() {
+        let fake = stocked();
+        *fake.vaults.lock().unwrap() = vec![vault("kv")];
+        *fake.items.lock().unwrap() = vec![VaultItem {
+            kind: ItemKind::Secret,
+            name: "db-password".to_owned(),
+            enabled: true,
+            created: None,
+            updated: None,
+            expires: None,
+            content_type: None,
+            recovery_level: None,
+        }];
+        let (mut watcher, receiver) = watcher(&fake);
+        let start = Instant::now();
+        watcher.handle(ArmRequest::TabShowing(Some(TabId::KeyVault)));
+        watcher.handle(ArmRequest::Focus(ArmFocus::Vault("kv".to_owned())));
+        watcher.poll(start);
+
+        assert_eq!(
+            named(&drain(&receiver)),
+            vec!["inventory".to_owned(), "items kv".to_owned()]
+        );
+
+        // The same focus again, and every poll after it, costs nothing.
+        watcher.handle(ArmRequest::Focus(ArmFocus::Vault("kv".to_owned())));
+        watcher.poll(start + Duration::from_secs(1));
+        watcher.poll(start + INVENTORY_CADENCE);
+        assert_eq!(
+            named(&drain(&receiver)),
+            vec!["inventory".to_owned()],
+            "the cadence reads the subscription, never a vault's items again"
+        );
+
+        // A value is only ever read when something asks for one in as many
+        // words, and the answer says nothing a log could keep.
+        watcher.handle(ArmRequest::Reveal {
+            vault: "kv".to_owned(),
+            name: "db-password".to_owned(),
+        });
+        let events = drain(&receiver);
+        assert_eq!(named(&events), vec!["revealed db-password".to_owned()]);
+        let ArmEvent::Revealed {
+            value: Ok(secret), ..
+        } = &events[0]
+        else {
+            panic!("the reveal answered with {:?}", named(&events));
+        };
+        assert_eq!(secret.expose(), "");
+        let printed = format!("{:?}", events[0]);
+        assert!(printed.contains("[redacted]"), "{printed}");
+
+        // And nothing is held: the next poll asks for nothing at all.
+        watcher.poll(start + INVENTORY_CADENCE + Duration::from_secs(1));
+        assert!(drain(&receiver).is_empty());
+        assert_eq!(
+            fake.reads
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|read| read.starts_with("secret_value"))
+                .count(),
+            1,
+            "one keystroke, one read"
+        );
+    }
+
+    #[test]
+    fn a_revealed_value_never_prints_itself_wherever_the_event_is_written() {
+        let fake = stocked();
+        *fake.vaults.lock().unwrap() = vec![vault("kv")];
+        *fake.secret.lock().unwrap() = "hunter2".to_owned();
+        let (mut watcher, receiver) = watcher(&fake);
+        watcher.handle(ArmRequest::TabShowing(Some(TabId::KeyVault)));
+        watcher.poll(Instant::now());
+        drain(&receiver);
+
+        watcher.handle(ArmRequest::Reveal {
+            vault: "kv".to_owned(),
+            name: "db-password".to_owned(),
+        });
+        let events = drain(&receiver);
+        let printed = format!("{:?}", events[0]);
+        assert!(printed.contains("[redacted]"), "{printed}");
+        assert!(
+            !printed.contains("hunter2"),
+            "the one thing worth hiding is the one thing Debug must not print: {printed}"
+        );
+
+        // A vault the inventory does not hold is refused rather than read.
+        watcher.handle(ArmRequest::Reveal {
+            vault: "nowhere".to_owned(),
+            name: "db-password".to_owned(),
+        });
+        let events = drain(&receiver);
+        assert!(
+            matches!(&events[0], ArmEvent::Revealed { value: Err(reason), .. } if reason.contains("nowhere")),
+            "{:?}",
+            named(&events)
         );
     }
 

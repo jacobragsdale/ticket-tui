@@ -192,7 +192,10 @@ fn the_digits_reach_the_registry_and_vault_tabs_and_each_says_why_it_is_empty() 
     assert_eq!(app.tab, TabId::KeyVault);
     let text = render_text(120, 30, &mut app);
     assert!(pane_reads(&text, "Vaults", "0 vaults"), "{text}");
-    assert!(text.contains("No vaults read yet"), "{text}");
+    assert!(
+        text.contains("Reading the subscription"),
+        "the details pane says the read is on its way: {text}"
+    );
 
     // With no subscription to read, both tabs say so instead: the reason is
     // what tells a missing subscription from an empty one.

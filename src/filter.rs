@@ -307,6 +307,12 @@ pub const DATE_PRESETS: [&str; 4] = ["<24h", "<7d", "<14d", "<30d"];
 /// instants falling before that date. Relative bounds are measured from the
 /// instant handed to `matches` rather than from when the query was written, so
 /// a view saved as `changed:<7d` still means the last seven days tomorrow.
+///
+/// A span written with a `+` in front of it reaches the other way, into dates
+/// that have not arrived: `<+30d` is everything falling before the instant
+/// thirty days from now, which is how a field like a certificate's expiry is
+/// asked about. An age cannot say that — nothing has an age below zero — so
+/// the two directions are separate bounds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DatePredicate {
     operator: Comparison,
@@ -325,20 +331,25 @@ enum Comparison {
 enum DateBound {
     /// A span reaching back from now, in whole seconds.
     Age(i64),
+    /// A span reaching forward from now, written `+30d`: the instant that far
+    /// ahead, which is what a date still to come is compared against.
+    Ahead(i64),
     /// A fixed instant, which a bare `YYYY-MM-DD` reads as UTC midnight.
     Instant(Timestamp),
 }
 
 impl DatePredicate {
-    /// Reads a value such as `<7d`, `>=2h`, or `>2026-08-01`, and `None` for
-    /// anything that is not a comparison: a bare duration carries no direction
-    /// and so is not one.
+    /// Reads a value such as `<7d`, `>=2h`, `<+30d`, or `>2026-08-01`, and
+    /// `None` for anything that is not a comparison: a bare duration carries no
+    /// direction and so is not one.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         let (operator, rest) = Comparison::take(value.trim())?;
         let rest = rest.trim();
-        parse_age(rest)
-            .map(DateBound::Age)
+        rest.strip_prefix('+')
+            .and_then(parse_age)
+            .map(DateBound::Ahead)
+            .or_else(|| parse_age(rest).map(DateBound::Age))
             .or_else(|| Timestamp::parse(rest).ok().map(DateBound::Instant))
             .map(|bound| Self { operator, bound })
     }
@@ -349,6 +360,7 @@ impl DatePredicate {
     pub fn matches(self, instant: Timestamp, now: Timestamp) -> bool {
         match self.bound {
             DateBound::Age(seconds) => self.operator.holds(instant.seconds_until(now), seconds),
+            DateBound::Ahead(seconds) => self.operator.holds(instant, now.plus_seconds(seconds)),
             DateBound::Instant(bound) => self.operator.holds(instant, bound),
         }
     }
@@ -1212,6 +1224,30 @@ mod tests {
         assert_eq!(DatePredicate::parse("<7y"), None, "years are not a unit");
         assert_eq!(DatePredicate::parse("<"), None);
         assert_eq!(DatePredicate::parse("<d"), None);
+    }
+
+    #[test]
+    fn a_span_written_forward_compares_against_a_date_still_to_come() {
+        let now = ts("2026-08-29T12:00:00Z");
+        let holds = |value: &str, expires: &str| {
+            DatePredicate::parse(value)
+                .unwrap_or_else(|| panic!("{value} should parse"))
+                .matches(ts(expires), now)
+        };
+
+        // What "expiring within thirty days" is written as, and it takes in
+        // what has expired already: both are past the instant thirty days out.
+        assert!(holds("<+30d", "2026-09-10T12:00:00Z"));
+        assert!(holds("<+30d", "2026-08-01T12:00:00Z"));
+        assert!(!holds("<+30d", "2026-12-01T12:00:00Z"));
+        assert!(holds(">+30d", "2026-12-01T12:00:00Z"));
+        assert!(holds("<=+30d", "2026-09-28T12:00:00Z"), "the edge is taken");
+
+        // An age cannot say the same thing: everything still to come has an
+        // age of nought, whether it falls tomorrow or next year.
+        assert!(holds("<30d", "2026-12-01T12:00:00Z"));
+        assert_eq!(DatePredicate::parse("<+7y"), None, "years are not a unit");
+        assert_eq!(DatePredicate::parse("<+"), None);
     }
 
     #[test]

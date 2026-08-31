@@ -4,6 +4,7 @@
 use super::*;
 use crate::app::acr::tests::acr_app;
 use crate::app::aks::tests::aks_app;
+use crate::app::key_vault::tests::key_vault_app;
 use crate::app::pipelines::tests::pipelines_app;
 use crate::app::pull_requests::tests::pull_requests_app;
 use crate::app::repos::tests::repos_app;
@@ -24,7 +25,7 @@ fn tabs() -> Vec<(TabId, App, &'static str, &'static str)> {
     aks.select_tab(TabId::Aks);
     let mut acr = acr_app();
     acr.select_tab(TabId::Acr);
-    let mut key_vault = App::new(Vec::new());
+    let mut key_vault = key_vault_app();
     key_vault.select_tab(TabId::KeyVault);
     vec![
         (TabId::WorkItems, work_items, "Tickets", "Details"),
@@ -252,10 +253,6 @@ fn the_pane_commands_answer_on_every_tab() {
 #[test]
 fn dragging_across_a_row_copies_its_text_on_every_tab() {
     for (tab, mut app, _, _) in tabs() {
-        // The Key Vault tab has no rows to drag across until C1 reads them.
-        if tab == TabId::KeyVault {
-            continue;
-        }
         render_text(130, 30, &mut app);
         let row = app
             .shell

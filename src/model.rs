@@ -752,6 +752,15 @@ pub enum Jump {
         registry: String,
         name: String,
     },
+    /// One key vault, by name.
+    Vault(String),
+    /// One secret, key or certificate in it. The kind travels with the name
+    /// because a vault may hold all three under it.
+    VaultItem {
+        vault: String,
+        kind: String,
+        name: String,
+    },
 }
 
 impl Jump {
@@ -770,6 +779,8 @@ impl Jump {
             Self::Run(id) => format!("Run #{id}"),
             Self::Registry(name) => format!("Registry {name}"),
             Self::Repository { registry, name } => format!("Repository {name} in {registry}"),
+            Self::Vault(name) => format!("Vault {name}"),
+            Self::VaultItem { vault, kind, name } => format!("The {kind} {name} in {vault}"),
         }
     }
 }
