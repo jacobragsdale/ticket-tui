@@ -935,7 +935,10 @@ impl WorkItemsScreen {
             | CommandId::ShowLogs
             | CommandId::DescribePod
             | CommandId::PreviousLogs
-            | CommandId::NextContainer => AppAction::None,
+            | CommandId::NextContainer
+            | CommandId::RestartPod
+            | CommandId::ExecShell
+            | CommandId::OpenRepo => AppAction::None,
             CommandId::SprintSummary => {
                 self.open_sprint_summary();
                 AppAction::None

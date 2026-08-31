@@ -12,11 +12,12 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use super::pipelines::LOG_LINE_CAP;
-use super::{AppAction, Focus, ListCursor, Screen, Shell, TabId};
+use super::{AppAction, CopiedContent, Focus, ListCursor, Screen, Shell, TabId};
 use crate::aks::{AksRequest, Cluster, LogFollow, Pod, PodKey, PodRow, PodSchema};
 use crate::columns::{ColumnId, ColumnLayout, TableLayout};
 use crate::command::{CommandId, command_for_key};
 use crate::filter::{MatchContext, ParsedQuery, parse_query};
+use crate::model::Jump;
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 use crate::session::TabSession;
 use crate::text_input::TextInput;
@@ -32,6 +33,8 @@ pub enum AksMode {
     #[default]
     Browse,
     Search,
+    /// `x` has been pressed once, and the modal is asking whether it meant it.
+    ConfirmRestart,
 }
 
 /// What the text pane under the pod's details is showing.
@@ -77,6 +80,10 @@ pub struct AksScreen {
     /// is out for.
     describe: Option<(PodKey, Result<Vec<String>, String>)>,
     describe_pending: Option<PodKey>,
+    /// The pod the confirmation is about, and the one a delete is out for.
+    /// Nothing is ever deleted without the first becoming the second.
+    pub restarting: Option<PodKey>,
+    deleting: Option<PodKey>,
     /// When the last read landed, which the table's status says: nothing here
     /// is stored, so how old the answer is matters.
     read_at: Option<Instant>,
@@ -111,6 +118,8 @@ impl Default for AksScreen {
             previous: false,
             describe: None,
             describe_pending: None,
+            restarting: None,
+            deleting: None,
             read_at: None,
             refresh_pending: false,
             reads_seen: 0,
@@ -472,10 +481,42 @@ impl AksScreen {
 
     /// Whether anything a person is waiting on is in flight, which is what
     /// makes a spinner turn. The pod list reads itself on a cadence, so it
-    /// does not count; the restart arrives with the ticket that sends it.
+    /// does not count.
     #[must_use]
     pub const fn busy(&self) -> bool {
-        self.describe_pending.is_some()
+        self.describe_pending.is_some() || self.deleting.is_some()
+    }
+
+    /// The pod the confirmation is about, which is what the modal names and
+    /// whose owner it says will put a new one up.
+    #[must_use]
+    pub fn restarting_pod(&self) -> Option<&Pod> {
+        let key = self.restarting.as_ref()?;
+        self.pods.iter().find(|pod| pod.key == *key)
+    }
+
+    /// What the delete said. A refusal is the user's to see; a delete that
+    /// went through is news, because the pod it names is on its way out and
+    /// another is on its way in.
+    pub fn delete_answered(&mut self, shell: &mut Shell, key: &PodKey, error: Option<String>) {
+        if self.deleting.as_ref() == Some(key) {
+            self.deleting = None;
+        }
+        match error {
+            Some(message) => {
+                shell.set_error(format!("Could not restart {}: {message}", key.name));
+            }
+            None => {
+                let owner = self
+                    .pods
+                    .iter()
+                    .find(|pod| pod.key == *key)
+                    .and_then(|pod| pod.owner.as_ref())
+                    .map(|(kind, name)| format!("; {kind} {name} is putting a new one up"))
+                    .unwrap_or_default();
+                shell.set_news(format!("Deleted {}{owner}", key.name));
+            }
+        }
     }
 
     /// Sorts by one column, turning the direction around when it is already
@@ -543,8 +584,11 @@ impl AksScreen {
     pub fn run_command(&mut self, shell: &mut Shell, id: CommandId) -> AppAction {
         match id {
             CommandId::Search => self.mode = AksMode::Search,
-            // A pod has no page anywhere; #723 gives `o` something to do.
-            CommandId::Open => shell.set_status("A pod has no page to open"),
+            // A pod has no page anywhere, so the key that opens one says what
+            // does get you inside it.
+            CommandId::Open => {
+                shell.set_status("A pod has no page to open; s opens a shell in it");
+            }
             // The sync key reads the clusters again rather than pulling from
             // Azure DevOps: nothing on this tab comes from there.
             CommandId::Sync => {
@@ -569,6 +613,26 @@ impl AksScreen {
             }
             CommandId::PreviousLogs => self.toggle_previous(shell),
             CommandId::NextContainer => self.next_container(shell),
+            // `x` twice: the first opens the confirmation, the second is the
+            // confirmation's own answer. Nothing else sends the delete.
+            CommandId::RestartPod => {
+                if self.mode == AksMode::ConfirmRestart {
+                    return self.confirm_restart(shell);
+                }
+                self.confirm_restart_prompt(shell);
+            }
+            CommandId::ExecShell => return self.exec_shell(shell),
+            CommandId::OpenRepo => return self.open_repo(shell),
+            CommandId::CopyId => {
+                let Some(row) = self.selected_pod(shell) else {
+                    shell.set_error("No pod is selected");
+                    return AppAction::None;
+                };
+                return AppAction::Copy {
+                    text: format!("{}/{}", row.pod.key.namespace, row.pod.key.name),
+                    content: CopiedContent::Id,
+                };
+            }
             CommandId::HistoryBack => return AppAction::HistoryBack,
             CommandId::HistoryForward => return AppAction::HistoryForward,
             CommandId::Quit => shell.should_quit = true,
@@ -578,6 +642,90 @@ impl AksScreen {
             CommandId::ResetPaneSplit => shell.reset_pane_split(),
             _ => {}
         }
+        AppAction::None
+    }
+
+    /// The first `x`: asks, rather than deleting. A pod nothing put there is
+    /// refused outright — deleting it would take it away for good rather than
+    /// restart it.
+    fn confirm_restart_prompt(&mut self, shell: &mut Shell) {
+        let Some(row) = self.selected_pod(shell) else {
+            shell.set_error("No pod is selected");
+            return;
+        };
+        if !row.pod.restartable() {
+            shell.set_error(format!(
+                "{} has no controller to put it back; deleting it would not restart it",
+                row.pod.key.name
+            ));
+            return;
+        }
+        self.restarting = Some(row.pod.key.clone());
+        self.mode = AksMode::ConfirmRestart;
+    }
+
+    /// The second `x`, or the modal's own chip: the one place the delete is
+    /// sent from.
+    fn confirm_restart(&mut self, shell: &mut Shell) -> AppAction {
+        self.mode = AksMode::Browse;
+        let Some(key) = self.restarting.take() else {
+            return AppAction::None;
+        };
+        shell.set_status(format!("Restarting {}\u{2026}", key.name));
+        self.deleting = Some(key.clone());
+        AppAction::Aks(AksRequest::Delete(key))
+    }
+
+    /// The confirmation's keys: `x` again means it, anything else does not.
+    fn handle_restart_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        if key.code == KeyCode::Char('x') {
+            return self.run_command(shell, CommandId::RestartPod);
+        }
+        self.close_overlay(shell);
+        AppAction::None
+    }
+
+    /// `s`: the terminal goes to `kubectl exec` on the pod under the cursor,
+    /// on the container the log is following.
+    fn exec_shell(&mut self, shell: &mut Shell) -> AppAction {
+        let Some(row) = self.selected_pod(shell) else {
+            shell.set_error("No pod is selected");
+            return AppAction::None;
+        };
+        let Some(cluster) = self
+            .clusters
+            .iter()
+            .find(|cluster| cluster.name == row.pod.key.cluster)
+        else {
+            shell.set_error(format!(
+                "cluster {} is no longer in config.toml",
+                row.pod.key.cluster
+            ));
+            return AppAction::None;
+        };
+        AppAction::ExecShell {
+            context: cluster.context.clone(),
+            key: row.pod.key.clone(),
+            container: self.container.clone(),
+        }
+    }
+
+    /// `g`: the Repos tab, on the repository the pod's image or app label
+    /// names. A pod nothing on file matches says what it did offer.
+    fn open_repo(&mut self, shell: &mut Shell) -> AppAction {
+        let Some(row) = self.selected_pod(shell) else {
+            shell.set_error("No pod is selected");
+            return AppAction::None;
+        };
+        if let Some(repo) = row.repo.clone() {
+            return AppAction::Follow(Jump::Repo(repo));
+        }
+        let candidates = row.pod.repo_candidates();
+        shell.set_error(if candidates.is_empty() {
+            format!("{} names no repository", row.pod.key.name)
+        } else {
+            format!("No repository on file is called {}", candidates.join(", "))
+        });
         AppAction::None
     }
 }
@@ -630,8 +778,10 @@ fn pod_context(row: &PodRow) -> crate::agent_context::PodContext {
 
 impl Screen for AksScreen {
     fn handle_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
-        if self.mode == AksMode::Search {
-            return self.handle_search_key(key);
+        match self.mode {
+            AksMode::Search => return self.handle_search_key(key),
+            AksMode::ConfirmRestart => return self.handle_restart_key(shell, key),
+            AksMode::Browse => {}
         }
         // With the details pane in hand the keys are the text pane's: it is
         // the only thing in there to move around in.
@@ -771,6 +921,7 @@ impl Screen for AksScreen {
 
     fn close_overlay(&mut self, _shell: &mut Shell) {
         self.mode = AksMode::Browse;
+        self.restarting = None;
     }
 
     fn active_editor(&self) -> Option<TextEditor> {
@@ -830,8 +981,9 @@ impl Screen for AksScreen {
     fn footer_hint(&self, _shell: &Shell) -> &str {
         match self.mode {
             AksMode::Search => "←→ cursor  Ctrl-W delete word  Ctrl-U clear  Enter/Esc finish",
+            AksMode::ConfirmRestart => "x restart it  Esc leave it",
             AksMode::Browse => {
-                "↑↓/jk move  L logs  D describe  P previous  C container  / search  ? help"
+                "↑↓/jk move  L logs  D describe  x restart  s shell  g repo  / search  ? help"
             }
         }
     }

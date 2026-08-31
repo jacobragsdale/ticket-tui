@@ -405,3 +405,81 @@ fn clicking_a_container_line_picks_the_one_the_log_follows() {
         "{text}"
     );
 }
+
+#[test]
+fn the_details_pane_offers_the_four_things_a_pod_answers_to() {
+    let mut app = aks_app();
+    let text = aks_text(150, 40, &mut app);
+
+    for label in [" Logs ", " Describe ", " Shell ", " Restart "] {
+        assert!(text.contains(label), "{label} is a button: {text}");
+    }
+    assert!(
+        text.contains("Repository: orders-api  g"),
+        "and the repository line says which key follows it: {text}"
+    );
+
+    let name = app
+        .aks
+        .selected_pod(&app.shell)
+        .expect("a pod under the cursor")
+        .pod
+        .key
+        .name;
+    let restart = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::RunCommand(CommandId::RestartPod)))
+        .expect("the pane offers the restart")
+        .rect;
+    click(&mut app, restart.x + 1, restart.y);
+
+    let confirm = render_text(150, 40, &mut app);
+    assert!(confirm.contains(&format!("Restart {name}?")), "{confirm}");
+    assert!(
+        confirm.contains("Deployment orders-api replaces it"),
+        "the confirmation names what puts a new pod up: {confirm}"
+    );
+    assert!(
+        confirm.contains(" Restart   Leave it "),
+        "both answers are chips on one row: {confirm}"
+    );
+    assert!(
+        confirm.contains("x again to restart it"),
+        "and the keys stand beside them: {confirm}"
+    );
+}
+
+#[test]
+fn the_restart_confirm_answers_the_mouse_and_leave_it_deletes_nothing() {
+    let mut app = aks_app();
+    aks_text(150, 40, &mut app);
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    render_text(150, 40, &mut app);
+
+    let restart = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::RunCommand(CommandId::RestartPod)))
+        .expect("the modal confirms");
+    assert_eq!(
+        restart.layer,
+        PointerLayer::Modal,
+        "over everything behind it"
+    );
+    let leave = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::CloseOverlay))
+        .expect("and leaves it alone");
+    assert_eq!(leave.layer, PointerLayer::Modal);
+    let rect = leave.rect;
+
+    let action = click(&mut app, rect.x + 1, rect.y);
+
+    assert_eq!(action, crate::app::AppAction::None, "nothing was sent");
+    assert!(app.aks.restarting.is_none());
+    assert!(!app.aks.busy());
+    let text = render_text(150, 40, &mut app);
+    assert!(!text.contains("Restart pod "), "the modal is gone: {text}");
+}

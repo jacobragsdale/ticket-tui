@@ -3,6 +3,40 @@
 
 use super::*;
 
+/// `s` on the AKS tab: the TUI steps out of the way the same way it does for
+/// the editor, `kubectl exec -it` gets the terminal, and whatever the shell
+/// exited with is what the notification says.
+// ponytail: sh only; distroless has no shell anyway.
+pub(super) fn exec_shell(app: &mut App, context: &str, key: &PodKey, container: Option<&str>) {
+    let outcome = released_terminal(|| {
+        let mut command = Command::new("kubectl");
+        command.args([
+            "--context",
+            context,
+            "exec",
+            "-it",
+            "-n",
+            &key.namespace,
+            &key.name,
+        ]);
+        if let Some(container) = container {
+            command.args(["-c", container]);
+        }
+        command.arg("--").arg("sh").status()
+    });
+    match outcome {
+        Ok(status) if status.success() => app
+            .shell
+            .set_status(format!("Shell in {} closed", key.name)),
+        Ok(status) => app
+            .shell
+            .set_error(format!("kubectl exec in {} exited with {status}", key.name)),
+        Err(error) => app
+            .shell
+            .set_error(format!("Could not run kubectl: {error}")),
+    }
+}
+
 /// The Actions menu's Description row: the description goes out to the user's
 /// editor as Markdown, and whatever comes back comes back as HTML.
 ///

@@ -127,6 +127,14 @@ pub enum AppAction {
     /// Something for the cluster worker: read the pods again, follow a log,
     /// restart a pod. Nothing here waits on it either.
     Aks(crate::aks::AksRequest),
+    /// Hand the terminal to `kubectl exec -it` on one pod, and take it back
+    /// when the shell in there exits. `container` is the one the log follows;
+    /// with none, kubectl picks the pod's default.
+    ExecShell {
+        context: String,
+        key: crate::aks::PodKey,
+        container: Option<String>,
+    },
     /// Read the pending approvals now rather than at the next poll.
     RefreshApprovals,
     /// Approve or reject one approval, with an optional word about why.

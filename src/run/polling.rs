@@ -251,8 +251,9 @@ pub(super) fn poll_aks(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 app.aks.set_description(&key, text);
             }
             AksEvent::Stopped => runtime.aks.worker = None,
-            // The restart arrives with the ticket that sends it.
-            AksEvent::Deleted { .. } => {}
+            AksEvent::Deleted { key, error } => {
+                app.aks.delete_answered(&mut app.shell, &key, error);
+            }
         }
     }
     redraw

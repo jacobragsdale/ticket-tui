@@ -484,3 +484,201 @@ fn the_agent_context_says_which_log_the_pane_is_following() {
     assert_eq!(log.line_count, 1);
     assert!(log.following);
 }
+
+/// One key, pressed on whatever tab is showing.
+fn press(app: &mut App, code: KeyCode) -> AppAction {
+    app.handle_key(KeyEvent::new(code, KeyModifiers::NONE))
+}
+
+/// A pod nothing put there: a shell somebody left running, which a delete
+/// would take away for good rather than restart.
+fn bare(name: &str) -> Pod {
+    let mut pod = pod("qa", "orders", name, "Running");
+    pod.owner = None;
+    pod
+}
+
+/// Moves the cursor onto one pod by name, the way a person would.
+fn select(app: &mut App, name: &str) {
+    let index = names(app)
+        .iter()
+        .position(|held| held == name)
+        .expect("the pod is on the table");
+    app.aks.cursor.focus(index);
+    settle(app);
+}
+
+#[test]
+fn x_asks_once_more_and_the_second_x_sends_the_delete_that_restarts_the_pod() {
+    let mut app = aks_app();
+    settle(&mut app);
+    let key = target(&app).key;
+
+    assert_eq!(press(&mut app, KeyCode::Char('x')), AppAction::None);
+    assert_eq!(app.aks.mode, AksMode::ConfirmRestart, "it asks first");
+    assert_eq!(app.aks.restarting.as_ref(), Some(&key));
+    assert!(!app.aks.busy(), "and nothing is out yet");
+
+    let action = press(&mut app, KeyCode::Char('x'));
+
+    assert_eq!(action, AppAction::Aks(AksRequest::Delete(key.clone())));
+    assert_eq!(app.aks.mode, AksMode::Browse);
+    assert!(app.aks.restarting.is_none());
+    assert!(app.aks.busy(), "a delete a person is waiting on spins");
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some(format!("Restarting {}\u{2026}", key.name).as_str())
+    );
+
+    app.aks.delete_answered(&mut app.shell, &key, None);
+    assert!(!app.aks.busy());
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some(
+            format!(
+                "Deleted {}; Deployment orders-api is putting a new one up",
+                key.name
+            )
+            .as_str()
+        ),
+        "the news says what is putting a new one up"
+    );
+}
+
+#[test]
+fn esc_leaves_the_pod_where_it_is_and_a_pod_with_no_controller_is_never_asked_about() {
+    let mut app = aks_app();
+    settle(&mut app);
+    press(&mut app, KeyCode::Char('x'));
+
+    assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
+    assert_eq!(app.aks.mode, AksMode::Browse);
+    assert!(app.aks.restarting.is_none());
+    assert!(!app.aks.busy(), "nothing was sent");
+
+    app.aks
+        .set_pods(&app.shell, "qa", Some("orders"), Ok(vec![bare("debug")]));
+    select(&mut app, "debug");
+
+    assert_eq!(press(&mut app, KeyCode::Char('x')), AppAction::None);
+    assert_eq!(app.aks.mode, AksMode::Browse, "nothing was opened");
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some("debug has no controller to put it back; deleting it would not restart it")
+    );
+}
+
+#[test]
+fn a_delete_that_was_refused_says_so_and_stops_the_spinner() {
+    let mut app = aks_app();
+    settle(&mut app);
+    let key = target(&app).key;
+    press(&mut app, KeyCode::Char('x'));
+    press(&mut app, KeyCode::Char('x'));
+    assert!(app.aks.busy());
+
+    app.aks.delete_answered(
+        &mut app.shell,
+        &key,
+        Some("pods is forbidden: User cannot delete".to_owned()),
+    );
+
+    assert!(!app.aks.busy());
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some(
+            format!(
+                "Could not restart {}: pods is forbidden: User cannot delete",
+                key.name
+            )
+            .as_str()
+        )
+    );
+}
+
+#[test]
+fn s_hands_the_terminal_to_kubectl_exec_on_the_container_the_log_is_on() {
+    let mut app = sidecar_app();
+    press(&mut app, KeyCode::Char('C'));
+
+    let action = press(&mut app, KeyCode::Char('s'));
+
+    assert_eq!(
+        action,
+        AppAction::ExecShell {
+            context: "aks-qa".to_owned(),
+            key: PodKey {
+                cluster: "qa".to_owned(),
+                namespace: "orders".to_owned(),
+                name: "orders-api-7d9f5b-abc12".to_owned(),
+            },
+            container: Some("istio-proxy".to_owned()),
+        },
+        "the kubeconfig context is what kubectl is told, not the cluster's name"
+    );
+
+    let mut empty = App::new(Vec::new());
+    empty.aks.set_clusters(vec![cluster("qa", &["orders"])]);
+    empty.select_tab(TabId::Aks);
+    assert_eq!(press(&mut empty, KeyCode::Char('s')), AppAction::None);
+    assert_eq!(
+        empty.shell.notification().map(|(text, _)| text),
+        Some("No pod is selected")
+    );
+}
+
+#[test]
+fn g_goes_to_the_repository_the_image_names_and_says_what_it_tried_when_none_matches() {
+    let mut app = aks_app();
+    settle(&mut app);
+
+    assert_eq!(
+        app.aks.run_command(&mut app.shell, CommandId::OpenRepo),
+        AppAction::Follow(Jump::Repo("orders-api".to_owned()))
+    );
+    press(&mut app, KeyCode::Char('g'));
+    assert_eq!(app.tab, TabId::Repos, "and the key lands on that tab");
+
+    app.select_tab(TabId::Aks);
+    let mut stranger = pod("qa", "orders", "payments-7f-aaa", "Running");
+    stranger.labels = vec![("app".to_owned(), "payments".to_owned())];
+    stranger.containers[0].image = "myacr.azurecr.io/team/payments:4".to_owned();
+    app.aks
+        .set_pods(&app.shell, "qa", Some("orders"), Ok(vec![stranger]));
+    select(&mut app, "payments-7f-aaa");
+
+    assert_eq!(press(&mut app, KeyCode::Char('g')), AppAction::None);
+    assert_eq!(app.tab, TabId::Aks, "nowhere to go");
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some("No repository on file is called payments")
+    );
+}
+
+#[test]
+fn y_copies_the_pod_the_way_kubectl_would_be_given_it() {
+    let mut app = aks_app();
+    select(&mut app, "billing-worker-1");
+
+    let action = press(&mut app, KeyCode::Char('y'));
+
+    assert_eq!(
+        action,
+        AppAction::Copy {
+            text: "orders/billing-worker-1".to_owned(),
+            content: CopiedContent::Id,
+        }
+    );
+}
+
+#[test]
+fn o_says_what_does_get_you_inside_a_pod() {
+    let mut app = aks_app();
+
+    press(&mut app, KeyCode::Char('o'));
+
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some("A pod has no page to open; s opens a shell in it")
+    );
+}

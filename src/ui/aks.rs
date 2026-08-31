@@ -24,6 +24,71 @@ pub(crate) fn render(frame: &mut Frame<'_>, screen: &mut AksScreen, shell: &mut 
     render_search(frame, screen, shell, sections[0]);
     render_content(frame, screen, shell, sections[1]);
     render_status_bar(frame, shell, sections[2], screen.footer_hint(shell));
+    if screen.mode == AksMode::ConfirmRestart {
+        render_restart_confirm(frame, screen, shell);
+    }
+}
+
+/// `Restart orders-api-7d9f5b-abc12?`, with what puts a new one up said out
+/// loud: a delete that nothing replaces is a different act altogether, and the
+/// modal is where the difference has to be visible.
+fn render_restart_confirm(frame: &mut Frame<'_>, screen: &AksScreen, shell: &mut Shell) {
+    let Some(pod) = screen.restarting_pod() else {
+        return;
+    };
+    let name = pod.key.name.clone();
+    let replacement = pod.owner.as_ref().map_or_else(
+        || "Deletes the pod.".to_owned(),
+        |(kind, owner)| format!("Deletes the pod; {kind} {owner} replaces it."),
+    );
+    let area = centered_rect(frame.area(), 56, 8);
+    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, " Restart pod ");
+    let rows = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(format!("Restart {name}?")),
+            Line::from(""),
+            Line::styled(replacement, Style::default().fg(theme().muted)),
+        ])
+        .wrap(Wrap { trim: false }),
+        rows[0],
+    );
+    render_control(
+        frame,
+        shell,
+        Control {
+            area: Rect::new(rows[1].x, rows[1].y, 9, 1),
+            label: " Restart ",
+            target: PointerTarget::RunCommand(CommandId::RestartPod),
+            layer: PointerLayer::Modal,
+            kind: ControlKind::Primary,
+            enabled: true,
+        },
+    );
+    render_control(
+        frame,
+        shell,
+        Control {
+            area: Rect::new(rows[1].x.saturating_add(10), rows[1].y, 10, 1),
+            label: " Leave it ",
+            target: PointerTarget::CloseOverlay,
+            layer: PointerLayer::Modal,
+            kind: ControlKind::Chip,
+            enabled: true,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "x again to restart it  \u{00b7}  Esc to leave it",
+            Style::default().fg(theme().muted),
+        )),
+        rows[2],
+    );
 }
 
 fn render_search(frame: &mut Frame<'_>, screen: &AksScreen, shell: &mut Shell, area: Rect) {
@@ -379,11 +444,16 @@ fn render_pod_details(
         Line::from(""),
     ];
     // The buttons stand for the keys they name, so clicking one is the key.
-    let buttons: [(&str, PointerTarget); 2] = [
+    let buttons: [(&str, PointerTarget); 4] = [
         (" Logs ", PointerTarget::RunCommand(CommandId::ShowLogs)),
         (
             " Describe ",
             PointerTarget::RunCommand(CommandId::DescribePod),
+        ),
+        (" Shell ", PointerTarget::RunCommand(CommandId::ExecShell)),
+        (
+            " Restart ",
+            PointerTarget::RunCommand(CommandId::RestartPod),
         ),
     ];
     let buttons_index = lines.len();
@@ -400,6 +470,7 @@ fn render_pod_details(
                     .fg(theme().link)
                     .add_modifier(Modifier::UNDERLINED),
             ),
+            Span::styled("  g", Style::default().fg(theme().muted)),
         ]));
         (index, repo)
     });

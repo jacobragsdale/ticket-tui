@@ -185,6 +185,16 @@ pub(super) fn handle_action(
                 .shell
                 .set_error("No clusters are configured; add [[clusters]] to config.toml"),
         },
+        // The shell out is the editor's round trip again: the terminal goes
+        // back, kubectl runs in it, and the screen is repainted from scratch.
+        AppAction::ExecShell {
+            context,
+            key,
+            container,
+        } => {
+            exec_shell(app, &context, &key, container.as_deref());
+            return true;
+        }
         AppAction::LocalGit(request) => match runtime.local.worker.as_ref() {
             Some(worker) => {
                 let _ = worker.send(request);

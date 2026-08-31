@@ -21,7 +21,7 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use serde_json::Value;
 use ticket_tui::agent_context::{self, AgentContext};
-use ticket_tui::aks::{AksEvent, AksHandle, AksRequest, Cluster, Kubectl, LogFollow};
+use ticket_tui::aks::{AksEvent, AksHandle, AksRequest, Cluster, Kubectl, LogFollow, PodKey};
 use ticket_tui::app::{
     App, AppAction, CopiedContent, DividerOrientation, PointerTarget, Snapshot, SyncTarget, TabId,
 };
