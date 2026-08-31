@@ -3,7 +3,8 @@
 //!
 //! A bare invocation still opens the TUI, which is what `ticket-tui` has
 //! always been. Every subcommand does one thing and exits. The reads answer
-//! from SQLite and never touch the network — except `pods` and `acr`, which
+//! from SQLite and never touch the network — except `pods`, `acr` and the
+//! vault commands (`vaults`, `secrets`, `keys`, `certs`), which
 //! have no database to answer from and read the clusters through `kubectl`
 //! and the subscription through ARM every time; the writes go out over the
 //! same
@@ -28,7 +29,8 @@ use crate::app::pipelines::rows::{RunRow, duration_label, run_glyph, short_branc
 use crate::app::pull_requests::{PrRow, PrSchema};
 use crate::app::repos::{RepoRow, RepoSchema};
 use crate::arm::{
-    ArmClient, ArmConfig, ArmSource, Inventory, Manifest, Registry, Repository, Tag, portal_url,
+    ArmClient, ArmConfig, ArmSource, Inventory, ItemKind, Manifest, Registry, Repository, Secret,
+    Tag, Vault, VaultItem, portal_url,
 };
 use crate::azure::{self, AzureClient, AzureConfig};
 use crate::classification::{self, NodeKind};
@@ -154,6 +156,18 @@ pub enum Command {
     /// Read the subscription's container registries, and what is in them
     #[command(subcommand)]
     Acr(AcrCommand),
+    /// Read the subscription's key vaults
+    #[command(subcommand)]
+    Vaults(VaultsCommand),
+    /// Read one vault's secrets, and one secret's value on request
+    #[command(subcommand)]
+    Secrets(SecretsCommand),
+    /// Read one vault's keys
+    #[command(subcommand)]
+    Keys(KeysCommand),
+    /// Read one vault's certificates
+    #[command(subcommand)]
+    Certs(CertsCommand),
 }
 
 /// The ACR tab, without the tab. There is no database behind this one either:
@@ -221,6 +235,90 @@ pub enum AcrTagsCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// The Key Vault tab, without the tab. No database backs this one either: the
+/// subscription is asked for its vaults on every invocation, and a vault's own
+/// data plane answers for the secrets, keys and certificates inside it. A
+/// listing never carries a value, and nothing here reads one unless it is
+/// asked for in as many words.
+#[derive(Clone, Debug, Subcommand)]
+pub enum VaultsCommand {
+    /// Print the key vaults the subscription holds
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one vault's fields, the way into it in the portal, and how many
+    /// of each thing it holds
+    Show {
+        /// The vault's name, as the subscription spells it
+        vault: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum SecretsCommand {
+    /// Print every secret in one vault, without any of their values
+    List {
+        /// The vault to read, by name
+        #[arg(long, value_name = "NAME")]
+        vault: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print what one secret's listing says about it, and its value only when
+    /// asked
+    Show {
+        /// The vault the secret is in, by name
+        #[arg(long, value_name = "NAME")]
+        vault: String,
+        /// The secret, as the vault spells it
+        name: String,
+        #[arg(long)]
+        json: bool,
+        /// Print the secret's value itself, raw, to stdout; nothing else is
+        /// printed, and it cannot be combined with --json
+        #[arg(long, conflicts_with = "json")]
+        value: bool,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum KeysCommand {
+    /// Print every key in one vault
+    List {
+        /// The vault to read, by name
+        #[arg(long, value_name = "NAME")]
+        vault: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum CertsCommand {
+    /// Print every certificate in one vault, with how far off each expiry is
+    List {
+        /// The vault to read, by name
+        #[arg(long, value_name = "NAME")]
+        vault: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// The four vault groups as one value. They are four top-level commands
+/// because that is how an agent reaches for them, but they all read the same
+/// inventory and the same listing, so one function runs the lot.
+#[derive(Clone, Debug)]
+pub enum VaultCliCommand {
+    Vaults(VaultsCommand),
+    Secrets(SecretsCommand),
+    Keys(KeysCommand),
+    Certs(CertsCommand),
 }
 
 /// The AKS tab, without the tab. There is no database behind this one: the
@@ -475,6 +573,10 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Approvals(command) => run_approvals(cli, command),
         Command::Pods(command) => run_pods(command),
         Command::Acr(command) => run_acr(cli, command),
+        Command::Vaults(command) => run_vaults(cli, &VaultCliCommand::Vaults(command.clone())),
+        Command::Secrets(command) => run_vaults(cli, &VaultCliCommand::Secrets(command.clone())),
+        Command::Keys(command) => run_vaults(cli, &VaultCliCommand::Keys(command.clone())),
+        Command::Certs(command) => run_vaults(cli, &VaultCliCommand::Certs(command.clone())),
     }
 }
 
@@ -2743,6 +2845,331 @@ struct TagShowJson<'a> {
     tag: TagJson<'a>,
     pull: String,
     manifest: ManifestJson<'a>,
+}
+
+/// The vaults the subscription holds, and what is inside one of them. The
+/// subscription is resolved the way the tabs resolve it, and an unresolved one
+/// or a refused token is the error rather than an empty listing: there is
+/// nothing stored here to fall back on.
+fn run_vaults(cli: &Cli, command: &VaultCliCommand) -> Result<()> {
+    let config = ArmConfig::resolve(
+        cli.subscription.clone(),
+        std::env::var("TICKET_TUI_SUBSCRIPTION").ok(),
+    )?;
+    run_vaults_with(command, &ArmClient::new(config))
+}
+
+fn run_vaults_with(command: &VaultCliCommand, source: &dyn ArmSource) -> Result<()> {
+    let inventory = source.inventory()?;
+    let now = Timestamp::now();
+    match command {
+        VaultCliCommand::Vaults(VaultsCommand::List { json }) => {
+            emit(&if *json {
+                to_json(
+                    &inventory
+                        .vaults
+                        .iter()
+                        .map(VaultJson::new)
+                        .collect::<Vec<_>>(),
+                )?
+            } else {
+                tabulate_vaults(&inventory.vaults)
+            });
+            Ok(())
+        }
+        VaultCliCommand::Vaults(VaultsCommand::Show { vault, json }) => {
+            let vault = find_vault(&inventory, vault)?;
+            let items = source.items(vault)?;
+            emit(&if *json {
+                to_json(&VaultJson::with_items(vault, &items))?
+            } else {
+                describe_vault(vault, &items)
+            });
+            Ok(())
+        }
+        VaultCliCommand::Secrets(SecretsCommand::List { vault, json }) => {
+            list_items(source, &inventory, vault, ItemKind::Secret, *json, now)
+        }
+        VaultCliCommand::Keys(KeysCommand::List { vault, json }) => {
+            list_items(source, &inventory, vault, ItemKind::Key, *json, now)
+        }
+        VaultCliCommand::Certs(CertsCommand::List { vault, json }) => {
+            list_items(source, &inventory, vault, ItemKind::Certificate, *json, now)
+        }
+        VaultCliCommand::Secrets(SecretsCommand::Show {
+            vault,
+            name,
+            json,
+            value,
+        }) => {
+            let vault = find_vault(&inventory, vault)?;
+            if *value {
+                // The one read in this file that comes back holding something
+                // worth hiding, and the one place it is printed. Nothing else
+                // goes to stdout, so `$(…)` around this command is the value
+                // and only the value.
+                println!("{}", secret_output(&source.secret_value(vault, name)?));
+                return Ok(());
+            }
+            let found = source
+                .items(vault)?
+                .into_iter()
+                .find(|item| item.kind == ItemKind::Secret && same_text(&item.name, name))
+                .with_context(|| format!("no secret called {name} in {}", vault.name))?;
+            emit(&if *json {
+                to_json(&VaultItemJson::new(&found))?
+            } else {
+                describe_item(&found, now)
+            });
+            Ok(())
+        }
+    }
+}
+
+/// One vault's items of one kind, which is all three listing commands.
+fn list_items(
+    source: &dyn ArmSource,
+    inventory: &Inventory,
+    vault: &str,
+    kind: ItemKind,
+    json: bool,
+    now: Timestamp,
+) -> Result<()> {
+    let vault = find_vault(inventory, vault)?;
+    let items = of_kind(&source.items(vault)?, kind);
+    emit(&if json {
+        to_json(&items.iter().map(VaultItemJson::new).collect::<Vec<_>>())?
+    } else {
+        tabulate_items(&items, kind, now)
+    });
+    Ok(())
+}
+
+/// The vault one name means, matched the way every other name on this command
+/// line is: ignoring case.
+fn find_vault<'a>(inventory: &'a Inventory, name: &str) -> Result<&'a Vault> {
+    inventory
+        .vaults
+        .iter()
+        .find(|vault| same_text(&vault.name, name))
+        .with_context(|| format!("no vault called {name} in this subscription"))
+}
+
+/// The items of one kind, in the order the vault listed them.
+fn of_kind(items: &[VaultItem], kind: ItemKind) -> Vec<VaultItem> {
+    items
+        .iter()
+        .filter(|item| item.kind == kind)
+        .cloned()
+        .collect()
+}
+
+/// `name · resource group · location · sku · uri`.
+fn tabulate_vaults(vaults: &[Vault]) -> String {
+    if vaults.is_empty() {
+        return "no key vaults in this subscription".to_owned();
+    }
+    columns(
+        &vaults
+            .iter()
+            .map(|vault| {
+                vec![
+                    vault.name.clone(),
+                    vault.resource_group.clone(),
+                    vault.location.clone(),
+                    vault.sku.clone(),
+                    vault.uri.clone(),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// `name · enabled · updated · expires`, and the content type after that for a
+/// secret, which is the one kind that carries one. A certificate's expiry is
+/// the thing a reader is usually after, so it gets the plain words as well.
+fn tabulate_items(items: &[VaultItem], kind: ItemKind, now: Timestamp) -> String {
+    if items.is_empty() {
+        return format!("no {}s in this vault", kind.as_str());
+    }
+    columns(
+        &items
+            .iter()
+            .map(|item| {
+                let mut expires = instant_label(item.expires, now);
+                if kind == ItemKind::Certificate
+                    && let Some(words) = expiry_words(item.expires, now)
+                {
+                    expires.push(' ');
+                    expires.push_str(&words);
+                }
+                let mut row = vec![
+                    item.name.clone(),
+                    enabled_label(item.enabled),
+                    instant_label(item.updated, now),
+                    expires,
+                ];
+                if kind == ItemKind::Secret {
+                    row.push(or_dash(item.content_type.as_deref()));
+                }
+                row
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// One vault as a block of text, with how many of each thing it holds — which
+/// is the count `show` reads the listing for.
+fn describe_vault(vault: &Vault, items: &[VaultItem]) -> String {
+    [
+        vault.name.clone(),
+        vault.uri.clone(),
+        String::new(),
+        format!("Group         {}", vault.resource_group),
+        format!("Location      {}", vault.location),
+        format!("SKU           {}", vault.sku),
+        format!("Secrets       {}", of_kind(items, ItemKind::Secret).len()),
+        format!("Keys          {}", of_kind(items, ItemKind::Key).len()),
+        format!(
+            "Certificates  {}",
+            of_kind(items, ItemKind::Certificate).len()
+        ),
+        String::new(),
+        format!("Portal        {}", portal_url(&vault.id)),
+    ]
+    .join("\n")
+}
+
+/// One item as everything its listing says about it, and a last line saying
+/// what is deliberately missing.
+fn describe_item(item: &VaultItem, now: Timestamp) -> String {
+    [
+        format!("{}  {}", item.name, item.kind.as_str()),
+        String::new(),
+        format!("Enabled       {}", enabled_label(item.enabled)),
+        format!("Created       {}", instant_label(item.created, now)),
+        format!("Updated       {}", instant_label(item.updated, now)),
+        format!("Expires       {}", instant_label(item.expires, now)),
+        format!("Content type  {}", or_dash(item.content_type.as_deref())),
+        format!("Recovery      {}", or_dash(item.recovery_level.as_deref())),
+        String::new(),
+        "value: not shown; pass --value to print it".to_owned(),
+    ]
+    .join("\n")
+}
+
+/// How far off an expiry is, in words rather than a stamp. Nothing to say
+/// about an item that never expires.
+fn expiry_words(expires: Option<Timestamp>, now: Timestamp) -> Option<String> {
+    let expires = expires?;
+    let ahead = now.seconds_until(expires);
+    Some(if ahead > 0 {
+        format!("expires in {}", whole_days(ahead))
+    } else {
+        format!("expired {} ago", whole_days(expires.seconds_until(now)))
+    })
+}
+
+/// Whole days, singular where it needs to be.
+fn whole_days(seconds: i64) -> String {
+    match seconds / 86_400 {
+        1 => "1 day".to_owned(),
+        days => format!("{days} days"),
+    }
+}
+
+fn enabled_label(enabled: bool) -> String {
+    if enabled { "yes" } else { "no" }.to_owned()
+}
+
+fn or_dash(text: Option<&str>) -> String {
+    text.map_or_else(|| "\u{2014}".to_owned(), ToOwned::to_owned)
+}
+
+/// The value path, alone, so the one `expose` in this file has a name and a
+/// test of its own. A [`Secret`] never reaches a format string anywhere else:
+/// it would print `[redacted]`, which is not what the caller asked for either.
+fn secret_output(secret: &Secret) -> String {
+    secret.expose().to_owned()
+}
+
+/// One vault as `--json` prints it, portal link included so an agent need not
+/// build one. The counts are only there for `show`, which is the one form that
+/// reads the listing.
+#[derive(Serialize)]
+struct VaultJson<'a> {
+    name: &'a str,
+    resource_group: &'a str,
+    location: &'a str,
+    sku: &'a str,
+    uri: &'a str,
+    id: &'a str,
+    portal_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    items: Option<ItemCountsJson>,
+}
+
+impl<'a> VaultJson<'a> {
+    fn new(vault: &'a Vault) -> Self {
+        Self {
+            name: &vault.name,
+            resource_group: &vault.resource_group,
+            location: &vault.location,
+            sku: &vault.sku,
+            uri: &vault.uri,
+            id: &vault.id,
+            portal_url: portal_url(&vault.id),
+            items: None,
+        }
+    }
+
+    fn with_items(vault: &'a Vault, items: &[VaultItem]) -> Self {
+        Self {
+            items: Some(ItemCountsJson {
+                secrets: of_kind(items, ItemKind::Secret).len(),
+                keys: of_kind(items, ItemKind::Key).len(),
+                certs: of_kind(items, ItemKind::Certificate).len(),
+            }),
+            ..Self::new(vault)
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ItemCountsJson {
+    secrets: usize,
+    keys: usize,
+    certs: usize,
+}
+
+/// One secret, key or certificate as `--json` prints it: everything the
+/// listing carries, and nothing it does not. There is no field here for a
+/// value, on purpose.
+#[derive(Serialize)]
+struct VaultItemJson<'a> {
+    kind: &'static str,
+    name: &'a str,
+    enabled: bool,
+    created: Option<String>,
+    updated: Option<String>,
+    expires: Option<String>,
+    content_type: Option<&'a str>,
+    recovery_level: Option<&'a str>,
+}
+
+impl<'a> VaultItemJson<'a> {
+    fn new(item: &'a VaultItem) -> Self {
+        Self {
+            kind: item.kind.as_str(),
+            name: &item.name,
+            enabled: item.enabled,
+            created: item.created.map(Timestamp::to_rfc3339),
+            updated: item.updated.map(Timestamp::to_rfc3339),
+            expires: item.expires.map(Timestamp::to_rfc3339),
+            content_type: item.content_type.as_deref(),
+            recovery_level: item.recovery_level.as_deref(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -5044,6 +5471,477 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "no container registries in this subscription"
+        );
+    }
+
+    /// The four top-level groups are one enum once they are parsed, which is
+    /// what lets one function and one harness run the lot.
+    fn vault_command(arguments: &[&str]) -> VaultCliCommand {
+        match Cli::parse_from(arguments).command {
+            Some(Command::Vaults(command)) => VaultCliCommand::Vaults(command),
+            Some(Command::Secrets(command)) => VaultCliCommand::Secrets(command),
+            Some(Command::Keys(command)) => VaultCliCommand::Keys(command),
+            Some(Command::Certs(command)) => VaultCliCommand::Certs(command),
+            _ => panic!("the vault command did not parse"),
+        }
+    }
+
+    fn vault_fixture() -> Vault {
+        Vault {
+            id: "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/atlas-kv".to_owned(),
+            name: "atlas-kv".to_owned(),
+            resource_group: "rg".to_owned(),
+            location: "westeurope".to_owned(),
+            sku: "standard".to_owned(),
+            uri: "https://atlas-kv.vault.azure.net/".to_owned(),
+        }
+    }
+
+    /// One vault holding two secrets, a key and two certificates — one of
+    /// which has expired — and a value nothing but `--value` may print.
+    fn vault_fake() -> arm_tests::FakeArm {
+        let fake = arm_tests::FakeArm::default();
+        *fake.vaults.lock().unwrap() = vec![vault_fixture()];
+        *fake.items.lock().unwrap() = vec![
+            VaultItem {
+                kind: ItemKind::Secret,
+                name: "orders-db".to_owned(),
+                enabled: true,
+                created: Some(ts("2026-07-01T09:00:00Z")),
+                updated: Some(ts("2026-08-29T09:00:00Z")),
+                expires: None,
+                content_type: Some("text/plain".to_owned()),
+                recovery_level: Some("Recoverable+Purgeable".to_owned()),
+            },
+            VaultItem {
+                kind: ItemKind::Secret,
+                name: "retired-token".to_owned(),
+                enabled: false,
+                created: Some(ts("2026-01-05T09:00:00Z")),
+                updated: Some(ts("2026-01-05T09:00:00Z")),
+                expires: Some(ts("2026-08-20T09:00:00Z")),
+                content_type: None,
+                recovery_level: None,
+            },
+            VaultItem {
+                kind: ItemKind::Key,
+                name: "signing".to_owned(),
+                enabled: true,
+                created: Some(ts("2026-03-01T09:00:00Z")),
+                updated: Some(ts("2026-08-28T09:00:00Z")),
+                expires: None,
+                content_type: None,
+                recovery_level: Some("Purgeable".to_owned()),
+            },
+            VaultItem {
+                kind: ItemKind::Certificate,
+                name: "atlas-tls".to_owned(),
+                enabled: true,
+                created: Some(ts("2026-06-29T09:00:00Z")),
+                updated: Some(ts("2026-08-27T09:00:00Z")),
+                expires: Some(ts("2026-09-29T09:00:00Z")),
+                content_type: None,
+                recovery_level: None,
+            },
+            VaultItem {
+                kind: ItemKind::Certificate,
+                name: "old-tls".to_owned(),
+                enabled: true,
+                created: Some(ts("2025-08-20T09:00:00Z")),
+                updated: Some(ts("2026-02-01T09:00:00Z")),
+                expires: Some(ts("2026-08-20T09:00:00Z")),
+                content_type: None,
+                recovery_level: None,
+            },
+        ];
+        *fake.secret.lock().unwrap() = "p@ssw0rd-that-belongs-in-no-table".to_owned();
+        fake
+    }
+
+    #[test]
+    fn vaults_secrets_keys_and_certs_parse_their_forms_and_value_rejects_json() {
+        assert!(matches!(
+            vault_command(&["ticket-tui", "vaults", "list"]),
+            VaultCliCommand::Vaults(VaultsCommand::List { json: false })
+        ));
+
+        // The subscription is a global flag, so it may be written in front of
+        // the subcommand.
+        let VaultCliCommand::Vaults(VaultsCommand::Show { vault, json }) = vault_command(&[
+            "ticket-tui",
+            "--subscription",
+            "sub-1",
+            "vaults",
+            "show",
+            "atlas-kv",
+            "--json",
+        ]) else {
+            panic!("vaults show did not parse");
+        };
+        assert_eq!(vault, "atlas-kv");
+        assert!(json);
+
+        let VaultCliCommand::Secrets(SecretsCommand::List { vault, json }) =
+            vault_command(&["ticket-tui", "secrets", "list", "--vault", "atlas-kv"])
+        else {
+            panic!("secrets list did not parse");
+        };
+        assert_eq!(vault, "atlas-kv");
+        assert!(!json);
+
+        let VaultCliCommand::Secrets(SecretsCommand::Show {
+            vault,
+            name,
+            json,
+            value,
+        }) = vault_command(&[
+            "ticket-tui",
+            "secrets",
+            "show",
+            "--vault",
+            "atlas-kv",
+            "orders-db",
+        ])
+        else {
+            panic!("secrets show did not parse");
+        };
+        assert_eq!((vault.as_str(), name.as_str()), ("atlas-kv", "orders-db"));
+        assert!(!json);
+        assert!(!value);
+
+        let VaultCliCommand::Secrets(SecretsCommand::Show { value, .. }) = vault_command(&[
+            "ticket-tui",
+            "secrets",
+            "show",
+            "--vault",
+            "atlas-kv",
+            "orders-db",
+            "--value",
+        ]) else {
+            panic!("secrets show --value did not parse");
+        };
+        assert!(value);
+
+        let VaultCliCommand::Keys(KeysCommand::List { vault, json }) =
+            vault_command(&["ticket-tui", "keys", "list", "--vault", "atlas-kv"])
+        else {
+            panic!("keys list did not parse");
+        };
+        assert_eq!(vault, "atlas-kv");
+        assert!(!json);
+
+        let VaultCliCommand::Certs(CertsCommand::List { vault, json }) = vault_command(&[
+            "ticket-tui",
+            "certs",
+            "list",
+            "--vault",
+            "atlas-kv",
+            "--json",
+        ]) else {
+            panic!("certs list did not parse");
+        };
+        assert_eq!(vault, "atlas-kv");
+        assert!(json);
+
+        // Printing a value and printing a document are different asks, and
+        // asking for both is refused at the command line rather than resolved
+        // into a quiet preference for one of them.
+        assert!(
+            Cli::try_parse_from([
+                "ticket-tui",
+                "secrets",
+                "show",
+                "--vault",
+                "atlas-kv",
+                "orders-db",
+                "--value",
+                "--json",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn vault_items_print_as_tables_and_json_from_a_fake() {
+        let fake = vault_fake();
+        for arguments in [
+            vec!["ticket-tui", "vaults", "list"],
+            vec!["ticket-tui", "vaults", "show", "atlas-kv"],
+            vec!["ticket-tui", "secrets", "list", "--vault", "atlas-kv"],
+            vec!["ticket-tui", "keys", "list", "--vault", "atlas-kv"],
+            vec![
+                "ticket-tui",
+                "certs",
+                "list",
+                "--vault",
+                "atlas-kv",
+                "--json",
+            ],
+            vec![
+                "ticket-tui",
+                "secrets",
+                "show",
+                "--vault",
+                "atlas-kv",
+                "orders-db",
+            ],
+        ] {
+            run_vaults_with(&vault_command(&arguments), &fake).unwrap();
+        }
+        // `vaults list` asks for nothing but the inventory; every other form
+        // reads the one listing that answers for all three kinds, and none of
+        // them reads a value.
+        assert_eq!(
+            *fake.reads.lock().unwrap(),
+            [
+                "inventory",
+                "inventory",
+                "items",
+                "inventory",
+                "items",
+                "inventory",
+                "items",
+                "inventory",
+                "items",
+                "inventory",
+                "items",
+            ]
+        );
+
+        let now = ts("2026-08-30T09:00:00Z");
+        assert_eq!(
+            tabulate_vaults(&[vault_fixture()]),
+            "atlas-kv  rg  westeurope  standard  https://atlas-kv.vault.azure.net/"
+        );
+        assert_eq!(tabulate_vaults(&[]), "no key vaults in this subscription");
+
+        let json = serde_json::to_value(VaultJson::new(&vault_fixture())).unwrap();
+        assert_eq!(json["uri"], "https://atlas-kv.vault.azure.net/");
+        assert_eq!(
+            json["portal_url"],
+            "https://portal.azure.com/#resource/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/atlas-kv"
+        );
+        // A listing has read no vault's contents, so it says nothing about
+        // what is in one.
+        assert!(json.get("items").is_none());
+
+        let items = fake.items.lock().unwrap().clone();
+        let json = serde_json::to_value(VaultJson::with_items(&vault_fixture(), &items)).unwrap();
+        assert_eq!(json["items"]["secrets"], 2);
+        assert_eq!(json["items"]["keys"], 1);
+        assert_eq!(json["items"]["certs"], 2);
+
+        let described = describe_vault(&vault_fixture(), &items);
+        assert!(
+            described.starts_with("atlas-kv\nhttps://atlas-kv.vault.azure.net/\n"),
+            "{described}"
+        );
+        assert!(described.contains("Secrets       2"), "{described}");
+        assert!(described.contains("Keys          1"), "{described}");
+        assert!(described.contains("Certificates  2"), "{described}");
+        assert!(
+            described.ends_with(&format!(
+                "Portal        {}",
+                portal_url(&vault_fixture().id)
+            )),
+            "{described}"
+        );
+
+        // Each listing command is the one listing, filtered.
+        let secrets = of_kind(&items, ItemKind::Secret);
+        let keys = of_kind(&items, ItemKind::Key);
+        let certs = of_kind(&items, ItemKind::Certificate);
+        assert_eq!(
+            secrets
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            ["orders-db", "retired-token"]
+        );
+        assert_eq!(keys.len(), 1);
+        assert_eq!(certs.len(), 2);
+
+        // A secret carries a content type, so it gets the extra column; a
+        // secret that never expires keeps its dash.
+        assert_eq!(
+            tabulate_items(&secrets[..1], ItemKind::Secret, now),
+            "orders-db  yes  2026-08-29 09:00:00 UTC (1d)  \u{2014}  text/plain"
+        );
+        let table = tabulate_items(&secrets, ItemKind::Secret, now);
+        assert!(
+            table.contains("orders-db      yes  2026-08-29 09:00:00 UTC (1d)"),
+            "{table}"
+        );
+        // A disabled secret says so, and one with no content type keeps a dash
+        // where the column would be.
+        assert!(
+            table.ends_with("retired-token  no   2026-01-05 09:00:00 UTC (237d)  2026-08-20 09:00:00 UTC (10d)  \u{2014}"),
+            "{table}"
+        );
+
+        assert_eq!(
+            tabulate_items(&keys, ItemKind::Key, now),
+            "signing  yes  2026-08-28 09:00:00 UTC (2d)  \u{2014}"
+        );
+        assert_eq!(
+            tabulate_items(&[], ItemKind::Key, now),
+            "no keys in this vault"
+        );
+
+        // A certificate's expiry is what a reader is after, so it is said in
+        // words as well as in a stamp, in whichever direction applies.
+        let table = tabulate_items(&certs, ItemKind::Certificate, now);
+        assert!(
+            table.contains("2026-09-29 09:00:00 UTC (0s) expires in 30 days"),
+            "{table}"
+        );
+        assert!(
+            table.contains("2026-08-20 09:00:00 UTC (10d) expired 10 days ago"),
+            "{table}"
+        );
+        assert_eq!(expiry_words(None, now), None);
+        assert_eq!(
+            expiry_words(Some(ts("2026-08-31T09:00:00Z")), now).as_deref(),
+            Some("expires in 1 day")
+        );
+
+        let json = serde_json::to_value(VaultItemJson::new(&secrets[0])).unwrap();
+        assert_eq!(json["kind"], "secret");
+        assert_eq!(json["name"], "orders-db");
+        assert_eq!(json["enabled"], true);
+        assert_eq!(json["created"], "2026-07-01T09:00:00Z");
+        assert_eq!(json["updated"], "2026-08-29T09:00:00Z");
+        assert_eq!(json["expires"], Value::Null);
+        assert_eq!(json["content_type"], "text/plain");
+        assert_eq!(json["recovery_level"], "Recoverable+Purgeable");
+
+        // `secrets show` prints what the listing says and then says, in as
+        // many words, what it is deliberately not printing.
+        let described = describe_item(&secrets[0], now);
+        assert!(described.starts_with("orders-db  secret\n"), "{described}");
+        assert!(described.contains("Enabled       yes"), "{described}");
+        assert!(
+            described.contains("Content type  text/plain"),
+            "{described}"
+        );
+        assert!(
+            described.contains("Recovery      Recoverable+Purgeable"),
+            "{described}"
+        );
+        assert!(
+            described.ends_with("\nvalue: not shown; pass --value to print it"),
+            "{described}"
+        );
+
+        // Nothing a metadata form prints, in either shape, carries the value.
+        let value = fake.secret.lock().unwrap().clone();
+        for printed in [
+            described,
+            table,
+            tabulate_items(&secrets, ItemKind::Secret, now),
+            describe_vault(&vault_fixture(), &items),
+            to_json(&secrets.iter().map(VaultItemJson::new).collect::<Vec<_>>()).unwrap(),
+            to_json(&VaultItemJson::new(&secrets[0])).unwrap(),
+            to_json(&VaultJson::with_items(&vault_fixture(), &items)).unwrap(),
+        ] {
+            assert!(!printed.contains(&value), "{printed}");
+        }
+    }
+
+    #[test]
+    fn secrets_show_value_prints_exactly_the_value() {
+        let fake = vault_fake();
+        let value = fake.secret.lock().unwrap().clone();
+        let secret = fake.secret_value(&vault_fixture(), "orders-db").unwrap();
+        assert_eq!(secret_output(&secret), value);
+        // Which is why the value path has to go through `expose`: a format
+        // string prints the wrong thing rather than nothing.
+        assert_eq!(format!("{secret}"), "[redacted]");
+        assert_eq!(format!("{secret:?}"), "[redacted]");
+
+        fake.reads.lock().unwrap().clear();
+        run_vaults_with(
+            &vault_command(&[
+                "ticket-tui",
+                "secrets",
+                "show",
+                "--vault",
+                "atlas-kv",
+                "orders-db",
+                "--value",
+            ]),
+            &fake,
+        )
+        .unwrap();
+        assert_eq!(
+            *fake.reads.lock().unwrap(),
+            ["inventory", "secret_value orders-db"]
+        );
+
+        // The metadata form reads the listing every other form reads, and
+        // never the value.
+        fake.reads.lock().unwrap().clear();
+        run_vaults_with(
+            &vault_command(&[
+                "ticket-tui",
+                "secrets",
+                "show",
+                "--vault",
+                "atlas-kv",
+                "orders-db",
+            ]),
+            &fake,
+        )
+        .unwrap();
+        assert_eq!(*fake.reads.lock().unwrap(), ["inventory", "items"]);
+    }
+
+    #[test]
+    fn a_vault_or_item_the_subscription_does_not_hold_is_refused_by_name() {
+        let fake = vault_fake();
+        assert_eq!(
+            run_vaults_with(
+                &vault_command(&["ticket-tui", "vaults", "show", "billing-kv"]),
+                &fake
+            )
+            .unwrap_err()
+            .to_string(),
+            "no vault called billing-kv in this subscription"
+        );
+        // The name is matched the way every other name here is: ignoring case.
+        run_vaults_with(
+            &vault_command(&["ticket-tui", "vaults", "show", "ATLAS-KV"]),
+            &fake,
+        )
+        .unwrap();
+
+        // A key is not a secret, however the vault lists them.
+        assert_eq!(
+            run_vaults_with(
+                &vault_command(&[
+                    "ticket-tui",
+                    "secrets",
+                    "show",
+                    "--vault",
+                    "atlas-kv",
+                    "signing",
+                ]),
+                &fake
+            )
+            .unwrap_err()
+            .to_string(),
+            "no secret called signing in atlas-kv"
+        );
+
+        let empty = arm_tests::FakeArm::default();
+        assert_eq!(
+            run_vaults_with(
+                &vault_command(&["ticket-tui", "secrets", "list", "--vault", "atlas-kv"]),
+                &empty
+            )
+            .unwrap_err()
+            .to_string(),
+            "no vault called atlas-kv in this subscription"
         );
     }
 }
