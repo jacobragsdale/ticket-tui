@@ -21,6 +21,7 @@ drive.
 - [`pipelines`, `runs`](#pipelines-runs)
 - [Waiting, and exit codes](#waiting-and-exit-codes)
 - [`approvals`](#approvals)
+- [`pods`](#pods)
 
 ```console
 ticket-tui sync [--full]
@@ -52,6 +53,7 @@ ticket-tui runs wait <id>
 ticket-tui approvals list [--json]
 ticket-tui approvals approve <id> [--comment TEXT]
 ticket-tui approvals reject <id> [--comment TEXT]
+ticket-tui pods [--cluster NAME] [--namespace NAME] ['<filter>'] [--json]
 ```
 
 ## Global options
@@ -396,3 +398,78 @@ ticket-tui approvals reject abc-123 --comment 'waiting on the migration'
 Columns: `id  build-number  stage  pipeline`. `--json` adds `run_id`,
 `instructions` and `requested_at`. Both answers take an optional `--comment`,
 which Azure DevOps records with the decision.
+
+## `pods`
+
+The AKS tab without the tab, and the one read that has no database behind it:
+it reads the clusters `config.toml` names through `kubectl`, live, every time.
+
+```console
+$ ticket-tui pods
+qa    orders   orders-api-7d9f5b-abc12   1/1  Running           0  4h
+qa    orders   orders-api-7d9f5b-def34   0/1  CrashLoopBackOff  9  12m
+prod  billing  billing-worker-6c4a1-x9z  1/1  Running           0  3d
+
+$ ticket-tui pods --cluster qa "status:crashloopbackoff"
+qa  orders  orders-api-7d9f5b-def34  0/1  CrashLoopBackOff  9  12m
+
+$ ticket-tui pods --cluster qa --namespace orders "orders-api-7d9f5b-def34" --json
+[
+  {
+    "cluster": "qa",
+    "namespace": "orders",
+    "name": "orders-api-7d9f5b-def34",
+    "status": "CrashLoopBackOff",
+    "ready": "0/1",
+    "restarts": 9,
+    "created": "2026-08-30T10:00:00Z",
+    "age": "12m",
+    "node": "aks-nodepool1-0",
+    "ip": "10.0.0.7",
+    "owner": "Deployment/orders-api",
+    "containers": [
+      {
+        "name": "api",
+        "image": "myacr.azurecr.io/team/orders-api:1.2.3",
+        "ready": false,
+        "restarts": 9,
+        "state": "CrashLoopBackOff"
+      }
+    ],
+    "labels": { "app": "orders-api", "pod-template-hash": "7d9f5b" }
+  }
+]
+```
+
+Columns: `cluster  namespace  pod  ready  status  restarts  age`, or
+`no matching pods`. The positional argument is the AKS tab's grammar —
+`cluster:`, `ns:`, `status:`, `owner:`, `node:`, `app:`, `repo:`, and anything
+else matched fuzzily against the name, namespace, owner and repository
+([filters.md](filters.md)). `--cluster` and `--namespace` narrow what is *read*
+rather than what is printed, which is the difference between one `kubectl` call
+and six.
+
+`repo` is always null here: matching a pod to a repository wants the project's
+repositories, and this command does not open the database. Read it from the
+live context (`aks.selected.repo`) when a TUI is running.
+
+Failures are per cluster, and partial answers are still printed. A cluster that
+will not answer puts one line on stderr —
+
+```console
+$ ticket-tui pods; echo "exit $?"
+prod: Unable to connect to the server: dial tcp: i/o timeout
+qa  orders  orders-api-7d9f5b-abc12  1/1  Running  0  4h
+error: 1 cluster(s) could not be read
+exit 1
+```
+
+— so a non-zero exit means *some* cluster is missing from the table, not that
+nothing was read. A namespace the server refuses (`Error from server
+(Forbidden)`) does not stop that cluster's other namespaces; anything else
+does.
+
+`config.toml` with no `[[clusters]]` is an error: `no clusters in config.toml;
+add a [[clusters]] table`. So is `--cluster` naming one the file does not have.
+`kubectl` must be on `PATH` and already logged in — the TUI and the CLI both
+shell out to it and neither can answer a prompt.

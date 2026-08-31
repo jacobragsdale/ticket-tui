@@ -6,12 +6,14 @@ description: Read and change an Azure DevOps project with ticket-tui. Use when t
 # ticket-tui
 
 ticket-tui is a terminal front-end for one Azure DevOps project: work items,
-repositories, pull requests and pipelines, on four tabs. It keeps a local SQLite
-database of what the project holds and writes changes straight back to Azure
-DevOps. Azure DevOps is the record of truth; the database is a durable local
-copy of it that survives across runs, not a scratch cache.
+repositories, pull requests and pipelines, on the first four of seven tabs. It
+keeps a local SQLite database of what the project holds and writes changes
+straight back to Azure DevOps. Azure DevOps is the record of truth; the database
+is a durable local copy of it that survives across runs, not a scratch cache.
+Tab `5` is AKS, which has no database behind it at all — it reads clusters
+through `kubectl`, live.
 
-Four surfaces, each with a read, a write and a live view:
+Five surfaces, each with a read, a write and a live view:
 
 | Surface | Read (from SQLite) | Write (to Azure DevOps) | In the live context |
 |---|---|---|---|
@@ -19,6 +21,7 @@ Four surfaces, each with a read, a write and a live view:
 | Repositories | `repos list`, `repos show` | — (clone/fetch/pull are the TUI's own keys) | `repos` |
 | Pull requests | `prs list`, `prs show` | `prs vote`, `complete`, `abandon`, `autocomplete`, `comment` | `pull_requests` |
 | Pipelines | `pipelines`, `runs list` | `runs trigger`, `cancel`, `retry`; `approvals approve`/`reject` | `pipelines` |
+| AKS pods | `pods` (live, through `kubectl`) | — (restart and shell are the TUI's keys `x` and `s`) | `aks` |
 
 `runs show`, `runs logs`, `runs wait` and `approvals list` read Azure DevOps
 rather than the database: a timeline, a log and a run's own progress are not
@@ -152,8 +155,8 @@ are read live by the commands that need them, never stored.
 ## What the user is looking at
 
 While the TUI runs it publishes `tickets.context.json` beside the database,
-describing **all four tabs whether or not they are showing**, plus `active_tab`
-— so you never have to ask the user to press a key. Read it whenever they say
+describing **every tab whether or not it is showing**, plus `active_tab` — so
+you never have to ask the user to press a key. Read it whenever they say
 "this ticket", "the selected one", "my pull request", or "the build":
 
 ```console
@@ -256,6 +259,17 @@ reads it.
 ticket-tui approvals list          # id build stage pipeline
 ticket-tui approvals approve <id> --comment 'checked the staging smoke'
 ```
+
+**Is anything crash-looping in qa?**
+
+```console
+ticket-tui pods --cluster qa 'status:crashloopbackoff' --json
+```
+Reads the cluster live; there is no database to be stale. Exit 1 with a line on
+stderr means a cluster could not be read, and the pods that *did* answer are
+still on stdout. When a TUI is running and the user has a pod under the cursor —
+"this pod", "why is it restarting" — read `aks.selected` from the context
+instead, which also carries the repository the image names.
 
 **What changed in this sprint's pull requests**
 

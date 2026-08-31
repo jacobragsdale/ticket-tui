@@ -1,7 +1,7 @@
 # The filter grammars
 
-One shape, four vocabularies. Work items, repositories, pull requests and runs
-each have their own fields; everything else — how values combine, how they are
+One shape, five vocabularies. Work items, repositories, pull requests, runs and
+pods each have their own fields; everything else — how values combine, how they are
 quoted, how sentinels resolve — is the same everywhere, and the same in the
 TUI's search boxes and in the `search.query` field of the context JSON. None of
 it is WIQL: the global `--query WIQL` flag that narrows a *pull* is a different
@@ -16,9 +16,10 @@ thing entirely.
 - [Repositories — `ticket-tui repos list --query`](#repositories--ticket-tui-repos-list---query)
 - [Pull requests — `ticket-tui prs list --query`](#pull-requests--ticket-tui-prs-list---query)
 - [Runs — `ticket-tui runs list --query`](#runs--ticket-tui-runs-list---query)
+- [Pods — `ticket-tui pods`](#pods--ticket-tui-pods)
 
 This page describes the work-item grammar first, because it is the largest, and
-then the three shorter ones. Each is used by the subcommand named beside it.
+then the four shorter ones. Each is used by the subcommand named beside it.
 
 A query is a sequence of `field:value` pairs and free text. Values in one field
 are ORed, different fields are ANDed, and everything left over is matched
@@ -203,3 +204,36 @@ ticket-tui runs list --query 'branch:main by:@me'
 
 A run still going has no result, so `result:failed` never matches one; use
 `status:inProgress` for those.
+
+## Pods — `ticket-tui pods`
+
+The only grammar whose query is a positional argument rather than `--query`:
+`ticket-tui pods 'status:running'`.
+
+| Field | Aliases | Matches |
+|---|---|---|
+| `cluster:` | | The cluster's name **in `config.toml`**, not its kubeconfig context |
+| `ns:` | `namespace:` | The namespace |
+| `status:` | `phase:` | The STATUS word: `Running`, `CrashLoopBackOff`, `Pending`, `Completed`, `Init:1/2` |
+| `owner:` | `deployment:` | What made it, by name: `orders-api` for a `Deployment/orders-api` |
+| `node:` | | The node it landed on |
+| `app:` | | The `app` or `app.kubernetes.io/name` label |
+| `repo:` | `repository:` | The repository on file its image or app label names |
+
+Fuzzy text matches the pod name, the namespace, the owner and the repository.
+
+```console
+ticket-tui pods 'status:running'
+ticket-tui pods --cluster qa 'status:crashloopbackoff'
+ticket-tui pods 'app:orders-api ns:orders'
+ticket-tui pods 'orders-api'                     # fuzzy: name, namespace, owner, repo
+```
+
+`--cluster` and `--namespace` are not the same as `cluster:` and `ns:`: the
+flags narrow what `kubectl` is *asked for*, the fields narrow what is printed
+from what came back. `--cluster qa` is one read; `cluster:qa` is every cluster
+read and most of the rows thrown away.
+
+`repo:` never matches from the CLI — the repository lookup wants the project's
+repositories and `pods` does not open the database — but it works in the TUI's
+own search box and in the columns.

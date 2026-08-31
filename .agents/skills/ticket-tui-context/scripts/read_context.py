@@ -5,9 +5,10 @@
 # ///
 """Read and summarize ticket-tui's live agent context.
 
-Schema 3 describes all four tabs — work items, repos, pull requests and
-pipelines — whether or not the user is looking at them, so this prints the
-active tab first and then whatever each tab holds.
+Schema 3 describes every tab — work items, repos, pull requests, pipelines and
+AKS — whether or not the user is looking at them, so this prints the active tab
+first and then whatever each tab holds. (ACR and Key Vault are placeholders
+until their tickets land, and are left to --json.)
 """
 
 from __future__ import annotations
@@ -161,6 +162,9 @@ def validate_context(data: dict[str, object]) -> None:
     pipelines = object_mapping(data.get("pipelines"))
     text(pipelines.get("level"), "pipelines.level")
     object_list(pipelines.get("watched"))
+    aks = object_mapping(data.get("aks"))
+    integer(aks.get("visible_rows"), "aks.visible_rows")
+    integer(aks.get("unhealthy"), "aks.unhealthy")
 
 
 def validate_work_items(data: dict[str, object]) -> None:
@@ -259,6 +263,7 @@ def print_summary(context_path: Path, data: dict[str, object]) -> None:
     print_repos(object_mapping(data.get("repos")))
     print_pull_requests(object_mapping(data.get("pull_requests")))
     print_pipelines(object_mapping(data.get("pipelines")))
+    print_aks(object_mapping(data.get("aks")))
 
     if not live:
         print(
@@ -451,6 +456,51 @@ def print_pipelines(data: dict[str, object]) -> None:
     watched = object_list(data.get("watched"))
     if watched:
         print(f"  Watching: {', '.join(str(run) for run in watched)}")
+
+
+def print_aks(data: dict[str, object]) -> None:
+    """The AKS tab. Pods are read live through kubectl and never stored, so this
+    is the last read rather than the cluster's state right now."""
+    print("")
+    clusters = [str(value) for value in object_list(data.get("clusters") or [])]
+    print(
+        f"[aks] {', '.join(clusters) or 'no clusters in config.toml'} · "
+        f"{data.get('visible_rows', 0)} pods · "
+        f"{data.get('unhealthy', 0)} unhealthy"
+    )
+    pod = data.get("selected")
+    if pod is not None:
+        chosen = object_mapping(pod)
+        print(
+            f"  Pod: {chosen.get('cluster', '?')}/{chosen.get('namespace', '?')}/"
+            f"{chosen.get('name', '?')} · {chosen.get('status', '?')} · "
+            f"{chosen.get('ready', '?')} ready · "
+            f"{chosen.get('restarts', 0)} restarts"
+        )
+        owner = chosen.get("owner")
+        if owner:
+            print(f"    Owner: {owner}")
+        repo = chosen.get("repo")
+        if repo:
+            print(f"    Repository: {repo}")
+        for value in object_list(chosen.get("containers") or []):
+            container = object_mapping(value)
+            print(
+                f"    {container.get('name', '?')}  {container.get('state', '?')}"
+                f"  {container.get('image', '?')}"
+            )
+    log = data.get("following_log")
+    if log is not None:
+        tail = object_mapping(log)
+        print(
+            f"  Log: {tail.get('pod', '?')}"
+            f"{' -c ' + str(tail['container']) if tail.get('container') else ''}"
+            f"{' (previous)' if tail.get('previous') else ''} · "
+            f"{tail.get('line_count', 0)} lines"
+            f"{' · following' if tail.get('following') else ' · scrolled'}"
+        )
+    for message in object_list(data.get("errors") or []):
+        print(f"  ! {message}")
 
 
 def print_selected_details(database: Path, selected_value: object) -> None:

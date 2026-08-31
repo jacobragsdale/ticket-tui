@@ -11,7 +11,7 @@ field changed in the TUI is written straight back over the REST API. Everything
 else it does is local.
 
 ```
- 1 Work items  2 Repos  3 Pull requests  4 Pipelines                       Actions  ?
+ 1 Work items  2 Repos  3 Pull requests  4 Pipelines  5 AKS  6 ACR  7 Key Vault     ?
 / Type / to search, or pick a filter from the bar below
  State ▾   Assignee ▾   Iteration ▾   Type ▾   Priority ▾   Tags ▾   +
 ╭ Tickets 116/116 · Changed ↑ ───────────────────────────────────────────────────────╮
@@ -58,7 +58,7 @@ offline, browsing whatever the database already holds.
 
 | Key | Does |
 |---|---|
-| `1`–`4` | Work items, Repos, Pull requests, Pipelines |
+| `1`–`7` | Work items, Repos, Pull requests, Pipelines, AKS, ACR, Key Vault |
 | `/` | Live fuzzy search — `state:active`, `assignee:@me`, `id:642` |
 | `p` / `:` | The command palette: every action the tab can take |
 | `e` | The Actions menu — edit title, state, assignee, tags, description |
@@ -66,6 +66,9 @@ offline, browsing whatever the database already holds.
 | `r` | Sync now, without waiting for the timer |
 | `o` | Open the selected row in the system browser |
 | `?` | The in-app help, generated from the same table the keys are bound in |
+| `L` / `D` | On AKS: tail the selected pod's log, or `kubectl describe` it |
+| `x` / `s` | On AKS: restart the pod after a confirm, or open a shell in it |
+| `g` | On AKS: jump to the repository the pod's image names |
 | `q` | Quit |
 
 The mouse works throughout: click a field to edit it, drag the divider, scroll
@@ -86,9 +89,20 @@ repaints a running ticket-tui when it changes. Without one the
 sixteen ANSI colours of the terminal show through; `--theme terminal-light`
 suits a white ground, and `NO_COLOR` turns colour off.
 
+The same file names the clusters the AKS tab reads, one table each — the name
+the tab shows, the kubeconfig context `kubectl` reaches it by, and the
+namespaces to read, or none for all of them:
+
+```toml
+[[clusters]]
+name = "qa"
+context = "aks-qa"
+namespaces = ["orders", "billing"]
+```
+
 `ticket-tui` is also a CLI — `list`, `show`, `edit`, `comment`, `create`,
-`repos`, `prs`, `pipelines`, `runs`, `approvals` — so a script or an agent can
-do anything the TUI can.
+`repos`, `prs`, `pipelines`, `runs`, `approvals`, `pods` — so a script or an
+agent can do anything the TUI can.
 
 ## More
 

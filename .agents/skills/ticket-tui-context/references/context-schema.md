@@ -36,8 +36,8 @@ version — `tickets.finished_hidden` was — so a reader should ignore fields i
 does not know rather than refuse them; only removing or reshaping a field
 already documented here bumps the version.
 
-Version 3 describes **all four tabs**, whether or not the user is looking at
-them: `active_tab` says where they are, and the four blocks say what each tab
+Version 3 describes **every tab**, whether or not the user is looking at them:
+`active_tab` says where they are, and the blocks under it say what each tab
 holds. Everything version 2 kept at the top level moved under `work_items`
 unchanged.
 
@@ -50,11 +50,15 @@ unchanged.
 | `me` | string or null | Signed-in display name recorded by sync, including the background refresh, overridden by `TICKET_TUI_ME`; null when neither is set |
 | `sync` | object | Where the rows are pulled from and how the last pull went |
 | `pending_edits` | pending edit array | Edits sent to Azure DevOps and not answered yet |
-| `active_tab` | string | `work_items`, `repos`, `pull_requests`, or `pipelines` |
+| `active_tab` | string | `work_items`, `repos`, `pull_requests`, `pipelines`, `aks`, `acr`, or `key_vault` |
 | `work_items` | object | The Work items tab |
 | `repos` | object | The Repos tab |
 | `pull_requests` | object | The Pull requests tab |
 | `pipelines` | object | The Pipelines tab |
+| `aks` | object | The AKS tab |
+| `acr` | object | The ACR tab, a placeholder until its ticket lands |
+| `key_vault` | object | The Key Vault tab, the same |
+| `arm` | object | What the ACR and Key Vault tabs can reach: `subscription`, `offline`, `last_error` |
 
 ### `work_items`
 
@@ -123,6 +127,47 @@ The whole tree would be longer than the rest of the document; read it with
 Runs, timelines and logs are live rather than stored, so this block is only as
 current as the watcher's last poll, and it is empty on a run that has never
 opened the tab.
+
+### `aks`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `clusters` | string array | The clusters `config.toml` names, in file order; left out when there are none |
+| `selected` | pod or null | The pod the cursor is on |
+| `visible_rows` | integer | How many rows the query leaves on the table |
+| `unhealthy` | integer | How many of those pods somebody has to look at |
+| `following_log` | object or null | The log the text pane is tailing |
+| `errors` | string array | One line per `(cluster, namespace)` that could not be read; left out when every read succeeded |
+
+A pod carries `cluster` (the name `config.toml` gives it, not the kubeconfig
+context), `namespace`, `name`, `status` (the STATUS word — `Running`,
+`CrashLoopBackOff`, `Init:1/2`), `ready` (`1/2`, containers ready over
+containers in the spec), `restarts`, `node`, `owner` (`Deployment/orders-api`,
+or null for a bare pod — a pod with no owner is not restartable), `created_at`
+(UTC RFC 3339), `containers`, and `repo` — the repository on file its image or
+app label names, null when nothing matches.
+
+A container carries `name`, `image`, `state` (`Running`, or the reason it is
+waiting or has stopped: `CrashLoopBackOff`, `Completed`, `ExitCode:137`) and
+`restarts`.
+
+`following_log` carries `pod`, `container` (null while the pane follows the
+first), `previous` (whether it is the run before the last restart), `line_count`
+and `following` (whether the pane is pinned to the tail rather than scrolled
+back).
+
+Pods are read live through `kubectl` and never stored, so this block is only as
+current as the last read — 15 seconds at most while the tab is showing, and
+however long ago it was left when it is not. `errors` is the one place a cluster
+that cannot be reached shows up: its pods are simply missing from
+`visible_rows`, not zeroed. `ticket-tui pods` is the same read without the TUI.
+
+### `acr` and `key_vault`
+
+Both carry `level` and `visible_rows` while those tabs are placeholders; their
+own tickets fill them in. `arm` at the top level says whether they have a
+subscription to read at all: `subscription`, `offline`, and `last_error`, the
+one line that says why an offline run reads nothing.
 
 ## Sync fields
 

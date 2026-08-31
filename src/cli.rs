@@ -3,11 +3,14 @@
 //!
 //! A bare invocation still opens the TUI, which is what `ticket-tui` has
 //! always been. Every subcommand does one thing and exits. The reads answer
-//! from SQLite and never touch the network; the writes go out over the same
+//! from SQLite and never touch the network — except `pods`, which has no
+//! database to answer from and reads the clusters through `kubectl` every
+//! time; the writes go out over the same
 //! trait-backed source the TUI's sync worker uses and store the copy Azure
 //! DevOps answers with, so a running TUI picks the change up from the database
 //! it is already watching.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,12 +20,14 @@ use clap::{Args, Parser, Subcommand, ValueHint};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::aks::{KubeSource, Kubectl, PodRow, PodSchema};
 use crate::app::pipelines::RunSchema;
 use crate::app::pipelines::rows::{RunRow, duration_label, run_glyph, short_branch};
 use crate::app::pull_requests::{PrRow, PrSchema};
 use crate::app::repos::{RepoRow, RepoSchema};
 use crate::azure::{self, AzureClient, AzureConfig};
 use crate::classification::{self, NodeKind};
+use crate::config::{self, Config};
 use crate::db::{self, SqliteTicketRepository, default_database_path};
 use crate::edit::{FieldEdit, normalize_tags, revision_test};
 use crate::filter::{FilterField, MatchContext, ParsedQuery, WorkItemSchema, parse_query};
@@ -35,6 +40,7 @@ use crate::model::{
 use crate::search;
 use crate::sync::{self, AzureConnector, PrAction, SyncMode, SyncOutcome, WorkItemSource};
 use crate::timestamp::Timestamp;
+use crate::ui::pipelines::relative_age;
 use crate::watch::{LIVE_RUNS_CADENCE, LOG_CADENCE, PipelineSource};
 
 #[derive(Debug, Parser)]
@@ -135,6 +141,30 @@ pub enum Command {
     /// Read and answer the approvals a run is waiting on
     #[command(subcommand)]
     Approvals(ApprovalsCommand),
+    /// Print the pods of every cluster config.toml names, read live through
+    /// kubectl
+    Pods(PodsCommand),
+}
+
+/// The AKS tab, without the tab. There is no database behind this one: the
+/// clusters in `config.toml` are read through `kubectl` on every invocation,
+/// which is also why no repository is matched to a pod here — that lookup
+/// wants the project's repositories, and this command does not open the
+/// database.
+#[derive(Args, Clone, Debug)]
+pub struct PodsCommand {
+    /// Only this cluster, by the name config.toml gives it
+    #[arg(long, value_name = "NAME")]
+    pub cluster: Option<String>,
+    /// Only this namespace, whatever config.toml lists for the cluster
+    #[arg(long, value_name = "NAME")]
+    pub namespace: Option<String>,
+    /// The AKS tab's grammar — cluster:, ns:, status:, owner:, node:, app:,
+    /// repo: — anything else matches the name
+    pub query: Option<String>,
+    /// Print the pods as a JSON array rather than as a table
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// The Pipelines tab, without the tab. `list` answers from the database; every
@@ -366,6 +396,7 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Pipelines { json } => run_pipelines(&database, *json),
         Command::Runs(command) => run_runs(cli, &database, command),
         Command::Approvals(command) => run_approvals(cli, command),
+        Command::Pods(command) => run_pods(command),
     }
 }
 
@@ -2101,6 +2132,187 @@ fn run_approvals(cli: &Cli, command: &ApprovalsCommand) -> Result<()> {
     }
 }
 
+/// Every pod of every cluster `config.toml` names. A file that will not parse
+/// is the error; a cluster that will not answer is one line on stderr and a
+/// non-zero exit after the pods that did answer have been printed, because a
+/// partial answer is still worth having.
+fn run_pods(command: &PodsCommand) -> Result<()> {
+    let config = config::load(&config::default_path())?;
+    run_pods_with(&config, command, &Kubectl)
+}
+
+fn run_pods_with(config: &Config, command: &PodsCommand, source: &dyn KubeSource) -> Result<()> {
+    if config.clusters.is_empty() {
+        bail!("no clusters in config.toml; add a [[clusters]] table");
+    }
+    let clusters = match &command.cluster {
+        Some(name) => vec![
+            config
+                .clusters
+                .iter()
+                .find(|cluster| same_text(&cluster.name, name))
+                .with_context(|| format!("no cluster called {name} in config.toml"))?,
+        ],
+        None => config.clusters.iter().collect(),
+    };
+    let mut rows = Vec::new();
+    let mut unreadable = 0usize;
+    for cluster in clusters {
+        let targets = command
+            .namespace
+            .as_deref()
+            .map_or_else(|| cluster.targets(), |namespace| vec![Some(namespace)]);
+        let mut failed = false;
+        for namespace in targets {
+            match source.pods(cluster, namespace) {
+                // No repositories: this command does not open the database,
+                // so no pod can be matched to one.
+                Ok(pods) => rows.extend(pods.into_iter().map(|pod| PodRow::new(pod, &[]))),
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    eprintln!("{}: {message}", cluster.name);
+                    failed = true;
+                    // A server that refused one namespace will answer for the
+                    // next; one that could not be reached will not, and is not
+                    // asked again — the worker's own rule.
+                    if !message.starts_with("Error from server") {
+                        break;
+                    }
+                }
+            }
+        }
+        if failed {
+            unreadable += 1;
+        }
+    }
+    let rows = filter_pods(rows, command.query.as_deref());
+    let now = Timestamp::now();
+    emit(&if command.json {
+        to_json(
+            &rows
+                .iter()
+                .map(|row| PodJson::new(row, now))
+                .collect::<Vec<_>>(),
+        )?
+    } else {
+        tabulate_pods(&rows, now)
+    });
+    if unreadable > 0 {
+        bail!("{unreadable} cluster(s) could not be read");
+    }
+    Ok(())
+}
+
+/// The rows one query names, in the order the clusters were read.
+fn filter_pods(rows: Vec<PodRow>, query: Option<&str>) -> Vec<PodRow> {
+    let Some(query) = query else {
+        return rows;
+    };
+    let parsed = parse_query::<PodSchema>(query);
+    let context = MatchContext::now();
+    rows.into_iter()
+        .filter(|row| {
+            parsed.filters.matches_in(row, false, &context) && row.matches_fuzzy(&parsed.fuzzy)
+        })
+        .collect()
+}
+
+/// `cluster · namespace · name · ready · status · restarts · age`, the table
+/// the tab draws, in the order `kubectl get pods` would print it.
+fn tabulate_pods(rows: &[PodRow], now: Timestamp) -> String {
+    if rows.is_empty() {
+        return "no matching pods".to_owned();
+    }
+    columns(
+        &rows
+            .iter()
+            .map(|row| {
+                vec![
+                    row.pod.key.cluster.clone(),
+                    row.pod.key.namespace.clone(),
+                    row.pod.key.name.clone(),
+                    row.pod.ready_label(),
+                    row.pod.status.clone(),
+                    row.pod.restarts.to_string(),
+                    pod_age(row, now).unwrap_or_else(|| "\u{2014}".to_owned()),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// How long the pod has been up, in the tab's own words. A pod whose creation
+/// stamp `kubectl` did not report has no age rather than an age of zero.
+fn pod_age(row: &PodRow, now: Timestamp) -> Option<String> {
+    row.pod.created.map(|created| relative_age(created, now))
+}
+
+/// One pod as `--json` prints it: everything the details pane shows, so an
+/// agent reading this need not open the TUI.
+#[derive(Serialize)]
+struct PodJson<'a> {
+    cluster: &'a str,
+    namespace: &'a str,
+    name: &'a str,
+    status: &'a str,
+    ready: String,
+    restarts: u32,
+    created: Option<String>,
+    age: Option<String>,
+    node: &'a str,
+    ip: &'a str,
+    owner: Option<String>,
+    containers: Vec<ContainerJson<'a>>,
+    labels: BTreeMap<&'a str, &'a str>,
+}
+
+#[derive(Serialize)]
+struct ContainerJson<'a> {
+    name: &'a str,
+    image: &'a str,
+    ready: bool,
+    restarts: u32,
+    state: &'a str,
+}
+
+impl<'a> PodJson<'a> {
+    fn new(row: &'a PodRow, now: Timestamp) -> Self {
+        let pod = &row.pod;
+        Self {
+            cluster: &pod.key.cluster,
+            namespace: &pod.key.namespace,
+            name: &pod.key.name,
+            status: &pod.status,
+            ready: pod.ready_label(),
+            restarts: pod.restarts,
+            created: pod.created.map(Timestamp::to_rfc3339),
+            age: pod_age(row, now),
+            node: &pod.node,
+            ip: &pod.ip,
+            owner: pod
+                .owner
+                .as_ref()
+                .map(|(kind, name)| format!("{kind}/{name}")),
+            containers: pod
+                .containers
+                .iter()
+                .map(|container| ContainerJson {
+                    name: &container.name,
+                    image: &container.image,
+                    ready: container.ready,
+                    restarts: container.restarts,
+                    state: &container.state,
+                })
+                .collect(),
+            labels: pod
+                .labels
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct PipelineJson<'a> {
     id: i64,
@@ -2289,6 +2501,7 @@ fn emit(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aks::tests as aks_tests;
     use crate::azure::{SyncBatch, create_document};
     use crate::edit;
     use crate::model::{StateOption, StoredWorkItem};
@@ -3907,5 +4120,153 @@ mod tests {
         assert_eq!(json["pipeline"], "ticket-tui CI");
         assert_eq!(json["result"], "succeeded");
         assert_eq!(json["branch"], "main");
+    }
+    fn pods_command(arguments: &[&str]) -> PodsCommand {
+        let Some(Command::Pods(command)) = Cli::parse_from(arguments).command else {
+            panic!("pods did not parse");
+        };
+        command
+    }
+
+    fn pod_rows() -> Vec<PodRow> {
+        [
+            aks_tests::pod("qa", "orders", "orders-api-1", "Running"),
+            aks_tests::pod("qa", "orders", "orders-api-2", "CrashLoopBackOff"),
+            aks_tests::pod("prod", "billing", "billing-worker-1", "Running"),
+        ]
+        .into_iter()
+        .map(|pod| PodRow::new(pod, &[]))
+        .collect()
+    }
+
+    #[test]
+    fn pods_parses_its_cluster_namespace_query_and_json() {
+        let command = pods_command(&[
+            "ticket-tui",
+            "pods",
+            "--cluster",
+            "qa",
+            "--namespace",
+            "orders",
+            "status:running",
+            "--json",
+        ]);
+        assert_eq!(command.cluster.as_deref(), Some("qa"));
+        assert_eq!(command.namespace.as_deref(), Some("orders"));
+        assert_eq!(command.query.as_deref(), Some("status:running"));
+        assert!(command.json);
+
+        let bare = pods_command(&["ticket-tui", "pods"]);
+        assert!(bare.cluster.is_none() && bare.namespace.is_none() && bare.query.is_none());
+        assert!(!bare.json);
+    }
+
+    #[test]
+    fn a_pod_query_narrows_by_cluster_status_and_app_and_the_rest_matches_the_name() {
+        let names = |rows: Vec<PodRow>| {
+            rows.into_iter()
+                .map(|row| row.pod.key.name)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(filter_pods(pod_rows(), None)).len(), 3);
+        assert_eq!(
+            names(filter_pods(pod_rows(), Some("cluster:qa"))),
+            ["orders-api-1", "orders-api-2"]
+        );
+        assert_eq!(
+            names(filter_pods(pod_rows(), Some("status:crashloopbackoff"))),
+            ["orders-api-2"]
+        );
+        // Two fields are ANDed: the label every fixture pod carries, and the
+        // cluster only one of them is in.
+        assert_eq!(
+            names(filter_pods(pod_rows(), Some("app:orders-api cluster:prod"))),
+            ["billing-worker-1"]
+        );
+        assert!(filter_pods(pod_rows(), Some("app:nothing")).is_empty());
+        assert_eq!(
+            names(filter_pods(pod_rows(), Some("billing-worker"))),
+            ["billing-worker-1"]
+        );
+        assert!(filter_pods(pod_rows(), Some("ns:nowhere")).is_empty());
+    }
+
+    #[test]
+    fn run_pods_prints_a_table_and_json_from_a_fake_and_exits_non_zero_when_a_cluster_fails() {
+        let config = Config {
+            clusters: vec![
+                aks_tests::cluster("qa", &["orders"]),
+                aks_tests::cluster("prod", &["billing"]),
+            ],
+            ..Config::default()
+        };
+        let fake = aks_tests::FakeKube::default();
+        fake.answer(
+            "qa",
+            Some("orders"),
+            Ok(vec![aks_tests::pod(
+                "qa",
+                "orders",
+                "orders-api-1",
+                "Running",
+            )]),
+        );
+        fake.answer(
+            "prod",
+            Some("billing"),
+            Err("Unable to connect to the server"),
+        );
+
+        let command = pods_command(&["ticket-tui", "pods"]);
+        let error = run_pods_with(&config, &command, &fake).unwrap_err();
+        assert_eq!(error.to_string(), "1 cluster(s) could not be read");
+        assert_eq!(
+            *fake.reads.lock().unwrap(),
+            [
+                ("qa".to_owned(), Some("orders".to_owned())),
+                ("prod".to_owned(), Some("billing".to_owned())),
+            ]
+        );
+
+        // --cluster reads only that cluster, and every cluster answering is a
+        // clean exit.
+        let only_qa = pods_command(&["ticket-tui", "pods", "--cluster", "qa"]);
+        fake.reads.lock().unwrap().clear();
+        run_pods_with(&config, &only_qa, &fake).unwrap();
+        assert_eq!(fake.reads.lock().unwrap().len(), 1);
+
+        let bad = pods_command(&["ticket-tui", "pods", "--cluster", "staging"]);
+        assert_eq!(
+            run_pods_with(&config, &bad, &fake).unwrap_err().to_string(),
+            "no cluster called staging in config.toml"
+        );
+        assert_eq!(
+            run_pods_with(&Config::default(), &command, &fake)
+                .unwrap_err()
+                .to_string(),
+            "no clusters in config.toml; add a [[clusters]] table"
+        );
+
+        let now = ts("2026-08-30T10:30:00Z");
+        let rows = pod_rows();
+        let table = tabulate_pods(&rows, now);
+        assert!(
+            table.starts_with("qa    orders   orders-api-1      1/1  Running"),
+            "{table}"
+        );
+        assert!(table.ends_with("30m"), "{table}");
+        assert_eq!(tabulate_pods(&[], now), "no matching pods");
+
+        let json = serde_json::to_value(PodJson::new(&rows[0], now)).unwrap();
+        assert_eq!(json["cluster"], "qa");
+        assert_eq!(json["owner"], "Deployment/orders-api");
+        assert_eq!(json["ready"], "1/1");
+        assert_eq!(json["age"], "30m");
+        assert_eq!(json["created"], "2026-08-30T10:00:00Z");
+        assert_eq!(json["labels"]["app"], "orders-api");
+        assert_eq!(
+            json["containers"][0]["image"],
+            "myacr.azurecr.io/team/orders-api:1.2.3"
+        );
     }
 }

@@ -1004,17 +1004,19 @@ scheduled and no row selected — it says so rather than painting an empty grid.
 
 ## Tabs
 
-A one-row bar across the top names the four screens the app is growing into:
+A one-row bar across the top names the seven screens:
 
-    1 Work items   2 Repos   3 Pull requests   4 Pipelines
+    1 Work items   2 Repos   3 Pull requests   4 Pipelines   5 AKS   6 ACR   7 Key Vault
 
-`1`–`4` switch between them from anywhere a digit is not being typed — an
-overlay comes down on the way out — and clicking a tab does the same. Each
+`1`–`7` switch between them from anywhere a digit is not being typed — an
+overlay comes down on the way out — and clicking a tab does the same. The names
+shorten, and then go altogether leaving the digits, as the terminal narrows, so
+every tab stays on the bar and stays clickable at any width. Each
 screen keeps its own query, cursor and scroll while another is showing, and a
-tab wears a badge after its name when it has something waiting. Repos, Pull
-requests and Pipelines say which ticket fills them in until it lands.
+tab wears a badge after its name when it has something waiting. ACR and Key
+Vault say which ticket fills them in until it lands.
 
-All four are drawn by one pane system: the same two panes, the same three
+All seven are drawn by one pane system: the same two panes, the same three
 arrangements as the terminal narrows, and the same draggable seam between them,
 described under [Controls](#controls). The split, which
 pane is showing below 70 columns, and the focus are the shell's rather than any
@@ -1228,6 +1230,84 @@ leaves it and the title says `scrolled`, and `End` follows again. The pane is a
 selectable surface, so dragging across it copies lines. Twenty thousand lines
 are kept per log, with a line at the top saying how many earlier ones went.
 
+## AKS
+
+Tab `5` lists the pods of every cluster `config.toml` names: `Pod · Cluster ·
+Namespace · Ready · Status · Restarts · Age`, with Node and Repository off the
+table by default and one press of `c` away. A `[[clusters]]` table is a name —
+what the tab calls it — the kubeconfig context `kubectl` reaches it by, and the
+namespaces to read; a cluster that lists none is read `--all-namespaces` in one
+call. The file is re-read whenever it changes, so a cluster added while the TUI
+is running is read at once, and one taken out takes its pods with it.
+
+    [[clusters]]
+    name = "qa"
+    context = "aks-qa"
+    namespaces = ["orders", "billing"]
+
+Nothing here touches SQLite. A pod is read live, the way local git state and
+live runs are: what a cluster holds is not the project's business, and a read is
+cheap. `src/aks.rs` is a third worker on a thread of its own — `PodWatcher`,
+with its own `kubectl` processes and its own channel — so a slow cluster queues
+behind neither a pull nor an edit. While the tab is showing, each cluster is
+read every 15 seconds on a `Cadence` of its own, the same one the pipeline
+watcher stretches to a minute when a cluster will not answer and puts back on
+the next clean read; while the tab is hidden nothing is read at all. One
+`kubectl logs -f` child runs at a time — whichever pod the details pane is on —
+and it is killed when the pane leaves it and when the run ends, so a quit leaves
+no `kubectl` behind. Every one-shot call carries `--request-timeout=10s`; the
+follow is the one call without a bound, because a stream is meant to last.
+
+Each `(cluster, namespace)` is a read of its own, and the pods it answers with
+replace the ones held for that pair and nothing else — so a cluster that cannot
+be reached blanks no other, and the cursor stays on the pod it was on. A read
+that fails leaves one line under the table's status and in the details pane —
+`qa/orders: Unable to connect to the server` — replaced by the next read of the
+same pair and dropped by one that succeeds. A namespace the server refused,
+`Error from server (Forbidden)`, does not stop the cluster's other namespaces;
+anything else does, since a server that could not be reached will not answer the
+next call either. The tab wears a `✗N` badge counting the pods somebody has to
+look at.
+
+Its grammar: `cluster:`, `ns:`, `status:`, `owner:`, `node:`, `app:` — the `app`
+and `app.kubernetes.io/name` labels — and `repo:`; anything left over matches
+the name, the namespace, the owner or the repository. Column headers sort, and a
+list re-read every fifteen seconds orders rows a column cannot tell apart by
+where they live, so nothing shuffles under the cursor.
+
+The details pane heads the pod with its glyph and status, then the cluster and
+namespace, Owner, Node, IP, Created, Ready and Restarts, the buttons
+`[Logs] [Describe] [Shell] [Restart]`, the repository the image or app label
+names when one is on file, and the containers — name, image, whether each is
+ready, its restarts and its state, with a `›` on the one the log is following.
+
+Under that is a text pane showing one of two things. `L` is the pod's log,
+tailed with `kubectl logs -f --timestamps --tail=500`, its title reading `Log ·
+orders-api-7d9f5b-abc12 · api · 1,204 lines · following`. Follow mode keeps the
+tail in view; scrolling up leaves it and the title says `scrolled`, `End`
+follows again, and a stream that stopped — the pod went, or `kubectl` refused —
+says `ended` rather than spinning forever. `P` turns on `-p`, the run before the
+last restart, which is where a crash loop says why; `C` moves to the pod's next
+container and round to the first again. `D` puts what `kubectl describe pod`
+said in the log's place, and `L` brings the log back. `l` gives the text pane
+the whole details pane and gives it back. Twenty thousand lines are kept, as
+everywhere else.
+
+The verbs: `x` deletes the pod and lets its controller put it back, asking once
+more first — the confirmation names the owner, a second `x` sends it, `Esc` does
+not — and it is refused outright on a pod with no controller, which deleting
+would take away for good rather than restart. `s` runs `kubectl exec -it … --
+sh` in this terminal, suspending the TUI and repainting it on the way out. `g`
+goes to the Repos tab, on the repository the pod's image or app label names —
+`repo_candidates` reads `myacr.azurecr.io/team/orders-api:1.2.3` as
+`orders-api` — and `[` comes back the way it does anywhere else; a pod nothing
+on file matches says what it offered. `y` copies `namespace/pod`. `r` re-reads
+the clusters rather than pulling from Azure DevOps: nothing on this tab comes
+from there. `o` has no page to open and says so.
+
+Tabs `6` ACR and `7` Key Vault are placeholders naming the ticket that fills
+each one in.
+
 ## Controls
 
 Everything above the tabs line is global; the work-item keys under it only do
@@ -1235,7 +1315,7 @@ anything on tab `1`.
 
 | Input | Action |
 |---|---|
-| `1`–`4` | Switch to Work items, Repos, Pull requests, or Pipelines |
+| `1`–`7` | Switch to Work items, Repos, Pull requests, Pipelines, AKS, ACR, or Key Vault |
 | `↑`/`↓`, `j`/`k` | Move the ticket selection, family row, or focused details pane |
 | `Page Up`/`Page Down` | Move ten tickets or one family page |
 | `Home`/`End` | Select the first/last ticket, family row, or details line |
@@ -1276,6 +1356,13 @@ anything on tab `1`.
 | `Enter` | Select the family cursor ticket; with details focused, edit the field under the pointer, or open the work item |
 | `o` | Open the selected ticket in the system browser |
 | `r` | Sync from Azure DevOps now, without waiting for the timer |
+| `L` / `D` (AKS) | Tail the selected pod's log, or put `kubectl describe` in its place |
+| `P` / `C` (AKS) | Follow the run before the last restart, or the pod's next container |
+| `l` / `End` (AKS) | Give the text pane the whole details pane; follow the tail again |
+| `x` (AKS) | Delete the pod so its controller puts it back; a second `x` confirms |
+| `s` (AKS) | `kubectl exec -it … -- sh` in this terminal |
+| `g` (AKS) | Go to the repository the pod's image or app label names |
+| `y` (AKS) | Copy `namespace/pod` |
 | `i` | Show database path, row counts, hidden finished rows, and sync freshness |
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
@@ -1712,6 +1799,7 @@ ticket-tui runs wait <id>
 ticket-tui approvals list [--json]
 ticket-tui approvals approve <id> [--comment TEXT]
 ticket-tui approvals reject <id> [--comment TEXT]
+ticket-tui pods [--cluster NAME] [--namespace NAME] ['<filter>'] [--json]
 ```
 
 `sync` pulls and exits, printing what moved — `Synced 3 changes from
@@ -1832,6 +1920,19 @@ run 51 succeeded · 20260829.4
 `--parent` links it under an existing one. A refusal prints what Azure DevOps
 said and exits 1.
 
+`pods` is the one read with no database to answer from: it reads the clusters
+`config.toml` names through `kubectl`, every time. It prints `cluster namespace
+pod ready status restarts age`, or `no matching pods`; `--json` adds the node,
+the IP, the owner as `Deployment/orders-api`, every container with its image
+and state, and the labels. The positional argument is the AKS tab's own
+[grammar](#aks), and `--cluster` and `--namespace` narrow what is read rather
+than what is printed. No repository is matched to a pod here — that lookup wants
+the project's repositories, and this command does not open the database. A
+cluster that could not be read is one line on stderr and a non-zero exit after
+the pods that did answer have been printed, because a partial answer is still
+worth having; a `config.toml` with no `[[clusters]]` is an error saying to add
+one.
+
 ## Live agent context
 
 While ticket-tui is running, it atomically publishes a compact JSON snapshot
@@ -1843,10 +1944,10 @@ without scraping terminal cells or causing SQLite reloads; the
 Schema 3 describes the whole workspace rather than one tab. At the top level:
 the cache path, the signed-in display name that marks your own work items, the
 process ID and last-change timestamp, a `sync` block, the `pending_edits` not
-yet answered, and `active_tab` — `work_items`, `repos`, `pull_requests` or
-`pipelines`. Under those, one block per tab, **all four filled whether or not
-the tab is showing**, so an agent asked about a pull request need not ask the
-user to press `3`:
+yet answered, and `active_tab` — `work_items`, `repos`, `pull_requests`,
+`pipelines`, `aks`, `acr` or `key_vault`. Under those, one block per tab, **all
+of them filled whether or not the tab is showing**, so an agent asked about a
+pull request need not ask the user to press `3`:
 
 - `work_items` — everything schema 2 kept at the top level, unchanged and one
   level down: selected and checked tickets, the rows in the viewport with the
@@ -1866,6 +1967,14 @@ user to press `3`:
   run — the run with its stages, each stage's state and result — the log being
   tailed (`run_id`, `log_id`, `node`, `line_count`, `following`), how many runs
   are going, which are watched, and how many approvals are pending.
+- `aks` — the `clusters` `config.toml` names, the pod under the cursor with its
+  containers, how many rows the table is showing and how many of them are
+  unhealthy, the log being tailed (`pod`, `container`, `previous`,
+  `line_count`, `following`), and one `errors` line per `(cluster, namespace)`
+  that could not be read. Pods are read live rather than stored, so the block is
+  only as current as the last read.
+- `acr` and `key_vault` — a `level` and a `visible_rows` count while those tabs
+  are placeholders; their own tickets fill them in.
 
 Schema 2 consumers read the work-item fields at the top level and will find them
 under `work_items` instead.

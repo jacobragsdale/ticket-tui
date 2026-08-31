@@ -1,6 +1,6 @@
 # Where to pick up
 
-Last updated 2026-08-29. The backlog itself lives in Azure DevOps
+Last updated 2026-08-30. The backlog itself lives in Azure DevOps
 (`jacobragsdale/development`); this file is only the pointer into it. Run
 `ticket-tui` and browse the epics for the current state.
 
@@ -19,9 +19,19 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
   chip buttons, the details pane's badge row and rules, and one spinner for
   every wait are all on `main`.
 - **Every tab is drawn by one pane system** (2026-08-29; see "One pane system"
-  below): the same two panes, three layouts and draggable seam on all four.
+  below): the same two panes, three layouts and draggable seam on all seven.
+- **The AKS tab is done** (Epic #718: #719 the worker and the config, #720 the
+  table, #721 the log pane, #722 the verbs, #723 the CLI and these docs). Tab
+  `5` reads the clusters `config.toml` names through `kubectl` on a worker of
+  its own, and `ticket-tui pods` is the same read without the TUI. There is no
+  cluster reachable from this machine yet, so every one of those tickets was
+  built and tested against `aks::tests::FakeKube` — see "AKS tab — integration
+  checklist" below for the day one is.
+- **ACR (#724) and Key Vault (#725) are in progress** on their own branches.
+  Tabs `6` and `7` are on the bar and are placeholders naming their tickets;
+  `src/arm.rs` is the shared ARM client behind both.
 - The gate is `cargo fmt --check`, `cargo clippy --all-targets --all-features
-  -D warnings`, `cargo test --all-targets` (548 lib + 28 bin tests) and
+  -D warnings`, `cargo test --all-targets` (622 lib + 29 bin tests) and
   `cargo build --release`, with the test run repeated under `NO_COLOR=1`,
   `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` — the theme
   matrix, which is real because `Theme::from_env` reads the variable.
@@ -33,7 +43,8 @@ Last updated 2026-08-29. The backlog itself lives in Azure DevOps
 ## The module tree (#661, #662, #698)
 
 `src/app.rs`, `src/ui.rs` and `src/run.rs` are directory modules; every file is
-under 1,500 lines. `App` is `{ shell, tab, work_items, repos, pull_requests, pipelines }`:
+under 1,500 lines. `App` is `{ shell, tab, work_items, repos, pull_requests, pipelines, aks, acr,
+key_vault }`:
 `Shell` is the state every screen shares and each tab is a `Screen`. A screen
 method that needs the shell takes `shell: &mut Shell` (or `&Shell`) as its
 first argument after the receiver; nothing else reaches across.
@@ -57,10 +68,20 @@ first argument after the receiver; nothing else reaches across.
         repos/          the Repos tab: the table, the workspace, the git keys
         pull_requests/  the Pull requests tab: votes, complete, comment
         pipelines/      the Pipelines tab: two levels, the timeline, the log
+        aks/            the AKS tab: the pod table, the details and text panes,
+                        and the verbs — mod.rs, columns.rs, tests.rs
+        acr/            the ACR tab (#724, in progress)
+        key_vault/      the Key Vault tab (#725, in progress)
     src/watch.rs        the pipeline watcher thread: live runs, timelines, logs,
                         approvals — cadences that stretch, and no SQLite at all
     src/local.rs        the local-repos thread: the workspace scan and the three
                         git commands the Repos tab runs — also no SQLite
+    src/aks.rs          the AKS worker thread: Pod, PodRow, PodSchema, the
+                        KubeSource trait and the Kubectl behind it, PodWatcher
+                        with a 15 s Cadence per cluster, and the one
+                        `kubectl logs -f` child — no SQLite either
+    src/arm.rs          the Azure Resource Manager client the ACR and Key Vault
+                        tabs read through
     src/main.rs         opens the module below and reports what it returns
     src/run/mod.rs      run: the database, the workers, the terminal, and back
         engines.rs      the sync, details, local and reload workers, and the
@@ -71,7 +92,8 @@ first argument after the receiver; nothing else reaches across.
         editor.rs       the description round trip through $VISUAL/$EDITOR/vi
         desktop.rs      the clipboard and the browser
         pointer.rs      the mouse pointer shape, and what the hover means
-        tests/          the same split, over one fake Azure DevOps
+        tests/          the same split, over one fake Azure DevOps — and
+                        tests/aks.rs, over one fake kubectl
     src/ui/mod.rs       render, render_screen, the layout, the theme, anchoring
         panes.rs        the pane system every tab is arranged by: the three
                         layouts, the draggable seam, the narrow switcher
@@ -83,6 +105,10 @@ first argument after the receiver; nothing else reaches across.
         repos.rs        the Repos tab's own renderer
         pull_requests.rs  the Pull requests tab's own renderer
         pipelines.rs    the Pipelines tab's own renderer
+        aks.rs          the AKS tab's own renderer: the table, the pod details
+                        and the log pane under them
+        acr.rs          the ACR tab's placeholder
+        key_vault.rs    the Key Vault tab's placeholder
         tests/          the same split
 
 Every ui function takes `screen` and `shell` rather than `app`, and
@@ -226,6 +252,57 @@ implemented what the real client did not**.
 - `parse_timeline` sorted by an `order` field that only ranks siblings, and a
   job's log lives on the Phase record that gets flattened away — so the tree
   read out of order and no job had a log (#693).
+
+## AKS tab — integration checklist
+
+Nothing in Epic #718 was ever run against a real cluster: there is none
+reachable from this machine, so the worker, the tab and `ticket-tui pods` were
+all built against `aks::tests::FakeKube`. That is not the same as working. The
+day a cluster is reachable, walk this list in order — it is the shortest path
+from nothing to a tab that is definitely honest.
+
+**1. Get `kubectl` working outside ticket-tui first.** The TUI shells out to it
+and shows what it says; a login problem here reads as a broken tab.
+
+```console
+brew install Azure/kubelogin/kubelogin
+az aks get-credentials -g <rg> -n <cluster> --subscription <sub>   # per cluster
+kubelogin convert-kubeconfig -l azurecli
+kubectl --context <ctx> get pods -n <ns>                           # in a plain shell
+```
+
+**2. Then the CLI, before the TUI.** Add a `[[clusters]]` table per cluster to
+`~/.config/ticket-tui/config.toml` — `name`, `context`, and `namespaces` (leave
+it out for `--all-namespaces`) — and run:
+
+```console
+ticket-tui pods
+ticket-tui pods --json
+```
+
+They take the same read path the tab does, with none of the drawing, so a
+failure here is the read and not the screen.
+
+**3. Then the tab.** `5`, and work down:
+
+- Both clusters' rows appear as each read lands, not only when the slowest one
+  does.
+- `/` `cluster:prod status:running` narrows; a header click sorts; `c` puts Node
+  and Repo on the table.
+- Select a pod: the log tails within a second. Scroll up — the title says
+  `scrolled`; `End` — `following`.
+- `P` on a CrashLoopBackOff pod shows the run before the last restart. `C` on a
+  multi-container pod moves between them. `D` then `L` swaps describe and log.
+- `s` opens a shell in the pod, and the TUI repaints when it exits.
+- `x` on a qa pod: the confirmation names the owner, a second `x` sends it, the
+  row goes `Terminating`, and the replacement appears within about a second.
+- `g` jumps to the repository — only for a pod whose image or app label names
+  one the project has.
+- Edit `config.toml` while it runs: the new cluster is read at once.
+- Set one cluster's context to a name that does not exist: its message shows in
+  the table status and in the details pane, and the other cluster is unaffected.
+- Leave the tab and come back: the stream survives. Quit with `q` and check
+  `pgrep kubectl` leaves nothing behind.
 
 ## Known data issue, not a code bug
 
