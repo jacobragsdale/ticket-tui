@@ -72,7 +72,7 @@ fn aks_runtime(source: FakeKube) -> SyncRuntime {
             worker: Some(AksHandle::spawn(Box::new(source)).unwrap()),
             ..AksRuntime::default()
         },
-        arm_config: None,
+        arm_config: ArmConfig::default(),
         arm: ArmRuntime::default(),
     }
 }

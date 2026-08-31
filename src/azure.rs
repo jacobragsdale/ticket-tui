@@ -82,7 +82,14 @@ const PROJECT_IDS_WIQL: &str =
 pub struct AzureConfig {
     /// Organization slug, e.g. `jacobragsdale` for `https://dev.azure.com/jacobragsdale`.
     pub organization: String,
+    /// The project the work items live in: every `wit` and `wiql` call, the
+    /// teams, and the URL a work item opens at.
     pub project: String,
+    /// The project the repositories, pull requests and pipelines live in,
+    /// which in a shop that keeps its board and its code apart is not the one
+    /// above. Every `git`, `build`, `pipelines`, `approvals` and
+    /// `pullrequests` call goes here; left unsaid, it is [`Self::project`].
+    pub code_project: String,
     /// An extra WIQL condition ANDed into both pulls, narrowing a project too
     /// large to hold whole — `[System.ChangedDate] > @today-180`, say. `None`
     /// pulls the project entire.
@@ -90,12 +97,15 @@ pub struct AzureConfig {
 }
 
 impl AzureConfig {
-    /// Resolve organization, project, and sync scope from explicit values, then
-    /// the `TICKET_TUI_ORG` / `TICKET_TUI_PROJECT` / `TICKET_TUI_QUERY`
-    /// environment, then the `az devops configure` defaults file.
+    /// Resolve organization, both projects, and sync scope from explicit
+    /// values, then the `TICKET_TUI_ORG` / `TICKET_TUI_PROJECT` /
+    /// `TICKET_TUI_CODE_PROJECT` / `TICKET_TUI_QUERY` environment, then the
+    /// `az devops configure` defaults file. A code project nobody named is the
+    /// project itself, which is what one project in one place has always meant.
     pub fn resolve(
         organization: Option<String>,
         project: Option<String>,
+        code_project: Option<String>,
         scope: Option<String>,
     ) -> Result<Self> {
         let defaults = az_devops_defaults();
@@ -111,9 +121,14 @@ impl AzureConfig {
             .context(
                 "no Azure DevOps project; pass --project, set TICKET_TUI_PROJECT, or run `az devops configure --defaults project=...`",
             )?;
+        let code_project = settled_code_project(
+            code_project.or_else(|| std::env::var("TICKET_TUI_CODE_PROJECT").ok()),
+            &project,
+        );
         Ok(Self {
             organization: organization_slug(&organization),
             project,
+            code_project,
             scope: sync_scope(scope.or_else(|| std::env::var("TICKET_TUI_QUERY").ok())),
         })
     }
@@ -127,6 +142,16 @@ impl AzureConfig {
     pub fn work_item_url(&self, id: i64) -> String {
         format!("{}/{}/_workitems/edit/{id}", self.base_url(), self.project)
     }
+}
+
+/// Where the repositories, pull requests and pipelines live: whatever was
+/// named, trimmed, and the project itself when nothing was — which is what one
+/// project in one place has always meant.
+fn settled_code_project(named: Option<String>, project: &str) -> String {
+    named
+        .map(|named| named.trim().to_owned())
+        .filter(|named| !named.is_empty())
+        .unwrap_or_else(|| project.to_owned())
 }
 
 /// A sync scope is whatever the user wrote, trimmed; a blank one is no scope at
@@ -544,6 +569,15 @@ impl AzureClient {
         Ok(url)
     }
 
+    /// A URL under the project the code lives in, which is the project itself
+    /// unless the file named another. Everything Git, build, pipeline and
+    /// pull request is addressed through here; the work items are not.
+    fn code_url(&self, tail: &[&str]) -> Result<Url> {
+        let mut segments = vec![self.config.code_project.as_str()];
+        segments.extend_from_slice(tail);
+        self.api_url(&segments)
+    }
+
     /// A `{project}/_apis/wit/...` URL with `query` after it as written, so
     /// the `$` in `$expand` and `$depth` survives the way the endpoints spell
     /// their options.
@@ -593,24 +627,17 @@ impl AzureClient {
     /// back on each of them and is what the pull request and artifact-link
     /// endpoints ask for. One cheap request, made on every pull.
     pub fn fetch_repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
-        let segments = [self.config.project.as_str(), "_apis", "git", "repositories"];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "git", "repositories"])?;
         url.set_query(Some(&version_query()));
         let response = self.get(url.as_str())?;
-        Ok(parse_repositories(&response, &self.config.project))
+        Ok(parse_repositories(&response, &self.config.code_project))
     }
 
     /// The project's build definitions. `includeAllProperties` is what carries
     /// the repository and the default branch, which the Pipelines tab needs to
     /// say what a pipeline builds.
     pub fn fetch_pipelines(&self) -> Result<Vec<Pipeline>> {
-        let segments = [
-            self.config.project.as_str(),
-            "_apis",
-            "build",
-            "definitions",
-        ];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "build", "definitions"])?;
         url.set_query(Some(&format!(
             "includeAllProperties=true&api-version={API_VERSION}"
         )));
@@ -620,8 +647,7 @@ impl AzureClient {
     /// The newest runs in the project, whatever pipeline they belong to. One
     /// window, newest first, which is also what prunes the stored table.
     pub fn fetch_runs(&self) -> Result<Vec<Run>> {
-        let segments = [self.config.project.as_str(), "_apis", "build", "builds"];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "build", "builds"])?;
         url.set_query(Some(&format!(
             "$top={RUN_WINDOW}&queryOrder=queueTimeDescending&api-version={API_VERSION}"
         )));
@@ -632,8 +658,7 @@ impl AzureClient {
     /// the watcher polls, so it asks for as little as it can: the statuses
     /// that mean "still happening", and a small window of them.
     pub fn fetch_live_runs(&self) -> Result<Vec<Run>> {
-        let segments = [self.config.project.as_str(), "_apis", "build", "builds"];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "build", "builds"])?;
         url.set_query(Some(&format!(
             "statusFilter=inProgress,notStarted,cancelling&$top=50\
              &queryOrder=queueTimeDescending&api-version={API_VERSION}"
@@ -646,15 +671,7 @@ impl AzureClient {
     /// on screen and going.
     pub fn fetch_timeline(&self, run_id: i64) -> Result<Vec<TimelineRecord>> {
         let id = run_id.to_string();
-        let segments = [
-            self.config.project.as_str(),
-            "_apis",
-            "build",
-            "builds",
-            id.as_str(),
-            "timeline",
-        ];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "build", "builds", id.as_str(), "timeline"])?;
         url.set_query(Some(&version_query()));
         Ok(parse_timeline(&self.get(url.as_str())?))
     }
@@ -668,16 +685,14 @@ impl AzureClient {
         start_line: usize,
     ) -> Result<Vec<String>> {
         let (run, log) = (run_id.to_string(), log_id.to_string());
-        let segments = [
-            self.config.project.as_str(),
+        let mut url = self.code_url(&[
             "_apis",
             "build",
             "builds",
             run.as_str(),
             "logs",
             log.as_str(),
-        ];
-        let mut url = self.api_url(&segments)?;
+        ])?;
         url.set_query(Some(&format!(
             "startLine={start_line}&api-version={API_VERSION}"
         )));
@@ -695,14 +710,7 @@ impl AzureClient {
     /// the live list is read with.
     pub fn fetch_run(&self, run_id: i64) -> Result<Option<Run>> {
         let id = run_id.to_string();
-        let segments = [
-            self.config.project.as_str(),
-            "_apis",
-            "build",
-            "builds",
-            id.as_str(),
-        ];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "build", "builds", id.as_str()])?;
         url.set_query(Some(&version_query()));
         let response = self.get(url.as_str())?;
         Ok(parse_runs(&serde_json::json!({ "value": [response] }))
@@ -714,15 +722,7 @@ impl AzureClient {
     /// `refs/heads/main`, which is what the picker lists and what the trigger
     /// puts back in front of `refs/heads/`.
     pub fn fetch_branches(&self, repo_id: &str) -> Result<Vec<String>> {
-        let segments = [
-            self.config.project.as_str(),
-            "_apis",
-            "git",
-            "repositories",
-            repo_id,
-            "refs",
-        ];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "git", "repositories", repo_id, "refs"])?;
         url.set_query(Some(&format!("filter=heads/&api-version={API_VERSION}")));
         let response = self.get(url.as_str())?;
         let mut branches: Vec<String> = response["value"]
@@ -751,14 +751,7 @@ impl AzureClient {
             format!("refs/heads/{branch}")
         };
         let id = pipeline_id.to_string();
-        let segments = [
-            self.config.project.as_str(),
-            "_apis",
-            "pipelines",
-            id.as_str(),
-            "runs",
-        ];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "pipelines", id.as_str(), "runs"])?;
         url.set_query(Some(&version_query()));
         let body = serde_json::json!({
             "resources": {
@@ -780,14 +773,7 @@ impl AzureClient {
     /// Stops one run, or retries the jobs that failed in it.
     pub fn patch_run(&self, run_id: i64, retry: bool) -> Result<Run> {
         let id = run_id.to_string();
-        let segments = [
-            self.config.project.as_str(),
-            "_apis",
-            "build",
-            "builds",
-            id.as_str(),
-        ];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "build", "builds", id.as_str()])?;
         url.set_query(Some(&if retry {
             format!("retry=true&api-version={API_VERSION}")
         } else {
@@ -808,13 +794,7 @@ impl AzureClient {
     /// Every approval the project is waiting on. The endpoint is a preview
     /// one, which is the only one there is.
     pub fn fetch_approvals(&self) -> Result<Vec<Approval>> {
-        let segments = [
-            self.config.project.as_str(),
-            "_apis",
-            "pipelines",
-            "approvals",
-        ];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "pipelines", "approvals"])?;
         url.set_query(Some(
             "state=pending&$expand=steps&api-version=7.1-preview.1",
         ));
@@ -823,13 +803,7 @@ impl AzureClient {
 
     /// Approves or rejects one approval, with an optional word about why.
     pub fn answer_approval(&self, id: &str, approve: bool, comment: &str) -> Result<()> {
-        let segments = [
-            self.config.project.as_str(),
-            "_apis",
-            "pipelines",
-            "approvals",
-        ];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "pipelines", "approvals"])?;
         url.set_query(Some("api-version=7.1-preview.1"));
         let body = serde_json::json!([{
             "approvalId": id,
@@ -844,15 +818,7 @@ impl AzureClient {
     /// jumps to.
     pub fn fetch_run_work_items(&self, run_id: i64) -> Result<Vec<i64>> {
         let id = run_id.to_string();
-        let segments = [
-            self.config.project.as_str(),
-            "_apis",
-            "build",
-            "builds",
-            id.as_str(),
-            "workitems",
-        ];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "build", "builds", id.as_str(), "workitems"])?;
         url.set_query(Some(&version_query()));
         let response = self.get(url.as_str())?;
         Ok(response["value"]
@@ -872,8 +838,7 @@ impl AzureClient {
     /// The project's pull requests in one status. The list endpoint carries
     /// the reviewers with each one, so a page is all the table needs.
     pub fn fetch_pull_requests(&self, status: &str, top: usize) -> Result<Vec<PullRequest>> {
-        let segments = [self.config.project.as_str(), "_apis", "git", "pullrequests"];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "git", "pullrequests"])?;
         url.set_query(Some(&format!(
             "searchCriteria.status={status}&$top={top}&api-version={API_VERSION}"
         )));
@@ -883,8 +848,7 @@ impl AzureClient {
     /// The work items one pull request says it closes.
     pub fn fetch_pull_request_work_items(&self, repo_id: &str, id: i64) -> Result<Vec<i64>> {
         let pull_request = id.to_string();
-        let segments = [
-            self.config.project.as_str(),
+        let mut url = self.code_url(&[
             "_apis",
             "git",
             "repositories",
@@ -892,8 +856,7 @@ impl AzureClient {
             "pullrequests",
             pull_request.as_str(),
             "workitems",
-        ];
-        let mut url = self.api_url(&segments)?;
+        ])?;
         url.set_query(Some(&version_query()));
         let response = self.get(url.as_str())?;
         Ok(response["value"]
@@ -914,13 +877,7 @@ impl AzureClient {
     /// build that gates it is named. The endpoint asks for the pull request by
     /// its artifact id, which is why the project's GUID is worth storing.
     pub fn fetch_pull_request_policy(&self, project_id: &str, id: i64) -> Result<Option<PrBuild>> {
-        let segments = [
-            self.config.project.as_str(),
-            "_apis",
-            "policy",
-            "evaluations",
-        ];
-        let mut url = self.api_url(&segments)?;
+        let mut url = self.code_url(&["_apis", "policy", "evaluations"])?;
         url.set_query(Some(&format!(
             "artifactId=vstfs:///CodeReview/CodeReviewId/{project_id}/{id}\
              &api-version=7.1-preview.1"
@@ -961,8 +918,7 @@ impl AzureClient {
         vote: i8,
     ) -> Result<()> {
         let pull_request = id.to_string();
-        let segments = [
-            self.config.project.as_str(),
+        let mut url = self.code_url(&[
             "_apis",
             "git",
             "repositories",
@@ -971,8 +927,7 @@ impl AzureClient {
             pull_request.as_str(),
             "reviewers",
             reviewer_id,
-        ];
-        let mut url = self.api_url(&segments)?;
+        ])?;
         url.set_query(Some(&version_query()));
         self.send(
             url.as_str(),
@@ -985,8 +940,7 @@ impl AzureClient {
     /// comments are what the browser is for.
     pub fn fetch_pull_request_threads(&self, repo_id: &str, id: i64) -> Result<Vec<PrThread>> {
         let pull_request = id.to_string();
-        let segments = [
-            self.config.project.as_str(),
+        let mut url = self.code_url(&[
             "_apis",
             "git",
             "repositories",
@@ -994,8 +948,7 @@ impl AzureClient {
             "pullrequests",
             pull_request.as_str(),
             "threads",
-        ];
-        let mut url = self.api_url(&segments)?;
+        ])?;
         url.set_query(Some(&version_query()));
         Ok(parse_threads(&self.get(url.as_str())?))
     }
@@ -1008,8 +961,7 @@ impl AzureClient {
         text: &str,
     ) -> Result<PrThread> {
         let pull_request = id.to_string();
-        let segments = [
-            self.config.project.as_str(),
+        let mut url = self.code_url(&[
             "_apis",
             "git",
             "repositories",
@@ -1017,8 +969,7 @@ impl AzureClient {
             "pullrequests",
             pull_request.as_str(),
             "threads",
-        ];
-        let mut url = self.api_url(&segments)?;
+        ])?;
         url.set_query(Some(&version_query()));
         let body = serde_json::json!({
             "comments": [{ "parentCommentId": 0, "content": text, "commentType": "text" }],
@@ -1032,16 +983,14 @@ impl AzureClient {
     /// Completes, abandons, or turns auto-complete on or off.
     pub fn patch_pull_request(&self, repo_id: &str, id: i64, body: &Value) -> Result<PullRequest> {
         let pull_request = id.to_string();
-        let segments = [
-            self.config.project.as_str(),
+        let mut url = self.code_url(&[
             "_apis",
             "git",
             "repositories",
             repo_id,
             "pullrequests",
             pull_request.as_str(),
-        ];
-        let mut url = self.api_url(&segments)?;
+        ])?;
         url.set_query(Some(&version_query()));
         let response = self.patch(url.as_str(), body)?;
         parse_pull_requests(&serde_json::json!({ "value": [response] }), &self.config)
@@ -1542,7 +1491,7 @@ fn pull_request_url(entry: &Value, config: &AzureConfig) -> String {
     };
     let project = repository["project"]["name"]
         .as_str()
-        .unwrap_or(config.project.as_str());
+        .unwrap_or(config.code_project.as_str());
     format!(
         "{}/{project}/_git/{name}/pullrequest/{id}",
         config.base_url()
@@ -2467,6 +2416,7 @@ mod tests {
         AzureConfig {
             organization: "demo".into(),
             project: "development".into(),
+            code_project: "development".into(),
             scope: None,
         }
     }
@@ -3323,6 +3273,57 @@ mod tests {
             "https://dev.azure.com/demo/Fabrikam%20Fiber/_apis/wit/workitems/$User%20Story\
              ?$expand=relations&api-version=7.1",
             "a space is escaped either side of the type; the dollar is not"
+        );
+    }
+
+    #[test]
+    fn the_code_project_addresses_git_and_build_while_the_work_items_keep_the_project() {
+        let split = client(AzureConfig {
+            code_project: "Fiquants".into(),
+            ..config()
+        });
+
+        assert_eq!(
+            split
+                .code_url(&["_apis", "git", "repositories"])
+                .unwrap()
+                .as_str(),
+            "https://dev.azure.com/demo/Fiquants/_apis/git/repositories",
+            "the repositories live in the code project"
+        );
+        assert_eq!(
+            split
+                .code_url(&["_apis", "build", "builds"])
+                .unwrap()
+                .as_str(),
+            "https://dev.azure.com/demo/Fiquants/_apis/build/builds",
+            "and so do the builds"
+        );
+        assert_eq!(
+            split
+                .wit_url(&["classificationnodes"], &version_query())
+                .unwrap(),
+            "https://dev.azure.com/demo/development/_apis/wit/classificationnodes?api-version=7.1",
+            "the work items stay where the board is"
+        );
+        assert!(
+            split
+                .comments_url(613, None)
+                .unwrap()
+                .contains("/development/"),
+            "a comment hangs off the work item's own project"
+        );
+        assert_eq!(
+            split.config.work_item_url(613),
+            "https://dev.azure.com/demo/development/_workitems/edit/613"
+        );
+
+        // Nobody naming one keeps every URL in the one project.
+        assert_eq!(settled_code_project(None, "ISTO"), "ISTO");
+        assert_eq!(settled_code_project(Some("  ".into()), "ISTO"), "ISTO");
+        assert_eq!(
+            settled_code_project(Some(" Fiquants ".into()), "ISTO"),
+            "Fiquants"
         );
     }
 

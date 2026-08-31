@@ -1,0 +1,58 @@
+# ticket-tui, in one file. Copy it to ~/.config/ticket-tui/config.toml
+# ($XDG_CONFIG_HOME/ticket-tui/config.toml when that is set, on macOS as well),
+# edit it, run `az login`, and run `ticket-tui`.
+#
+# Every table is optional and so is every key in it: a flag or a TICKET_TUI_*
+# variable still wins over this file, and whatever none of the three name is
+# left for the Azure CLI to answer. Keys a build does not know are ignored, so
+# this file can grow without an older binary refusing it.
+
+[devops]                      # tabs 1 to 4, and every subcommand
+org = "myorg"                 # slug or https://dev.azure.com/myorg
+project = "ISTO"              # where the work items live
+code_project = "Fiquants"     # where the repos, pull requests and pipelines live; left out = project
+# query = "[System.AreaPath] UNDER 'ISTO\\Team'"   # optional WIQL scope on every pull
+# workspace = "~/Development" # where clones live; a leading ~ is the home directory
+
+[azure]                       # tabs 6 ACR and 7 Key Vault
+subscriptions = ["<dev-guid>", "<qa-guid>", "<prod-guid>"]   # left out: whatever `az account show` says
+registries = ["acrdev", "acrqa", "acrprod"]   # optional: only these, in this order
+vaults = ["kv-dev", "kv-qa", "kv-prod"]       # optional: only these, in this order
+
+# Tab 5 AKS, one table per cluster. The contexts are the ones
+# `az aks get-credentials --resource-group RG --name CLUSTER` writes into the
+# kubeconfig; `kubectl config get-contexts` lists what is there.
+[[clusters]]
+name = "qa"                   # what the tab calls it
+context = "aks-qa"            # the kubeconfig context kubectl reaches it by
+namespaces = ["orders", "billing"]   # left out or empty: every namespace at once
+
+[[clusters]]
+name = "prod"
+context = "aks-prod"
+
+# The colour theme. `preset` is terminal, terminal-light, mono or custom;
+# left out, a [theme.custom] palette is painted if there is one and the
+# terminal's own sixteen colours if there is not. The `theme` tool writes both
+# of these tables for you.
+[theme]
+preset = "custom"
+
+[theme.custom]
+name = "neon-void"
+appearance = "dark"
+bg = "#05060a"
+bg_deep = "#000000"
+surface = "#0b0d14"
+overlay = "#171b28"
+fg = "#dfe6ff"
+subtle = "#aab4dd"
+muted = "#626c9c"
+accent = "#c07cff"
+red = "#ff5f87"
+green = "#4ef5a4"
+yellow = "#ffd75f"
+blue = "#61a8ff"
+cyan = "#4fe8ff"
+orange = "#ff9e5e"
+teal = "#29e0c8"

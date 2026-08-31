@@ -18,7 +18,7 @@ fn offline_runtime() -> SyncRuntime {
         local: LocalRuntime::default(),
         aks: AksRuntime::default(),
         arm: ArmRuntime::default(),
-        arm_config: None,
+        arm_config: ArmConfig::default(),
     }
 }
 

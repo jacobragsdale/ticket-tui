@@ -58,22 +58,30 @@ pub struct Cli {
     /// SQLite database to open instead of the platform data-directory default
     #[arg(long, global = true, value_name = "PATH", value_hint = ValueHint::FilePath)]
     pub database: Option<PathBuf>,
-    /// Azure DevOps organization (slug or URL); defaults to TICKET_TUI_ORG or `az devops configure`
+    /// Azure DevOps organization (slug or URL); defaults to TICKET_TUI_ORG,
+    /// then config.toml, then `az devops configure`
     #[arg(long, global = true, value_name = "ORG")]
     pub org: Option<String>,
-    /// Azure DevOps project; defaults to TICKET_TUI_PROJECT or `az devops configure`
+    /// Azure DevOps project the work items live in; defaults to
+    /// TICKET_TUI_PROJECT, then config.toml, then `az devops configure`
     #[arg(long, global = true, value_name = "PROJECT")]
     pub project: Option<String>,
-    /// Azure subscription id for the ACR and Key Vault tabs; defaults to
-    /// TICKET_TUI_SUBSCRIPTION or `az account show`
+    /// Azure DevOps project the repositories, pull requests and pipelines live
+    /// in; defaults to TICKET_TUI_CODE_PROJECT, then config.toml, then
+    /// whatever --project settled on
+    #[arg(long, global = true, value_name = "PROJECT")]
+    pub code_project: Option<String>,
+    /// Azure subscription id for the ACR and Key Vault tabs, repeatable;
+    /// defaults to TICKET_TUI_SUBSCRIPTION, then config.toml, then
+    /// `az account show`
     #[arg(long, global = true, value_name = "SUBSCRIPTION")]
-    pub subscription: Option<String>,
+    pub subscription: Vec<String>,
     /// Seconds between background pulls from Azure DevOps, 0 to turn the timer
     /// off; defaults to TICKET_TUI_REFRESH or 60
     #[arg(long, value_name = "SECONDS")]
     pub refresh: Option<u64>,
     /// Extra WIQL condition ANDed into every pull, narrowing a large project;
-    /// defaults to TICKET_TUI_QUERY
+    /// defaults to TICKET_TUI_QUERY, then config.toml
     #[arg(long, value_name = "WIQL")]
     pub query: Option<String>,
     /// Days a work item may sit untouched before the Changed column flags it
@@ -86,15 +94,87 @@ pub struct Cli {
     #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,
     /// Directory the Repos tab looks for clones in and makes new ones under;
-    /// defaults to TICKET_TUI_WORKSPACE, then ~/Development
+    /// defaults to TICKET_TUI_WORKSPACE, then config.toml, then ~/Development
     #[arg(long, global = true, value_name = "PATH", value_hint = ValueHint::DirPath)]
     pub workspace: Option<PathBuf>,
+    /// The registries worth listing, in this order, as `config.toml` names
+    /// them. There is no flag for it: it is a standing choice about a
+    /// workplace rather than something one invocation says.
+    #[arg(skip)]
+    pub registries: Vec<String>,
+    /// The vaults worth listing, in this order, as `config.toml` names them.
+    #[arg(skip)]
+    pub vaults: Vec<String>,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
+impl Cli {
+    /// What `config.toml` says, for everything the flags and the environment
+    /// left unsaid: flag, then `TICKET_TUI_*`, then the file, and whatever
+    /// none of the three name is left for the Azure CLI to answer. `env` is
+    /// handed in rather than read here, so the order can be tested without an
+    /// environment to set.
+    #[must_use]
+    pub fn with_file_defaults(
+        mut self,
+        file: &Config,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Self {
+        let variable = |key: &str| {
+            env(key)
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        let settled = |flag: Option<String>, key: &str, file: Option<&String>| {
+            flag.or_else(|| variable(key)).or_else(|| file.cloned())
+        };
+        self.org = settled(self.org, "TICKET_TUI_ORG", file.devops.org.as_ref());
+        self.project = settled(
+            self.project,
+            "TICKET_TUI_PROJECT",
+            file.devops.project.as_ref(),
+        );
+        self.code_project = settled(
+            self.code_project,
+            "TICKET_TUI_CODE_PROJECT",
+            file.devops.code_project.as_ref(),
+        );
+        self.query = settled(self.query, "TICKET_TUI_QUERY", file.devops.query.as_ref());
+        // The variable names one subscription; a list of them is the file's to
+        // hold.
+        if self.subscription.is_empty() {
+            self.subscription = variable("TICKET_TUI_SUBSCRIPTION")
+                .map(|one| vec![one])
+                .unwrap_or_else(|| file.azure.subscriptions.clone());
+        }
+        self.workspace = self
+            .workspace
+            .or_else(|| variable("TICKET_TUI_WORKSPACE").map(PathBuf::from))
+            .or_else(|| file.devops.workspace.clone());
+        self.registries = file.azure.registries.clone();
+        self.vaults = file.azure.vaults.clone();
+        self
+    }
+
+    /// What the ACR and Key Vault tabs read: the subscriptions settled above,
+    /// and which of the registries and vaults in them are worth listing. An
+    /// empty subscription list is the Azure CLI's to answer, later and
+    /// elsewhere.
+    #[must_use]
+    pub fn arm_config(&self) -> ArmConfig {
+        ArmConfig {
+            subscriptions: self.subscription.clone(),
+            registries: self.registries.clone(),
+            vaults: self.vaults.clone(),
+        }
+    }
+}
+
 /// One thing to do and then exit. The flags above still apply: `--database`,
-/// `--org` and `--project` may be written either side of the subcommand.
+/// `--org`, `--project`, `--code-project` and `--subscription` may be written
+/// either side of the subcommand, and what none of them says `config.toml`
+/// answers for.
 #[derive(Clone, Debug, Subcommand)]
 pub enum Command {
     /// Pull work items from Azure DevOps into the database and exit
@@ -596,7 +676,12 @@ pub fn resolve_me(stored: Option<String>, env: Option<String>) -> Option<String>
 /// here first so a file that does not exist yet is created and given its
 /// schema; the pull itself takes its own connection.
 fn run_sync(cli: &Cli, database: PathBuf, full: bool) -> Result<()> {
-    let config = AzureConfig::resolve(cli.org.clone(), cli.project.clone(), cli.query.clone())?;
+    let config = AzureConfig::resolve(
+        cli.org.clone(),
+        cli.project.clone(),
+        cli.code_project.clone(),
+        cli.query.clone(),
+    )?;
     let repository = SqliteTicketRepository::open(&database)?;
     guard_stored_project(
         repository
@@ -1067,6 +1152,7 @@ fn connect(cli: &Cli) -> Result<AzureClient> {
     AzureClient::connect(AzureConfig::resolve(
         cli.org.clone(),
         cli.project.clone(),
+        cli.code_project.clone(),
         cli.query.clone(),
     )?)
 }
@@ -2498,11 +2584,7 @@ impl<'a> PodJson<'a> {
 /// or a refused token is the error rather than an empty listing: there is
 /// nothing stored here to fall back on.
 fn run_acr(cli: &Cli, command: &AcrCommand) -> Result<()> {
-    let config = ArmConfig::resolve(
-        cli.subscription.clone(),
-        std::env::var("TICKET_TUI_SUBSCRIPTION").ok(),
-    )?;
-    run_acr_with(command, &ArmClient::new(config))
+    run_acr_with(command, &ArmClient::new(cli.arm_config().resolve()?))
 }
 
 fn run_acr_with(command: &AcrCommand, source: &dyn ArmSource) -> Result<()> {
@@ -2852,11 +2934,7 @@ struct TagShowJson<'a> {
 /// or a refused token is the error rather than an empty listing: there is
 /// nothing stored here to fall back on.
 fn run_vaults(cli: &Cli, command: &VaultCliCommand) -> Result<()> {
-    let config = ArmConfig::resolve(
-        cli.subscription.clone(),
-        std::env::var("TICKET_TUI_SUBSCRIPTION").ok(),
-    )?;
-    run_vaults_with(command, &ArmClient::new(config))
+    run_vaults_with(command, &ArmClient::new(cli.arm_config().resolve()?))
 }
 
 fn run_vaults_with(command: &VaultCliCommand, source: &dyn ArmSource) -> Result<()> {
@@ -3388,6 +3466,7 @@ mod tests {
         AzureConfig {
             organization: "demo".into(),
             project: "atlas".into(),
+            code_project: "atlas".into(),
             scope: None,
         }
     }
@@ -3604,6 +3683,81 @@ mod tests {
         );
         assert_eq!(after.org.as_deref(), Some("demo"));
         assert!(matches!(after.command, Some(Command::Sync { full: false })));
+    }
+
+    #[test]
+    fn the_file_answers_for_what_no_flag_and_no_variable_did() {
+        let file = config::parse(
+            "[devops]\norg = \"file-org\"\nproject = \"ISTO\"\ncode_project = \"Fiquants\"\n\
+             query = \"[System.Id] > 1\"\nworkspace = \"/srv/code\"\n\n[azure]\n\
+             subscriptions = [\"file-sub\"]\nregistries = [\"acrdev\"]\nvaults = [\"kv-dev\"]\n",
+        )
+        .unwrap();
+        let env = |key: &str| match key {
+            "TICKET_TUI_PROJECT" => Some("env-project".to_owned()),
+            "TICKET_TUI_CODE_PROJECT" => Some("env-code".to_owned()),
+            "TICKET_TUI_QUERY" => Some("env query".to_owned()),
+            "TICKET_TUI_SUBSCRIPTION" => Some("env-sub".to_owned()),
+            "TICKET_TUI_WORKSPACE" => Some("/env/code".to_owned()),
+            _ => None,
+        };
+
+        // The flag wins over the variable, which wins over the file.
+        let flagged = Cli::parse_from([
+            "ticket-tui",
+            "--org",
+            "flag-org",
+            "--query",
+            "flag query",
+            "--workspace",
+            "/flag/code",
+        ])
+        .with_file_defaults(&file, env);
+        assert_eq!(flagged.org.as_deref(), Some("flag-org"));
+        assert_eq!(flagged.query.as_deref(), Some("flag query"));
+        assert_eq!(flagged.workspace.as_deref(), Some(Path::new("/flag/code")));
+        assert_eq!(flagged.project.as_deref(), Some("env-project"));
+        assert_eq!(flagged.code_project.as_deref(), Some("env-code"));
+        assert_eq!(
+            flagged.subscription,
+            ["env-sub"],
+            "the variable names one subscription"
+        );
+
+        // --subscription is repeatable, and a subscription named on the
+        // command line beats both.
+        let repeated = Cli::parse_from([
+            "ticket-tui",
+            "--subscription",
+            "one",
+            "--subscription",
+            "two",
+        ])
+        .with_file_defaults(&file, env);
+        assert_eq!(repeated.subscription, ["one", "two"]);
+
+        // With neither flag nor variable, every one of them comes from the file.
+        let from_file = Cli::parse_from(["ticket-tui"]).with_file_defaults(&file, |_| None);
+        assert_eq!(from_file.org.as_deref(), Some("file-org"));
+        assert_eq!(from_file.project.as_deref(), Some("ISTO"));
+        assert_eq!(from_file.code_project.as_deref(), Some("Fiquants"));
+        assert_eq!(from_file.query.as_deref(), Some("[System.Id] > 1"));
+        assert_eq!(from_file.workspace.as_deref(), Some(Path::new("/srv/code")));
+        assert_eq!(
+            from_file.arm_config(),
+            ArmConfig {
+                subscriptions: vec!["file-sub".to_owned()],
+                registries: vec!["acrdev".to_owned()],
+                vaults: vec!["kv-dev".to_owned()],
+            },
+            "the ACR and Key Vault tabs read exactly what the file named"
+        );
+
+        // And with no file either, everything is left for `az` to answer.
+        let bare = Cli::parse_from(["ticket-tui"]).with_file_defaults(&Config::default(), |_| None);
+        assert_eq!(bare.org, None);
+        assert_eq!(bare.code_project, None);
+        assert_eq!(bare.arm_config(), ArmConfig::default());
     }
 
     #[test]

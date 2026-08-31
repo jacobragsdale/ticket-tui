@@ -6,7 +6,7 @@ the context file agents read. [README.md](README.md) is the short way in.
 
 - [Run it](#run-it)
 - [Authentication](#authentication)
-- [Organization and project](#organization-and-project)
+- [Organization and projects](#organization-and-projects)
 - [Sync](#sync)
 - [Editing](#editing)
 - [Creating work items](#creating-work-items)
@@ -65,7 +65,7 @@ cargo run --release -- --refresh 300
 
 `TICKET_TUI_REFRESH` sets the same interval, and `--query` narrows what a pull
 asks Azure DevOps for; both are under
-[Organization and project](#organization-and-project).
+[Organization and projects](#organization-and-projects).
 
 Without a configured organization the TUI runs offline: it browses the database,
 never contacts the network, and `r` reports the missing organization. An empty
@@ -108,21 +108,39 @@ on each sync and keeps nothing but work-item data in SQLite. A secret's value
 read out of a key vault is held in memory for one minute and written nowhere at
 all — not the database, not the session file, not the agent context.
 
-## Organization and project
+## Organization and projects
 
-Both values are resolved in this order:
+Every value is resolved in this order:
 
-1. the `--org` and `--project` flags;
-2. the `TICKET_TUI_ORG` and `TICKET_TUI_PROJECT` environment variables;
-3. the `[defaults]` entries in `~/.azure/azuredevops/config`, written by
+1. the `--org`, `--project` and `--code-project` flags;
+2. the `TICKET_TUI_ORG`, `TICKET_TUI_PROJECT` and `TICKET_TUI_CODE_PROJECT`
+   environment variables;
+3. the `[devops]` table in `config.toml`;
+4. the `[defaults]` entries in `~/.azure/azuredevops/config`, written by
    `az devops configure --defaults organization=... project=...`
    (`AZURE_CONFIG_DIR` moves that file).
 
 `--org` accepts a bare slug, `https://dev.azure.com/<slug>`, or
-`https://<slug>.visualstudio.com`; all three reduce to the slug. Without both
-values the TUI browses the database offline and never syncs; `ticket-tui sync`
-with an unresolved value fails with the missing flag, variable, and command
-spelled out.
+`https://<slug>.visualstudio.com`; all three reduce to the slug. Without an
+organization and a project the TUI browses the database offline and never
+syncs; `ticket-tui sync` with an unresolved value fails with the missing flag,
+variable, and command spelled out.
+
+### Two projects, one organization
+
+A shop whose board lives in one project and whose code lives in another says so
+once: `project` is where the work items are, `code_project` is where the
+repositories, pull requests and pipelines are. Left unsaid, the code project is
+the project, which is what one project in one place has always meant.
+
+The split is a property of the URL and nothing else. Every `wit` and `wiql`
+call, the teams behind the assignee picker, and the address a work item opens
+at use `project`; every `git`, `build`, `pipelines`, `approvals` and
+`pullrequests` call goes through `AzureClient::code_url` and uses
+`code_project`. One client, one token, one organization: `X-VSS-ForceMsaPassThrough`
+still travels on all of them, exactly as `az devops` sends it. The database
+overlay's sync line adds `· code <code_project>` when the two differ and says
+nothing when they do not.
 
 ### The database remembers which project it holds
 
@@ -164,6 +182,45 @@ session remembered. **Set stale threshold** in the command palette steps
 through 7, 14, 21, and 30 days, has the last word for the rest of the run, and
 is what gets saved. See [Stale-item
 highlighting](#stale-item-highlighting).
+
+### `config.toml`
+
+One file holds everything a workplace does not change from run to run:
+
+```toml
+[devops]                      # tabs 1 to 4, and every subcommand
+org = "myorg"                 # slug or https://dev.azure.com/myorg
+project = "ISTO"              # where the work items live
+code_project = "Fiquants"     # repos, pull requests and pipelines; left out = project
+# query = "[System.AreaPath] UNDER 'ISTO\\Team'"   # optional WIQL scope on every pull
+# workspace = "~/Development" # where clones live; a leading ~ is the home directory
+
+[azure]                       # tabs 6 ACR and 7 Key Vault
+subscriptions = ["<dev-guid>", "<qa-guid>"]   # left out: whatever `az account show` says
+registries = ["acrdev", "acrqa"]              # optional: only these, in this order
+vaults = ["kv-dev", "kv-qa"]                  # optional: only these, in this order
+```
+
+`config.example.toml` at the root of the repository is the whole file,
+commented, `[[clusters]]` and `[theme]` included; copying it to
+`~/.config/ticket-tui/config.toml` and editing it is the setup.
+
+Every key is optional and every one of them is a default: the flag wins, then
+the `TICKET_TUI_*` variable, then this file, then whatever the Azure CLI is
+set to — `az devops configure` for the organization and the project,
+`az account show` for the subscription. Keys a build does not know are ignored,
+so the file can grow without an older binary refusing it. A blank string is
+refused where a blank cluster name is, because it would otherwise mask the flag
+and the variable behind it: `devops.project is blank; give it a value or leave
+it out`. The file is read once, straight after the command line is parsed, and
+a file that will not parse stops the TUI and every subcommand alike; the
+mid-run reload keeps reporting a broken file in the footer instead, because by
+then there is a footer to report it in.
+
+`[[clusters]]` names the kubeconfig contexts the AKS tab reads — the ones
+`az aks get-credentials --resource-group RG --name CLUSTER` writes, which
+`kubectl config get-contexts` lists. Signing in to a tenant other than the
+login's default wants `az login --tenant <tenant>` first.
 
 ### `--theme`, `TICKET_TUI_THEME` and `config.toml`
 
@@ -229,9 +286,10 @@ Where the Repos tab looks for clones and makes new ones:
 cargo run --release -- --workspace ~/src
 ```
 
-`TICKET_TUI_WORKSPACE` sets the same directory, and the flag wins when both are
-given. Without either it is `~/Development`. See [The
-workspace](#the-workspace).
+`TICKET_TUI_WORKSPACE` sets the same directory and `workspace` under `[devops]`
+in `config.toml` is the third way to say it, in that order of precedence; a
+leading `~/` in the file is the home directory. Without any of the three it is
+`~/Development`. See [The workspace](#the-workspace).
 
 ### `--query`: how much of the project to sync
 
@@ -1325,13 +1383,26 @@ is the thread. Neither touches SQLite: what a subscription holds is not the
 project's business and it changes without anyone editing a work item, so it is
 read live the way a cluster's pods are and the next read replaces it.
 
-The subscription is `--subscription <id>`, else `TICKET_TUI_SUBSCRIPTION`, else
-whatever `az account show` says the Azure CLI is set to — and that last step
-happens on the worker thread rather than on the startup path, so no run pays for
-a shell-out it may never need. With none of the three, both tabs draw empty and
-say so:
+The subscriptions are `--subscription <id>`, repeatable, else
+`TICKET_TUI_SUBSCRIPTION` naming one, else `subscriptions` under `[azure]` in
+`config.toml` naming as many as a shop has, else whatever `az account show`
+says the Azure CLI is set to — and that last step happens on the worker thread
+rather than on the startup path, so no run pays for a shell-out it may never
+need. One Resource Graph query covers all of them at once, so dev, qa and prod
+arrive in one listing. With none of the four, both tabs draw empty and say so:
 
-    no Azure subscription: pass --subscription, set TICKET_TUI_SUBSCRIPTION, or run `az account set`
+    no Azure subscription: pass --subscription, name one under [azure] in config.toml, set TICKET_TUI_SUBSCRIPTION, or run `az account set`
+
+`registries` and `vaults` under `[azure]` narrow what comes back: an allowlist
+keeps only the resources it names, in the order it names them, matched without
+regard to case, and a name the subscriptions do not hold is simply absent
+rather than an error — `ticket-tui acr list` and `ticket-tui vaults list` show
+what matched. An empty allowlist is no opinion at all and keeps everything,
+which is what fifty subscriptions' worth of registries need narrowing from.
+The status bar names the subscriptions being read, joined with `, `.
+
+`az login` is what all of this borrows. A tenant other than the login's default
+wants `az login --tenant <tenant>` before any of it will answer.
 
 Three token audiences, all borrowed from the Azure CLI's login. `management.azure.com`
 signs the Resource Graph query that lists the subscription's registries and
@@ -1922,9 +1993,10 @@ query the cache while the TUI is running.
 
 A bare `ticket-tui` opens the TUI. Every subcommand does one thing and exits,
 which is what lets an agent — or a script — read and change work items without
-a terminal to drive. `--database`, `--org`, `--project`, `--workspace` and
-`--subscription` apply to all of them and may be written either side of the
-subcommand.
+a terminal to drive. `--database`, `--org`, `--project`, `--code-project`,
+`--workspace` and `--subscription` — the last repeatable — apply to all of them
+and may be written either side of the subcommand. Every one of them falls back
+to `config.toml`, so a shop that has edited that file writes none of them.
 
 ```console
 ticket-tui sync [--full]

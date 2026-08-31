@@ -75,9 +75,10 @@ pub(super) struct SyncRuntime {
     pub(super) arm: ArmRuntime,
     pub(super) scheduler: SyncScheduler,
     pub(super) config: Option<AzureConfig>,
-    /// The subscription the ACR and Key Vault tabs read, resolved at startup.
-    /// `None` when none did, which is what puts the reason on those tabs.
-    pub(super) arm_config: Option<ArmConfig>,
+    /// What the ACR and Key Vault tabs read: the subscriptions the flags, the
+    /// variable and the file settled on, and the registries and vaults worth
+    /// listing out of them. No subscription named is the worker's to settle.
+    pub(super) arm_config: ArmConfig,
     /// Why Azure DevOps could not be resolved, reported when the user asks for
     /// a sync anyway.
     pub(super) offline_reason: Option<String>,

@@ -345,10 +345,10 @@ pub struct ArmHandle {
 }
 
 impl ArmHandle {
-    /// Starts the worker on its own thread. `None` leaves the subscription for
-    /// the thread to resolve, which is the `az account show` a run only pays
-    /// for once one of these tabs is opened.
-    pub fn spawn(config: Option<ArmConfig>) -> Result<Self> {
+    /// Starts the worker on its own thread. A config naming no subscription
+    /// leaves that for the thread to settle, which is the `az account show` a
+    /// run only pays for once one of these tabs is opened.
+    pub fn spawn(config: ArmConfig) -> Result<Self> {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         thread::Builder::new()
@@ -382,22 +382,21 @@ impl ArmHandle {
 }
 
 /// The thread: settle on a subscription, then watch it.
-fn work(config: Option<ArmConfig>, events: &Sender<ArmEvent>, requests: &Receiver<ArmRequest>) {
-    let config = match config {
-        Some(config) => config,
-        None => {
-            let resolved = ArmConfig::resolve(None, None).map_err(|error| said(&error));
-            let _ = events.send(ArmEvent::Subscription(
-                resolved
-                    .as_ref()
-                    .map(|config| config.subscription.clone())
-                    .map_err(Clone::clone),
-            ));
-            match resolved {
-                Ok(config) => config,
-                Err(reason) => return refuse(&reason, events, requests),
-            }
+fn work(config: ArmConfig, events: &Sender<ArmEvent>, requests: &Receiver<ArmRequest>) {
+    let config = if config.subscriptions.is_empty() {
+        let resolved = config.resolve().map_err(|error| said(&error));
+        let _ = events.send(ArmEvent::Subscription(
+            resolved
+                .as_ref()
+                .map(|config| config.subscriptions.join(", "))
+                .map_err(Clone::clone),
+        ));
+        match resolved {
+            Ok(config) => config,
+            Err(reason) => return refuse(&reason, events, requests),
         }
+    } else {
+        config
     };
     watch(
         ArmWatcher::new(Box::new(ArmClient::new(config)), events.clone()),
@@ -842,9 +841,10 @@ mod tests {
     fn the_handle_runs_the_worker_on_its_own_thread_and_says_once_when_it_stops() {
         // A configured subscription mints nothing until something is read, and
         // with neither tab showing nothing is: this never leaves the process.
-        let handle = ArmHandle::spawn(Some(ArmConfig {
-            subscription: "sub-1".to_owned(),
-        }))
+        let handle = ArmHandle::spawn(ArmConfig {
+            subscriptions: vec!["sub-1".to_owned()],
+            ..ArmConfig::default()
+        })
         .unwrap();
         handle.send(ArmRequest::TabShowing(None)).unwrap();
         handle.send(ArmRequest::Stop).unwrap();
@@ -860,7 +860,7 @@ mod tests {
         // The one place `az account show` runs. Whether this machine has a
         // signed-in CLI or none at all, the answer comes back as an event
         // rather than as a startup failure.
-        let handle = ArmHandle::spawn(None).unwrap();
+        let handle = ArmHandle::spawn(ArmConfig::default()).unwrap();
         match await_event(&handle, 30) {
             Some(ArmEvent::Subscription(Ok(subscription))) => {
                 assert!(!subscription.trim().is_empty());

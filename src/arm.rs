@@ -65,50 +65,64 @@ const HTTP_DATE: &[FormatItem<'static>] = format_description!(
     "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT"
 );
 
-/// Which subscription the registry and vault tabs read.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Which subscriptions the registry and vault tabs read, and which of the
+/// resources in them are worth listing. An empty allowlist is no opinion at
+/// all: every registry or vault the subscriptions hold is listed.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ArmConfig {
-    /// The subscription id, as a GUID.
-    pub subscription: String,
+    /// The subscription ids, as GUIDs. Empty means nothing has named one, so
+    /// the Azure CLI is asked — on the worker thread rather than the startup
+    /// path, so no run pays for a shell-out it may never need.
+    pub subscriptions: Vec<String>,
+    /// Only these registries, in this order. Empty lists them all.
+    pub registries: Vec<String>,
+    /// Only these vaults, in this order. Empty lists them all.
+    pub vaults: Vec<String>,
 }
 
 impl ArmConfig {
-    /// The subscription from the flag, then from `TICKET_TUI_SUBSCRIPTION` —
-    /// which the caller reads and hands over — then from whichever one the
-    /// Azure CLI is set to.
-    pub fn resolve(flag: Option<String>, env: Option<String>) -> Result<Self> {
-        Self::resolve_with(flag, env, az_subscription)
-    }
-
-    /// The subscription the two settings name, without asking anything: the
-    /// flag, then `TICKET_TUI_SUBSCRIPTION`. `None` when neither was set,
-    /// which is not a failure — it means the Azure CLI has yet to be asked,
-    /// and the ARM worker thread does that off the startup path so no run pays
-    /// for a shell-out it may never need.
-    #[must_use]
-    pub fn from_settings(flag: Option<String>, env: Option<String>) -> Option<Self> {
-        named(flag)
-            .or_else(|| named(env))
-            .map(|subscription| Self { subscription })
+    /// The subscriptions as they stand, or whichever one the Azure CLI is set
+    /// to when nothing has named any.
+    pub fn resolve(self) -> Result<Self> {
+        self.resolve_with(az_subscription)
     }
 
     /// [`ArmConfig::resolve`] with the CLI step handed in, so the order can be
-    /// tested without a shell.
-    pub fn resolve_with(
-        flag: Option<String>,
-        env: Option<String>,
-        az: impl FnOnce() -> Result<String>,
-    ) -> Result<Self> {
-        let subscription = named(flag)
-            .or_else(|| named(env))
-            .or_else(|| az().ok().and_then(|found| named(Some(found))));
-        match subscription {
-            Some(subscription) => Ok(Self { subscription }),
+    /// tested without a shell — and so a test can hold `az` to being asked
+    /// only when no subscription was named.
+    pub fn resolve_with(mut self, az: impl FnOnce() -> Result<String>) -> Result<Self> {
+        self.subscriptions.retain(|held| !held.trim().is_empty());
+        if !self.subscriptions.is_empty() {
+            return Ok(self);
+        }
+        match az().ok().and_then(|found| named(Some(found))) {
+            Some(subscription) => {
+                self.subscriptions = vec![subscription];
+                Ok(self)
+            }
             None => bail!(
-                "no Azure subscription: pass --subscription, set TICKET_TUI_SUBSCRIPTION, or run `az account set`"
+                "no Azure subscription: pass --subscription, name one under [azure] in config.toml, set TICKET_TUI_SUBSCRIPTION, or run `az account set`"
             ),
         }
     }
+}
+
+/// The resources an allowlist names, in the order it names them, matched
+/// without regard to case. An empty allowlist keeps everything; a name the
+/// subscriptions do not hold is simply absent.
+fn allowed<T: Clone>(found: Vec<T>, names: &[String], name_of: impl Fn(&T) -> &str) -> Vec<T> {
+    if names.is_empty() {
+        return found;
+    }
+    names
+        .iter()
+        .filter_map(|wanted| {
+            found
+                .iter()
+                .find(|held| name_of(held).eq_ignore_ascii_case(wanted.trim()))
+                .cloned()
+        })
+        .collect()
 }
 
 /// One setting that was actually set: trimmed, and blank is not an answer.
@@ -498,11 +512,15 @@ impl fmt::Display for SignedOut {
 
 impl std::error::Error for SignedOut {}
 
-/// A client for one subscription: the agent every call goes out on, and the
-/// ARM token they are all signed with.
+/// A client for a set of subscriptions: the agent every call goes out on, the
+/// ARM token they are all signed with, and which of the registries and vaults
+/// they hold are worth listing.
 pub struct ArmClient {
     transport: Box<dyn Transport>,
-    subscription: String,
+    subscriptions: Vec<String>,
+    /// The registries and the vaults worth listing, when the file named any.
+    registries: Vec<String>,
+    vaults: Vec<String>,
     /// Minted on the first call that needs it and re-minted once when ARM says
     /// it is spent: a CLI token lasts about an hour and a running TUI outlives
     /// that.
@@ -528,16 +546,13 @@ impl ArmClient {
     pub fn with_transport(config: ArmConfig, transport: Box<dyn Transport>) -> Self {
         Self {
             transport,
-            subscription: config.subscription,
+            subscriptions: config.subscriptions,
+            registries: config.registries,
+            vaults: config.vaults,
             token: RefCell::new(None),
             refresh_tokens: RefCell::new(HashMap::new()),
             throttled: Cell::new(None),
         }
-    }
-
-    #[must_use]
-    pub fn subscription(&self) -> &str {
-        &self.subscription
     }
 
     /// How long the refusals since the last time this was asked want to be
@@ -843,7 +858,7 @@ impl ArmSource for ArmClient {
         let mut skip: Option<String> = None;
         loop {
             let mut body = json!({
-                "subscriptions": [self.subscription],
+                "subscriptions": self.subscriptions,
                 "query": INVENTORY_QUERY,
             });
             if let Some(token) = &skip {
@@ -861,6 +876,12 @@ impl ArmSource for ArmClient {
             // A repeated token would page for ever; absent or unchanged is the
             // end of the answer either way.
             if next.is_none() || next == skip {
+                inventory.registries =
+                    allowed(inventory.registries, &self.registries, |registry| {
+                        registry.name.as_str()
+                    });
+                inventory.vaults =
+                    allowed(inventory.vaults, &self.vaults, |vault| vault.name.as_str());
                 return Ok(inventory);
             }
             skip = next;
@@ -1088,12 +1109,17 @@ pub(crate) mod tests {
     }
 
     fn client(transport: &FakeHttp) -> ArmClient {
-        ArmClient::with_transport(
+        client_for(
+            transport,
             ArmConfig {
-                subscription: "sub-1".to_owned(),
+                subscriptions: vec!["sub-1".to_owned()],
+                ..ArmConfig::default()
             },
-            Box::new(transport.clone()),
         )
+    }
+
+    fn client_for(transport: &FakeHttp, config: ArmConfig) -> ArmClient {
+        ArmClient::with_transport(config, Box::new(transport.clone()))
     }
 
     /// The two token answers every registry call starts with.
@@ -1119,6 +1145,13 @@ pub(crate) mod tests {
         }
     }
 
+    fn registry_named(name: &str) -> Registry {
+        Registry {
+            name: name.to_owned(),
+            ..registry_of("acr.azurecr.io")
+        }
+    }
+
     fn vault_of(uri: &str) -> Vault {
         Vault {
             id: "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv"
@@ -1140,35 +1173,133 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_subscription_comes_from_the_flag_then_the_variable_then_az_and_the_refusal_names_all_three()
-     {
-        let flagged = ArmConfig::resolve_with(
-            Some("  from-flag  ".to_owned()),
-            Some("from-env".to_owned()),
-            || Ok("from-az".to_owned()),
-        )
+    fn az_is_asked_only_when_nothing_named_a_subscription_and_the_refusal_says_where_to_name_one() {
+        let named = ArmConfig {
+            subscriptions: vec!["  sub-1  ".to_owned(), "sub-2".to_owned()],
+            ..ArmConfig::default()
+        }
+        .resolve_with(|| panic!("az was asked with a subscription already named"))
         .unwrap();
-        assert_eq!(flagged.subscription, "from-flag");
+        assert_eq!(named.subscriptions, ["  sub-1  ", "sub-2"]);
 
-        let from_env = ArmConfig::resolve_with(None, Some("from-env".to_owned()), || {
-            Ok("from-az".to_owned())
-        })
+        // A subscription written blank is not an answer, so the CLI is.
+        let from_az = ArmConfig {
+            subscriptions: vec!["  ".to_owned()],
+            registries: vec!["acrdev".to_owned()],
+            ..ArmConfig::default()
+        }
+        .resolve_with(|| Ok(" from-az\n".to_owned()))
         .unwrap();
-        assert_eq!(from_env.subscription, "from-env");
+        assert_eq!(from_az.subscriptions, ["from-az"]);
+        assert_eq!(from_az.registries, ["acrdev"], "the allowlist travels on");
 
-        // A flag or a variable set to nothing is not an answer.
-        let from_az = ArmConfig::resolve_with(Some("  ".to_owned()), Some(String::new()), || {
-            Ok(" from-az\n".to_owned())
-        })
-        .unwrap();
-        assert_eq!(from_az.subscription, "from-az");
-
-        let refused = ArmConfig::resolve_with(None, None, || Err(anyhow!("az is not signed in")))
+        let refused = ArmConfig::default()
+            .resolve_with(|| Err(anyhow!("az is not signed in")))
             .unwrap_err()
             .to_string();
         assert!(refused.contains("--subscription"), "{refused}");
+        assert!(refused.contains("config.toml"), "{refused}");
         assert!(refused.contains("TICKET_TUI_SUBSCRIPTION"), "{refused}");
         assert!(refused.contains("az account set"), "{refused}");
+    }
+
+    #[test]
+    fn an_allowlist_keeps_only_what_it_names_in_its_own_order_whatever_the_case() {
+        let registries = vec![
+            registry_named("acrprod"),
+            registry_named("acrdev"),
+            registry_named("acrqa"),
+        ];
+        let names = ["ACRQA".to_owned(), "acrdev".to_owned()];
+        assert_eq!(
+            allowed(registries.clone(), &names, |registry| registry
+                .name
+                .as_str())
+            .iter()
+            .map(|registry| registry.name.as_str())
+            .collect::<Vec<_>>(),
+            ["acrqa", "acrdev"],
+            "the allowlist's order, not the subscription's"
+        );
+        assert_eq!(
+            allowed(registries.clone(), &["ghcr".to_owned()], |registry| {
+                registry.name.as_str()
+            })
+            .len(),
+            0,
+            "a name the subscriptions do not hold is simply absent"
+        );
+        assert_eq!(
+            allowed(registries.clone(), &[], |registry| registry.name.as_str()).len(),
+            3,
+            "no allowlist keeps everything"
+        );
+    }
+
+    #[test]
+    fn every_subscription_is_queried_at_once_and_an_allowlist_narrows_what_comes_back() {
+        let resource = |kind: &str, name: &str| {
+            json!({
+                "id": format!("/subscriptions/sub-1/resourceGroups/rg/providers/{kind}/{name}"),
+                "name": name,
+                "type": if kind.contains("ContainerRegistry") {
+                    "microsoft.containerregistry/registries"
+                } else {
+                    "microsoft.keyvault/vaults"
+                },
+                "resourceGroup": "rg",
+                "location": "westeurope",
+                "sku": "Premium",
+                "loginServer": format!("{name}.azurecr.io"),
+                "vaultUri": format!("https://{name}.vault.azure.net/"),
+            })
+        };
+        let transport = FakeHttp::ok(&[json!({
+            "data": [
+                resource("Microsoft.ContainerRegistry/registries", "acrdev"),
+                resource("Microsoft.ContainerRegistry/registries", "acrqa"),
+                resource("Microsoft.KeyVault/vaults", "kv-dev"),
+                resource("Microsoft.KeyVault/vaults", "kv-qa"),
+            ],
+        })]);
+        let inventory = client_for(
+            &transport,
+            ArmConfig {
+                subscriptions: vec!["sub-1".to_owned(), "sub-2".to_owned()],
+                registries: vec!["ACRQA".to_owned()],
+                vaults: vec!["kv-qa".to_owned(), "kv-dev".to_owned()],
+            },
+        )
+        .inventory()
+        .unwrap();
+
+        assert_eq!(
+            inventory
+                .registries
+                .iter()
+                .map(|registry| registry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["acrqa"],
+            "only what the file named, whatever the case"
+        );
+        assert_eq!(
+            inventory
+                .vaults
+                .iter()
+                .map(|vault| vault.name.as_str())
+                .collect::<Vec<_>>(),
+            ["kv-qa", "kv-dev"],
+            "in the order the file named them"
+        );
+
+        let Some(Body::Json(body)) = &transport.sent()[0].body else {
+            panic!("the query was not a JSON post");
+        };
+        assert_eq!(
+            body["subscriptions"],
+            json!(["sub-1", "sub-2"]),
+            "one query over every subscription rather than one query each"
+        );
     }
 
     #[test]

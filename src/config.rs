@@ -1,9 +1,22 @@
-//! `config.toml`: the file a user — or the `theme` tool — writes to shape the
-//! TUI. It lives in `$XDG_CONFIG_HOME/ticket-tui/` (`~/.config` by default, on
-//! macOS too, because that is where every other terminal program keeps its
-//! own), and it is optional: a missing file is the default configuration.
+//! `config.toml`: the one file a user — or the `theme` tool — writes to say
+//! where the work is and how the TUI should look. It lives in
+//! `$XDG_CONFIG_HOME/ticket-tui/` (`~/.config` by default, on macOS too,
+//! because that is where every other terminal program keeps its own), and it
+//! is optional: a missing file is the default configuration.
 //!
 //! ```toml
+//! [devops]                   # tabs 1 to 4, and every subcommand
+//! org = "myorg"              # slug or https://dev.azure.com/myorg
+//! project = "ISTO"           # where the work items live
+//! code_project = "Fiquants"  # repos, pull requests and pipelines; left out = project
+//! query = "[System.AreaPath] UNDER 'ISTO\\Team'"   # optional WIQL scope on every pull
+//! workspace = "~/Development"                      # where clones live
+//!
+//! [azure]                    # tabs 6 ACR and 7 Key Vault
+//! subscriptions = ["dev-guid", "qa-guid"]   # left out: whatever `az account show` says
+//! registries = ["acrdev", "acrqa"]          # optional: only these, in this order
+//! vaults = ["kv-dev", "kv-qa"]              # optional: only these, in this order
+//!
 //! [theme]
 //! preset = "custom"          # terminal · terminal-light · mono · custom
 //!
@@ -32,8 +45,10 @@
 //! namespaces = ["orders"]    # left out or empty: --all-namespaces
 //! ```
 //!
-//! Keys this build does not know are ignored, so the table can grow without
-//! an older binary refusing the file.
+//! Every value here is a default: a flag or a `TICKET_TUI_*` variable still
+//! wins over the file, and what none of the three say is left for the Azure
+//! CLI to answer. Keys this build does not know are ignored, so the file can
+//! grow without an older binary refusing it.
 
 use std::path::{Path, PathBuf};
 
@@ -45,9 +60,57 @@ use serde::{Deserialize, Deserializer};
 pub struct Config {
     #[serde(default)]
     pub theme: ThemeSection,
+    /// Where the work items and the code live, when the file says.
+    #[serde(default)]
+    pub devops: DevOps,
+    /// What the ACR and Key Vault tabs read, when the file says.
+    #[serde(default)]
+    pub azure: Azure,
     /// The clusters the AKS tab reads, in the order the file lists them.
     #[serde(default)]
     pub clusters: Vec<Cluster>,
+}
+
+/// The Azure DevOps side of the file. Everything is optional: what is left out
+/// falls back to a flag, a variable, or `az devops configure`.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+pub struct DevOps {
+    /// Organization slug, or the `https://dev.azure.com/...` URL it is in.
+    #[serde(default)]
+    pub org: Option<String>,
+    /// The project the work items live in.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// The project the repositories, pull requests and pipelines live in.
+    /// Left out, they live in the project above.
+    #[serde(default)]
+    pub code_project: Option<String>,
+    /// One extra WIQL condition ANDed into every pull.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Where the Repos tab looks for clones and makes new ones. A leading
+    /// `~/` is the home directory.
+    #[serde(default)]
+    pub workspace: Option<PathBuf>,
+}
+
+/// The subscription side of the file: which subscriptions the ACR and Key
+/// Vault tabs read, and which of the resources in them are worth listing. An
+/// empty list is no opinion at all rather than an empty tab.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+pub struct Azure {
+    /// The subscription ids to read. Left out: whichever one the Azure CLI is
+    /// set to.
+    #[serde(default)]
+    pub subscriptions: Vec<String>,
+    /// Only these registries, in this order. Left out: every one the
+    /// subscriptions hold.
+    #[serde(default)]
+    pub registries: Vec<String>,
+    /// Only these vaults, in this order. Left out: every one the
+    /// subscriptions hold.
+    #[serde(default)]
+    pub vaults: Vec<String>,
 }
 
 /// One cluster the AKS tab reads: what to call it, the kubeconfig context
@@ -201,6 +264,19 @@ fn config_home(xdg: Option<PathBuf>, home: Option<PathBuf>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".config"))
 }
 
+/// A leading `~/` — or a bare `~` — is the home directory; every other path
+/// is taken as it was written. Nothing else is expanded: this is one file
+/// written by hand, not a shell.
+fn expand_home(path: &Path, home: Option<PathBuf>) -> PathBuf {
+    let Some(home) = home else {
+        return path.to_path_buf();
+    };
+    match path.strip_prefix("~") {
+        Ok(rest) => home.join(rest),
+        Err(_) => path.to_path_buf(),
+    }
+}
+
 /// Reads the file, or the default configuration when there is none.
 pub fn load(path: &Path) -> Result<Config> {
     match std::fs::read_to_string(path) {
@@ -211,8 +287,34 @@ pub fn load(path: &Path) -> Result<Config> {
 }
 
 pub fn parse(source: &str) -> Result<Config> {
-    let config: Config =
+    let mut config: Config =
         toml::from_str(source).map_err(|error| anyhow::anyhow!("{}", error.message()))?;
+    // A value written blank is a mistake rather than an opinion: it would
+    // otherwise mask the flag, the variable and the CLI default behind it.
+    for (key, value) in [
+        ("devops.org", config.devops.org.as_deref()),
+        ("devops.project", config.devops.project.as_deref()),
+        ("devops.code_project", config.devops.code_project.as_deref()),
+        ("devops.query", config.devops.query.as_deref()),
+    ] {
+        if value.is_some_and(|value| value.trim().is_empty()) {
+            bail!("{key} is blank; give it a value or leave it out");
+        }
+    }
+    for (key, names) in [
+        ("azure.subscriptions", &config.azure.subscriptions),
+        ("azure.registries", &config.azure.registries),
+        ("azure.vaults", &config.azure.vaults),
+    ] {
+        if names.iter().any(|name| name.trim().is_empty()) {
+            bail!("{key} holds a blank name; give it a value or leave it out");
+        }
+    }
+    config.devops.workspace = config
+        .devops
+        .workspace
+        .take()
+        .map(|path| expand_home(&path, std::env::var_os("HOME").map(PathBuf::from)));
     for (index, cluster) in config.clusters.iter().enumerate() {
         if cluster.name.trim().is_empty() || cluster.context.trim().is_empty() {
             bail!("clusters[{index}] needs a name and a context");
@@ -312,6 +414,57 @@ ansi = ["#0b0d14"]
         )
         .unwrap_err();
         assert_eq!(format!("{error:#}"), "two clusters are called \"qa\"");
+    }
+
+    #[test]
+    fn the_devops_and_azure_tables_parse_and_a_blank_value_is_refused() {
+        let config = parse(
+            "[devops]\norg = \"myorg\"\nproject = \"ISTO\"\ncode_project = \"Fiquants\"\nquery = \"[System.Id] > 1\"\n\n[azure]\nsubscriptions = [\"dev\", \"qa\"]\nregistries = [\"acrdev\"]\nvaults = [\"kv-dev\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.devops.org.as_deref(), Some("myorg"));
+        assert_eq!(config.devops.project.as_deref(), Some("ISTO"));
+        assert_eq!(config.devops.code_project.as_deref(), Some("Fiquants"));
+        assert_eq!(config.devops.query.as_deref(), Some("[System.Id] > 1"));
+        assert_eq!(config.azure.subscriptions, ["dev", "qa"]);
+        assert_eq!(config.azure.registries, ["acrdev"]);
+        assert_eq!(config.azure.vaults, ["kv-dev"]);
+
+        // Left out is the whole point: an older file, or one that only paints,
+        // says nothing about either.
+        let empty = parse("[theme]\n").unwrap();
+        assert_eq!(empty.devops, DevOps::default());
+        assert_eq!(empty.azure, Azure::default());
+
+        assert_eq!(
+            format!("{:#}", parse("[devops]\nproject = \"  \"\n").unwrap_err()),
+            "devops.project is blank; give it a value or leave it out"
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                parse("[azure]\nvaults = [\"kv\", \"\"]\n").unwrap_err()
+            ),
+            "azure.vaults holds a blank name; give it a value or leave it out"
+        );
+    }
+
+    #[test]
+    fn a_workspace_written_with_a_tilde_is_the_home_directory() {
+        assert_eq!(
+            expand_home(Path::new("~/Development"), Some("/home/j".into())),
+            PathBuf::from("/home/j/Development")
+        );
+        assert_eq!(
+            expand_home(Path::new("/srv/code"), Some("/home/j".into())),
+            PathBuf::from("/srv/code"),
+            "an absolute path is taken as written"
+        );
+        assert_eq!(
+            expand_home(Path::new("~/Development"), None),
+            PathBuf::from("~/Development"),
+            "with no home to expand to, the path stands as written"
+        );
     }
 
     #[test]

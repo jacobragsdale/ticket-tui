@@ -42,13 +42,21 @@ else it does is local.
 ## Run it
 
 You need Rust 1.88 or newer, a macOS or Linux terminal, and access to an Azure
-DevOps project.
+DevOps project. One edited file is the whole setup:
 
 ```console
+mkdir -p ~/.config/ticket-tui && cp config.example.toml ~/.config/ticket-tui/config.toml
 az login                                                  # ticket-tui borrows this login
-cargo run --release -- sync --org my-org --project my-project
+cargo run --release -- sync                               # fills the database
 cargo run --release                                       # later runs open at once
 ```
+
+`config.toml` names the organization, the project the work items live in, the
+project the code lives in, the subscriptions the ACR and Key Vault tabs read,
+and the clusters the AKS tab reads. Every one of them can still be overridden
+by a flag — `--org`, `--project`, `--code-project`, `--subscription` — or by
+the matching `TICKET_TUI_*` variable, and whatever none of the three name is
+left for the Azure CLI to answer.
 
 The first `sync` fills the database; every run after it opens immediately and
 pulls in the background. Without a configured organization the TUI runs
@@ -85,16 +93,47 @@ The database is durable and lives in the platform data directory —
 interface, not a scratch cache: other tools and agent skills read it directly,
 and the TUI publishes a JSON file beside it naming what is on screen.
 
-`~/.config/ticket-tui/config.toml` is optional and holds the colour theme: a
-`[theme.custom]` palette in the vocabulary of the `theme` tool, which applies
-one palette to every program on the machine, writes this file for you, and
-repaints a running ticket-tui when it changes. Without one the
-sixteen ANSI colours of the terminal show through; `--theme terminal-light`
-suits a white ground, and `NO_COLOR` turns colour off.
+`~/.config/ticket-tui/config.toml` is optional and is the one file worth
+editing; [config.example.toml](config.example.toml) is a commented copy of the
+whole of it.
+
+`[devops]` says where the work is. `org` takes a slug or a
+`https://dev.azure.com/...` URL, `project` is where the work items live, and
+`code_project` is where the repositories, pull requests and pipelines live —
+left out, they live in the same project, which is what one project in one place
+has always meant. `query` is one WIQL condition ANDed into every pull, and
+`workspace` is where the Repos tab looks for clones, with a leading `~/` read
+as the home directory:
+
+```toml
+[devops]
+org = "myorg"
+project = "ISTO"
+code_project = "Fiquants"
+```
+
+`[azure]` says what the ACR and Key Vault tabs read. They address an **Azure
+subscription** rather than the Azure DevOps project, so they need `az login`;
+an Azure DevOps personal access token does not reach a subscription, and a
+tenant other than the login's default wants `az login --tenant <tenant>`.
+`subscriptions` may name several at once, and `registries` and `vaults` narrow
+what is listed to the ones worth seeing, in the order they are written:
+
+```toml
+[azure]
+subscriptions = ["<dev-guid>", "<qa-guid>"]
+registries = ["acrdev", "acrqa"]
+vaults = ["kv-dev", "kv-qa"]
+```
+
+Left out, the subscription is `--subscription <id>`, else
+`TICKET_TUI_SUBSCRIPTION`, else whichever one `az account set` left the Azure
+CLI on; with none of the four both tabs draw empty and say why.
 
 The same file names the clusters the AKS tab reads, one table each — the name
 the tab shows, the kubeconfig context `kubectl` reaches it by, and the
-namespaces to read, or none for all of them:
+namespaces to read, or none for all of them. The contexts are the ones
+`az aks get-credentials` writes into the kubeconfig:
 
 ```toml
 [[clusters]]
@@ -103,12 +142,11 @@ context = "aks-qa"
 namespaces = ["orders", "billing"]
 ```
 
-The ACR and Key Vault tabs read one **Azure subscription** rather than the
-Azure DevOps project, so they need `az login` and a subscription to read:
-`--subscription <id>`, else `TICKET_TUI_SUBSCRIPTION`, else whichever one `az
-account set` left the Azure CLI on. With none of the three both tabs draw empty
-and say why. An Azure DevOps personal access token does not reach a
-subscription.
+And it holds the colour theme: a `[theme.custom]` palette in the vocabulary of
+the `theme` tool, which applies one palette to every program on the machine,
+writes this file for you, and repaints a running ticket-tui when it changes.
+Without one the sixteen ANSI colours of the terminal show through; `--theme
+terminal-light` suits a white ground, and `NO_COLOR` turns colour off.
 
 `ticket-tui` is also a CLI — `list`, `show`, `edit`, `comment`, `create`,
 `repos`, `prs`, `pipelines`, `runs`, `approvals`, `pods`, `acr`, `vaults`,

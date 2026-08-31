@@ -64,7 +64,12 @@ use polling::*;
 mod tests;
 
 pub(super) fn run() -> Result<()> {
-    let cli = Cli::parse();
+    // One file behind every run: the flags and the TICKET_TUI_* variables
+    // still win over it, and a file that will not parse stops the TUI and
+    // every subcommand alike rather than starting somewhere nobody asked for.
+    // The mid-run reload keeps reporting a broken file in the footer instead.
+    let file = ticket_tui::config::load(&ticket_tui::config::default_path())?;
+    let cli = Cli::parse().with_file_defaults(&file, |key| std::env::var(key).ok());
     // Every subcommand does its one thing and exits; only a bare invocation
     // opens the TUI.
     if let Some(command) = &cli.command {
@@ -87,11 +92,15 @@ pub(super) fn run() -> Result<()> {
         .zip(repository.meta(db::PROJECT_KEY)?);
     // An unresolved organization is not a reason to refuse to start: the TUI
     // browses the database offline and says why it cannot sync.
-    let (config, offline_reason) =
-        match AzureConfig::resolve(cli.org.clone(), cli.project.clone(), cli.query.clone()) {
-            Ok(config) => (Some(config), None),
-            Err(error) => (None, Some(format!("{error:#}"))),
-        };
+    let (config, offline_reason) = match AzureConfig::resolve(
+        cli.org.clone(),
+        cli.project.clone(),
+        cli.code_project.clone(),
+        cli.query.clone(),
+    ) {
+        Ok(config) => (Some(config), None),
+        Err(error) => (None, Some(format!("{error:#}"))),
+    };
 
     let tickets = repository.load_all()?;
     let graph = repository.load_graph()?;
@@ -179,20 +188,16 @@ pub(super) fn run() -> Result<()> {
         },
         aks: AksRuntime::default(),
         arm: ArmRuntime::default(),
-        // Which subscription the ACR and Key Vault tabs read: the flag, then
-        // the variable, and nothing else. Asking the Azure CLI costs a
-        // shell-out, so the worker thread does that instead — and only once
+        // Which subscriptions the ACR and Key Vault tabs read, and which of
+        // the registries and vaults in them are worth listing: the flags, the
+        // variable and the file, and nothing else. Asking the Azure CLI costs
+        // a shell-out, so the worker thread does that instead — and only once
         // one of those tabs is opened.
-        arm_config: ArmConfig::from_settings(
-            cli.subscription.clone(),
-            std::env::var("TICKET_TUI_SUBSCRIPTION").ok(),
-        ),
+        arm_config: cli.arm_config(),
     };
     app.shell.set_arm_subscription(
-        runtime
-            .arm_config
-            .as_ref()
-            .map(|config| config.subscription.clone()),
+        (!runtime.arm_config.subscriptions.is_empty())
+            .then(|| runtime.arm_config.subscriptions.join(", ")),
     );
     if let Some(config) = config.filter(|_| wrong_project.is_none()) {
         runtime.worker = Some(SyncHandle::spawn(
@@ -343,6 +348,11 @@ fn sync_source(config: &AzureConfig, refresh: u64) -> String {
         "on request".to_owned()
     };
     let mut source = format!("{}/{} {timer}", config.organization, config.project);
+    // Said only when the code is somewhere else: one project in one place is
+    // what the line has always meant.
+    if config.code_project != config.project {
+        source.push_str(&format!(" · code {}", config.code_project));
+    }
     if let Some(scope) = &config.scope {
         source.push_str(&format!(" · scope ({scope})"));
     }

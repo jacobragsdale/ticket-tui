@@ -35,8 +35,16 @@ things a pull stores.
 `ticket-tui` if it is installed, else `cargo run -q --release --` from the root
 of a checkout of this repository — which is also where the `uv run .agents/…`
 paths below resolve from. Every example writes `ticket-tui`. `--database`,
-`--org`, `--project` and `--workspace` are global and may be written either side
-of the subcommand. Errors go to stderr as `error: …` and exit 1.
+`--org`, `--project`, `--code-project`, `--workspace` and `--subscription` —
+the last repeatable — are global and may be written either side of the
+subcommand. Each falls back to `TICKET_TUI_*` and then to
+`~/.config/ticket-tui/config.toml`, which is where a machine says its
+organization, its projects and its subscriptions once, so none of them normally
+needs writing. Errors go to stderr as `error: …` and exit 1.
+
+The work items may live in one project and the code in another: `project` in
+that file is the board, `code_project` is the repositories, pull requests and
+pipelines, and left out they are the same project.
 
 ## Read the backlog
 
@@ -159,12 +167,18 @@ ticket-tui keys list --vault atlas-kv
 ticket-tui certs list --vault atlas-kv                 # with how far off each expiry is
 ```
 
-The subscription is `--subscription ID`, else `TICKET_TUI_SUBSCRIPTION`, else
-whichever one `az account set` left the CLI on; with none of the three every one
-of these commands is an error rather than an empty listing. `az login` must have
-happened — a personal access token opens Azure DevOps and nothing else, so a
-PAT-only run reads no subscription at all and the live context says so in
-`arm.offline` and `arm.last_error`.
+The subscriptions are `--subscription ID`, repeatable, else
+`TICKET_TUI_SUBSCRIPTION` naming one, else `subscriptions` under `[azure]` in
+`~/.config/ticket-tui/config.toml` naming several, else whichever one
+`az account set` left the CLI on; with none of the four every one of these
+commands is an error rather than an empty listing. `registries` and `vaults` in
+that same table narrow the listings to the ones worth seeing, in the order they
+are written, so `acr list` and `vaults list` show what matched rather than
+everything fifty subscriptions hold. `az login` must have happened — a personal
+access token opens Azure DevOps and nothing else, so a PAT-only run reads no
+subscription at all and the live context says so in `arm.offline` and
+`arm.last_error`; a tenant other than the login's default wants
+`az login --tenant TENANT`.
 
 All eleven forms are read-only. There is no untag, no delete, no create or set,
 no IAM and no replication here; the `portal_url` that `acr show` and `vaults

@@ -34,6 +34,11 @@ Last updated 2026-08-31. The backlog itself lives in Azure DevOps
   the context, the skill and these docs). Tab `7` lists the subscription's
   vaults, drills into one vault's secrets, keys and certificates, and reveals
   one secret's value on `R` for a minute and nowhere else.
+- **One `config.toml` now holds the whole setup** (#734, 2026-08-31; see
+  "Configuration, 2026-08-31" below): `[devops]` names the organization, the
+  project the work items live in and the `code_project` the repositories, pull
+  requests and pipelines live in; `[azure]` names the subscriptions and,
+  optionally, which registries and vaults out of them are worth listing.
 - **The review round over all three new tabs is done** (#733, 2026-08-31; see
   "Review round, 2026-08-31" below): three read-only reviewers over
   `0745f38..main` plus a pty walk-through of every AKS verb against
@@ -205,6 +210,40 @@ Also: the CLI now resolves query sentinels through the same `MatchContext` the
 TUI uses, and refuses one it cannot resolve rather than returning an empty list.
 `ticket-tui sync` caches the classification trees, which only opening a picker
 used to do.
+
+## Configuration, 2026-08-31 (#734)
+
+`config.toml` is now the one file a machine is set up with, and
+`config.example.toml` at the root is a commented copy of the whole of it. Two
+tables joined the theme and `[[clusters]]`, both optional and both ignored by
+an older build:
+
+- `[devops]` — `org`, `project` (where the work items live), `code_project`
+  (where the repositories, pull requests and pipelines live; left out, the
+  project), `query`, and `workspace`, whose leading `~/` is the home directory.
+- `[azure]` — `subscriptions`, and the optional `registries` and `vaults`
+  allowlists, which keep only what they name, in the order they name it,
+  without regard to case.
+
+The order for every setting is flag → `TICKET_TUI_*` → `config.toml` → the
+Azure CLI (`az devops configure`, `az account show`), settled once in
+`Cli::with_file_defaults` straight after `Cli::parse()`, so the TUI and every
+subcommand read the same file. A file that will not parse is a startup error
+for all of them; the mid-run reload in `run/polling.rs` still reports one in
+the footer.
+
+`AzureConfig` gained `code_project` and `AzureClient::code_url`, which is what
+every `git`, `build`, `pipelines`, `approvals` and `pullrequests` URL is built
+from — the `wit`, `wiql`, teams and work-item URLs keep `project`, and the MSA
+pass-through header is unchanged. `ArmConfig` became
+`{ subscriptions, registries, vaults }`: one Resource Graph query covers every
+subscription at once, `az account show` is asked only when nothing named one,
+and the status bar joins the subscriptions with `, `.
+
+Untouched on purpose: the theme engine, `[[clusters]]`, the process vocabulary,
+and `X-VSS-ForceMsaPassThrough`. Still unproven against a real split-project
+organization or a multi-subscription tenant — there is neither on this machine,
+so both paths are covered by tests only.
 
 ## Review round, 2026-08-31
 

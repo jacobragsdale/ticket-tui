@@ -215,6 +215,7 @@ fn submitting_a_form_sends_the_fields_it_holds_and_the_parent_as_a_link() {
     let config = crate::azure::AzureConfig {
         organization: "demo".into(),
         project: "atlas".into(),
+        code_project: "atlas".into(),
         scope: None,
     };
     let document = crate::azure::create_document(&patch, parent, &config);

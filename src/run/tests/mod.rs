@@ -255,6 +255,7 @@ fn synced_app(path: &Path, source: FakeAzure) -> (App, SqliteTicketRepository, S
         config: Some(AzureConfig {
             organization: "example-org".into(),
             project: "atlas".into(),
+            code_project: "atlas".into(),
             scope: None,
         }),
         offline_reason: None,
@@ -266,7 +267,7 @@ fn synced_app(path: &Path, source: FakeAzure) -> (App, SqliteTicketRepository, S
         local: LocalRuntime::default(),
         aks: AksRuntime::default(),
         arm: ArmRuntime::default(),
-        arm_config: None,
+        arm_config: ArmConfig::default(),
     };
     (app, repository, runtime)
 }

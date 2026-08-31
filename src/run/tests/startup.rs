@@ -79,6 +79,7 @@ fn a_database_another_project_filled_is_browsed_rather_than_replaced() {
     let config = AzureConfig {
         organization: "example-org".into(),
         project: "atlas".into(),
+        code_project: "atlas".into(),
         scope: None,
     };
 
@@ -121,7 +122,7 @@ fn a_database_another_project_filled_is_browsed_rather_than_replaced() {
         local: LocalRuntime::default(),
         aks: AksRuntime::default(),
         arm: ArmRuntime::default(),
-        arm_config: None,
+        arm_config: ArmConfig::default(),
     };
 
     handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
@@ -143,6 +144,7 @@ fn the_database_overlay_names_the_project_the_timer_and_the_scope() {
     let mut config = AzureConfig {
         organization: "example-org".into(),
         project: "atlas".into(),
+        code_project: "atlas".into(),
         scope: None,
     };
     assert_eq!(sync_source(&config, 60), "example-org/atlas every 60s");
@@ -151,6 +153,14 @@ fn the_database_overlay_names_the_project_the_timer_and_the_scope() {
         "example-org/atlas on request",
         "--refresh 0 leaves r as the only way to pull"
     );
+
+    config.code_project = "fiquants".into();
+    assert_eq!(
+        sync_source(&config, 60),
+        "example-org/atlas every 60s · code fiquants",
+        "the code project is named only when it is somewhere else"
+    );
+    config.code_project.clone_from(&config.project);
 
     config.scope = Some("[System.ChangedDate] > @today-180".into());
     assert_eq!(
@@ -183,7 +193,7 @@ fn an_offline_run_explains_why_it_cannot_sync_and_says_nothing_in_the_title() {
         local: LocalRuntime::default(),
         aks: AksRuntime::default(),
         arm: ArmRuntime::default(),
-        arm_config: None,
+        arm_config: ArmConfig::default(),
     };
 
     handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
