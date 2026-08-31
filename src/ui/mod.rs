@@ -44,8 +44,8 @@ mod widgets;
 
 use details::{assigned_to_me_style, field_label, field_line, render_details, state_glyph};
 use overlays::{
-    ListOverlay, column_rows, link_line, overlay_line, overlay_row, overlay_row_width, pill_style,
-    render_chips, render_column_overlay, render_facet_bar, render_facet_menu,
+    ListOverlay, bar_fields, column_rows, link_line, overlay_line, overlay_row, overlay_row_width,
+    pill_style, render_chips, render_column_overlay, render_facet_bar, render_facet_menu,
     render_filter_overlay, render_help_popup, render_info_overlay, render_list_overlay,
     render_palette, render_sort_popup, render_sprint_overlay, render_views_overlay,
     terminate_underline,
@@ -291,6 +291,9 @@ pub(crate) fn render_screen(
 }
 
 fn render_pass(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, shell: &mut Shell, area: Rect) {
+    // Which fields are pills decides which filters are chips, so the bar is
+    // measured before the rows are laid out.
+    screen.facet_bar.shown = bar_fields(screen, area.width);
     let chip_height =
         u16::from(screen.finished_hidden() || !screen.overflow_filter_tokens().is_empty());
     let sections = Layout::vertical([
@@ -361,7 +364,7 @@ fn render_search(
             area,
             text: screen.query(),
             cursor: screen.query_cursor(),
-            placeholder: "Type / to search, or pick State, Type, Tags, or Assignee below",
+            placeholder: "Type / to search, or pick a filter from the bar below",
             active: screen.mode == WorkItemMode::Search,
             pending: screen.search_pending,
             clearable: true,

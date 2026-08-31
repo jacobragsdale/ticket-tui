@@ -23,6 +23,10 @@ pub struct FacetBar {
     pub field_index: usize,
     pub value_index: usize,
     pub scroll: ScrollState,
+    /// The pills the last frame had room to draw. The bar takes as many of
+    /// [`FilterField::BAR`] as fit, so what is a pill and what falls to the
+    /// Filters overlay is a question of width.
+    pub shown: Vec<FilterField>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -107,7 +111,7 @@ impl WorkItemsScreen {
             .enumerate()
             .filter(|(_, token)| match token {
                 FilterToken::Bookmarked => true,
-                FilterToken::Field { field, .. } => !field.on_bar(),
+                FilterToken::Field { field, .. } => !self.facet_bar.shown.contains(field),
             })
             .collect()
     }
@@ -476,7 +480,7 @@ impl WorkItemsScreen {
     }
 
     pub(super) fn open_facets(&mut self, field_index: usize) {
-        self.facet_bar.field_index = field_index.min(FilterField::BAR.len());
+        self.facet_bar.field_index = field_index.min(self.facet_bar.shown.len());
         self.facet_bar.value_index = 0;
         self.mode = WorkItemMode::Facets;
     }
@@ -491,7 +495,7 @@ impl WorkItemsScreen {
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 self.facet_bar.field_index =
-                    (self.facet_bar.field_index + 1).min(FilterField::BAR.len());
+                    (self.facet_bar.field_index + 1).min(self.facet_bar.shown.len());
                 self.facet_bar.value_index = 0;
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -504,7 +508,7 @@ impl WorkItemsScreen {
                 }
             }
             KeyCode::Char(' ') | KeyCode::Enter => {
-                if self.facet_bar.field_index >= FilterField::BAR.len() {
+                if self.facet_bar.field_index >= self.facet_bar.shown.len() {
                     self.open_filters();
                 } else {
                     self.toggle_current_bar_facet(shell);
@@ -520,7 +524,10 @@ impl WorkItemsScreen {
     }
 
     fn focused_bar_field(&self) -> Option<FilterField> {
-        FilterField::BAR.get(self.facet_bar.field_index).copied()
+        self.facet_bar
+            .shown
+            .get(self.facet_bar.field_index)
+            .copied()
     }
 
     fn focused_bar_facets(&self, shell: &Shell) -> Vec<FacetValue> {

@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn the_bar_draws_every_pill_that_fits_and_leaves_the_rest_to_the_chips() {
+    let mut app = App::new(vec![ticket()]);
+    let wide = render_text(200, 24, &mut app);
+    assert_eq!(app.work_items.facet_bar.shown, FilterField::BAR.to_vec());
+    assert!(wide.contains("Created"), "a wide bar holds the last pill");
+
+    // Narrow enough that the fields at the end of the bar have nowhere to go,
+    // so a filter on one of them is drawn as a chip instead.
+    app.work_items
+        .set_query(&mut app.shell, "created:<7d".into());
+    let narrow = render_text(40, 24, &mut app);
+    assert!(
+        !app.work_items
+            .facet_bar
+            .shown
+            .contains(&FilterField::Created)
+    );
+    assert!(narrow.contains("created:<7d ×"), "{narrow}");
+}
+
+#[test]
 fn facet_pills_open_their_menu_and_the_filter_overlay_maps_scrolled_clicks() {
     let mut app = App::new(vec![ticket()]);
     let text = render_text(110, 24, &mut app);
@@ -16,7 +37,9 @@ fn facet_pills_open_their_menu_and_the_filter_overlay_maps_scrolled_clicks() {
     click(&mut app, pill.x, pill.y);
     assert_eq!(app.work_items.mode, WorkItemMode::Facets);
     assert_eq!(
-        FilterField::BAR
+        app.work_items
+            .facet_bar
+            .shown
             .get(app.work_items.facet_bar.field_index)
             .copied(),
         Some(FilterField::Type)

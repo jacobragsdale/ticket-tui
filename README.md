@@ -12,8 +12,8 @@ else it does is local.
 
 ```
  1 Work items  2 Repos  3 Pull requests  4 Pipelines                       Actions  ?
-/ Type / to search, or pick State, Type, Tags, or Assignee below
- State ▾   Type ▾   Tags ▾   Assignee ▾   +
+/ Type / to search, or pick a filter from the bar below
+ State ▾   Assignee ▾   Iteration ▾   Type ▾   Priority ▾   Tags ▾   +
 ╭ Tickets 116/116 · Changed ↑ ───────────────────────────────────────────────────────╮
 │       ID      Title                       State      Type           Pri Changed↑   │
 │────────────────────────────────────────────────────────────────────────────────────│

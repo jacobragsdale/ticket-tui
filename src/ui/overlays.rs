@@ -278,6 +278,10 @@ pub(super) fn render_chips(
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// What `More` needs at the end of the bar: ` +N `, the way into every filter
+/// the width could not fit.
+const MORE_PILL_WIDTH: u16 = 5;
+
 pub(super) fn render_facet_bar(
     frame: &mut Frame<'_>,
     screen: &mut WorkItemsScreen,
@@ -289,12 +293,9 @@ pub(super) fn render_facet_bar(
     let mut spans = Vec::new();
     let mut x = area.x;
     let mut remaining = area.width;
-    for (index, field) in FilterField::BAR.iter().enumerate() {
+    for (index, field) in screen.facet_bar.shown.iter().enumerate() {
         let label = facet_pill_label(*field, &filters);
         let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
-        if remaining < width.saturating_add(1) {
-            break;
-        }
         let rect = Rect::new(x, area.y, width, 1);
         shell.hit_regions.push(region(
             rect,
@@ -310,7 +311,7 @@ pub(super) fn render_facet_bar(
         x = x.saturating_add(width.saturating_add(1));
         remaining = remaining.saturating_sub(width.saturating_add(1));
     }
-    if remaining >= 5 {
+    if remaining >= MORE_PILL_WIDTH {
         let more_count = screen.overflow_filter_tokens().len();
         let more = if more_count == 0 {
             " + ".to_owned()
@@ -325,10 +326,32 @@ pub(super) fn render_facet_bar(
             None,
             None,
         ));
-        let selected = focused && screen.facet_bar.field_index >= FilterField::BAR.len();
+        let selected = focused && screen.facet_bar.field_index >= screen.facet_bar.shown.len();
         spans.push(Span::styled(more, pill_style(selected, more_count > 0)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The pills the bar has room for: as many of [`FilterField::BAR`] as fit,
+/// keeping the last few columns for `More` so the way into the rest of the
+/// filters never falls off the end.
+pub(crate) fn bar_fields(screen: &WorkItemsScreen, width: u16) -> Vec<FilterField> {
+    let filters = screen.parsed_query().filters;
+    let mut remaining = width.saturating_sub(MORE_PILL_WIDTH);
+    let mut fields = Vec::new();
+    for field in FilterField::BAR {
+        // Each pill is followed by a space, so it costs a column more than it
+        // draws.
+        let pill = u16::try_from(facet_pill_label(field, &filters).chars().count())
+            .unwrap_or(u16::MAX)
+            .saturating_add(1);
+        if pill > remaining {
+            break;
+        }
+        remaining -= pill;
+        fields.push(field);
+    }
+    fields
 }
 
 pub(super) fn facet_pill_label(
@@ -484,7 +507,12 @@ pub(super) fn render_facet_menu(
     screen: &mut WorkItemsScreen,
     shell: &mut Shell,
 ) {
-    let Some(field) = FilterField::BAR.get(screen.facet_bar.field_index).copied() else {
+    let Some(field) = screen
+        .facet_bar
+        .shown
+        .get(screen.facet_bar.field_index)
+        .copied()
+    else {
         return;
     };
     let facets = screen.facets_for(shell, field);

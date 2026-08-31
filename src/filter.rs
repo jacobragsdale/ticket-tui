@@ -199,7 +199,19 @@ impl FilterField {
         Self::Created,
     ];
 
-    pub const BAR: [Self; 4] = [Self::State, Self::Type, Self::Tags, Self::Assignee];
+    /// The facet pills the bar offers, most-reached-for first. The bar draws
+    /// as many as the width holds and leaves the rest to the Filters overlay.
+    pub const BAR: [Self; 9] = [
+        Self::State,
+        Self::Assignee,
+        Self::Iteration,
+        Self::Type,
+        Self::Priority,
+        Self::Tags,
+        Self::Area,
+        Self::Changed,
+        Self::Created,
+    ];
 
     /// The fields the Filters overlay lists: every one whose values are worth
     /// offering. `id:` is typed or jumped to, never picked off a list as long
@@ -215,11 +227,6 @@ impl FilterField {
         Self::Changed,
         Self::Created,
     ];
-
-    #[must_use]
-    pub const fn on_bar(self) -> bool {
-        matches!(self, Self::State | Self::Type | Self::Tags | Self::Assignee)
-    }
 
     /// Whether the Filters overlay offers a list of this field's values. An id
     /// has as many values as there are rows, which is a list nobody wants.

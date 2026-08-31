@@ -132,7 +132,9 @@ impl WorkItemsScreen {
                     let Some(field) = FilterField::parse(key) else {
                         return AppAction::None;
                     };
-                    let index = FilterField::BAR
+                    let index = self
+                        .facet_bar
+                        .shown
                         .iter()
                         .position(|entry| *entry == field)
                         .unwrap_or_default();

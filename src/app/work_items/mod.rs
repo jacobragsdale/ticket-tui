@@ -431,7 +431,7 @@ impl WorkItemsScreen {
             }
             WorkItemMode::Sort => "↑↓ choose field  ←→ direction  Enter apply  Esc cancel",
             WorkItemMode::Help => "↑↓/jk scroll  PgUp/PgDn page  Home/End jump  ?/Esc close",
-            WorkItemMode::Facets if self.facet_bar.field_index >= FilterField::BAR.len() => {
+            WorkItemMode::Facets if self.facet_bar.field_index >= self.facet_bar.shown.len() => {
                 "←→ field  Enter more filters  Esc back"
             }
             WorkItemMode::Facets => "←→/hl field  ↑↓/jk value  Space toggle  + more  Esc back",
