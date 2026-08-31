@@ -1105,7 +1105,16 @@ pub struct AksHandle {
     requests: Sender<AksRequest>,
     events: Receiver<AksEvent>,
     stopped: Cell<bool>,
+    /// The thread, joined when the handle goes so the stream it holds is
+    /// killed before the process is: a process on its way out runs no
+    /// destructor on another thread.
+    thread: Option<thread::JoinHandle<()>>,
 }
+
+/// How long a quit waits for the worker to put its stream down. A read of
+/// an unreachable cluster can take ten seconds, and a quit is not worth that;
+/// a worker with nothing in hand answers in a millisecond.
+const STOP_GRACE: Duration = Duration::from_secs(2);
 
 impl AksHandle {
     /// Starts the worker on its own thread. It ends when the handle is
@@ -1113,7 +1122,7 @@ impl AksHandle {
     pub fn spawn(source: Box<dyn KubeSource>) -> Result<Self> {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
-        thread::Builder::new()
+        let thread = thread::Builder::new()
             .name("ticket-aks".into())
             .spawn(move || watch(PodWatcher::new(source, event_sender), &request_receiver))
             .context("failed to start the cluster worker")?;
@@ -1121,6 +1130,7 @@ impl AksHandle {
             requests: request_sender,
             events: event_receiver,
             stopped: Cell::new(false),
+            thread: Some(thread),
         })
     }
 
@@ -1140,6 +1150,26 @@ impl AksHandle {
                 (!self.stopped.replace(true)).then_some(AksEvent::Stopped)
             }
         }
+    }
+}
+
+impl Drop for AksHandle {
+    fn drop(&mut self) {
+        let _ = self.requests.send(AksRequest::Stop);
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // Joined from a thread of its own, so the wait can be given up: a
+        // worker mid-read finishes that read first, and the process does not
+        // stand around for it.
+        let (done, finished) = mpsc::channel();
+        let _ = thread::Builder::new()
+            .name("ticket-aks-stop".into())
+            .spawn(move || {
+                let _ = thread.join();
+                let _ = done.send(());
+            });
+        let _ = finished.recv_timeout(STOP_GRACE);
     }
 }
 
@@ -1543,6 +1573,10 @@ pub(crate) mod tests {
         pub deletes: Arc<Mutex<Vec<PodKey>>>,
         pub log_text: Arc<Mutex<String>>,
         pub follows: Arc<Mutex<Vec<LogFollow>>>,
+        /// Whether a follow hands out a real process — `sleep` — so a test
+        /// can see it killed; its pids are kept here.
+        pub with_children: Arc<AtomicBool>,
+        pub children: Arc<Mutex<Vec<u32>>>,
     }
 
     impl FakeKube {
@@ -1595,8 +1629,19 @@ pub(crate) mod tests {
             if target.container.as_deref() == Some("missing") {
                 bail!("container missing is not valid for pod {}", target.key.name);
             }
+            let child = if self.with_children.load(Ordering::SeqCst) {
+                let child = Command::new("sleep")
+                    .arg("30")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .spawn()?;
+                self.children.lock().unwrap().push(child.id());
+                Some(child)
+            } else {
+                None
+            };
             Ok(LogTail {
-                child: None,
+                child,
                 stdout: Box::new(Cursor::new(self.log_text.lock().unwrap().clone())),
                 stderr: Some(Box::new(Cursor::new(String::new()))),
             })
@@ -2074,5 +2119,41 @@ pub(crate) mod tests {
             4,
             "nothing more until the cadence is up"
         );
+    }
+
+    /// Whether a process is still there to be signalled.
+    fn alive(pid: u32) -> bool {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[test]
+    fn dropping_the_handle_kills_the_stream_before_the_process_can_leave_it_behind() {
+        let fake = FakeKube::default();
+        fake.with_children.store(true, Ordering::SeqCst);
+        let handle = AksHandle::spawn(Box::new(fake.clone())).unwrap();
+        handle
+            .send(AksRequest::Clusters(vec![cluster("qa", &["orders"])]))
+            .unwrap();
+        handle
+            .send(AksRequest::Follow(LogFollow {
+                key: key("qa", "a"),
+                container: None,
+                previous: false,
+            }))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fake.children.lock().unwrap().is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let pid = fake.children.lock().unwrap()[0];
+        assert!(alive(pid), "the stream is running");
+        drop(handle);
+        assert!(!alive(pid), "and gone with the handle");
     }
 }

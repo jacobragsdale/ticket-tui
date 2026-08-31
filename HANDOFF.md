@@ -1,6 +1,6 @@
 # Where to pick up
 
-Last updated 2026-08-30. The backlog itself lives in Azure DevOps
+Last updated 2026-08-31. The backlog itself lives in Azure DevOps
 (`jacobragsdale/development`); this file is only the pointer into it. Run
 `ticket-tui` and browse the epics for the current state.
 
@@ -30,18 +30,22 @@ Last updated 2026-08-30. The backlog itself lives in Azure DevOps
 - **The ACR tab is done** (Epic #724). Tab `6` lists the subscription's
   container registries and drills into one registry's repositories, tags and
   manifests, and `ticket-tui acr` is the same read without the TUI.
-- **The Key Vault tab is nearly done** (Epic #725): #730 the tab and #731 the
-  CLI are closed, this ticket (#732) is the context, the skill and these docs,
-  and **#733 is the review round for both ARM tabs** — read it next. Tab `7`
-  lists the subscription's vaults, drills into one vault's secrets, keys and
-  certificates, and reveals one secret's value on `R` for a minute and nowhere
-  else.
+- **The Key Vault tab is done** (Epic #725: #730 the tab, #731 the CLI, #732
+  the context, the skill and these docs). Tab `7` lists the subscription's
+  vaults, drills into one vault's secrets, keys and certificates, and reveals
+  one secret's value on `R` for a minute and nowhere else.
+- **The review round over all three new tabs is done** (#733, 2026-08-31; see
+  "Review round, 2026-08-31" below): three read-only reviewers over
+  `0745f38..main` plus a pty walk-through of every AKS verb against
+  `scripts/fake-kubectl` (`scripts/walk_aks.py`). Everything it confirmed is
+  fixed on `main`, each with the test that would have caught it.
 - **Neither ARM tab has ever been run against a real subscription**: there is
   none reachable from this machine, so `src/arm.rs`, `src/arm_watch.rs`, both
   tabs and all five CLI groups were built against `arm::tests::FakeArm`. See
   "ARM tabs — integration checklist" below for the day one is.
 - The gate is `cargo fmt --check`, `cargo clippy --all-targets --all-features
-  -D warnings`, `cargo test --all-targets` (675 lib + 29 bin tests) and
+  -D warnings`, `cargo test --all-targets` (698 lib + 29 bin tests, one ignored because it
+  shells out to `az`) and
   `cargo build --release`, with the test run repeated under `NO_COLOR=1`,
   `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` — the theme
   matrix, which is real because `Theme::from_env` reads the variable.
@@ -201,6 +205,45 @@ Also: the CLI now resolves query sentinels through the same `MatchContext` the
 TUI uses, and refuses one it cannot resolve rather than returning an empty list.
 `ticket-tui sync` caches the classification trees, which only opening a picker
 used to do.
+
+## Review round, 2026-08-31
+
+The three new tabs (5 AKS, 6 ACR, 7 Key Vault) were read as one change by
+three reviewers — the AKS side, the ARM side, the seams with the rest of the
+app — and the AKS tab was driven live under a pty with `scripts/fake-kubectl`.
+What they confirmed, all fixed in `27464d6` and the commit after it:
+
+- The restart confirm did not take the pointer: a click on the details pane's
+  own `Restart` chip behind the modal deleted the pod, and `c`, `?`, `p`, `i`
+  and the digits reached past the confirm (a click through the Columns editor
+  could then delete it). The modal covers the whole screen on its own layer,
+  and `Screen::modal_open` makes every key answer a confirm first — on the
+  Pipelines and Pull requests confirms too.
+- A `kubectl get pods` sweep blocked every follow, describe and delete sent
+  meanwhile (12 s in the repro): the worker reads one namespace per poll.
+- Narrowing a cluster's `namespaces` left the dropped namespace's pods on the
+  table for ever; a describe that landed after the cursor moved was shown
+  under the new pod and flipped the pane back after `L`; the "earlier lines
+  skipped" count was always 1; the log title's spinner froze on a quiet pod;
+  a `kubectl logs -f` child could outlive the process on `q`.
+- A registry call's 401 never re-minted the ARM token, so the ACR tab died
+  after an hour; the refresh token is now exchanged once per registry;
+  `Retry-After: nan` panicked the worker; a refusal's `error.details` — where
+  Resource Graph puts the reason — is part of its message.
+- A reveal nobody answered, or walked away from, spun the tab at 10 Hz for the
+  rest of the run; `busy()` now counts only on the tab showing; a value can no
+  longer be hung on a key of the same name; `Y` copies only what is shown; a
+  disabled certificate's expiry is muted and not counted.
+- `r` inside a registry or a vault re-reads it, not only the inventory.
+- One unknown jump kind in `history` threw away the whole session file for an
+  older build; `g` on a pod records `Jump::Pod`, so `[` comes back; a missing
+  ARM jump says "subscription"; `plus_seconds` saturates; a click on a tab's
+  search row no longer reaches the work items through a shared overlay; the
+  one test that shelled out to `az` is `#[ignore]`.
+
+Left as house behaviour: the Columns overlay's edits to a second-level layout
+(repositories, items, runs) are not saved by the session, on every tab that
+has a second level.
 
 ## Code review pass, 2026-08-29
 
@@ -391,7 +434,7 @@ ticket-tui certs list --vault <v>
 empty table with no explanation. Start with no subscription at all and no `az
 account`: the same, in `arm.last_error`.
 
-Known gap for #733 to settle: `r` re-reads the *inventory* and re-asks for the
+Settled in #733 (`r` now re-reads the open registry or vault too); the note as it stood: `r` re-reads the *inventory* and re-asks for the
 current focus, but not the items of a registry or vault that is already open and
 already read — the focus reads are once-per-focus by design. Decide there
 whether `r` should force those too.
