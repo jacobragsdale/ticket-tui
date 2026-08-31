@@ -406,7 +406,7 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
 
 /// Bytes as the API reports them, in the units a person reads. Shared with
 /// the ACR tab, whose manifests are counted the same way.
-pub(super) fn size_label(bytes: i64) -> String {
+pub(crate) fn size_label(bytes: i64) -> String {
     let bytes = bytes.max(0);
     match bytes {
         0..=1023 => format!("{bytes} B"),

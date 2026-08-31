@@ -466,7 +466,7 @@ fn tag_line(tag: &Tag, screen: &AcrScreen, repo: &str, now: Timestamp) -> Line<'
 }
 
 /// `linux/amd64`, or a dash for a manifest that named neither.
-fn platform_label(manifest: &crate::arm::Manifest) -> String {
+pub(crate) fn platform_label(manifest: &crate::arm::Manifest) -> String {
     match (manifest.os.as_str(), manifest.architecture.as_str()) {
         ("", "") => "\u{2014}".to_owned(),
         (os, "") => os.to_owned(),
@@ -475,7 +475,7 @@ fn platform_label(manifest: &crate::arm::Manifest) -> String {
     }
 }
 
-fn count_label(count: Option<u64>) -> String {
+pub(crate) fn count_label(count: Option<u64>) -> String {
     count.map_or_else(|| "\u{2014}".to_owned(), |count| count.to_string())
 }
 

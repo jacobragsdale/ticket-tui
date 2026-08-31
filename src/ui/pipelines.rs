@@ -906,7 +906,7 @@ fn short_commit(version: &str) -> String {
     version.chars().take(8).collect()
 }
 
-fn instant_label(instant: Option<Timestamp>, now: Timestamp) -> String {
+pub(crate) fn instant_label(instant: Option<Timestamp>, now: Timestamp) -> String {
     instant.map_or_else(
         || "—".to_owned(),
         |instant| format!("{} ({})", instant.exact_utc(), relative_age(instant, now)),

@@ -3,9 +3,10 @@
 //!
 //! A bare invocation still opens the TUI, which is what `ticket-tui` has
 //! always been. Every subcommand does one thing and exits. The reads answer
-//! from SQLite and never touch the network — except `pods`, which has no
-//! database to answer from and reads the clusters through `kubectl` every
-//! time; the writes go out over the same
+//! from SQLite and never touch the network — except `pods` and `acr`, which
+//! have no database to answer from and read the clusters through `kubectl`
+//! and the subscription through ARM every time; the writes go out over the
+//! same
 //! trait-backed source the TUI's sync worker uses and store the copy Azure
 //! DevOps answers with, so a running TUI picks the change up from the database
 //! it is already watching.
@@ -21,10 +22,14 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::aks::{KubeSource, Kubectl, PodRow, PodSchema};
+use crate::app::acr::rows::short_digest;
 use crate::app::pipelines::RunSchema;
 use crate::app::pipelines::rows::{RunRow, duration_label, run_glyph, short_branch};
 use crate::app::pull_requests::{PrRow, PrSchema};
 use crate::app::repos::{RepoRow, RepoSchema};
+use crate::arm::{
+    ArmClient, ArmConfig, ArmSource, Inventory, Manifest, Registry, Repository, Tag, portal_url,
+};
 use crate::azure::{self, AzureClient, AzureConfig};
 use crate::classification::{self, NodeKind};
 use crate::config::{self, Config};
@@ -40,7 +45,9 @@ use crate::model::{
 use crate::search;
 use crate::sync::{self, AzureConnector, PrAction, SyncMode, SyncOutcome, WorkItemSource};
 use crate::timestamp::Timestamp;
-use crate::ui::pipelines::relative_age;
+use crate::ui::acr::{count_label, platform_label};
+use crate::ui::pipelines::{instant_label, relative_age};
+use crate::ui::repos::size_label;
 use crate::watch::{LIVE_RUNS_CADENCE, LOG_CADENCE, PipelineSource};
 
 #[derive(Debug, Parser)]
@@ -144,6 +151,76 @@ pub enum Command {
     /// Print the pods of every cluster config.toml names, read live through
     /// kubectl
     Pods(PodsCommand),
+    /// Read the subscription's container registries, and what is in them
+    #[command(subcommand)]
+    Acr(AcrCommand),
+}
+
+/// The ACR tab, without the tab. There is no database behind this one either:
+/// the subscription is asked for its registries on every invocation, and a
+/// registry's own data plane answers for the repositories and tags inside it.
+#[derive(Clone, Debug, Subcommand)]
+pub enum AcrCommand {
+    /// Print the container registries the subscription holds
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one registry's fields, the way into it in the portal, and how
+    /// many repositories its catalog holds
+    Show {
+        /// The registry's name, as the subscription spells it
+        registry: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the repositories one registry holds
+    #[command(subcommand)]
+    Repos(AcrReposCommand),
+    /// Read the tags of one repository
+    #[command(subcommand)]
+    Tags(AcrTagsCommand),
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum AcrReposCommand {
+    /// Print every repository in one registry, with the counts and the stamp
+    /// its attributes carry
+    List {
+        /// The registry to read, by name
+        #[arg(long, value_name = "NAME")]
+        registry: String,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum AcrTagsCommand {
+    /// Print one repository's tags, newest first
+    List {
+        /// The registry the repository is in, by name
+        #[arg(long, value_name = "NAME")]
+        registry: String,
+        /// The repository, as the catalog spells it
+        #[arg(long, value_name = "NAME")]
+        repo: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one tag, what it points at, and the reference that pulls it
+    Show {
+        /// The registry the repository is in, by name
+        #[arg(long, value_name = "NAME")]
+        registry: String,
+        /// The repository, as the catalog spells it
+        #[arg(long, value_name = "NAME")]
+        repo: String,
+        /// The tag, as the repository spells it
+        tag: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The AKS tab, without the tab. There is no database behind this one: the
@@ -397,6 +474,7 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Runs(command) => run_runs(cli, &database, command),
         Command::Approvals(command) => run_approvals(cli, command),
         Command::Pods(command) => run_pods(command),
+        Command::Acr(command) => run_acr(cli, command),
     }
 }
 
@@ -2313,6 +2391,360 @@ impl<'a> PodJson<'a> {
     }
 }
 
+/// The registries the subscription holds, and what is inside one of them. The
+/// subscription is resolved the way the tabs resolve it, and an unresolved one
+/// or a refused token is the error rather than an empty listing: there is
+/// nothing stored here to fall back on.
+fn run_acr(cli: &Cli, command: &AcrCommand) -> Result<()> {
+    let config = ArmConfig::resolve(
+        cli.subscription.clone(),
+        std::env::var("TICKET_TUI_SUBSCRIPTION").ok(),
+    )?;
+    run_acr_with(command, &ArmClient::new(config))
+}
+
+fn run_acr_with(command: &AcrCommand, source: &dyn ArmSource) -> Result<()> {
+    let inventory = source.inventory()?;
+    let now = Timestamp::now();
+    match command {
+        AcrCommand::List { json } => {
+            emit(&if *json {
+                to_json(
+                    &inventory
+                        .registries
+                        .iter()
+                        .map(RegistryJson::new)
+                        .collect::<Vec<_>>(),
+                )?
+            } else {
+                tabulate_registries(&inventory.registries)
+            });
+            Ok(())
+        }
+        AcrCommand::Show { registry, json } => {
+            let registry = find_registry(&inventory, registry)?;
+            let repositories = source.repositories(registry)?.len();
+            emit(&if *json {
+                to_json(&RegistryJson::with_catalog(registry, repositories))?
+            } else {
+                describe_registry(registry, repositories)
+            });
+            Ok(())
+        }
+        AcrCommand::Repos(AcrReposCommand::List { registry, json }) => {
+            let registry = find_registry(&inventory, registry)?;
+            let (rows, unreadable) = attributed_repositories(source, registry)?;
+            emit(&if *json {
+                to_json(&rows.iter().map(RepositoryJson::new).collect::<Vec<_>>())?
+            } else {
+                tabulate_repositories(&rows, now)
+            });
+            if unreadable > 0 {
+                bail!("{unreadable} repository(s) could not be read");
+            }
+            Ok(())
+        }
+        AcrCommand::Tags(AcrTagsCommand::List {
+            registry,
+            repo,
+            json,
+        }) => {
+            let registry = find_registry(&inventory, registry)?;
+            let tags = source.tags(registry, repo)?;
+            emit(&if *json {
+                to_json(&tags.iter().map(TagJson::new).collect::<Vec<_>>())?
+            } else {
+                tabulate_tags(&tags, now)
+            });
+            Ok(())
+        }
+        AcrCommand::Tags(AcrTagsCommand::Show {
+            registry,
+            repo,
+            tag,
+            json,
+        }) => {
+            let registry = find_registry(&inventory, registry)?;
+            let found = source
+                .tags(registry, repo)?
+                .into_iter()
+                .find(|held| same_text(&held.name, tag))
+                .with_context(|| format!("no tag called {tag} on {repo} in {}", registry.name))?;
+            let manifest = source.manifest(registry, repo, &found.digest)?;
+            let pull = format!("{}/{repo}:{}", registry.login_server, found.name);
+            emit(&if *json {
+                to_json(&TagShowJson {
+                    tag: TagJson::new(&found),
+                    pull,
+                    manifest: ManifestJson::new(&manifest),
+                })?
+            } else {
+                describe_tag(&found, &manifest, &pull, now)
+            });
+            Ok(())
+        }
+    }
+}
+
+/// The registry one name means, matched the way every other name on this
+/// command line is: ignoring case.
+fn find_registry<'a>(inventory: &'a Inventory, name: &str) -> Result<&'a Registry> {
+    let Some(first) = inventory.registries.first() else {
+        bail!("no container registries in this subscription");
+    };
+    inventory
+        .registries
+        .iter()
+        .find(|registry| same_text(&registry.name, name))
+        .with_context(|| {
+            // Nothing on the source says which subscription answered, but
+            // every resource it named carries it: `/subscriptions/<id>/…`.
+            let subscription = first.id.split('/').nth(2).unwrap_or("unknown");
+            format!("no registry called {name} in subscription {subscription}")
+        })
+}
+
+/// The catalog, then one attributes read per name. A repository that refuses
+/// is one line on stderr and a row with its counts still empty, so a listing
+/// one repository would not answer for is still worth printing; the count of
+/// refusals is the caller's to exit on.
+fn attributed_repositories(
+    source: &dyn ArmSource,
+    registry: &Registry,
+) -> Result<(Vec<Repository>, usize)> {
+    let mut rows = Vec::new();
+    let mut unreadable = 0usize;
+    for listed in source.repositories(registry)? {
+        match source.repository(registry, &listed.name) {
+            Ok(filled) => rows.push(filled),
+            Err(error) => {
+                eprintln!("{}: {error:#}", listed.name);
+                unreadable += 1;
+                rows.push(listed);
+            }
+        }
+    }
+    Ok((rows, unreadable))
+}
+
+/// `name · resource group · sku · location · login server`, the registry table
+/// the tab draws with its hidden column shown.
+fn tabulate_registries(registries: &[Registry]) -> String {
+    if registries.is_empty() {
+        return "no container registries in this subscription".to_owned();
+    }
+    columns(
+        &registries
+            .iter()
+            .map(|registry| {
+                vec![
+                    registry.name.clone(),
+                    registry.resource_group.clone(),
+                    registry.sku.clone(),
+                    registry.location.clone(),
+                    registry.login_server.clone(),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// `repository · tags · manifests · updated`. A count nobody could read is a
+/// dash rather than a nought, the way the tab draws one that has not landed.
+fn tabulate_repositories(rows: &[Repository], now: Timestamp) -> String {
+    if rows.is_empty() {
+        return "no repositories in this registry".to_owned();
+    }
+    columns(
+        &rows
+            .iter()
+            .map(|row| {
+                vec![
+                    row.name.clone(),
+                    count_label(row.tags),
+                    count_label(row.manifests),
+                    instant_label(row.updated, now),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// `tag · digest · created`, newest first because that is the order the
+/// registry lists them in.
+fn tabulate_tags(tags: &[Tag], now: Timestamp) -> String {
+    if tags.is_empty() {
+        return "no tags on this repository".to_owned();
+    }
+    columns(
+        &tags
+            .iter()
+            .map(|tag| {
+                vec![
+                    tag.name.clone(),
+                    short_digest(&tag.digest),
+                    instant_label(tag.created, now),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// One registry as a block of text, in the order the details pane lists it.
+fn describe_registry(registry: &Registry, repositories: usize) -> String {
+    [
+        registry.name.clone(),
+        registry.login_server.clone(),
+        String::new(),
+        format!("Group         {}", registry.resource_group),
+        format!("Location      {}", registry.location),
+        format!("SKU           {}", registry.sku),
+        format!("Repositories  {repositories}"),
+        String::new(),
+        format!("Portal        {}", portal_url(&registry.id)),
+    ]
+    .join("\n")
+}
+
+/// One tag as a block of text: what it points at, when each end of that was
+/// made, what the manifest weighs and runs on, and the reference that pulls
+/// it.
+fn describe_tag(tag: &Tag, manifest: &Manifest, pull: &str, now: Timestamp) -> String {
+    [
+        format!("{}  {}", tag.name, short_digest(&tag.digest)),
+        String::new(),
+        format!("Digest        {}", tag.digest),
+        format!("Tagged        {}", instant_label(tag.created, now)),
+        format!("Created       {}", instant_label(manifest.created, now)),
+        format!("Platform      {}", platform_label(manifest)),
+        format!(
+            "Size          {}",
+            manifest_size(manifest).unwrap_or_else(|| "\u{2014}".to_owned())
+        ),
+        String::new(),
+        format!("Pull          {pull}"),
+    ]
+    .join("\n")
+}
+
+/// What a manifest weighs, in the units the tab writes it in.
+fn manifest_size(manifest: &Manifest) -> Option<String> {
+    manifest
+        .size
+        .map(|bytes| size_label(i64::try_from(bytes).unwrap_or(i64::MAX)))
+}
+
+/// One registry as `--json` prints it, portal link included so an agent need
+/// not build one. The repository count is only there for `show`, which is the
+/// one form that reads the catalog.
+#[derive(Serialize)]
+struct RegistryJson<'a> {
+    name: &'a str,
+    resource_group: &'a str,
+    sku: &'a str,
+    location: &'a str,
+    login_server: &'a str,
+    id: &'a str,
+    portal_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repositories: Option<usize>,
+}
+
+impl<'a> RegistryJson<'a> {
+    fn new(registry: &'a Registry) -> Self {
+        Self {
+            name: &registry.name,
+            resource_group: &registry.resource_group,
+            sku: &registry.sku,
+            location: &registry.location,
+            login_server: &registry.login_server,
+            id: &registry.id,
+            portal_url: portal_url(&registry.id),
+            repositories: None,
+        }
+    }
+
+    fn with_catalog(registry: &'a Registry, repositories: usize) -> Self {
+        Self {
+            repositories: Some(repositories),
+            ..Self::new(registry)
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RepositoryJson<'a> {
+    name: &'a str,
+    tags: Option<u64>,
+    manifests: Option<u64>,
+    updated: Option<String>,
+}
+
+impl<'a> RepositoryJson<'a> {
+    fn new(repository: &'a Repository) -> Self {
+        Self {
+            name: &repository.name,
+            tags: repository.tags,
+            manifests: repository.manifests,
+            updated: repository.updated.map(Timestamp::to_rfc3339),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct TagJson<'a> {
+    name: &'a str,
+    digest: &'a str,
+    short_digest: String,
+    created: Option<String>,
+    updated: Option<String>,
+}
+
+impl<'a> TagJson<'a> {
+    fn new(tag: &'a Tag) -> Self {
+        Self {
+            name: &tag.name,
+            digest: &tag.digest,
+            short_digest: short_digest(&tag.digest),
+            created: tag.created.map(Timestamp::to_rfc3339),
+            updated: tag.updated.map(Timestamp::to_rfc3339),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ManifestJson<'a> {
+    digest: &'a str,
+    platform: String,
+    architecture: &'a str,
+    os: &'a str,
+    size: Option<u64>,
+    size_label: Option<String>,
+    created: Option<String>,
+}
+
+impl<'a> ManifestJson<'a> {
+    fn new(manifest: &'a Manifest) -> Self {
+        Self {
+            digest: &manifest.digest,
+            platform: platform_label(manifest),
+            architecture: &manifest.architecture,
+            os: &manifest.os,
+            size: manifest.size,
+            size_label: manifest_size(manifest),
+            created: manifest.created.map(Timestamp::to_rfc3339),
+        }
+    }
+}
+
+/// One tag and everything `tags show` prints about it.
+#[derive(Serialize)]
+struct TagShowJson<'a> {
+    tag: TagJson<'a>,
+    pull: String,
+    manifest: ManifestJson<'a>,
+}
+
 #[derive(Serialize)]
 struct PipelineJson<'a> {
     id: i64,
@@ -2502,6 +2934,7 @@ fn emit(text: &str) {
 mod tests {
     use super::*;
     use crate::aks::tests as aks_tests;
+    use crate::arm::tests as arm_tests;
     use crate::azure::{SyncBatch, create_document};
     use crate::edit;
     use crate::model::{StateOption, StoredWorkItem};
@@ -4267,6 +4700,350 @@ mod tests {
         assert_eq!(
             json["containers"][0]["image"],
             "myacr.azurecr.io/team/orders-api:1.2.3"
+        );
+    }
+
+    fn acr_command(arguments: &[&str]) -> AcrCommand {
+        let Some(Command::Acr(command)) = Cli::parse_from(arguments).command else {
+            panic!("acr did not parse");
+        };
+        command
+    }
+
+    fn registry_fixture() -> Registry {
+        Registry {
+            id: "/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.ContainerRegistry/registries/acr".to_owned(),
+            name: "acr".to_owned(),
+            resource_group: "rg".to_owned(),
+            location: "westeurope".to_owned(),
+            sku: "Premium".to_owned(),
+            login_server: "acr.azurecr.io".to_owned(),
+        }
+    }
+
+    /// One registry, two repositories whose attributes have landed, two tags
+    /// and the manifest the newer one points at.
+    fn acr_fake() -> arm_tests::FakeArm {
+        let fake = arm_tests::FakeArm::default();
+        *fake.registries.lock().unwrap() = vec![registry_fixture()];
+        *fake.repositories.lock().unwrap() = vec![
+            Repository {
+                name: "team/orders-api".to_owned(),
+                tags: Some(7),
+                manifests: Some(9),
+                updated: Some(ts("2026-08-29T09:00:00Z")),
+            },
+            Repository {
+                name: "team/billing".to_owned(),
+                tags: Some(2),
+                manifests: Some(2),
+                updated: None,
+            },
+        ];
+        *fake.tags.lock().unwrap() = vec![
+            Tag {
+                name: "1.2.3".to_owned(),
+                digest: "sha256:0123456789abcdef".to_owned(),
+                created: Some(ts("2026-08-29T09:00:00Z")),
+                updated: None,
+            },
+            Tag {
+                name: "1.2.2".to_owned(),
+                digest: "sha256:fedcba9876543210".to_owned(),
+                created: Some(ts("2026-08-28T09:00:00Z")),
+                updated: None,
+            },
+        ];
+        *fake.manifest.lock().unwrap() = Some(Manifest {
+            digest: "sha256:0123456789abcdef".to_owned(),
+            size: Some(13_107_200),
+            created: Some(ts("2026-08-29T08:55:00Z")),
+            architecture: "amd64".to_owned(),
+            os: "linux".to_owned(),
+        });
+        fake
+    }
+
+    #[test]
+    fn acr_parses_list_show_repos_and_tags_with_their_flags() {
+        assert!(matches!(
+            acr_command(&["ticket-tui", "acr", "list"]),
+            AcrCommand::List { json: false }
+        ));
+        // The subscription is a global flag, so it may be written in front of
+        // the subcommand.
+        assert!(matches!(
+            acr_command(&[
+                "ticket-tui",
+                "--subscription",
+                "sub-1",
+                "acr",
+                "list",
+                "--json"
+            ]),
+            AcrCommand::List { json: true }
+        ));
+
+        let AcrCommand::Show { registry, json } =
+            acr_command(&["ticket-tui", "acr", "show", "acr", "--json"])
+        else {
+            panic!("acr show did not parse");
+        };
+        assert_eq!(registry, "acr");
+        assert!(json);
+
+        let AcrCommand::Repos(AcrReposCommand::List { registry, json }) =
+            acr_command(&["ticket-tui", "acr", "repos", "list", "--registry", "acr"])
+        else {
+            panic!("acr repos list did not parse");
+        };
+        assert_eq!(registry, "acr");
+        assert!(!json);
+
+        let AcrCommand::Tags(AcrTagsCommand::List {
+            registry,
+            repo,
+            json,
+        }) = acr_command(&[
+            "ticket-tui",
+            "acr",
+            "tags",
+            "list",
+            "--registry",
+            "acr",
+            "--repo",
+            "team/orders-api",
+            "--json",
+        ])
+        else {
+            panic!("acr tags list did not parse");
+        };
+        assert_eq!(registry, "acr");
+        assert_eq!(repo, "team/orders-api");
+        assert!(json);
+
+        let AcrCommand::Tags(AcrTagsCommand::Show {
+            registry,
+            repo,
+            tag,
+            json,
+        }) = acr_command(&[
+            "ticket-tui",
+            "acr",
+            "tags",
+            "show",
+            "--registry",
+            "acr",
+            "--repo",
+            "team/orders-api",
+            "1.2.3",
+        ])
+        else {
+            panic!("acr tags show did not parse");
+        };
+        assert_eq!(registry, "acr");
+        assert_eq!(repo, "team/orders-api");
+        assert_eq!(tag, "1.2.3");
+        assert!(!json);
+    }
+
+    #[test]
+    fn acr_prints_registries_repositories_and_tags_from_a_fake() {
+        let fake = acr_fake();
+        for arguments in [
+            vec!["ticket-tui", "acr", "list"],
+            vec!["ticket-tui", "acr", "show", "acr"],
+            vec!["ticket-tui", "acr", "repos", "list", "--registry", "acr"],
+            vec![
+                "ticket-tui",
+                "acr",
+                "tags",
+                "list",
+                "--registry",
+                "acr",
+                "--repo",
+                "team/orders-api",
+            ],
+            vec![
+                "ticket-tui",
+                "acr",
+                "tags",
+                "show",
+                "--registry",
+                "acr",
+                "--repo",
+                "team/orders-api",
+                "1.2.3",
+                "--json",
+            ],
+        ] {
+            run_acr_with(&acr_command(&arguments), &fake).unwrap();
+        }
+        // `list` asks for nothing but the inventory; `repos list` reads the
+        // catalog and then one attributes call per name; `tags show` reads the
+        // manifest the tag points at.
+        assert_eq!(
+            *fake.reads.lock().unwrap(),
+            [
+                "inventory",
+                "inventory",
+                "repositories",
+                "inventory",
+                "repositories",
+                "repository team/orders-api",
+                "repository team/billing",
+                "inventory",
+                "tags team/orders-api",
+                "inventory",
+                "tags team/orders-api",
+                "manifest sha256:0123456789abcdef",
+            ]
+        );
+
+        let now = ts("2026-08-30T09:00:00Z");
+        assert_eq!(
+            tabulate_registries(&[registry_fixture()]),
+            "acr  rg  Premium  westeurope  acr.azurecr.io"
+        );
+        assert_eq!(
+            tabulate_registries(&[]),
+            "no container registries in this subscription"
+        );
+
+        let json =
+            serde_json::to_value(RegistryJson::with_catalog(&registry_fixture(), 2)).unwrap();
+        assert_eq!(json["login_server"], "acr.azurecr.io");
+        assert_eq!(json["repositories"], 2);
+        assert_eq!(
+            json["portal_url"],
+            "https://portal.azure.com/#resource/subscriptions/sub-1/resourceGroups/rg/providers/Microsoft.ContainerRegistry/registries/acr"
+        );
+        // A listing has not read any catalog, so it says nothing about counts.
+        assert!(
+            serde_json::to_value(RegistryJson::new(&registry_fixture()))
+                .unwrap()
+                .get("repositories")
+                .is_none()
+        );
+
+        let described = describe_registry(&registry_fixture(), 2);
+        assert!(
+            described.starts_with("acr\nacr.azurecr.io\n"),
+            "{described}"
+        );
+        assert!(described.contains("Repositories  2"), "{described}");
+
+        let repositories = fake.repositories.lock().unwrap().clone();
+        let table = tabulate_repositories(&repositories, now);
+        assert!(
+            table.starts_with("team/orders-api  7  9  2026-08-29 09:00:00 UTC (1d)"),
+            "{table}"
+        );
+        // A repository whose attributes nobody could read keeps its dashes.
+        assert_eq!(
+            tabulate_repositories(
+                &[Repository {
+                    name: "team/billing".to_owned(),
+                    tags: None,
+                    manifests: None,
+                    updated: None,
+                }],
+                now
+            ),
+            "team/billing  \u{2014}  \u{2014}  \u{2014}"
+        );
+        assert_eq!(
+            tabulate_repositories(&[], now),
+            "no repositories in this registry"
+        );
+
+        let json = serde_json::to_value(RepositoryJson::new(&repositories[0])).unwrap();
+        assert_eq!(json["tags"], 7);
+        assert_eq!(json["manifests"], 9);
+        assert_eq!(json["updated"], "2026-08-29T09:00:00Z");
+
+        let tags = fake.tags.lock().unwrap().clone();
+        let table = tabulate_tags(&tags, now);
+        assert!(
+            table.starts_with("1.2.3  0123456789ab  2026-08-29 09:00:00 UTC (1d)"),
+            "{table}"
+        );
+        assert_eq!(tabulate_tags(&[], now), "no tags on this repository");
+
+        let manifest = fake.manifest.lock().unwrap().clone().unwrap();
+        let pull = "acr.azurecr.io/team/orders-api:1.2.3";
+        let shown = describe_tag(&tags[0], &manifest, pull, now);
+        assert!(shown.starts_with("1.2.3  0123456789ab\n"), "{shown}");
+        assert!(shown.contains("Platform      linux/amd64"), "{shown}");
+        assert!(shown.contains("Size          12.5 MB"), "{shown}");
+        assert!(shown.ends_with(&format!("Pull          {pull}")), "{shown}");
+
+        let json = serde_json::to_value(TagShowJson {
+            tag: TagJson::new(&tags[0]),
+            pull: pull.to_owned(),
+            manifest: ManifestJson::new(&manifest),
+        })
+        .unwrap();
+        assert_eq!(json["tag"]["short_digest"], "0123456789ab");
+        assert_eq!(json["tag"]["created"], "2026-08-29T09:00:00Z");
+        assert_eq!(json["manifest"]["platform"], "linux/amd64");
+        assert_eq!(json["manifest"]["size_label"], "12.5 MB");
+        assert_eq!(json["pull"], pull);
+
+        // An attributes call that refuses is a line on stderr and a non-zero
+        // exit once the rows that did answer have been printed.
+        *fake.repository_failure.lock().unwrap() = Some("forbidden".to_owned());
+        assert_eq!(
+            run_acr_with(
+                &acr_command(&["ticket-tui", "acr", "repos", "list", "--registry", "acr"]),
+                &fake
+            )
+            .unwrap_err()
+            .to_string(),
+            "2 repository(s) could not be read"
+        );
+
+        // A tag the repository does not have is refused rather than guessed at.
+        *fake.repository_failure.lock().unwrap() = None;
+        assert_eq!(
+            run_acr_with(
+                &acr_command(&[
+                    "ticket-tui",
+                    "acr",
+                    "tags",
+                    "show",
+                    "--registry",
+                    "acr",
+                    "--repo",
+                    "team/orders-api",
+                    "9.9.9",
+                ]),
+                &fake
+            )
+            .unwrap_err()
+            .to_string(),
+            "no tag called 9.9.9 on team/orders-api in acr"
+        );
+    }
+
+    #[test]
+    fn a_registry_the_subscription_does_not_hold_is_refused_by_name() {
+        let fake = acr_fake();
+        assert_eq!(
+            run_acr_with(&acr_command(&["ticket-tui", "acr", "show", "ghcr"]), &fake)
+                .unwrap_err()
+                .to_string(),
+            "no registry called ghcr in subscription sub-1"
+        );
+        // The name is matched the way every other name here is: ignoring case.
+        run_acr_with(&acr_command(&["ticket-tui", "acr", "show", "ACR"]), &fake).unwrap();
+
+        let empty = arm_tests::FakeArm::default();
+        assert_eq!(
+            run_acr_with(&acr_command(&["ticket-tui", "acr", "show", "acr"]), &empty)
+                .unwrap_err()
+                .to_string(),
+            "no container registries in this subscription"
         );
     }
 }
