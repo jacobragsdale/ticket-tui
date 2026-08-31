@@ -120,6 +120,7 @@ fn the_repository_line_of_a_matched_pod_jumps_to_the_repos_tab() {
 fn an_unreadable_cluster_says_what_it_said_on_the_table_and_in_the_pane() {
     let mut app = aks_app();
     app.aks.set_pods(
+        &app.shell,
         "qa",
         Some("orders"),
         Err("Unable to connect to the server: dial tcp: i/o timeout".to_owned()),
@@ -144,6 +145,7 @@ fn an_unreadable_cluster_says_what_it_said_on_the_table_and_in_the_pane() {
     assert!(waiting.contains("Reading qa"), "{waiting}");
 
     empty.aks.set_pods(
+        &empty.shell,
         "qa",
         Some("orders"),
         Err("context does not exist".to_owned()),
@@ -207,7 +209,8 @@ fn a_pod_with_no_timestamp_still_draws_a_row() {
     let mut app = aks_app();
     let mut ageless = pod("qa", "orders", "orders-api-7d9f5b-zzz99", "Pending");
     ageless.created = None;
-    app.aks.set_pods("qa", Some("orders"), Ok(vec![ageless]));
+    app.aks
+        .set_pods(&app.shell, "qa", Some("orders"), Ok(vec![ageless]));
 
     let text = aks_text(140, 24, &mut app);
     assert!(text.contains("orders-api-7d9f5b-zzz99"), "{text}");

@@ -100,11 +100,12 @@ impl AksScreen {
     /// told about yet, or any refusal at all after the user asked for a read.
     pub fn set_pods(
         &mut self,
+        shell: &Shell,
         cluster: &str,
         namespace: Option<&str>,
         pods: Result<Vec<Pod>, String>,
     ) -> Option<String> {
-        let selected = self.selected_key();
+        let selected = self.selected_key(shell);
         self.read_at = Some(Instant::now());
         self.reads_seen += 1;
         // The same read as this one: the same cluster, and the same namespace
@@ -143,7 +144,7 @@ impl AksScreen {
         };
         // The rows the cursor is counted over have moved: it stays on its own
         // pod wherever that now sorts.
-        let rows = self.rows(&[]);
+        let rows = self.visible_pods(shell);
         match selected.and_then(|key| rows.iter().position(|row| row.pod.key == key)) {
             Some(index) => self.cursor.focus(index),
             None => self.cursor.clamp(rows.len()),
@@ -151,11 +152,10 @@ impl AksScreen {
         toast
     }
 
-    /// The pod the cursor is on, looked up without the shell's repositories:
-    /// they name the Repo column and the `repo:` filter, and neither changes
-    /// which pod is under the hand.
-    fn selected_key(&self) -> Option<PodKey> {
-        self.rows(&[])
+    /// The pod the cursor is on, by key, so a re-read can find it again
+    /// wherever it now sorts.
+    fn selected_key(&self, shell: &Shell) -> Option<PodKey> {
+        self.visible_pods(shell)
             .get(self.cursor.index)
             .map(|row| row.pod.key.clone())
     }

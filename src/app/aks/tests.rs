@@ -25,6 +25,7 @@ pub(crate) fn aks_app() -> App {
         cluster("prod", &["orders"]),
     ]);
     app.aks.set_pods(
+        &app.shell,
         "qa",
         Some("orders"),
         Ok(vec![
@@ -33,6 +34,7 @@ pub(crate) fn aks_app() -> App {
         ]),
     );
     app.aks.set_pods(
+        &app.shell,
         "prod",
         Some("orders"),
         Ok(vec![
@@ -93,6 +95,7 @@ fn a_re_read_in_another_order_leaves_the_cursor_on_the_pod_it_was_on() {
     // The same pods, listed the other way round, plus one that sorts ahead of
     // both and pushes the chosen row down a line.
     app.aks.set_pods(
+        &app.shell,
         "qa",
         Some("orders"),
         Ok(vec![
@@ -115,7 +118,7 @@ fn a_re_read_in_another_order_leaves_the_cursor_on_the_pod_it_was_on() {
     // A read that takes the pod away pulls the cursor back onto the list.
     app.aks.cursor.focus(4);
     app.aks
-        .set_pods("qa", Some("orders"), Ok(Vec::<Pod>::new()));
+        .set_pods(&app.shell, "qa", Some("orders"), Ok(Vec::<Pod>::new()));
     assert_eq!(app.aks.pod_count(), 2);
     assert!(app.aks.cursor.index < 2, "{}", app.aks.cursor.index);
 }
@@ -125,6 +128,7 @@ fn an_unreadable_cluster_says_so_once_and_leaves_the_other_clusters_rows() {
     let mut app = aks_app();
 
     let toast = app.aks.set_pods(
+        &app.shell,
         "qa",
         Some("orders"),
         Err("context \"aks-qa\" does not exist".to_owned()),
@@ -149,6 +153,7 @@ fn an_unreadable_cluster_says_so_once_and_leaves_the_other_clusters_rows() {
     );
 
     let again = app.aks.set_pods(
+        &app.shell,
         "qa",
         Some("orders"),
         Err("context \"aks-qa\" does not exist".to_owned()),
@@ -158,6 +163,7 @@ fn an_unreadable_cluster_says_so_once_and_leaves_the_other_clusters_rows() {
     // Asking for a read makes the next refusal news again, however old it is.
     app.aks.run_command(&mut app.shell, CommandId::Sync);
     let forced = app.aks.set_pods(
+        &app.shell,
         "qa",
         Some("orders"),
         Err("context \"aks-qa\" does not exist".to_owned()),
@@ -165,6 +171,7 @@ fn an_unreadable_cluster_says_so_once_and_leaves_the_other_clusters_rows() {
     assert!(forced.is_some(), "a read the user asked for reports itself");
 
     let recovered = app.aks.set_pods(
+        &app.shell,
         "qa",
         Some("orders"),
         Ok(vec![pod(
@@ -188,7 +195,7 @@ fn the_badge_counts_the_pods_somebody_has_to_look_at() {
     assert_eq!(Screen::badge(&app.aks), Some("\u{2717}1".to_owned()));
 
     app.aks
-        .set_pods("qa", Some("orders"), Ok(Vec::<Pod>::new()));
+        .set_pods(&app.shell, "qa", Some("orders"), Ok(Vec::<Pod>::new()));
     assert_eq!(
         Screen::badge(&app.aks),
         None,
