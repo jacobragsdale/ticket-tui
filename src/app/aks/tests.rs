@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::*;
+use crate::aks::Container;
 use crate::aks::tests::{cluster, pod};
 use crate::app::App;
 use crate::app::repos::tests::repo;
@@ -11,6 +12,44 @@ fn crashing(cluster: &str, name: &str) -> Pod {
     pod.ready = (0, 1);
     pod.restarts = 9;
     pod
+}
+
+/// The one qa pod, with a sidecar beside it, so `C` and a click on a container
+/// line have somewhere to go. The cursor is left on it.
+pub(crate) fn sidecar_app() -> App {
+    let mut app = aks_app();
+    let mut sidecar = pod("qa", "orders", "orders-api-7d9f5b-abc12", "Running");
+    sidecar.containers.push(Container {
+        name: "istio-proxy".to_owned(),
+        image: "docker.io/istio/proxyv2:1.20".to_owned(),
+        ready: true,
+        restarts: 0,
+        state: "Running".to_owned(),
+        last_termination: None,
+    });
+    app.aks
+        .set_pods(&app.shell, "qa", Some("orders"), Ok(vec![sidecar]));
+    let index = names(&app)
+        .iter()
+        .position(|name| name == "orders-api-7d9f5b-abc12")
+        .expect("the pod with the sidecar is on the table");
+    app.aks.cursor.focus(index);
+    settle(&mut app);
+    app
+}
+
+/// The pane settled on whatever the cursor is over, which is what the draw and
+/// the run's poll both do before anything is followed.
+fn settle(app: &mut App) {
+    app.aks.sync_focus(&app.shell);
+}
+
+/// What the pane is following, which is what lines have to be addressed to.
+fn target(app: &App) -> LogFollow {
+    app.aks
+        .following()
+        .cloned()
+        .expect("a pod under the cursor")
 }
 
 /// An app whose AKS tab holds two clusters, four pods, and the repository one
@@ -271,4 +310,177 @@ fn a_cluster_the_file_no_longer_names_takes_its_pods_with_it() {
         "{:?}",
         names(&app)
     );
+}
+
+#[test]
+fn the_log_pane_holds_the_lines_of_the_stream_it_is_on_and_drops_any_others() {
+    let mut app = aks_app();
+    settle(&mut app);
+    let following = target(&app);
+
+    app.aks
+        .append_log(&following, vec!["starting".to_owned()], false);
+    app.aks
+        .append_log(&following, vec!["listening".to_owned()], false);
+    assert_eq!(app.aks.log_lines(), ["starting", "listening"]);
+    assert!(app.aks.log_following());
+    assert!(!app.aks.log_ended());
+
+    // Another pod's stream, still in flight when the pane moved on.
+    let stale = LogFollow {
+        key: PodKey {
+            cluster: "prod".to_owned(),
+            namespace: "orders".to_owned(),
+            name: "orders-api-9a1c2d-ghi56".to_owned(),
+        },
+        container: None,
+        previous: false,
+    };
+    app.aks
+        .append_log(&stale, vec!["not mine".to_owned()], false);
+    assert_eq!(app.aks.log_lines(), ["starting", "listening"]);
+
+    app.aks.append_log(&following, Vec::new(), true);
+    assert!(app.aks.log_ended(), "the stream said it was over");
+}
+
+#[test]
+fn a_pod_log_past_the_cap_keeps_the_tail_and_says_how_much_it_dropped() {
+    let mut app = aks_app();
+    settle(&mut app);
+    let following = target(&app);
+
+    let lines: Vec<String> = (1..=20_010).map(|line| format!("line {line}")).collect();
+    app.aks.append_log(&following, lines, false);
+
+    let held = app.aks.log_lines();
+    assert_eq!(held.len(), 20_000, "the cap holds");
+    assert!(
+        held[0].contains("earlier lines skipped"),
+        "and says what went: {}",
+        held[0]
+    );
+    assert_eq!(held.last().map(String::as_str), Some("line 20010"));
+}
+
+#[test]
+fn moving_the_cursor_to_another_pod_starts_that_pods_log_from_nothing() {
+    let mut app = aks_app();
+    settle(&mut app);
+    let following = target(&app);
+    app.aks
+        .append_log(&following, vec!["starting".to_owned()], false);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+
+    assert!(
+        app.aks.log_lines().is_empty(),
+        "the lines were the last pod's"
+    );
+    assert_ne!(
+        target(&app).key,
+        following.key,
+        "and the stream moved with it"
+    );
+}
+
+#[test]
+fn c_follows_the_next_container_and_a_pod_with_one_says_so() {
+    let mut app = sidecar_app();
+    assert_eq!(
+        target(&app).container,
+        None,
+        "the first, until one is chosen"
+    );
+    let following = target(&app);
+    app.aks
+        .append_log(&following, vec!["starting".to_owned()], false);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE));
+
+    assert_eq!(target(&app).container.as_deref(), Some("istio-proxy"));
+    assert!(
+        app.aks.log_lines().is_empty(),
+        "another container is another stream"
+    );
+
+    // Round again, and the pane is back on the first.
+    app.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE));
+    assert_eq!(target(&app).container.as_deref(), Some("api"));
+
+    let mut alone = aks_app();
+    settle(&mut alone);
+    let name = target(&alone).key.name;
+    alone.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE));
+    assert_eq!(
+        alone.shell.notification().map(|(text, _)| text),
+        Some(format!("{name} has one container").as_str())
+    );
+    assert_eq!(target(&alone).container, None);
+}
+
+#[test]
+fn p_asks_for_the_log_from_before_the_last_restart() {
+    let mut app = aks_app();
+    settle(&mut app);
+    let following = target(&app);
+    app.aks
+        .append_log(&following, vec!["starting".to_owned()], false);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
+
+    assert!(target(&app).previous);
+    assert!(
+        app.aks.log_lines().is_empty(),
+        "the run before the last restart is another stream"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
+    assert!(!target(&app).previous);
+}
+
+#[test]
+fn d_asks_for_the_description_and_l_puts_the_log_back() {
+    let mut app = aks_app();
+    settle(&mut app);
+    let key = target(&app).key;
+
+    let action = app.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+
+    assert_eq!(action, AppAction::Aks(AksRequest::Describe(key.clone())));
+    assert_eq!(app.aks.pane(), PaneText::Describe);
+    assert!(app.aks.busy(), "a describe a person is waiting on spins");
+    assert!(app.aks.describe_lines().is_none());
+
+    app.aks
+        .set_description(&key, Ok(vec![format!("Name:  {}", key.name)]));
+    assert!(!app.aks.busy());
+    assert_eq!(app.aks.pane(), PaneText::Describe);
+    assert!(matches!(app.aks.describe_lines(), Some(Ok(lines)) if lines.len() == 1));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+    assert_eq!(app.aks.pane(), PaneText::Log);
+    assert_eq!(app.shell.focus, Focus::Details, "and the pane has the keys");
+
+    // A description belongs to the pod it was asked about.
+    app.shell.focus_list();
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    assert!(app.aks.describe_lines().is_none());
+}
+
+#[test]
+fn the_agent_context_says_which_log_the_pane_is_following() {
+    let mut app = sidecar_app();
+    app.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE));
+    let following = target(&app);
+    app.aks
+        .append_log(&following, vec!["starting".to_owned()], false);
+
+    let context = app.agent_context();
+    let log = context.aks.following_log.expect("a log under the cursor");
+    assert_eq!(log.pod, "orders-api-7d9f5b-abc12");
+    assert_eq!(log.container.as_deref(), Some("istio-proxy"));
+    assert!(!log.previous);
+    assert_eq!(log.line_count, 1);
+    assert!(log.following);
 }

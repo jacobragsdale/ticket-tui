@@ -2,8 +2,8 @@
 //! table, and what the details pane says about the one under the cursor.
 //!
 //! Nothing here is stored. A pod is read live, the way local git state is, and
-//! the next read replaces it — the log tail, describe and the verbs arrive
-//! with the tickets that draw them.
+//! the next read replaces it; the log the text pane tails and the description
+//! it shows in its place live for as long as the cursor stays on the pod.
 
 use std::time::Instant;
 
@@ -11,8 +11,9 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
+use super::pipelines::LOG_LINE_CAP;
 use super::{AppAction, Focus, ListCursor, Screen, Shell, TabId};
-use crate::aks::{AksRequest, Cluster, Pod, PodKey, PodRow, PodSchema};
+use crate::aks::{AksRequest, Cluster, LogFollow, Pod, PodKey, PodRow, PodSchema};
 use crate::columns::{ColumnId, ColumnLayout, TableLayout};
 use crate::command::{CommandId, command_for_key};
 use crate::filter::{MatchContext, ParsedQuery, parse_query};
@@ -33,6 +34,16 @@ pub enum AksMode {
     Search,
 }
 
+/// What the text pane under the pod's details is showing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PaneText {
+    /// The pod's log, tailed.
+    #[default]
+    Log,
+    /// What `kubectl describe pod` said, in the log's place.
+    Describe,
+}
+
 pub struct AksScreen {
     clusters: Vec<Cluster>,
     pods: Vec<Pod>,
@@ -44,7 +55,28 @@ pub struct AksScreen {
     pub layout: TableLayout<PodColumn>,
     pub sort: (PodColumn, bool),
     pub cursor: ListCursor,
-    pub details: ScrollState,
+    /// Which of the two the text pane is showing, and where it is scrolled to.
+    /// One scroll for both: only one of them is on screen at a time.
+    pane: PaneText,
+    pub pane_scroll: ScrollState,
+    /// Whether the log pane is pinned to the tail, and whether it has the whole
+    /// details pane to itself.
+    log_follow: bool,
+    log_full: bool,
+    /// Whether the stream has ended: the pod went, or `kubectl` refused.
+    log_finished: bool,
+    /// What the pane is tailing now, which is also what the worker is told to
+    /// follow. The lines held are this target's and nobody else's.
+    log_target: Option<LogFollow>,
+    log_lines: Vec<String>,
+    /// The container chosen with `C`, if the pod has one by that name, and
+    /// whether `P` has asked for the run before the last restart.
+    container: Option<String>,
+    previous: bool,
+    /// What `kubectl describe pod` said about one pod, and the pod a describe
+    /// is out for.
+    describe: Option<(PodKey, Result<Vec<String>, String>)>,
+    describe_pending: Option<PodKey>,
     /// When the last read landed, which the table's status says: nothing here
     /// is stored, so how old the answer is matters.
     read_at: Option<Instant>,
@@ -68,7 +100,17 @@ impl Default for AksScreen {
             // By cluster, so the two clusters' pods do not interleave.
             sort: (PodColumn::Cluster, false),
             cursor: ListCursor::default(),
-            details: ScrollState::default(),
+            pane: PaneText::default(),
+            pane_scroll: ScrollState::default(),
+            log_follow: true,
+            log_full: false,
+            log_finished: false,
+            log_target: None,
+            log_lines: Vec::new(),
+            container: None,
+            previous: false,
+            describe: None,
+            describe_pending: None,
             read_at: None,
             refresh_pending: false,
             reads_seen: 0,
@@ -214,6 +256,188 @@ impl AksScreen {
         self.visible_pods(shell).get(self.cursor.index).cloned()
     }
 
+    /// What the log pane should be following: the pod under the cursor, the
+    /// container chosen if it still has one by that name, and whether the run
+    /// before the last restart was asked for. The run diffs this against what
+    /// the worker was last told.
+    #[must_use]
+    pub fn log_target(&self, shell: &Shell) -> Option<LogFollow> {
+        let row = self.selected_pod(shell)?;
+        let container = self
+            .container
+            .as_ref()
+            .filter(|name| {
+                row.pod
+                    .containers
+                    .iter()
+                    .any(|held| held.name == name.as_str())
+            })
+            .cloned();
+        Some(LogFollow {
+            key: row.pod.key.clone(),
+            container,
+            previous: self.previous,
+        })
+    }
+
+    /// What the pane is on now, which is what the lines held belong to.
+    #[must_use]
+    pub fn following(&self) -> Option<&LogFollow> {
+        self.log_target.as_ref()
+    }
+
+    /// Settles the pane on whatever the cursor is now over. A different target
+    /// is a different stream: the lines held were the last one's, and the pane
+    /// goes back to the tail of the new one. Another pod takes its container
+    /// choice and its description with it.
+    pub fn sync_focus(&mut self, shell: &Shell) {
+        let selected = self.selected_pod(shell).map(|row| row.pod.key);
+        if selected != self.log_target.as_ref().map(|target| target.key.clone()) {
+            self.container = None;
+            self.describe = None;
+            self.pane = PaneText::Log;
+        }
+        let target = self.log_target(shell);
+        if target == self.log_target {
+            return;
+        }
+        self.log_target = target;
+        self.log_lines.clear();
+        self.log_finished = false;
+        self.log_follow = true;
+        self.pane_scroll = ScrollState::default();
+    }
+
+    /// Folds lines onto the end of the log. Lines for a stream the pane has
+    /// already left are dropped rather than mixed into the one it is on.
+    pub fn append_log(&mut self, target: &LogFollow, lines: Vec<String>, finished: bool) {
+        if Some(target) != self.log_target.as_ref() {
+            return;
+        }
+        self.log_lines.extend(lines);
+        if self.log_lines.len() > LOG_LINE_CAP {
+            // One more than the overflow, because the line saying what went
+            // takes a place of its own.
+            let skipped = self.log_lines.len() - LOG_LINE_CAP + 1;
+            self.log_lines.drain(..skipped);
+            self.log_lines
+                .insert(0, format!("\u{2026} {skipped} earlier lines skipped"));
+        }
+        self.log_finished = finished;
+        if self.log_follow {
+            let viewport = self.pane_scroll.viewport.max(1);
+            self.pane_scroll.content = self.log_lines.len();
+            self.pane_scroll
+                .scroll_to(self.log_lines.len().saturating_sub(viewport));
+        }
+    }
+
+    /// What `kubectl describe pod` said. It reaches the pane only while the
+    /// cursor is still on the pod that was asked about.
+    pub fn set_description(&mut self, key: &PodKey, text: Result<Vec<String>, String>) {
+        if self.describe_pending.as_ref() == Some(key) {
+            self.describe_pending = None;
+        }
+        if self
+            .log_target
+            .as_ref()
+            .is_some_and(|target| target.key == *key)
+        {
+            self.show_pane(PaneText::Describe);
+        }
+        self.describe = Some((key.clone(), text));
+    }
+
+    /// Moves the log to the next of the pod's containers, round to the first
+    /// again. A pod with one container says so rather than doing nothing.
+    pub fn next_container(&mut self, shell: &mut Shell) {
+        let Some(row) = self.selected_pod(shell) else {
+            return;
+        };
+        let names: Vec<&str> = row
+            .pod
+            .containers
+            .iter()
+            .map(|container| container.name.as_str())
+            .collect();
+        if names.len() < 2 {
+            shell.set_status(format!("{} has one container", row.pod.key.name));
+            return;
+        }
+        let current = self
+            .container
+            .as_ref()
+            .and_then(|held| names.iter().position(|name| *name == held.as_str()))
+            .unwrap_or(0);
+        let next = names[(current + 1) % names.len()].to_owned();
+        shell.set_status(format!("Following {next}"));
+        self.container = Some(next);
+        self.sync_focus(shell);
+    }
+
+    /// Turns the `-p` on the log the pane follows on or off: the run before
+    /// the last restart is where a crash loop says why.
+    pub fn toggle_previous(&mut self, shell: &mut Shell) {
+        self.previous = !self.previous;
+        shell.set_status(if self.previous {
+            "Following the log from before the last restart"
+        } else {
+            "Following the running log"
+        });
+        self.sync_focus(shell);
+    }
+
+    /// Whether the log pane is pinned to the tail, which is what `End` puts it
+    /// back to and scrolling takes it out of.
+    #[must_use]
+    pub const fn log_following(&self) -> bool {
+        self.log_follow
+    }
+
+    pub const fn follow_log(&mut self, follow: bool) {
+        self.log_follow = follow;
+    }
+
+    /// Whether the stream the pane is on has ended.
+    #[must_use]
+    pub const fn log_ended(&self) -> bool {
+        self.log_finished
+    }
+
+    /// Whether the text pane has the whole details pane, which `l` toggles.
+    #[must_use]
+    pub const fn log_full_pane(&self) -> bool {
+        self.log_full
+    }
+
+    pub const fn toggle_log_pane(&mut self) {
+        self.log_full = !self.log_full;
+    }
+
+    #[must_use]
+    pub const fn pane(&self) -> PaneText {
+        self.pane
+    }
+
+    #[must_use]
+    pub fn log_lines(&self) -> &[String] {
+        &self.log_lines
+    }
+
+    /// What describe said about the pod under the cursor, when it has been
+    /// asked at all.
+    #[must_use]
+    pub fn describe_lines(&self) -> Option<&Result<Vec<String>, String>> {
+        self.describe.as_ref().map(|(_, text)| text)
+    }
+
+    /// Puts the text pane on one of the two and starts it at the top; the log
+    /// finds its own tail again on the next frame.
+    fn show_pane(&mut self, pane: PaneText) {
+        self.pane = pane;
+        self.pane_scroll.scroll_to(0);
+    }
+
     /// How many pods are held, whatever the query leaves.
     #[must_use]
     pub fn pod_count(&self) -> usize {
@@ -246,12 +470,12 @@ impl AksScreen {
         self.reads_seen > 0
     }
 
-    /// Whether anything is in flight, which is what makes a spinner turn. The
-    /// pod list reads itself on a cadence; describe and restart, which a
-    /// person waits on, arrive with the tickets that send them.
+    /// Whether anything a person is waiting on is in flight, which is what
+    /// makes a spinner turn. The pod list reads itself on a cadence, so it
+    /// does not count; the restart arrives with the ticket that sends it.
     #[must_use]
     pub const fn busy(&self) -> bool {
-        false
+        self.describe_pending.is_some()
     }
 
     /// Sorts by one column, turning the direction around when it is already
@@ -277,6 +501,15 @@ impl AksScreen {
             selected: rows.get(self.cursor.index).map(pod_context),
             visible_rows: rows.len(),
             unhealthy: self.unhealthy_count(),
+            following_log: self.log_target.as_ref().map(|target| {
+                crate::agent_context::FollowingPodLogContext {
+                    pod: target.key.name.clone(),
+                    container: target.container.clone(),
+                    previous: target.previous,
+                    line_count: self.log_lines.len(),
+                    following: self.log_follow,
+                }
+            }),
             errors: self
                 .errors
                 .iter()
@@ -319,6 +552,23 @@ impl AksScreen {
                 shell.set_status("Reading pods\u{2026}");
                 return AppAction::Aks(AksRequest::Refresh);
             }
+            // The text pane's two halves, and what the log follows.
+            CommandId::ShowLogs => {
+                self.show_pane(PaneText::Log);
+                shell.focus = Focus::Details;
+            }
+            CommandId::DescribePod => {
+                let Some(row) = self.selected_pod(shell) else {
+                    shell.set_status("No pod is selected");
+                    return AppAction::None;
+                };
+                let key = row.pod.key.clone();
+                self.describe_pending = Some(key.clone());
+                self.show_pane(PaneText::Describe);
+                return AppAction::Aks(AksRequest::Describe(key));
+            }
+            CommandId::PreviousLogs => self.toggle_previous(shell),
+            CommandId::NextContainer => self.next_container(shell),
             CommandId::HistoryBack => return AppAction::HistoryBack,
             CommandId::HistoryForward => return AppAction::HistoryForward,
             CommandId::Quit => shell.should_quit = true,
@@ -383,32 +633,81 @@ impl Screen for AksScreen {
         if self.mode == AksMode::Search {
             return self.handle_search_key(key);
         }
+        // With the details pane in hand the keys are the text pane's: it is
+        // the only thing in there to move around in.
+        if shell.focus == Focus::Details {
+            match key.code {
+                KeyCode::Char('l') => {
+                    self.toggle_log_pane();
+                    return AppAction::None;
+                }
+                KeyCode::End => {
+                    self.follow_log(true);
+                    return AppAction::None;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.pane_scroll.scroll_by(1);
+                    self.follow_log(false);
+                    return AppAction::None;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.pane_scroll.scroll_by(-1);
+                    self.follow_log(false);
+                    return AppAction::None;
+                }
+                KeyCode::PageUp => {
+                    self.pane_scroll.scroll_by(-10);
+                    self.follow_log(false);
+                    return AppAction::None;
+                }
+                // Downwards by the page is towards the tail, which is where
+                // following already has it: it keeps following.
+                KeyCode::PageDown => {
+                    self.pane_scroll.scroll_by(10);
+                    return AppAction::None;
+                }
+                KeyCode::Tab | KeyCode::Esc => {
+                    shell.focus_list();
+                    return AppAction::None;
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Tab => shell.toggle_focus(),
             KeyCode::Down | KeyCode::Char('j') => {
                 let count = self.row_count(shell);
                 self.cursor.move_by(1, count);
+                self.sync_focus(shell);
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 let count = self.row_count(shell);
                 self.cursor.move_by(-1, count);
+                self.sync_focus(shell);
             }
             KeyCode::PageDown => {
                 let count = self.row_count(shell);
                 self.cursor.page(1, count);
+                self.sync_focus(shell);
             }
             KeyCode::PageUp => {
                 let count = self.row_count(shell);
                 self.cursor.page(-1, count);
+                self.sync_focus(shell);
             }
-            KeyCode::Home => self.cursor.focus(0),
+            KeyCode::Home => {
+                self.cursor.focus(0);
+                self.sync_focus(shell);
+            }
             KeyCode::End => {
                 let count = self.row_count(shell);
                 self.cursor.move_by(isize::MAX, count);
+                self.sync_focus(shell);
             }
             KeyCode::Esc if !self.query.is_empty() => {
                 self.query.clear();
                 self.cursor.reset();
+                self.sync_focus(shell);
             }
             _ => return self.handle_command_key(shell, key),
         }
@@ -432,8 +731,20 @@ impl Screen for AksScreen {
             PointerTarget::TableRow { index } | PointerTarget::ToggleRowSelect { index } => {
                 if index < self.row_count(shell) {
                     self.cursor.focus(index);
+                    self.sync_focus(shell);
                 }
                 shell.focus = Focus::Tickets;
+            }
+            PointerTarget::FocusDetails => shell.focus = Focus::Details,
+            // A click on one of the pod's containers is what the log follows.
+            PointerTarget::TreeRow { index } => {
+                shell.focus = Focus::Details;
+                if let Some(row) = self.selected_pod(shell)
+                    && let Some(container) = row.pod.containers.get(index)
+                {
+                    self.container = Some(container.name.clone());
+                    self.sync_focus(shell);
+                }
             }
             PointerTarget::SortHeader(key) => self.toggle_sort(key),
             // The repository line in the details pane is the shell's to follow.
@@ -468,14 +779,19 @@ impl Screen for AksScreen {
 
     fn scroll_state(&self, surface: ScrollSurface) -> ScrollState {
         match surface {
-            ScrollSurface::Details => self.details,
+            ScrollSurface::Details => self.pane_scroll,
             _ => self.cursor.scroll,
         }
     }
 
+    /// Scrolling the log by hand is what takes it out of follow mode, wherever
+    /// the scroll came from — a key, the wheel, or the scrollbar thumb.
     fn scroll_state_mut(&mut self, surface: ScrollSurface) -> &mut ScrollState {
         match surface {
-            ScrollSurface::Details => &mut self.details,
+            ScrollSurface::Details => {
+                self.log_follow = false;
+                &mut self.pane_scroll
+            }
             _ => &mut self.cursor.scroll,
         }
     }
@@ -514,7 +830,9 @@ impl Screen for AksScreen {
     fn footer_hint(&self, _shell: &Shell) -> &str {
         match self.mode {
             AksMode::Search => "←→ cursor  Ctrl-W delete word  Ctrl-U clear  Enter/Esc finish",
-            AksMode::Browse => "↑↓/jk move  / search  r refresh  c columns  ? help",
+            AksMode::Browse => {
+                "↑↓/jk move  L logs  D describe  P previous  C container  / search  ? help"
+            }
         }
     }
 

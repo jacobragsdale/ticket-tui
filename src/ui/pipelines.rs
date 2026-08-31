@@ -835,7 +835,7 @@ fn log_line(raw: &str) -> Line<'static> {
 
 /// Azure DevOps prefixes every line with an ISO instant. It is dimmed rather
 /// than dropped: a slow step is easiest to spot by its clock.
-fn split_timestamp(raw: &str) -> (Option<String>, &str) {
+pub(super) fn split_timestamp(raw: &str) -> (Option<String>, &str) {
     let Some((stamp, rest)) = raw.split_once(' ') else {
         return (None, raw);
     };

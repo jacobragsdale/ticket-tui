@@ -931,7 +931,11 @@ impl WorkItemsScreen {
             | CommandId::CancelRun
             | CommandId::RetryRun
             | CommandId::WatchRun
-            | CommandId::Approvals => AppAction::None,
+            | CommandId::Approvals
+            | CommandId::ShowLogs
+            | CommandId::DescribePod
+            | CommandId::PreviousLogs
+            | CommandId::NextContainer => AppAction::None,
             CommandId::SprintSummary => {
                 self.open_sprint_summary();
                 AppAction::None

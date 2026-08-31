@@ -31,6 +31,9 @@ pub(super) struct AksRuntime {
     pub(super) worker: Option<AksHandle>,
     pub(super) clusters: Vec<Cluster>,
     pub(super) showing: bool,
+    /// The log the worker was last told to follow, so the message is sent when
+    /// it changes rather than every turn.
+    pub(super) following: Option<LogFollow>,
 }
 
 /// Everything the event loop needs to keep the database in step with Azure

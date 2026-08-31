@@ -75,6 +75,8 @@ pub struct AksContext {
     pub visible_rows: usize,
     /// How many of the pods on the table are in trouble.
     pub unhealthy: usize,
+    /// The log the text pane is tailing, when it is on one.
+    pub following_log: Option<FollowingPodLogContext>,
     /// One line per `(cluster, namespace)` that could not be read.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
@@ -267,6 +269,19 @@ pub struct StageContext {
     pub name: String,
     pub state: String,
     pub result: Option<String>,
+}
+
+/// The pod log the AKS text pane is tailing.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct FollowingPodLogContext {
+    pub pod: String,
+    /// The container chosen, or nothing while the pane follows the first.
+    pub container: Option<String>,
+    /// Whether it is the run before the last restart.
+    pub previous: bool,
+    pub line_count: usize,
+    /// Whether the pane is pinned to the tail rather than scrolled back.
+    pub following: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

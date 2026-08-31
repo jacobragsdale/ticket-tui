@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::aks::tests::pod;
-use crate::app::aks::tests::aks_app;
+use crate::app::aks::tests::{aks_app, sidecar_app};
 use crate::app::{Jump, TabId};
 
 /// The tab, drawn, with the AKS tab showing.
@@ -214,4 +214,194 @@ fn a_pod_with_no_timestamp_still_draws_a_row() {
 
     let text = aks_text(140, 24, &mut app);
     assert!(text.contains("orders-api-7d9f5b-zzz99"), "{text}");
+}
+
+/// The lines the followed pod's log answers with, as `kubectl --timestamps`
+/// hands them over.
+fn tail(app: &mut App, lines: &[&str], finished: bool) {
+    let target = app
+        .aks
+        .following()
+        .cloned()
+        .expect("a pod under the cursor");
+    app.aks.append_log(
+        &target,
+        lines.iter().map(|line| (*line).to_owned()).collect(),
+        finished,
+    );
+}
+
+#[test]
+fn the_log_pane_tails_the_selected_pod_and_says_what_it_is_following() {
+    let mut app = aks_app();
+    aks_text(170, 40, &mut app);
+    tail(
+        &mut app,
+        &[
+            "2026-08-30T10:00:00Z starting up",
+            "2026-08-30T10:00:01Z WARN the disk is filling",
+            "2026-08-30T10:00:02Z ERROR connection refused",
+        ],
+        false,
+    );
+
+    let text = render_text(170, 40, &mut app);
+    assert!(
+        text.contains("Log \u{00b7} orders-api-7d9f5b-abc12 \u{00b7} api \u{00b7} 3 lines"),
+        "the title names the pod, the container and the size: {text}"
+    );
+    assert!(text.contains("following"), "{text}");
+    assert!(text.contains("starting up"), "{text}");
+    assert!(
+        text.contains("10:00:00"),
+        "the timestamp is kept, dimmed: {text}"
+    );
+    assert!(text.contains("connection refused"), "{text}");
+
+    // A stream that has stopped has nothing left to wait for.
+    tail(&mut app, &[], true);
+    let ended = render_text(170, 40, &mut app);
+    assert!(ended.contains("ended"), "{ended}");
+}
+
+#[test]
+fn scrolling_the_pod_log_leaves_follow_mode_and_end_goes_back_to_it() {
+    let mut app = aks_app();
+    aks_text(170, 40, &mut app);
+    let lines: Vec<String> = (1..=200).map(|line| format!("line {line}")).collect();
+    tail(
+        &mut app,
+        &lines.iter().map(String::as_str).collect::<Vec<_>>(),
+        false,
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+    let text = render_text(170, 40, &mut app);
+    assert!(
+        text.contains("line 200"),
+        "following shows the tail: {text}"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+    let text = render_text(170, 40, &mut app);
+    assert!(
+        text.contains("scrolled") && !text.contains("line 200"),
+        "scrolling up by hand leaves follow mode: {text}"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    let text = render_text(170, 40, &mut app);
+    assert!(
+        text.contains("following") && text.contains("line 200"),
+        "{text}"
+    );
+
+    // The wheel over the pane leaves it just as a key does.
+    let pane = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::FocusDetails))
+        .expect("the text pane takes the wheel")
+        .rect;
+    app.handle_mouse(mouse(MouseEventKind::ScrollUp, pane.x + 2, pane.y + 2));
+    let text = render_text(170, 40, &mut app);
+    assert!(text.contains("scrolled"), "{text}");
+    assert!(!app.aks.log_following());
+}
+
+#[test]
+fn d_shows_the_description_in_the_logs_place_and_l_brings_the_log_back() {
+    let mut app = aks_app();
+    aks_text(170, 40, &mut app);
+    tail(&mut app, &["starting up"], false);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+    let waiting = render_text(170, 40, &mut app);
+    assert!(
+        waiting.contains("Describe \u{00b7} orders-api-7d9f5b-abc12"),
+        "{waiting}"
+    );
+    assert!(waiting.contains("Describing\u{2026}"), "{waiting}");
+
+    let key = app
+        .aks
+        .selected_pod(&app.shell)
+        .expect("a pod")
+        .pod
+        .key
+        .clone();
+    app.aks.set_description(
+        &key,
+        Ok(vec![
+            "Name:         orders-api-7d9f5b-abc12".to_owned(),
+            "Node:         aks-nodepool1-0".to_owned(),
+        ]),
+    );
+    let described = render_text(170, 40, &mut app);
+    assert!(
+        described.contains("Name:         orders-api"),
+        "{described}"
+    );
+    assert!(
+        !described.contains("starting up"),
+        "the log is put aside while describe has the pane: {described}"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+    let back = render_text(170, 40, &mut app);
+    assert!(back.contains("starting up"), "{back}");
+}
+
+#[test]
+fn l_gives_the_text_pane_the_whole_details_pane() {
+    let mut app = aks_app();
+    aks_text(170, 40, &mut app);
+    tail(&mut app, &["starting up"], false);
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+    let split = render_text(170, 40, &mut app);
+    assert!(
+        split.contains("Containers") && split.contains("starting up"),
+        "{split}"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+    let whole = render_text(170, 40, &mut app);
+    assert!(whole.contains("starting up"), "{whole}");
+    assert!(
+        !whole.contains("Containers"),
+        "the pod's own details step aside: {whole}"
+    );
+}
+
+#[test]
+fn clicking_a_container_line_picks_the_one_the_log_follows() {
+    let mut app = sidecar_app();
+    let text = aks_text(170, 40, &mut app);
+    assert!(
+        text.contains("\u{203a} api"),
+        "the followed container is marked: {text}"
+    );
+
+    let line = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::TreeRow { index: 1 }))
+        .expect("every container line is clickable")
+        .rect;
+    click(&mut app, line.x + 4, line.y);
+
+    let text = render_text(170, 40, &mut app);
+    assert_eq!(
+        app.aks
+            .following()
+            .and_then(|target| target.container.clone())
+            .as_deref(),
+        Some("istio-proxy")
+    );
+    assert!(text.contains("\u{203a} istio-proxy"), "{text}");
+    assert!(
+        text.contains("Log \u{00b7} orders-api-7d9f5b-abc12 \u{00b7} istio-proxy"),
+        "{text}"
+    );
 }

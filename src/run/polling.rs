@@ -210,6 +210,17 @@ pub(super) fn poll_aks(app: &mut App, runtime: &mut SyncRuntime) -> bool {
         runtime.aks.showing = showing;
         let _ = worker.send(AksRequest::TabShowing(showing));
     }
+    // Which pod the text pane is on decides whose log is worth streaming. It
+    // is settled here rather than only on the way to drawing, so the screen and
+    // the worker are on the same stream whatever was last painted, and it is
+    // not gated on the tab showing: re-tailing on the way back would replay the
+    // last five hundred lines.
+    app.aks.sync_focus(&app.shell);
+    let target = app.aks.following().cloned();
+    if target != runtime.aks.following {
+        runtime.aks.following = target.clone();
+        let _ = worker.send(target.map_or(AksRequest::Unfollow, AksRequest::Follow));
+    }
     // Drained first, so an event can be answered without holding a borrow of
     // the thread that sent it.
     let events: Vec<AksEvent> = std::iter::from_fn(|| worker.try_event()).collect();
@@ -228,10 +239,20 @@ pub(super) fn poll_aks(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                     app.shell.set_error(toast);
                 }
             }
+            AksEvent::LogLines {
+                target,
+                lines,
+                finished,
+            } => app.aks.append_log(&target, lines, finished),
+            AksEvent::Described { key, text } => {
+                if let Err(message) = &text {
+                    app.shell.set_error(message.clone());
+                }
+                app.aks.set_description(&key, text);
+            }
             AksEvent::Stopped => runtime.aks.worker = None,
-            // The log tail, describe and delete arrive with the tickets that
-            // draw them.
-            _ => {}
+            // The restart arrives with the ticket that sends it.
+            AksEvent::Deleted { .. } => {}
         }
     }
     redraw

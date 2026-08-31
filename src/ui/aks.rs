@@ -3,14 +3,18 @@
 
 use super::*;
 use crate::aks::{Pod, PodRow};
-use crate::app::aks::{AksMode, AksScreen, PodColumn, where_it_failed};
+use crate::app::aks::{AksMode, AksScreen, PaneText, PodColumn, where_it_failed};
+use crate::command::CommandId;
 use crate::model::Jump;
 use crate::ui::details::section_line;
-use crate::ui::pipelines::relative_age;
+use crate::ui::pipelines::{relative_age, split_timestamp};
 use crate::ui::table::{TableSpec, render_list_table, table_geometry};
 
 /// The whole tab: the search box, the table, the details pane and the footer.
 pub(crate) fn render(frame: &mut Frame<'_>, screen: &mut AksScreen, shell: &mut Shell, area: Rect) {
+    // Which pod the text pane is on is settled here, on the way to drawing it,
+    // so the worker is asked for the log of whatever is on screen.
+    screen.sync_focus(shell);
     let sections = Layout::vertical([
         Constraint::Length(1),
         Constraint::Fill(1),
@@ -49,7 +53,7 @@ fn render_content(frame: &mut Frame<'_>, screen: &mut AksScreen, shell: &mut She
         }
 
         fn second(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
-            render_pod_details(frame, self.0, shell, area);
+            render_details(frame, self.0, shell, area);
         }
     }
     render_workspace(
@@ -159,8 +163,178 @@ fn pod_style(pod: &Pod) -> Style {
     Style::default().fg(colour)
 }
 
+/// The right-hand pane: the pod above, the text pane under it, either side of
+/// a seam that drags like every other. `l` gives the text pane the whole area.
+fn render_details(frame: &mut Frame<'_>, screen: &mut AksScreen, shell: &mut Shell, area: Rect) {
+    if screen.log_full_pane() {
+        render_text_pane(frame, screen, shell, area);
+        return;
+    }
+    struct Halves<'a>(&'a mut AksScreen);
+    impl PanePair for Halves<'_> {
+        fn first(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+            render_pod_details(frame, self.0, shell, area);
+        }
+
+        fn second(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+            render_text_pane(frame, self.0, shell, area);
+        }
+    }
+    render_inner_split(frame, shell, area, &mut Halves(screen));
+}
+
+/// The pod's log, tailed, or what describe said in its place. Following keeps
+/// the tail in view; scrolling up by any means leaves it, and `End` goes back.
+fn render_text_pane(frame: &mut Frame<'_>, screen: &mut AksScreen, shell: &mut Shell, area: Rect) {
+    let row = screen.selected_pod(shell);
+    let describing = screen.pane() == PaneText::Describe;
+    let (title, lines, empty, refused) = match screen.pane() {
+        PaneText::Log => (
+            log_title(screen, row.as_ref()),
+            screen.log_lines().to_vec(),
+            "No log yet",
+            false,
+        ),
+        PaneText::Describe => describe_pane(screen, row.as_ref()),
+    };
+    let block = focused_block(title, shell.focus == Focus::Details).padding(Padding::horizontal(1));
+    let pane = inside_border(area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    // The pane itself: the wheel scrolls it, a click gives it the focus.
+    shell.hit_regions.push(region(
+        pane,
+        PointerTarget::FocusDetails,
+        PointerLayer::Base,
+        Some(SelectableSurface::Details),
+        Some(ScrollSurface::Details),
+    ));
+    if lines.is_empty() {
+        frame.render_widget(
+            Paragraph::new(empty).style(Style::default().fg(theme().muted)),
+            inner,
+        );
+        return;
+    }
+    let viewport = usize::from(inner.height).max(1);
+    screen.pane_scroll.set_viewport(viewport, lines.len());
+    if !describing && screen.log_following() {
+        screen
+            .pane_scroll
+            .scroll_to(lines.len().saturating_sub(viewport));
+    }
+    let offset = screen.pane_scroll.offset;
+    // Only the lines on screen are painted: the buffer runs to twenty thousand.
+    let painted: Vec<Line<'static>> = lines
+        .iter()
+        .skip(offset)
+        .take(viewport)
+        .map(|line| match (describing, refused) {
+            (false, _) => log_line(line),
+            (true, false) => Line::raw(line.clone()),
+            (true, true) => Line::styled(line.clone(), Style::default().fg(theme().error)),
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(painted), inner);
+    if lines.len() > viewport {
+        render_scrollbar(
+            frame,
+            PointerLayer::Base,
+            shell,
+            pane,
+            ScrollSurface::Details,
+            ScrollState {
+                offset,
+                content: lines.len(),
+                viewport,
+            },
+        );
+    }
+    capture_selectable(frame, shell, SelectableSurface::Details, inner, true);
+}
+
+/// What the log pane's border says: whose log, which container, how much of
+/// it, and whether it is still arriving.
+fn log_title(screen: &AksScreen, row: Option<&PodRow>) -> String {
+    let Some(target) = screen.following() else {
+        return " Log ".to_owned();
+    };
+    let container = target
+        .container
+        .clone()
+        .or_else(|| {
+            row.and_then(|row| row.pod.first_container())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "\u{2014}".to_owned());
+    // A stream that has ended has nothing left to wait for and says so
+    // plainly; one still arriving spins.
+    let state = if screen.log_ended() {
+        "ended".to_owned()
+    } else if screen.log_following() {
+        format!("{} following", spinner_frame())
+    } else {
+        "scrolled".to_owned()
+    };
+    format!(
+        " Log \u{00b7} {} \u{00b7} {container}{} \u{00b7} {} lines \u{00b7} {state} ",
+        target.key.name,
+        if target.previous { " (previous)" } else { "" },
+        screen.log_lines().len(),
+    )
+}
+
+/// The describe pane: what `kubectl describe pod` said, what it refused with,
+/// or that it is still being asked. The flag says the lines are a refusal.
+fn describe_pane(
+    screen: &AksScreen,
+    row: Option<&PodRow>,
+) -> (String, Vec<String>, &'static str, bool) {
+    let title = format!(
+        " Describe \u{00b7} {} ",
+        row.map_or("nothing chosen", |row| row.pod.key.name.as_str())
+    );
+    match screen.describe_lines() {
+        Some(Ok(text)) => (title, text.clone(), "Nothing came back", false),
+        Some(Err(message)) => (title, vec![message.clone()], "", true),
+        None => (
+            title,
+            Vec::new(),
+            if screen.busy() {
+                "Describing\u{2026}"
+            } else {
+                "D describes this pod"
+            },
+            false,
+        ),
+    }
+}
+
+/// One log line, with the timestamp `--timestamps` puts in front dimmed and
+/// the line painted by what its own words say about it.
+// ponytail: token heuristic, no log-format parsing.
+fn log_line(raw: &str) -> Line<'static> {
+    let (stamp, rest) = split_timestamp(raw);
+    let mut spans = Vec::new();
+    if let Some(stamp) = stamp {
+        spans.push(Span::styled(stamp, Style::default().fg(theme().muted)));
+    }
+    spans.push(Span::styled(rest.to_owned(), severity_style(rest)));
+    Line::from(spans)
+}
+
+fn severity_style(line: &str) -> Style {
+    if line.contains("ERROR") || line.contains("FATAL") || line.contains("level=error") {
+        Style::default().fg(theme().error)
+    } else if line.contains("WARN") {
+        Style::default().fg(theme().warning)
+    } else {
+        Style::default()
+    }
+}
+
 /// The details pane for the pod under the cursor: what it is, where it is
-/// running, and what its containers are doing. #722 puts the log under this.
+/// running, and what its containers are doing.
 fn render_pod_details(
     frame: &mut Frame<'_>,
     screen: &mut AksScreen,
@@ -202,7 +376,18 @@ fn render_pod_details(
         field_line("Created", created_label(&row.pod, now)),
         field_line("Ready", row.pod.ready_label()),
         field_line("Restarts", row.pod.restarts.to_string()),
+        Line::from(""),
     ];
+    // The buttons stand for the keys they name, so clicking one is the key.
+    let buttons: [(&str, PointerTarget); 2] = [
+        (" Logs ", PointerTarget::RunCommand(CommandId::ShowLogs)),
+        (
+            " Describe ",
+            PointerTarget::RunCommand(CommandId::DescribePod),
+        ),
+    ];
+    let buttons_index = lines.len();
+    lines.push(button_row(&buttons));
     // The repository that built it, when one on file matches: the one line of
     // this pane that goes somewhere.
     let repo_line = row.repo.clone().map(|repo| {
@@ -218,12 +403,26 @@ fn render_pod_details(
         ]));
         (index, repo)
     });
+    // Which container the log is on, so the line saying so can be marked and
+    // the others clicked to move it.
+    let followed = screen
+        .following()
+        .and_then(|target| target.container.clone())
+        .or_else(|| row.pod.first_container().map(str::to_owned));
+    let mut containers_start = 0;
     if !row.pod.containers.is_empty() {
         lines.push(Line::from(""));
         lines.push(section_line("Containers", inner.width));
+        containers_start = lines.len();
         for container in &row.pod.containers {
+            let marker = if followed.as_deref() == Some(container.name.as_str()) {
+                "\u{203a} "
+            } else {
+                "  "
+            };
             lines.push(Line::from(vec![
-                Span::raw(format!("  {}  ", container.name)),
+                Span::styled(marker.to_owned(), Style::default().fg(theme().accent)),
+                Span::raw(format!("{}  ", container.name)),
                 Span::styled(container.image.clone(), Style::default().fg(theme().muted)),
                 Span::styled(
                     if container.ready {
@@ -267,7 +466,11 @@ fn render_pod_details(
     // An image name or a message wraps, so the one target this pane has is
     // placed by the row its line landed on rather than by the line's index.
     let (rows, _) = wrapped_rows(&lines, inner.width);
+    let containers = row.pod.containers.len();
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    if let Some(y) = row_on_screen(inner, &rows, buttons_index, 0) {
+        register_buttons(shell, inner, y, PointerLayer::Base, &buttons);
+    }
     if let Some((index, repo)) = repo_line
         && let Some(y) = row_on_screen(inner, &rows, index, 0)
     {
@@ -278,6 +481,18 @@ fn render_pod_details(
             None,
             None,
         ));
+    }
+    // One hit region per container, so a click picks the one the log follows.
+    for index in 0..containers {
+        if let Some(y) = row_on_screen(inner, &rows, containers_start + index, 0) {
+            shell.hit_regions.push(region(
+                Rect::new(inner.x, y, inner.width, 1),
+                PointerTarget::TreeRow { index },
+                PointerLayer::Base,
+                None,
+                None,
+            ));
+        }
     }
 }
 

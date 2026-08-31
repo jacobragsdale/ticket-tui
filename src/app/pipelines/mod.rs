@@ -26,7 +26,7 @@ const BRANCH_CACHE_SECONDS: i64 = 600;
 
 /// The most lines one log is worth keeping in memory. Past this the oldest go
 /// and a line at the top says how many.
-const LOG_LINE_CAP: usize = 20_000;
+pub(crate) const LOG_LINE_CAP: usize = 20_000;
 use crate::text_input::TextInput;
 
 mod columns;

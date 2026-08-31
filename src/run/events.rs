@@ -253,6 +253,7 @@ pub(super) fn handle_action(
 fn spinning(app: &App) -> bool {
     app.shell.sync_pending
         || app.repos.busy()
+        || app.aks.busy()
         || app.work_items.details_pending.is_some()
         || app.shell.flashing()
 }

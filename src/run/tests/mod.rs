@@ -2,6 +2,7 @@
 //! Azure DevOps and the helpers that drive it live here; each submodule
 //! covers one file's worth of behaviour.
 
+mod aks;
 mod desktop;
 mod details;
 mod editor;
