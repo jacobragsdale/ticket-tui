@@ -56,9 +56,9 @@ unchanged.
 | `pull_requests` | object | The Pull requests tab |
 | `pipelines` | object | The Pipelines tab |
 | `aks` | object | The AKS tab |
-| `acr` | object | The ACR tab, a placeholder until its ticket lands |
-| `key_vault` | object | The Key Vault tab, the same |
-| `arm` | object | What the ACR and Key Vault tabs can reach: `subscription`, `offline`, `last_error` |
+| `acr` | object | The ACR tab |
+| `key_vault` | object | The Key Vault tab |
+| `arm` | object | What the ACR and Key Vault tabs can reach at all |
 
 ### `work_items`
 
@@ -162,12 +162,74 @@ however long ago it was left when it is not. `errors` is the one place a cluster
 that cannot be reached shows up: its pods are simply missing from
 `visible_rows`, not zeroed. `ticket-tui pods` is the same read without the TUI.
 
-### `acr` and `key_vault`
+### `arm`
 
-Both carry `level` and `visible_rows` while those tabs are placeholders; their
-own tickets fill them in. `arm` at the top level says whether they have a
-subscription to read at all: `subscription`, `offline`, and `last_error`, the
-one line that says why an offline run reads nothing.
+Whether the two subscription tabs have anything to read. Both are on the bar on
+every run; a run with no subscription draws them empty and says why here.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `subscription` | string or null | The subscription id the two tabs read; null when none was resolved |
+| `offline` | boolean | Nothing can be read — no subscription, or the Azure CLI refused |
+| `last_error` | string or null | The one line that says why, such as `run \`az login\`` |
+
+The subscription is `--subscription`, else `TICKET_TUI_SUBSCRIPTION`, else
+whichever one `az account set` left the CLI on. A personal access token opens
+Azure DevOps and nothing else, so a PAT-only run is ARM-offline with the work
+items tab working normally.
+
+### `acr`
+
+The ACR tab: the subscription's container registries, and the repositories of
+whichever one is open.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `level` | string | `registries` or `repositories` — which list the tab is showing |
+| `selected_registry` | registry or null | The registry the cursor is on, or the one that was drilled into |
+| `selected_repository` | repository or null | The repository the cursor is on; null at the registries level |
+| `selected_tag` | tag or null | The tag the details pane's own cursor is on |
+| `visible_rows` | integer | How many rows the query leaves on the table |
+
+A registry carries `name`, `resource_group`, `sku`, `location`, `login_server`
+(the host a pull reference starts with) and `portal_url`.
+
+A repository carries `name`, `tags` and `updated` — the last two null until the
+attributes call has landed, because a catalog listing is names and nothing else.
+
+A tag carries `name`, `digest` (the full `sha256:…`) and `created`.
+
+Registries are read from Resource Graph every 60 seconds while either ARM tab is
+showing, and a registry's own catalog, tags and manifest are read once per
+focus, so this block is only as current as the last read. Nothing here is
+stored: `ticket-tui acr list` is the same read without the TUI.
+
+### `key_vault`
+
+The Key Vault tab, the same way round: the subscription's vaults, and what one
+of them holds.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `level` | string | `vaults` or `items` — which list the tab is showing |
+| `selected_vault` | vault or null | The vault the cursor is on, or the one that was drilled into |
+| `selected_item` | item or null | The secret, key or certificate the cursor is on |
+| `visible_rows` | integer | How many rows the query leaves on the table |
+| `expiring_certificates` | integer | Certificates already lapsed or within 30 days of it, across every vault whose items have been read — the same count the tab bar badges `◇N` |
+
+A vault carries `name`, `resource_group`, `location`, `sku`, `uri` (the
+data-plane host its items are read from) and `portal_url`.
+
+An item carries `kind` (`secret`, `key`, or `cert`), `name`, `enabled`,
+`updated`, `expires` (null for one that never lapses), and `revealed`.
+
+**`revealed` is the only thing this file says about a value.** It is true while
+the user has pressed `R` on that secret and the minute has not run out; the
+value itself is nowhere in the document, and there is no field for it. A value
+is read out of the vault for the screen alone, once, and this file is written to
+disk. `ticket-tui secrets show --vault V NAME --value` is the one way to read
+one from outside the TUI, and it is an audited read — see
+[cli.md](cli.md#secrets-keys-certs).
 
 ## Sync fields
 

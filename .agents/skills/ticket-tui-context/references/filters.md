@@ -1,7 +1,8 @@
 # The filter grammars
 
-One shape, five vocabularies. Work items, repositories, pull requests, runs and
-pods each have their own fields; everything else — how values combine, how they are
+One shape, nine vocabularies. Work items, repositories, pull requests, runs,
+pods, registries, repositories-in-a-registry, vaults and vault items each have
+their own fields; everything else — how values combine, how they are
 quoted, how sentinels resolve — is the same everywhere, and the same in the
 TUI's search boxes and in the `search.query` field of the context JSON. None of
 it is WIQL: the global `--query WIQL` flag that narrows a *pull* is a different
@@ -17,9 +18,13 @@ thing entirely.
 - [Pull requests — `ticket-tui prs list --query`](#pull-requests--ticket-tui-prs-list---query)
 - [Runs — `ticket-tui runs list --query`](#runs--ticket-tui-runs-list---query)
 - [Pods — `ticket-tui pods`](#pods--ticket-tui-pods)
+- [Registries and repositories — the ACR tab](#registries-and-repositories--the-acr-tab)
+- [Vaults and their items — the Key Vault tab](#vaults-and-their-items--the-key-vault-tab)
 
 This page describes the work-item grammar first, because it is the largest, and
-then the four shorter ones. Each is used by the subcommand named beside it.
+then the shorter ones. Each is used by the subcommand named beside it, except
+the last four: the ACR and Key Vault tabs have search boxes but no `--query` on
+the command line, so those grammars are the TUI's alone.
 
 A query is a sequence of `field:value` pairs and free text. Values in one field
 are ORed, different fields are ANDed, and everything left over is matched
@@ -237,3 +242,88 @@ read and most of the rows thrown away.
 `repo:` never matches from the CLI — the repository lookup wants the project's
 repositories and `pods` does not open the database — but it works in the TUI's
 own search box and in the columns.
+
+## Registries and repositories — the ACR tab
+
+Two grammars, one per level, typed into the tab's own search box with `/`. There
+is no `--query` on `ticket-tui acr`: the listings are short enough that `grep`
+or `--json` and `jq` do the same job from a script.
+
+At the registries level:
+
+| Field | Aliases | Matches |
+|---|---|---|
+| `name:` | `registry:` | The registry's name |
+| `rg:` | `group:`, `resourcegroup:` | Its resource group |
+| `sku:` | | `Basic`, `Standard`, `Premium` |
+| `location:` | `region:` | The Azure region: `westeurope` |
+
+The facet bar offers `rg:`, `sku:` and `location:`. Anything left over matches
+the registry's name or its login server.
+
+Inside one registry, a catalog has one field worth naming:
+
+| Field | Aliases | Matches |
+|---|---|---|
+| `name:` | `repo:`, `repository:` | The repository's path, `team/orders-api` |
+
+The bar is empty at that level — the one field there is is already the thing you
+are typing. Leftover text matches the repository's name or the registry's.
+
+## Vaults and their items — the Key Vault tab
+
+The same shape again, and the same rule: the search box only, no `--query` on
+`ticket-tui vaults`, `secrets`, `keys` or `certs`.
+
+At the vaults level:
+
+| Field | Aliases | Matches |
+|---|---|---|
+| `name:` | `vault:` | The vault's name |
+| `rg:` | `group:`, `resourcegroup:` | Its resource group |
+| `location:` | `region:` | The Azure region |
+
+Inside one vault, over all three kinds at once, because that is how a person
+looks for one — by name, not by which listing it came out of:
+
+| Field | Aliases | Matches |
+|---|---|---|
+| `name:` | `item:` | The item's name |
+| `kind:` | `type:` | `secret`, `key`, or `cert` |
+| `enabled:` | | `yes`/`no`, and `true`/`false` — both spellings, so neither quietly matches nothing |
+| `expires:` | `expiry:` | A date comparison, the same one `changed:` and `created:` take |
+
+The facet bar offers `kind:` and `enabled:`. Leftover text matches the item's
+name or its kind; at the vaults level it matches the vault's name or its
+resource group.
+
+### `expires:` looks forward
+
+`expires:` is the one date field in this app that is usually about the future,
+so it takes the `+` form of the comparison:
+
+| Form | Meaning |
+|---|---|
+| `expires:<+30d` | Expires before the instant 30 days from now — everything falling due inside a month, plus everything already lapsed |
+| `expires:<+7d` | The same, inside a week |
+| `expires:>+90d` | Not due for more than 90 days |
+| `expires:<2026-09-01` | Before that date, absolutely |
+| `expires:>30d` | An *age*: lapsed more than 30 days ago |
+
+The `+` is what turns the bound around. `<+30d` compares against *now plus
+thirty days*, so it keeps what is about to run out; `<30d` with no `+` is the
+age form every other date field uses and would keep only what lapsed recently.
+Bounds are measured when the query runs, so the query stays true tomorrow.
+
+```console
+kind:cert expires:<+30d          # what the tab's ◇N badge counts
+kind:cert expires:<+30d enabled:yes
+kind:secret expires:<+7d
+```
+
+An item with no expiry never lapses and matches no comparison at all, which is
+why `kind:cert expires:<+30d` does not sweep up the certificates nobody dated.
+
+`◇N` on the tab bar is the same question asked without a query: certificates
+already lapsed or within thirty days of it, across every vault whose items have
+been read. It is in the live context as `key_vault.expiring_certificates`.

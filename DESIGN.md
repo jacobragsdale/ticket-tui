@@ -99,8 +99,14 @@ An access token expires in about an hour, well within one session, so a request
 Azure DevOps refuses is retried once with a freshly minted token before it is
 reported.
 
+All of that is Azure DevOps. The ACR and Key Vault tabs address a subscription
+instead, which wants tokens for other audiences and has never accepted a
+personal access token: see [Azure Resource Manager](#azure-resource-manager).
+
 ticket-tui stores no secrets. It reads the token from the CLI or the environment
-on each sync and keeps nothing but work-item data in SQLite.
+on each sync and keeps nothing but work-item data in SQLite. A secret's value
+read out of a key vault is held in memory for one minute and written nowhere at
+all — not the database, not the session file, not the agent context.
 
 ## Organization and project
 
@@ -1013,8 +1019,14 @@ overlay comes down on the way out — and clicking a tab does the same. The name
 shorten, and then go altogether leaving the digits, as the terminal narrows, so
 every tab stays on the bar and stays clickable at any width. Each
 screen keeps its own query, cursor and scroll while another is showing, and a
-tab wears a badge after its name when it has something waiting. ACR and Key
-Vault say which ticket fills them in until it lands.
+tab wears a badge after its name when it has something waiting.
+
+The first four read the database the sync worker fills; the last three read
+nothing of the sort. AKS reads clusters through `kubectl`, and ACR and Key Vault
+read one Azure **subscription** through Resource Manager — a different service
+from Azure DevOps, reached with a different login. See
+[Azure Resource Manager](#azure-resource-manager) for what that costs and what
+it buys.
 
 All seven are drawn by one pane system: the same two panes, the same three
 arrangements as the terminal narrows, and the same draggable seam between them,
@@ -1305,8 +1317,136 @@ on file matches says what it offered. `y` copies `namespace/pod`. `r` re-reads
 the clusters rather than pulling from Azure DevOps: nothing on this tab comes
 from there. `o` has no page to open and says so.
 
-Tabs `6` ACR and `7` Key Vault are placeholders naming the ticket that fills
-each one in.
+## Azure Resource Manager
+
+Tabs `6` and `7` read a subscription, not the project, so they get a second
+client and a second worker thread. `src/arm.rs` is the client; `src/arm_watch.rs`
+is the thread. Neither touches SQLite: what a subscription holds is not the
+project's business and it changes without anyone editing a work item, so it is
+read live the way a cluster's pods are and the next read replaces it.
+
+The subscription is `--subscription <id>`, else `TICKET_TUI_SUBSCRIPTION`, else
+whatever `az account show` says the Azure CLI is set to — and that last step
+happens on the worker thread rather than on the startup path, so no run pays for
+a shell-out it may never need. With none of the three, both tabs draw empty and
+say so:
+
+    no Azure subscription: pass --subscription, set TICKET_TUI_SUBSCRIPTION, or run `az account set`
+
+Three token audiences, all borrowed from the Azure CLI's login. `management.azure.com`
+signs the Resource Graph query that lists the subscription's registries and
+vaults. `vault.azure.net` signs every Key Vault data-plane call. A registry's own
+data plane wants a third: the ARM token is exchanged at
+`https://<login server>/oauth2/exchange` for a refresh token and then for an
+access token scoped to what is being read — `registry:catalog:*` for a catalog,
+`repository:<name>:metadata_read` for one repository's tags and manifests. There
+is no personal-access-token path anywhere here: a PAT is an Azure DevOps
+credential and ARM has never accepted one, so a PAT-only run has a working
+work-items tab and two empty ones, and every refusal says `az login`.
+
+The reads are edge-triggered. The Resource Graph inventory — one query for both
+resource types rather than one list call per provider — runs every 60 seconds
+while either ARM tab is showing, and not at all while neither is. Everything
+under it is read once per focus: drilling into a registry reads its catalog and
+then one attributes call per repository, moving the details cursor onto a tag
+reads that manifest, opening a vault reads its secrets, keys and certificates in
+one listing. Drilling in and back out again costs nothing: the screen holds what
+it read and stops asking. `r` clears the worker's memory of what it has
+answered and re-reads the inventory at once — but a registry or vault already
+open and already read is not asked for again, because the screen still holds it
+and so reports no focus. Whether it should is #733's to settle. A `429` or `503`
+honours `Retry-After` in either spelling — seconds or an IMF-fixdate — clamped to
+an hour, the same shape the pipeline watcher uses.
+
+A secret's value is the exception to all of it. It is read when somebody presses
+the key that asks for one and not a moment besides, answered once, and never held
+by the worker. In the app it lives in `Secret`, a newtype whose
+`Debug` and `Display` both print `[redacted]` so it cannot reach a log line, an
+error or a panic message by accident; `Secret::expose` is the one way to read it
+and it is meant to be conspicuous at the call site. There are exactly two callers:
+the line the details pane draws, and `secrets show --value`.
+
+## ACR
+
+Tab `6` lists the container registries the subscription holds: `Registry ·
+Resource group · SKU · Location`, with Login server off the table by default and
+one press of `c` away. `Enter` goes down into one registry's catalog —
+`Repository · Tags · Updated` — and `Backspace` or `h` comes back up. A count
+that has not landed yet is a muted `—` rather than a nought: a catalog listing is
+names and nothing else, and the counts arrive one attributes call at a time, with
+the table's bottom border reading `12 repositories · 5 of 12 read` while they do.
+
+The details pane shows what the cursor is on. A registry: its login server under
+its name, then Group, Location, SKU and Repos, and the portal link, which is a
+click target. A repository: its counts and stamp, the chips
+`[Copy pull] [Copy digest] [Open]`, then its tags newest first — name, short
+digest, age, and the size once the manifest has been read — and under them the
+Manifest section for the tag the pane's own cursor is on: Created, Platform
+(`linux/amd64`), Size. `Tab` moves the focus to the pane so `j`/`k` walk the
+tags; a click picks one directly. Whatever refused last is a `Problem` section at
+the bottom of either pane, in the error colour, cleared by the next read that
+works.
+
+Its two grammars, one per level: `name:`/`registry:`, `rg:`, `sku:`, `location:`
+on registries, with the facet bar offering the last three; `name:`/`repo:` alone
+inside one, where the bar stays empty because the one field there is is the one
+already in the search box. Leftover text matches the registry's name or login
+server, or the repository's name.
+
+The verbs: `y` copies the pull reference — `atlas.azurecr.io/team/api:1.2.3`, the
+thing `docker pull` wants, not a number. `D` copies the tag's full digest. `o`
+opens the registry in the Azure portal from either level — a repository and a
+tag have no page of their own. `r` re-reads the subscription rather than pulling
+from Azure DevOps: nothing on this tab comes from there.
+
+Deliberately out: untag and delete. This tab and `ticket-tui acr` are read-only,
+and the portal link is the way to anything destructive — a mistake here is not
+undoable and not worth a keystroke.
+
+## Key Vault
+
+Tab `7` lists the key vaults the subscription holds: `Vault · Resource group ·
+Location · SKU`. `Enter` goes down into one, and the level under it is **one
+table over all three kinds** — `Kind · Name · Enabled · Updated · Expires` —
+because that is how a person looks for one: by name, not by which listing it came
+out of. A disabled item is faded whole; an expiry reads amber inside the month
+before it and red once the clock has passed it. The table opens soonest-expiry
+first, and an item that never expires sorts last that way round.
+
+The details pane heads the item with its kind, then Enabled, Content type,
+Created, Updated, Expires (coloured the way the table's cell is) and Recovery,
+then the chips — `[Reveal]` only on a secret, since only a secret has a value,
+then `[Copy name] [Open]`. The vault pane above it is the same shape as the
+registry pane: name, URI, Group, Location, SKU, Items, and the portal link.
+
+Its grammars: `name:`/`vault:`, `rg:`, `location:` on vaults; `name:`/`item:`,
+`kind:` (`secret`, `key`, `cert`), `enabled:` (`yes`/`no` and `true`/`false`,
+both, so neither spelling quietly matches nothing) and `expires:` inside one. The
+facet bar offers `kind:` and `enabled:`. `expires:` is a date, and the one in this
+app usually asked about the future, so it takes the `+` form: `expires:<+30d` is
+everything falling due before the instant thirty days from now, which is the
+question this tab exists for. The tab wears a `◇N` badge counting the
+certificates already lapsed or within thirty days of it, across every vault whose
+items have been read.
+
+`R` reveals a secret's value. The worker reads it then and there, hands it back
+once, and keeps nothing; the pane shows it in the accent colour with `clears in
+43s` beside it, and it goes when the minute runs out, when the cursor moves, when
+the level changes, when `r` refreshes, and when the tab is left — `close_overlay`
+is what leaving runs, which is why the value goes with it. `Y` copies it, and
+only while it is showing. `y` copies the name. `o` opens the vault in the portal
+from either level, an item having no page of its own. `r` re-reads the
+subscription.
+
+The value is nowhere else. It is not in the session file, not in the agent
+context — which carries `revealed: true` and no field for a value — not in a
+notification, and not in a `Debug` line: `AppAction::CopySecret` prints
+`[redacted]` like everything else holding a `Secret`. Two tests hold that from
+both ends.
+
+Deliberately out: create, set and delete; access policies and IAM; and a secret's
+version history, which would be one more data-plane read per item for a question
+nobody has asked yet. The portal link is the way to all of it.
 
 ## Controls
 
@@ -1363,6 +1503,16 @@ anything on tab `1`.
 | `s` (AKS) | `kubectl exec -it … -- sh` in this terminal |
 | `g` (AKS) | Go to the repository the pod's image or app label names |
 | `y` (AKS) | Copy `namespace/pod` |
+| `Enter` (ACR, Key Vault) | Into the registry's repositories, or the vault's items |
+| `Backspace` / `h` (ACR, Key Vault) | Back up to the registries or the vaults |
+| `Tab` (ACR) | Focus the details pane, where `j`/`k` walk the tags and the manifest follows |
+| `y` (ACR) | Copy the pull reference — `atlas.azurecr.io/team/api:1.2.3` |
+| `D` (ACR) | Copy the digest of the tag the details pane is on |
+| `R` (Key Vault) | Reveal the selected secret's value: on this screen, for one minute, nowhere else |
+| `Y` (Key Vault) | Copy the revealed value, and only while it is showing |
+| `y` (Key Vault) | Copy the item's name |
+| `o` (ACR, Key Vault) | Open the registry or the vault in the Azure portal — the resource is what the portal has a page for, whichever level you are on |
+| `r` (AKS, ACR, Key Vault) | Re-read that tab's own source rather than pulling from Azure DevOps |
 | `i` | Show database path, row counts, hidden finished rows, and sync freshness |
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
@@ -1376,7 +1526,10 @@ screen has an arm for the command, so the palette never offers an entry that
 would do nothing; two tests hold that in both directions, and a command two
 tabs share is listed under both help headings because it does a different thing
 on each. `Open` is worded for what it opens — a ticket, a repository, a pull
-request, or a run. `?`, `p`/`:`, `c` and `i` open on every tab: the
+request, a run, or the Azure portal — and so are the three verbs that mean
+something different on a tab with no Azure DevOps behind it: `Sync` reads
+`Refresh pods`, `Refresh registries` or `Refresh vaults`, and `Copy ID` reads
+`Copy pull reference` on ACR and `Copy name` on Key Vault. `?`, `p`/`:`, `c` and `i` open on every tab: the
 palette lists the commands of the tab that is showing and runs its choice
 there, and the columns editor edits that tab's columns.
 
@@ -1769,8 +1922,9 @@ query the cache while the TUI is running.
 
 A bare `ticket-tui` opens the TUI. Every subcommand does one thing and exits,
 which is what lets an agent — or a script — read and change work items without
-a terminal to drive. `--database`, `--org`, and `--project` apply to all of
-them and may be written either side of the subcommand.
+a terminal to drive. `--database`, `--org`, `--project`, `--workspace` and
+`--subscription` apply to all of them and may be written either side of the
+subcommand.
 
 ```console
 ticket-tui sync [--full]
@@ -1800,6 +1954,17 @@ ticket-tui approvals list [--json]
 ticket-tui approvals approve <id> [--comment TEXT]
 ticket-tui approvals reject <id> [--comment TEXT]
 ticket-tui pods [--cluster NAME] [--namespace NAME] ['<filter>'] [--json]
+ticket-tui acr list [--json]
+ticket-tui acr show <registry> [--json]
+ticket-tui acr repos list --registry NAME [--json]
+ticket-tui acr tags list --registry NAME --repo NAME [--json]
+ticket-tui acr tags show --registry NAME --repo NAME <tag> [--json]
+ticket-tui vaults list [--json]
+ticket-tui vaults show <vault> [--json]
+ticket-tui secrets list --vault NAME [--json]
+ticket-tui secrets show --vault NAME <name> [--json | --value]
+ticket-tui keys list --vault NAME [--json]
+ticket-tui certs list --vault NAME [--json]
 ```
 
 `sync` pulls and exits, printing what moved — `Synced 3 changes from
@@ -1933,6 +2098,56 @@ the pods that did answer have been printed, because a partial answer is still
 worth having; a `config.toml` with no `[[clusters]]` is an error saying to add
 one.
 
+`acr` and the four vault groups are the [ACR](#acr) and [Key Vault](#key-vault)
+tabs without the tab, and the other reads with no database behind them: the
+subscription is asked for its registries and vaults on every invocation, and a
+registry's or a vault's own data plane answers for what is inside it. They
+resolve the subscription the way the tabs do — `--subscription`, then
+`TICKET_TUI_SUBSCRIPTION`, then the Azure CLI — and an unresolved one or a
+refused token is an error rather than an empty listing, because there is nothing
+stored here to fall back on. A name the subscription does not hold is refused by
+name (`no registry called ghcr in subscription sub-1`, `no vault called
+billing-kv in this subscription`), matched ignoring case like every other name on
+this command line.
+
+```console
+$ ticket-tui acr list
+acr  rg  Premium  westeurope  acr.azurecr.io
+
+$ ticket-tui acr repos list --registry acr
+team/orders-api  7  9  2026-08-29 09:00:00 UTC (1d)
+team/billing     —  —  —
+
+$ ticket-tui certs list --vault atlas-kv
+wildcard  yes  2026-08-01 09:00:00 UTC (29d)  2026-09-29 09:00:00 UTC (0s) expires in 30 days
+```
+
+The tables are the tabs' own with their hidden columns shown: `acr list` prints
+`name resource-group sku location login-server`, `repos list` prints
+`repository tags manifests updated`, `tags list` prints `tag digest created`
+newest first, `vaults list` prints `name resource-group location sku uri`, and
+the three item listings print `name enabled updated expires` with a
+`content-type` column after it for secrets and the expiry in words as well as a
+stamp for certificates. A count nobody could read is a dash rather than a nought,
+the way the tab draws one that has not landed; `acr repos list` puts one line per
+unreadable repository on stderr and exits non-zero after printing the rows that
+did answer. `show` on either resource is the block of text its details pane
+draws, portal link and all. `--json` carries the same fields plus the resource's
+`id` and a `portal_url`, so an agent need not build one; the counts (`repositories`
+on a registry, `items` on a vault) are only on `show`, which is the one form that
+reads them.
+
+Nothing under `acr` or the vault groups writes. Everything is read-only for the
+same reason the tabs are, and a listing never carries a value.
+
+`ticket-tui secrets show --vault V NAME --value` is the one command in this file
+that reads a secret's value. It prints it raw on stdout and prints nothing else,
+so `$(…)` around it is the value and only the value; it conflicts with `--json`
+at the command line rather than resolving into a quiet preference for one of
+them; and it is the only caller of `Secret::expose` outside the details pane. The
+metadata form of the same command reads the listing every other form reads, never
+the value, and ends by saying so — `value: not shown; pass --value to print it`.
+
 ## Live agent context
 
 While ticket-tui is running, it atomically publishes a compact JSON snapshot
@@ -1973,11 +2188,31 @@ pull request need not ask the user to press `3`:
   `line_count`, `following`), and one `errors` line per `(cluster, namespace)`
   that could not be read. Pods are read live rather than stored, so the block is
   only as current as the last read.
-- `acr` and `key_vault` — a `level` and a `visible_rows` count while those tabs
-  are placeholders; their own tickets fill them in.
+- `acr` — the `level` (`registries` or `repositories`), the registry under the
+  cursor with its group, SKU, location, login server and portal link, the
+  repository under it with its tag count and stamp, the tag the details pane's
+  own cursor is on with its full digest, and how many rows the query leaves on
+  the table.
+- `key_vault` — the `level` (`vaults` or `items`), the vault under the cursor
+  with its group, location, SKU, URI and portal link, the item under it —
+  `kind`, `name`, `enabled`, `updated`, `expires` — the row count, and
+  `expiring_certificates`, the same number the tab's `◇N` badge shows. The item
+  also carries `revealed`, which says whether its value is on the screen this
+  minute. **There is no field for the value and there is not meant to be one:**
+  a value is read for the screen alone and this file is written to disk.
+- `arm` — whether those two have anything to read at all: `subscription`,
+  `offline`, and `last_error`, the one line that says why an offline run reads
+  nothing. Both tabs are described on every run; `arm.offline` is what tells an
+  agent that an empty `acr` means "no subscription", not "no registries".
+
+The last three blocks, like `aks`, are as current as the last read rather than
+as current as a pull: 60 seconds for the inventory while an ARM tab is showing,
+and once per focus for everything under it.
 
 Schema 2 consumers read the work-item fields at the top level and will find them
-under `work_items` instead.
+under `work_items` instead. A block added within schema 3 — `aks`, `acr`,
+`key_vault` and `arm` all were — is additive, and a reader should ignore fields
+it does not know rather than refuse them.
 
 The file is replaced after meaningful rendered-state changes and removed on a
 clean exit. A crash or forced termination can leave a stale file, so consumers

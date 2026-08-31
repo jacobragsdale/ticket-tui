@@ -63,12 +63,15 @@ offline, browsing whatever the database already holds.
 | `p` / `:` | The command palette: every action the tab can take |
 | `e` | The Actions menu — edit title, state, assignee, tags, description |
 | `n` / `N` | New work item, or a new child of the selected one |
-| `r` | Sync now, without waiting for the timer |
-| `o` | Open the selected row in the system browser |
+| `r` | Sync now, without waiting for the timer — on AKS, ACR and Key Vault it re-reads that tab's own source |
+| `o` | Open the selected row in the system browser; the Azure portal on ACR and Key Vault |
 | `?` | The in-app help, generated from the same table the keys are bound in |
 | `L` / `D` | On AKS: tail the selected pod's log, or `kubectl describe` it |
 | `x` / `s` | On AKS: restart the pod after a confirm, or open a shell in it |
 | `g` | On AKS: jump to the repository the pod's image names |
+| `Enter` / `h` | On ACR and Key Vault: into the registry or vault under the cursor, and back out |
+| `y` / `D` | On ACR: copy the pull reference, or the tag's digest |
+| `R` / `Y` | On Key Vault: show a secret's value for one minute, or copy it while it is up |
 | `q` | Quit |
 
 The mouse works throughout: click a field to edit it, drag the divider, scroll
@@ -100,9 +103,20 @@ context = "aks-qa"
 namespaces = ["orders", "billing"]
 ```
 
+The ACR and Key Vault tabs read one **Azure subscription** rather than the
+Azure DevOps project, so they need `az login` and a subscription to read:
+`--subscription <id>`, else `TICKET_TUI_SUBSCRIPTION`, else whichever one `az
+account set` left the Azure CLI on. With none of the three both tabs draw empty
+and say why. An Azure DevOps personal access token does not reach a
+subscription.
+
 `ticket-tui` is also a CLI — `list`, `show`, `edit`, `comment`, `create`,
-`repos`, `prs`, `pipelines`, `runs`, `approvals`, `pods` — so a script or an
-agent can do anything the TUI can.
+`repos`, `prs`, `pipelines`, `runs`, `approvals`, `pods`, `acr`, `vaults`,
+`secrets`, `keys`, `certs` — so a script or an agent can do anything the TUI
+can. The vault commands print names, dates and whether a thing is enabled;
+`ticket-tui secrets show --vault V NAME --value` is the only one that prints a
+secret's value, raw, to stdout — so run it deliberately and keep what it prints
+out of anything you save.
 
 ## More
 

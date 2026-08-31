@@ -1,3 +1,17 @@
+//! The JSON document beside the database that says what the run is showing:
+//! the shell's own state, and one block per tab whether or not that tab is on
+//! screen.
+//!
+//! Versioning: adding a block, or a field to one, is additive and leaves
+//! [`SCHEMA_VERSION`] where it is — `aks`, `acr`, `key_vault` and `arm` all
+//! arrived within schema 3, and a reader that does not know a field ignores
+//! it. Only removing or reshaping something already documented bumps the
+//! version.
+//!
+//! There is no field here for a secret's value and there is not meant to be
+//! one: this file is written to disk, and a vault is read for the screen
+//! alone.
+
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -594,6 +608,123 @@ mod tests {
                 details_scroll_line: 0,
             },
         }
+    }
+
+    /// The two ARM tabs as an agent reads them: which subscription answered,
+    /// what each cursor is on, and — the point of the Key Vault block — that a
+    /// value on screen is reported as showing and never written down.
+    #[test]
+    fn the_document_names_the_arm_state_and_both_tabs_selections_and_never_a_value() {
+        use crate::app::{App, TabId};
+        use crate::arm::tests::FakeArm;
+        use crate::arm::{
+            ArmSource, Inventory, ItemKind, Registry, Repository, Tag, Vault, VaultItem,
+        };
+        use crate::timestamp::ts;
+
+        let registry = Registry {
+            id: "/subscriptions/sub-1/resourceGroups/platform/providers/Microsoft.ContainerRegistry/registries/atlas".to_owned(),
+            name: "atlas".to_owned(),
+            resource_group: "platform".to_owned(),
+            location: "westeurope".to_owned(),
+            sku: "Premium".to_owned(),
+            login_server: "atlas.azurecr.io".to_owned(),
+        };
+        let vault = Vault {
+            id: "/subscriptions/sub-1/resourceGroups/platform/providers/Microsoft.KeyVault/vaults/atlas-kv".to_owned(),
+            name: "atlas-kv".to_owned(),
+            resource_group: "platform".to_owned(),
+            location: "westeurope".to_owned(),
+            sku: "standard".to_owned(),
+            uri: "https://atlas-kv.vault.azure.net/".to_owned(),
+        };
+        // A `Secret` is only ever made by reading one out of a vault, which is
+        // what the fake source is here for.
+        let source = FakeArm::default();
+        *source.secret.lock().unwrap() = "hunter2".to_owned();
+        let secret = source.secret_value(&vault, "db-password").unwrap();
+
+        let inventory = Inventory {
+            registries: vec![registry],
+            vaults: vec![vault],
+        };
+        let mut app = App::new(Vec::new());
+        app.select_tab(TabId::KeyVault);
+        app.shell.set_arm_subscription(Some("sub-1".to_owned()));
+        app.acr.set_inventory(Ok(inventory.clone()));
+        app.acr.set_repositories(
+            "atlas",
+            Ok(vec![Repository {
+                name: "team/api".to_owned(),
+                tags: Some(4),
+                manifests: Some(4),
+                updated: Some(ts("2026-08-29T09:00:00Z")),
+            }]),
+        );
+        app.acr.set_tags(
+            "atlas",
+            "team/api",
+            Ok(vec![Tag {
+                name: "latest".to_owned(),
+                digest: "sha256:aaaaaaaaaaaaaaaa".to_owned(),
+                created: Some(ts("2026-08-29T09:00:00Z")),
+                updated: Some(ts("2026-08-29T09:00:00Z")),
+            }]),
+        );
+        app.key_vault.set_inventory(Ok(inventory));
+        app.key_vault.open_items();
+        app.key_vault.set_items(
+            "atlas-kv",
+            Ok(vec![VaultItem {
+                kind: ItemKind::Secret,
+                name: "db-password".to_owned(),
+                enabled: true,
+                created: Some(ts("2026-08-01T09:00:00Z")),
+                updated: Some(ts("2026-08-20T09:00:00Z")),
+                expires: None,
+                content_type: Some("text/plain".to_owned()),
+                recovery_level: Some("Recoverable+Purgeable".to_owned()),
+            }]),
+        );
+        app.key_vault
+            .set_revealed("atlas-kv", "db-password", Ok(secret));
+
+        let directory = tempdir().unwrap();
+        let path = path_for(&directory.path().join("tickets.sqlite3"));
+        save(&path, &app.agent_context()).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        let document: serde_json::Value = serde_json::from_str(&written).unwrap();
+
+        assert_eq!(document["schema_version"], SCHEMA_VERSION);
+        assert_eq!(document["active_tab"], "key_vault");
+        assert_eq!(document["arm"]["subscription"], "sub-1");
+        assert_eq!(document["arm"]["offline"], false);
+        assert!(document["arm"]["last_error"].is_null());
+
+        assert_eq!(document["acr"]["level"], "registries");
+        assert_eq!(document["acr"]["selected_registry"]["name"], "atlas");
+        assert_eq!(
+            document["acr"]["selected_registry"]["login_server"],
+            "atlas.azurecr.io"
+        );
+        assert!(
+            document["acr"]["selected_registry"]["portal_url"]
+                .as_str()
+                .unwrap()
+                .contains("portal.azure.com")
+        );
+
+        assert_eq!(document["key_vault"]["level"], "items");
+        assert_eq!(document["key_vault"]["selected_vault"]["name"], "atlas-kv");
+        assert_eq!(document["key_vault"]["selected_item"]["kind"], "secret");
+        assert_eq!(
+            document["key_vault"]["selected_item"]["name"],
+            "db-password"
+        );
+        assert_eq!(document["key_vault"]["selected_item"]["revealed"], true);
+
+        // The value is on the screen this minute and nowhere in the file.
+        assert!(!written.contains("hunter2"), "{written}");
     }
 
     #[test]

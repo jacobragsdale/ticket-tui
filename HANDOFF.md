@@ -27,11 +27,21 @@ Last updated 2026-08-30. The backlog itself lives in Azure DevOps
   cluster reachable from this machine yet, so every one of those tickets was
   built and tested against `aks::tests::FakeKube` — see "AKS tab — integration
   checklist" below for the day one is.
-- **ACR (#724) and Key Vault (#725) are in progress** on their own branches.
-  Tabs `6` and `7` are on the bar and are placeholders naming their tickets;
-  `src/arm.rs` is the shared ARM client behind both.
+- **The ACR tab is done** (Epic #724). Tab `6` lists the subscription's
+  container registries and drills into one registry's repositories, tags and
+  manifests, and `ticket-tui acr` is the same read without the TUI.
+- **The Key Vault tab is nearly done** (Epic #725): #730 the tab and #731 the
+  CLI are closed, this ticket (#732) is the context, the skill and these docs,
+  and **#733 is the review round for both ARM tabs** — read it next. Tab `7`
+  lists the subscription's vaults, drills into one vault's secrets, keys and
+  certificates, and reveals one secret's value on `R` for a minute and nowhere
+  else.
+- **Neither ARM tab has ever been run against a real subscription**: there is
+  none reachable from this machine, so `src/arm.rs`, `src/arm_watch.rs`, both
+  tabs and all five CLI groups were built against `arm::tests::FakeArm`. See
+  "ARM tabs — integration checklist" below for the day one is.
 - The gate is `cargo fmt --check`, `cargo clippy --all-targets --all-features
-  -D warnings`, `cargo test --all-targets` (622 lib + 29 bin tests) and
+  -D warnings`, `cargo test --all-targets` (675 lib + 29 bin tests) and
   `cargo build --release`, with the test run repeated under `NO_COLOR=1`,
   `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` — the theme
   matrix, which is real because `Theme::from_env` reads the variable.
@@ -70,8 +80,10 @@ first argument after the receiver; nothing else reaches across.
         pipelines/      the Pipelines tab: two levels, the timeline, the log
         aks/            the AKS tab: the pod table, the details and text panes,
                         and the verbs — mod.rs, columns.rs, tests.rs
-        acr/            the ACR tab (#724, in progress)
-        key_vault/      the Key Vault tab (#725, in progress)
+        acr/            the ACR tab: registries and one registry's catalog —
+                        mod.rs, columns.rs, filters.rs, rows.rs, tests.rs
+        key_vault/      the Key Vault tab: vaults and one vault's items, and
+                        the reveal that clears itself — the same five files
     src/watch.rs        the pipeline watcher thread: live runs, timelines, logs,
                         approvals — cadences that stretch, and no SQLite at all
     src/local.rs        the local-repos thread: the workspace scan and the three
@@ -81,7 +93,14 @@ first argument after the receiver; nothing else reaches across.
                         with a 15 s Cadence per cluster, and the one
                         `kubectl logs -f` child — no SQLite either
     src/arm.rs          the Azure Resource Manager client the ACR and Key Vault
-                        tabs read through
+                        tabs read through: ArmConfig and how a subscription is
+                        resolved, the three token audiences, the Resource Graph
+                        inventory query, the two data planes, and Secret —
+                        whose Debug and Display both print [redacted]
+    src/arm_watch.rs    the ARM worker thread, one for both tabs: the 60 s
+                        inventory cadence while either is showing, one read per
+                        focus under it, and the reveal that is answered once
+                        and never held — no SQLite here either
     src/main.rs         opens the module below and reports what it returns
     src/run/mod.rs      run: the database, the workers, the terminal, and back
         engines.rs      the sync, details, local and reload workers, and the
@@ -107,9 +126,17 @@ first argument after the receiver; nothing else reaches across.
         pipelines.rs    the Pipelines tab's own renderer
         aks.rs          the AKS tab's own renderer: the table, the pod details
                         and the log pane under them
-        acr.rs          the ACR tab's placeholder
-        key_vault.rs    the Key Vault tab's placeholder
-        tests/          the same split
+        acr.rs          the ACR tab's own renderer: the two tables, the
+                        registry and repository panes, the tags and manifest
+        key_vault.rs    the Key Vault tab's own renderer: the two tables, the
+                        vault and item panes, the expiry colours and the one
+                        line a revealed value is drawn on
+        tests/          the same split, plus tests/acr.rs and
+                        tests/key_vault.rs
+    scripts/fake-kubectl  a kubectl that answers from fixtures: get pods, a
+                        streaming logs -f, describe, delete and exec
+    scripts/walk_aks.py walks every AKS verb in the release binary under a pty
+                        against that fake, PASS/FAIL per step (needs `pyte`)
 
 Every ui function takes `screen` and `shell` rather than `app`, and
 `ui::render` paints the tab bar itself and then goes through `App::screen()`
@@ -303,6 +330,71 @@ failure here is the read and not the screen.
   the table status and in the details pane, and the other cluster is unaffected.
 - Leave the tab and come back: the stream survives. Quit with `q` and check
   `pgrep kubectl` leaves nothing behind.
+
+## ARM tabs — integration checklist
+
+Same story as AKS: nothing in Epics #724 and #725 was ever run against a real
+subscription, so the client, the worker, both tabs and all five CLI groups were
+built against `arm::tests::FakeArm`. That is not the same as working. The day a
+subscription is reachable, walk this in order.
+
+**1. Get the Azure CLI working outside ticket-tui first.** Everything here
+borrows its login, and a login problem reads as two broken tabs.
+
+```console
+az login
+az account set --subscription <id>          # or pass --subscription / set TICKET_TUI_SUBSCRIPTION
+az account show --query id -o tsv
+```
+
+An Azure DevOps personal access token does not reach a subscription:
+`AZURE_DEVOPS_EXT_PAT` alone leaves both tabs offline, on purpose.
+
+**2. Then the CLI, before the TUI.** Same read path, none of the drawing, so a
+failure here is the read and not the screen.
+
+```console
+ticket-tui acr list
+ticket-tui vaults list
+ticket-tui acr repos list --registry <r>
+ticket-tui certs list --vault <v>
+```
+
+**3. Then tab `6`.**
+
+- Registries land within a minute of opening the tab, and again on `r`.
+- `Enter` on one: the catalog appears, the counts fill in behind it, and the
+  bottom border counts the attributes reads while they land.
+- The details pane's tags fill, and the Manifest section follows the tag cursor
+  (`Tab`, then `j`/`k`, or a click).
+- `y` copies a pull reference that actually pulls — paste it after `docker pull`.
+- `D` copies the digest. `o` opens the registry in the portal.
+- `h` or `Backspace` goes back up and the cursor stays where it was.
+
+**4. Then tab `7`.**
+
+- Vaults land; `Enter` opens one and the three kinds arrive as one listing.
+- `kind:cert expires:<+30d` narrows to what is running out, and the `◇N` badge
+  on the tab agrees with the rows.
+- `R` on **one secret you are allowed to see**: the value shows, `clears in 60s`
+  counts down, and it is gone after a minute. Leave the tab and come back — it
+  is gone. Press `r` — it is gone.
+- `Y` while it is showing copies it; `Y` after it has cleared says
+  `Nothing is revealed to copy`.
+- A secret you are *not* allowed to read: the refusal shows under `Problem` and
+  the rest of the listing stays on screen.
+- `grep` the context file and the session file for the value you revealed. Both
+  must be clean.
+
+**5. Both tabs, wrong on purpose.** Start with `--subscription
+00000000-0000-0000-0000-000000000000`: both tabs say so rather than drawing an
+empty table with no explanation. Start with no subscription at all and no `az
+account`: the same, in `arm.last_error`.
+
+Known gap for #733 to settle: `r` re-reads the *inventory* and re-asks for the
+current focus, but not the items of a registry or vault that is already open and
+already read — the focus reads are once-per-focus by design. Decide there
+whether `r` should force those too.
 
 ## Known data issue, not a code bug
 
