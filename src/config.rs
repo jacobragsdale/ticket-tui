@@ -25,6 +25,11 @@
 //! cyan = "#4fe8ff"
 //! orange = "#ff9e5e"
 //! teal = "#29e0c8"
+//!
+//! [[clusters]]               # the AKS tab, one table per cluster
+//! name = "qa"                # what the tab calls it
+//! context = "aks-qa"         # the kubeconfig context kubectl uses
+//! namespaces = ["orders"]    # left out or empty: --all-namespaces
 //! ```
 //!
 //! Keys this build does not know are ignored, so the table can grow without
@@ -32,7 +37,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer};
 
@@ -40,6 +45,35 @@ use serde::{Deserialize, Deserializer};
 pub struct Config {
     #[serde(default)]
     pub theme: ThemeSection,
+    /// The clusters the AKS tab reads, in the order the file lists them.
+    #[serde(default)]
+    pub clusters: Vec<Cluster>,
+}
+
+/// One cluster the AKS tab reads: what to call it, the kubeconfig context
+/// `kubectl` reaches it by, and which namespaces to read.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct Cluster {
+    pub name: String,
+    pub context: String,
+    /// Left out or empty, every namespace is read at once.
+    #[serde(default)]
+    pub namespaces: Vec<String>,
+}
+
+impl Cluster {
+    /// The namespaces to read, one call each; `None` is all of them in one.
+    #[must_use]
+    pub fn targets(&self) -> Vec<Option<&str>> {
+        if self.namespaces.is_empty() {
+            vec![None]
+        } else {
+            self.namespaces
+                .iter()
+                .map(|held| Some(held.as_str()))
+                .collect()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -177,7 +211,20 @@ pub fn load(path: &Path) -> Result<Config> {
 }
 
 pub fn parse(source: &str) -> Result<Config> {
-    toml::from_str(source).map_err(|error| anyhow::anyhow!("{}", error.message()))
+    let config: Config =
+        toml::from_str(source).map_err(|error| anyhow::anyhow!("{}", error.message()))?;
+    for (index, cluster) in config.clusters.iter().enumerate() {
+        if cluster.name.trim().is_empty() || cluster.context.trim().is_empty() {
+            bail!("clusters[{index}] needs a name and a context");
+        }
+        if config.clusters[..index]
+            .iter()
+            .any(|held| held.name == cluster.name)
+        {
+            bail!("two clusters are called {:?}", cluster.name);
+        }
+    }
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -236,6 +283,35 @@ ansi = ["#0b0d14"]
         assert!(Rgb::parse("#12345").is_err());
         assert!(Rgb::parse("123456").is_err());
         assert_eq!(Rgb::parse("#ABCDEF").unwrap(), Rgb(0xab, 0xcd, 0xef));
+    }
+
+    #[test]
+    fn clusters_parse_from_the_file_and_no_namespaces_means_all_of_them() {
+        let config = parse(
+            "[[clusters]]\nname = \"qa\"\ncontext = \"aks-qa\"\nnamespaces = [\"orders\", \"billing\"]\n\n[[clusters]]\nname = \"prod\"\ncontext = \"aks-prod\"\n",
+        )
+        .unwrap();
+        assert_eq!(config.clusters.len(), 2);
+        assert_eq!(
+            config.clusters[0].targets(),
+            vec![Some("orders"), Some("billing")]
+        );
+        assert_eq!(config.clusters[1].targets(), vec![None]);
+        assert_eq!(parse("").unwrap().clusters, Vec::new());
+    }
+
+    #[test]
+    fn a_cluster_without_a_context_or_a_name_used_twice_names_itself() {
+        let error = parse("[[clusters]]\nname = \"qa\"\ncontext = \"\"\n").unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "clusters[0] needs a name and a context"
+        );
+        let error = parse(
+            "[[clusters]]\nname = \"qa\"\ncontext = \"a\"\n[[clusters]]\nname = \"qa\"\ncontext = \"b\"\n",
+        )
+        .unwrap_err();
+        assert_eq!(format!("{error:#}"), "two clusters are called \"qa\"");
     }
 
     #[test]
