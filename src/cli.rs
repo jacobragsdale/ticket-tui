@@ -49,6 +49,10 @@ pub struct Cli {
     /// Azure DevOps project; defaults to TICKET_TUI_PROJECT or `az devops configure`
     #[arg(long, global = true, value_name = "PROJECT")]
     pub project: Option<String>,
+    /// Azure subscription id for the ACR and Key Vault tabs; defaults to
+    /// TICKET_TUI_SUBSCRIPTION or `az account show`
+    #[arg(long, global = true, value_name = "SUBSCRIPTION")]
+    pub subscription: Option<String>,
     /// Seconds between background pulls from Azure DevOps, 0 to turn the timer
     /// off; defaults to TICKET_TUI_REFRESH or 60
     #[arg(long, value_name = "SECONDS")]

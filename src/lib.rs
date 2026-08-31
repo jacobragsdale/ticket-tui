@@ -1,6 +1,7 @@
 pub mod agent_context;
 pub mod aks;
 pub mod app;
+pub mod arm;
 pub mod azure;
 pub mod classification;
 pub mod cli;
