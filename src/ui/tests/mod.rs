@@ -1,5 +1,6 @@
 //! Tests for the work items screen renderer, split the way the module is.
 
+mod acr;
 mod aks;
 mod details;
 mod overlays;

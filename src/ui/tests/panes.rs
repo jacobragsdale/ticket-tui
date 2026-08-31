@@ -2,6 +2,7 @@
 //! in, and the seam between them.
 
 use super::*;
+use crate::app::acr::tests::acr_app;
 use crate::app::aks::tests::aks_app;
 use crate::app::pipelines::tests::pipelines_app;
 use crate::app::pull_requests::tests::pull_requests_app;
@@ -21,7 +22,7 @@ fn tabs() -> Vec<(TabId, App, &'static str, &'static str)> {
     pipelines.select_tab(TabId::Pipelines);
     let mut aks = aks_app();
     aks.select_tab(TabId::Aks);
-    let mut acr = App::new(Vec::new());
+    let mut acr = acr_app();
     acr.select_tab(TabId::Acr);
     let mut key_vault = App::new(Vec::new());
     key_vault.select_tab(TabId::KeyVault);
@@ -251,9 +252,8 @@ fn the_pane_commands_answer_on_every_tab() {
 #[test]
 fn dragging_across_a_row_copies_its_text_on_every_tab() {
     for (tab, mut app, _, _) in tabs() {
-        // The two ARM tabs have no rows to drag across until B3 and C1 read
-        // them.
-        if matches!(tab, TabId::Acr | TabId::KeyVault) {
+        // The Key Vault tab has no rows to drag across until C1 reads them.
+        if tab == TabId::KeyVault {
             continue;
         }
         render_text(130, 30, &mut app);

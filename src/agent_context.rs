@@ -41,11 +41,45 @@ pub struct AgentContext {
     pub arm: ArmContext,
 }
 
-/// The ACR tab. A placeholder while the tab is a shell: B3 fills it in.
+/// The ACR tab: which level it is on, and what the two cursors and the details
+/// pane are showing.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct AcrContext {
+    /// `registries` or `repositories`.
     pub level: String,
+    pub selected_registry: Option<RegistryContext>,
+    pub selected_repository: Option<RepositoryContext>,
+    pub selected_tag: Option<TagContext>,
     pub visible_rows: usize,
+}
+
+/// One container registry, as an agent reads it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RegistryContext {
+    pub name: String,
+    pub resource_group: String,
+    pub sku: String,
+    pub location: String,
+    /// The data-plane host a pull reference starts with.
+    pub login_server: String,
+    pub portal_url: String,
+}
+
+/// One repository in it. The counts and the stamp are `null` until the
+/// attributes call has landed: a catalog listing is names and nothing else.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepositoryContext {
+    pub name: String,
+    pub tags: Option<u64>,
+    pub updated: Option<String>,
+}
+
+/// The tag the details pane's cursor is on.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TagContext {
+    pub name: String,
+    pub digest: String,
+    pub created: Option<String>,
 }
 
 /// The Key Vault tab, the same way round: C1 fills it in.

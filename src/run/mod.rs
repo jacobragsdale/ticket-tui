@@ -26,6 +26,7 @@ use ticket_tui::app::{
     App, AppAction, CopiedContent, DividerOrientation, PointerTarget, Snapshot, SyncTarget, TabId,
 };
 use ticket_tui::arm::ArmConfig;
+use ticket_tui::arm_watch::{ArmEvent, ArmFocus, ArmHandle, ArmRequest};
 use ticket_tui::azure::AzureConfig;
 use ticket_tui::cli::{self, Cli, resolve_me};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
@@ -177,22 +178,22 @@ pub(super) fn run() -> Result<()> {
             ..LocalRuntime::default()
         },
         aks: AksRuntime::default(),
-        arm_config: None,
+        arm: ArmRuntime::default(),
+        // Which subscription the ACR and Key Vault tabs read: the flag, then
+        // the variable, and nothing else. Asking the Azure CLI costs a
+        // shell-out, so the worker thread does that instead — and only once
+        // one of those tabs is opened.
+        arm_config: ArmConfig::from_settings(
+            cli.subscription.clone(),
+            std::env::var("TICKET_TUI_SUBSCRIPTION").ok(),
+        ),
     };
-    // Which subscription the ACR and Key Vault tabs read. No token is minted
-    // here: that costs an `az` shell-out, and the worker thread does it when
-    // one of those tabs first asks for something.
-    match ArmConfig::resolve(
-        cli.subscription.clone(),
-        std::env::var("TICKET_TUI_SUBSCRIPTION").ok(),
-    ) {
-        Ok(config) => {
-            app.shell
-                .set_arm_subscription(Some(config.subscription.clone()));
-            runtime.arm_config = Some(config);
-        }
-        Err(error) => app.shell.set_arm_state(Some(format!("{error:#}"))),
-    }
+    app.shell.set_arm_subscription(
+        runtime
+            .arm_config
+            .as_ref()
+            .map(|config| config.subscription.clone()),
+    );
     if let Some(config) = config.filter(|_| wrong_project.is_none()) {
         runtime.worker = Some(SyncHandle::spawn(
             database_path.clone(),

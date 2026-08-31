@@ -73,6 +73,7 @@ fn aks_runtime(source: FakeKube) -> SyncRuntime {
             ..AksRuntime::default()
         },
         arm_config: None,
+        arm: ArmRuntime::default(),
     }
 }
 

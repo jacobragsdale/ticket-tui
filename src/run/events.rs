@@ -25,6 +25,7 @@ pub(super) fn run_terminal(
         redraw |= poll_pipelines(app, runtime);
         redraw |= poll_local(app, runtime);
         redraw |= poll_aks(app, runtime);
+        redraw |= poll_arm(app, runtime);
         redraw |= dispatch_due_pull(app, runtime);
         redraw |= dispatch_due_details(app, runtime);
         redraw |= persist_session(app, repository);
@@ -195,6 +196,18 @@ pub(super) fn handle_action(
             exec_shell(app, &context, &key, container.as_deref());
             return true;
         }
+        // The subscription thread starts with the first ARM tab opened, so a
+        // request before that says why rather than doing nothing.
+        AppAction::Arm(request) => match runtime.arm.worker.as_ref() {
+            Some(worker) => drop(worker.send(request)),
+            None => {
+                let refusal = app
+                    .shell
+                    .arm_state()
+                    .map_or_else(|| "Azure is not configured".to_owned(), str::to_owned);
+                app.shell.set_error(refusal);
+            }
+        },
         AppAction::LocalGit(request) => match runtime.local.worker.as_ref() {
             Some(worker) => {
                 let _ = worker.send(request);
@@ -264,6 +277,8 @@ fn spinning(app: &App) -> bool {
     app.shell.sync_pending
         || app.repos.busy()
         || app.aks.busy()
+        // A drill into a registry, in flight.
+        || app.acr.busy()
         || app.work_items.details_pending.is_some()
         || app.shell.flashing()
 }

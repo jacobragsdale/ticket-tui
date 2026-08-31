@@ -259,6 +259,109 @@ pub(super) fn poll_aks(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     redraw
 }
 
+/// Tells the subscription worker what is worth reading and folds in what it
+/// has read. Registries, repositories and tags live in the screen only:
+/// nothing here touches SQLite.
+pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
+    let showing = match app.tab {
+        TabId::Acr | TabId::KeyVault => Some(app.tab),
+        _ => None,
+    };
+    // Started by the first of the two tabs to be opened, and never started
+    // again once it has refused or stopped.
+    if runtime.arm.worker.is_none() && showing.is_some() && !runtime.arm.failed_to_start {
+        runtime.arm.failed_to_start = true;
+        match ArmHandle::spawn(runtime.arm_config.clone()) {
+            Ok(handle) => {
+                runtime.arm.failed_to_start = false;
+                runtime.arm.worker = Some(handle);
+            }
+            Err(error) => {
+                let refusal = format!("Could not start the subscription worker: {error:#}");
+                app.acr.set_arm_error(refusal.clone());
+                app.shell.set_error(refusal);
+            }
+        }
+    }
+    let Some(worker) = runtime.arm.worker.as_ref() else {
+        return false;
+    };
+    if showing != runtime.arm.showing {
+        runtime.arm.showing = showing;
+        let _ = worker.send(ArmRequest::TabShowing(showing));
+    }
+    // What the registry tab is looking at, and only while it is the one
+    // showing: a hidden tab is nothing to read for.
+    let focus = if showing == Some(TabId::Acr) {
+        app.acr.focus()
+    } else {
+        None
+    };
+    if focus != runtime.arm.focus {
+        runtime.arm.focus = focus.clone();
+        let _ = worker.send(focus.map_or(ArmRequest::Blur, ArmRequest::Focus));
+    }
+    // Drained first, so an event can be answered without holding a borrow of
+    // the thread that sent it.
+    let events: Vec<ArmEvent> = std::iter::from_fn(|| worker.try_event()).collect();
+    // A read in flight redraws on its own, so its spinner turns.
+    let redraw = !events.is_empty() || app.acr.busy();
+    for event in events {
+        let toast = match event {
+            ArmEvent::Subscription(Ok(subscription)) => {
+                app.shell.set_arm_subscription(Some(subscription));
+                app.shell.set_arm_state(None);
+                None
+            }
+            ArmEvent::Subscription(Err(reason)) => {
+                app.shell.set_arm_state(Some(reason.clone()));
+                Some(reason)
+            }
+            // One query answers for both tabs; C1 hands the vaults to the Key
+            // Vault screen, which reads them from this one until then.
+            ArmEvent::Inventory(inventory) => app.acr.set_inventory(inventory),
+            ArmEvent::Repositories {
+                registry,
+                repositories,
+            } => app.acr.set_repositories(&registry, repositories),
+            ArmEvent::Repository {
+                registry,
+                repository,
+            } => app.acr.set_repository(&registry, repository),
+            ArmEvent::Tags {
+                registry,
+                repo,
+                tags,
+            } => app.acr.set_tags(&registry, &repo, tags),
+            ArmEvent::Manifest {
+                registry,
+                repo,
+                digest,
+                manifest,
+            } => app.acr.set_manifest(&registry, &repo, &digest, manifest),
+            // Throttling is Azure working as designed and passes on its own,
+            // so it is said once rather than calling the tab offline.
+            ArmEvent::Throttled(wait) => {
+                app.shell.set_status(format!(
+                    "Holding off {}s \u{2014} Azure asked",
+                    wait.as_secs()
+                ));
+                None
+            }
+            ArmEvent::Failed(reason) => app.acr.set_arm_error(reason),
+            ArmEvent::Stopped => {
+                runtime.arm.worker = None;
+                runtime.arm.failed_to_start = true;
+                break;
+            }
+        };
+        if let Some(toast) = toast {
+            app.shell.set_error(toast);
+        }
+    }
+    redraw
+}
+
 /// Tells the pipeline watcher what is worth polling and folds in what it has
 /// seen. None of it is written to SQLite: the next pull is what persists a run,
 /// and until then the screen shows what the watcher has and the file has not.

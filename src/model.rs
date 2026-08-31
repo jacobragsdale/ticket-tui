@@ -744,6 +744,14 @@ pub enum Jump {
     },
     Pipeline(i64),
     Run(i64),
+    /// One container registry, by name.
+    Registry(String),
+    /// One repository inside one registry, which is two levels down the ACR
+    /// tab and so carries both names.
+    Repository {
+        registry: String,
+        name: String,
+    },
 }
 
 impl Jump {
@@ -760,6 +768,8 @@ impl Jump {
             Self::PullRequest { repo, id } => format!("Pull request !{id} in {repo}"),
             Self::Pipeline(id) => format!("Pipeline #{id}"),
             Self::Run(id) => format!("Run #{id}"),
+            Self::Registry(name) => format!("Registry {name}"),
+            Self::Repository { registry, name } => format!("Repository {name} in {registry}"),
         }
     }
 }

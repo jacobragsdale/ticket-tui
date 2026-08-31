@@ -79,6 +79,18 @@ impl ArmConfig {
         Self::resolve_with(flag, env, az_subscription)
     }
 
+    /// The subscription the two settings name, without asking anything: the
+    /// flag, then `TICKET_TUI_SUBSCRIPTION`. `None` when neither was set,
+    /// which is not a failure — it means the Azure CLI has yet to be asked,
+    /// and the ARM worker thread does that off the startup path so no run pays
+    /// for a shell-out it may never need.
+    #[must_use]
+    pub fn from_settings(flag: Option<String>, env: Option<String>) -> Option<Self> {
+        named(flag)
+            .or_else(|| named(env))
+            .map(|subscription| Self { subscription })
+    }
+
     /// [`ArmConfig::resolve`] with the CLI step handed in, so the order can be
     /// tested without a shell.
     pub fn resolve_with(
@@ -1506,12 +1518,18 @@ pub(crate) mod tests {
         pub vaults: Arc<Mutex<Vec<Vault>>>,
         pub repositories: Arc<Mutex<Vec<Repository>>>,
         pub tags: Arc<Mutex<Vec<Tag>>>,
+        /// What a manifest read answers with, digest aside.
+        pub manifest: Arc<Mutex<Option<Manifest>>>,
         pub items: Arc<Mutex<Vec<VaultItem>>>,
         pub secret: Arc<Mutex<String>>,
         /// The wait the next read reports having been asked for.
         pub throttle: Arc<Mutex<Option<Duration>>>,
         /// What the next read fails with, instead of answering.
         pub failure: Arc<Mutex<Option<String>>>,
+        /// What an attributes read fails with, while the catalog and the rest
+        /// still answer: a refusal about one repository rather than about the
+        /// registry holding it.
+        pub repository_failure: Arc<Mutex<Option<String>>>,
         /// Every call made, in order.
         pub reads: Arc<Mutex<Vec<String>>>,
     }
@@ -1541,6 +1559,13 @@ pub(crate) mod tests {
         }
 
         fn repository(&self, _registry: &Registry, name: &str) -> Result<Repository> {
+            if let Some(message) = self.repository_failure.lock().unwrap().clone() {
+                self.reads
+                    .lock()
+                    .unwrap()
+                    .push(format!("repository {name}"));
+                return Err(anyhow!(message));
+            }
             let held = self
                 .repositories
                 .lock()
@@ -1560,6 +1585,22 @@ pub(crate) mod tests {
         fn tags(&self, _registry: &Registry, repo: &str) -> Result<Vec<Tag>> {
             let tags = self.tags.lock().unwrap().clone();
             self.read(&format!("tags {repo}"), tags)
+        }
+
+        fn manifest(&self, _registry: &Registry, _repo: &str, digest: &str) -> Result<Manifest> {
+            let held = self
+                .manifest
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| Manifest {
+                    digest: digest.to_owned(),
+                    size: None,
+                    created: None,
+                    architecture: String::new(),
+                    os: String::new(),
+                });
+            self.read(&format!("manifest {digest}"), held)
         }
 
         fn items(&self, _vault: &Vault) -> Result<Vec<VaultItem>> {

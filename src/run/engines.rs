@@ -36,6 +36,19 @@ pub(super) struct AksRuntime {
     pub(super) following: Option<LogFollow>,
 }
 
+/// The two subscription tabs' side of the run: the worker thread, which of
+/// them it has been told is showing, and what the ACR tab is looking at.
+#[derive(Default)]
+pub(super) struct ArmRuntime {
+    pub(super) worker: Option<ArmHandle>,
+    pub(super) showing: Option<TabId>,
+    pub(super) focus: Option<ArmFocus>,
+    /// Whether the thread refused to start, or started and has since gone.
+    /// Without one there is nothing to try again with, and a thread that dies
+    /// under us would be started again every turn, so it is asked for once.
+    pub(super) failed_to_start: bool,
+}
+
 /// Everything the event loop needs to keep the database in step with Azure
 /// DevOps: the worker thread, the timer that feeds it, and why there is no
 /// worker when there is none.
@@ -58,6 +71,8 @@ pub(super) struct SyncRuntime {
     pub(super) local: LocalRuntime,
     /// Pods, on a thread of their own with its own `kubectl` processes.
     pub(super) aks: AksRuntime,
+    /// Registries and vaults, on a thread of their own with its own client.
+    pub(super) arm: ArmRuntime,
     pub(super) scheduler: SyncScheduler,
     pub(super) config: Option<AzureConfig>,
     /// The subscription the ACR and Key Vault tabs read, resolved at startup.

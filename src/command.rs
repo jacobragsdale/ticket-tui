@@ -36,6 +36,8 @@ pub enum CommandId {
     ToggleFinished,
     ToggleBookmark,
     CopyId,
+    /// The ACR tab's own copy: the digest of the tag the details pane is on.
+    CopyDigest,
     CopyUrl,
     CopyTitle,
     CopyMarkdown,
@@ -581,7 +583,14 @@ pub const COMMANDS: &[Command] = &[
         title: "Copy ID",
         keys: &[key('y')],
         help: "Selected or current tickets",
-        scope: Scope::Tabs(&[TabId::WorkItems, TabId::Repos, TabId::Aks]),
+        scope: Scope::Tabs(&[TabId::WorkItems, TabId::Repos, TabId::Aks, TabId::Acr]),
+    },
+    Command {
+        id: CommandId::CopyDigest,
+        title: "Copy digest",
+        keys: &[key('D')],
+        help: "The tag the details pane is on",
+        scope: Scope::Tabs(&[TabId::Acr]),
     },
     Command {
         id: CommandId::CopyUrl,
@@ -833,6 +842,9 @@ fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
             TabId::Aks => "Open in browser",
             TabId::Acr | TabId::KeyVault => "Open in the Azure portal",
         },
+        // A registry tag is copied as the reference `docker pull` wants, not
+        // as a number.
+        CommandId::CopyId if tab == TabId::Acr => "Copy pull reference",
         // A pod is read live, so the sync key reads the clusters again rather
         // than pulling from Azure DevOps.
         CommandId::Sync if tab == TabId::Aks => "Refresh pods",
@@ -1044,9 +1056,21 @@ mod tests {
     /// each of those over whichever tab is showing, so every tab answers them.
     fn answered_by(tab: TabId) -> &'static [CommandId] {
         match tab {
-            // Two tabs with no data yet: everything they answer is a verb
-            // every screen has.
-            TabId::Acr | TabId::KeyVault => &[
+            TabId::Acr => &[
+                CommandId::Search,
+                CommandId::Open,
+                CommandId::Sync,
+                CommandId::CopyId,
+                CommandId::CopyDigest,
+                CommandId::HistoryBack,
+                CommandId::HistoryForward,
+                CommandId::Quit,
+                CommandId::ToggleDetails,
+                CommandId::ResetPaneSplit,
+            ],
+            // A tab with no data yet: everything it answers is a verb every
+            // screen has.
+            TabId::KeyVault => &[
                 CommandId::Search,
                 CommandId::Open,
                 CommandId::Sync,

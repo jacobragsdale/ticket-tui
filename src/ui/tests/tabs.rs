@@ -184,8 +184,8 @@ fn the_digits_reach_the_registry_and_vault_tabs_and_each_says_why_it_is_empty() 
     let text = render_text(120, 30, &mut app);
     assert!(pane_reads(&text, "Registries", "0 registries"), "{text}");
     assert!(
-        text.contains("No registries read yet"),
-        "the details pane says nothing has been read: {text}"
+        text.contains("Reading the subscription"),
+        "the details pane says the read is on its way: {text}"
     );
 
     press(&mut app, KeyCode::Char('7'));
