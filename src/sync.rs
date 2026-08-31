@@ -191,6 +191,11 @@ pub enum SyncEvent {
         /// while the pull as a whole went on. `None` when nothing throttled.
         pause: Option<Duration>,
     },
+    /// A read on the side of a pull failed — the repositories, the pipelines
+    /// or the pull requests — while the pull itself landed. Said so a code
+    /// project that will not answer is not mistaken for one with nothing in
+    /// it.
+    Warning(String),
     /// One edit landed, or was refused and changes nothing.
     Edited(Box<Result<EditApplied, EditRejection>>),
     /// One work item's comments and revision history were read, or could not
@@ -930,10 +935,14 @@ pub fn pull_once(
     }
     drop(events);
     for event in received {
-        if let SyncEvent::DisplayName(name) = event
-            && let Ok(repository) = worker.repository()
-        {
-            drop(repository.set_meta(db::ME_DISPLAY_NAME_KEY, &name));
+        match event {
+            SyncEvent::DisplayName(name) => {
+                if let Ok(repository) = worker.repository() {
+                    drop(repository.set_meta(db::ME_DISPLAY_NAME_KEY, &name));
+                }
+            }
+            SyncEvent::Warning(text) => eprintln!("warning: {text}"),
+            _ => {}
         }
     }
     outcome
@@ -1585,13 +1594,21 @@ impl Worker {
         })
     }
 
+    /// Reports a read on the side of a pull that failed, and answers that
+    /// nothing was written.
+    fn warn(events: &Sender<SyncEvent>, what: &str, error: &anyhow::Error) -> bool {
+        let _ = events.send(SyncEvent::Warning(format!("{what}: {error:#}")));
+        false
+    }
+
     /// Reads the project's repositories and stores them if they differ from
     /// what is on file, so an idle project still writes nothing. Answers
     /// whether anything was written. A fetch that fails leaves the stored set
     /// alone: repositories are not what the pull is for.
     fn sync_repos(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
-        let Ok((repos, project_id)) = self.source(events)?.repositories() else {
-            return Ok(false);
+        let (repos, project_id) = match self.source(events)?.repositories() {
+            Ok(found) => found,
+            Err(error) => return Ok(Self::warn(events, "Repos", &error)),
         };
         let repository = self.repository()?;
         let written = repository.replace_repos(&repos)?;
@@ -1608,11 +1625,13 @@ impl Worker {
     /// prunes the runs table: it holds exactly what one query answers with.
     /// Answers whether anything was written.
     fn sync_pipelines(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
-        let Ok(pipelines) = self.source(events)?.pipelines() else {
-            return Ok(false);
+        let pipelines = match self.source(events)?.pipelines() {
+            Ok(found) => found,
+            Err(error) => return Ok(Self::warn(events, "Pipelines", &error)),
         };
-        let Ok(runs) = self.source(events)?.runs() else {
-            return Ok(false);
+        let runs = match self.source(events)?.runs() {
+            Ok(found) => found,
+            Err(error) => return Ok(Self::warn(events, "Pipeline runs", &error)),
         };
         let repository = self.repository()?;
         let stored_pipelines = repository.replace_pipelines(&pipelines)?;
@@ -1685,8 +1704,9 @@ impl Worker {
     /// a hundred requests — the work items and the build policy are read too.
     /// Answers whether anything was written.
     fn sync_pull_requests(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
-        let Ok(active) = self.source(events)?.pull_requests("active", 200) else {
-            return Ok(false);
+        let active = match self.source(events)?.pull_requests("active", 200) {
+            Ok(found) => found,
+            Err(error) => return Ok(Self::warn(events, "Pull requests", &error)),
         };
         let mut requests = active;
         for (status, top) in [("completed", 50), ("abandoned", 50)] {
@@ -2051,6 +2071,9 @@ mod tests {
         /// The project's team members, or `None` for a source that cannot list
         /// them, which is what the trait's default leaves behind.
         team_members: Option<Vec<Identity>>,
+        /// What the repositories endpoint refuses with: a code project that
+        /// will not answer.
+        code_refusal: Option<String>,
         /// The project's classification trees, or `None` for a source that
         /// cannot read them.
         classification_nodes: Option<Vec<ClassificationNode>>,
@@ -2244,6 +2267,9 @@ mod tests {
 
         fn repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
             *self.repo_requests.lock().unwrap() += 1;
+            if let Some(reason) = &self.code_refusal {
+                return Err(anyhow::anyhow!("{reason}"));
+            }
             Ok((self.repos.lock().unwrap().clone(), self.project_id.clone()))
         }
 
@@ -3965,11 +3991,34 @@ mod tests {
                 | SyncEvent::Created(_)
                 | SyncEvent::Reparented(_)
                 | SyncEvent::Deleted(_)
-                | SyncEvent::Commented(_) => continue,
+                | SyncEvent::Commented(_)
+                | SyncEvent::Warning(_) => continue,
                 SyncEvent::Stopped => panic!("the worker stopped early"),
             }
         }
         assert_eq!(seen, ["edit", "pull"], "requests are answered in order");
+    }
+
+    #[test]
+    fn a_code_project_that_will_not_answer_is_warned_about_rather_than_read_as_empty() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource {
+            code_refusal: Some("HTTP 404 for nope/_apis/git/repositories".into()),
+            ..FakeSource::with(vec![Ok(SyncBatch::default())])
+        };
+        let handle = SyncHandle::spawn(path, Box::new(source)).unwrap();
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        loop {
+            match next_event(&handle) {
+                SyncEvent::Warning(text) => {
+                    assert_eq!(text, "Repos: HTTP 404 for nope/_apis/git/repositories");
+                    break;
+                }
+                SyncEvent::Stopped => panic!("the worker stopped without a word"),
+                _ => continue,
+            }
+        }
     }
 
     /// The answer to the next create, past the display name the first connect

@@ -91,7 +91,12 @@ impl ArmConfig {
     /// tested without a shell — and so a test can hold `az` to being asked
     /// only when no subscription was named.
     pub fn resolve_with(mut self, az: impl FnOnce() -> Result<String>) -> Result<Self> {
-        self.subscriptions.retain(|held| !held.trim().is_empty());
+        self.subscriptions = self
+            .subscriptions
+            .iter()
+            .map(|held| held.trim().to_owned())
+            .filter(|held| !held.is_empty())
+            .collect();
         if !self.subscriptions.is_empty() {
             return Ok(self);
         }
@@ -1180,7 +1185,11 @@ pub(crate) mod tests {
         }
         .resolve_with(|| panic!("az was asked with a subscription already named"))
         .unwrap();
-        assert_eq!(named.subscriptions, ["  sub-1  ", "sub-2"]);
+        assert_eq!(
+            named.subscriptions,
+            ["sub-1", "sub-2"],
+            "trimmed, as written"
+        );
 
         // A subscription written blank is not an answer, so the CLI is.
         let from_az = ArmConfig {

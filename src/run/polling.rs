@@ -704,6 +704,7 @@ pub(super) fn poll_sync(
                         .reject_delete(&mut app.shell, &rejection.key, &rejection.message)
                 }
             },
+            SyncEvent::Warning(text) => app.shell.set_error(text),
             SyncEvent::Stopped => {
                 runtime.stop(app, "the Azure DevOps sync worker stopped");
             }

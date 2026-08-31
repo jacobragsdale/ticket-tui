@@ -240,6 +240,13 @@ pass-through header is unchanged. `ArmConfig` became
 subscription at once, `az account show` is asked only when nothing named one,
 and the status bar joins the subscriptions with `, `.
 
+The review of that delivery added `SyncEvent::Warning`: a repositories,
+pipelines or pull requests read that fails while the pull itself lands is now
+said — in the footer, and on stderr from `ticket-tui sync` — so a mistyped
+`code_project` is not mistaken for a project with nothing in it. Subscription
+ids are trimmed as written, and `config.example.toml` starts on the
+`terminal` theme rather than painting the sample palette.
+
 Untouched on purpose: the theme engine, `[[clusters]]`, the process vocabulary,
 and `X-VSS-ForceMsaPassThrough`. Still unproven against a real split-project
 organization or a multi-subscription tenant — there is neither on this machine,

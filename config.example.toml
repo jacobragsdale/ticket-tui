@@ -36,7 +36,7 @@ context = "aks-prod"
 # terminal's own sixteen colours if there is not. The `theme` tool writes both
 # of these tables for you.
 [theme]
-preset = "custom"
+preset = "terminal"        # terminal · terminal-light · mono · custom (the palette below)
 
 [theme.custom]
 name = "neon-void"
