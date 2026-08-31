@@ -913,7 +913,7 @@ fn instant_label(instant: Option<Timestamp>, now: Timestamp) -> String {
     )
 }
 
-fn relative_age(instant: Timestamp, now: Timestamp) -> String {
+pub(super) fn relative_age(instant: Timestamp, now: Timestamp) -> String {
     let seconds = instant.seconds_until(now).max(0);
     match seconds {
         0..=59 => format!("{seconds}s"),

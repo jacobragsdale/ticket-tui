@@ -24,6 +24,7 @@ pub(super) fn run_terminal(
         redraw |= poll_watch(app, repository, &mut reloader);
         redraw |= poll_pipelines(app, runtime);
         redraw |= poll_local(app, runtime);
+        redraw |= poll_aks(app, runtime);
         redraw |= dispatch_due_pull(app, runtime);
         redraw |= dispatch_due_details(app, runtime);
         redraw |= persist_session(app, repository);
@@ -176,6 +177,14 @@ pub(super) fn handle_action(
         }
         // git runs on the local thread; the screen hears back through its
         // events, so nothing waits here.
+        // The worker is only there once `config.toml` names a cluster, so a
+        // run with none says what to write rather than doing nothing.
+        AppAction::Aks(request) => match runtime.aks.worker.as_ref() {
+            Some(worker) => drop(worker.send(request)),
+            None => app
+                .shell
+                .set_error("No clusters are configured; add [[clusters]] to config.toml"),
+        },
         AppAction::LocalGit(request) => match runtime.local.worker.as_ref() {
             Some(worker) => {
                 let _ = worker.send(request);

@@ -33,6 +33,50 @@ pub struct AgentContext {
     pub repos: ReposContext,
     pub pull_requests: PullRequestsContext,
     pub pipelines: PipelinesContext,
+    pub aks: AksContext,
+}
+
+/// The AKS tab: the clusters `config.toml` names, the pod under the cursor,
+/// and whatever could not be read.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct AksContext {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<String>,
+    pub selected: Option<PodContext>,
+    pub visible_rows: usize,
+    /// How many of the pods on the table are in trouble.
+    pub unhealthy: usize,
+    /// One line per `(cluster, namespace)` that could not be read.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+}
+
+/// One pod, as an agent reads it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PodContext {
+    pub cluster: String,
+    pub namespace: String,
+    pub name: String,
+    pub status: String,
+    /// Containers ready over containers in the spec: `1/2`.
+    pub ready: String,
+    pub restarts: u32,
+    pub node: String,
+    /// What made it: `Deployment/orders-api`, or `null` for a bare pod.
+    pub owner: Option<String>,
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub containers: Vec<ContainerContext>,
+    /// The repository on file its image or app label names, when one does.
+    pub repo: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ContainerContext {
+    pub name: String,
+    pub image: String,
+    pub state: String,
+    pub restarts: u32,
 }
 
 /// The work items tab, which is everything schema 2 described at the top
@@ -402,6 +446,7 @@ mod tests {
             repos: ReposContext::default(),
             pull_requests: PullRequestsContext::default(),
             pipelines: PipelinesContext::default(),
+            aks: AksContext::default(),
             work_items: WorkItemsContext {
                 mode: "browse".into(),
                 focus: "tickets".into(),

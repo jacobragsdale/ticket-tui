@@ -24,6 +24,15 @@ pub(super) struct LocalRuntime {
     pub(super) showing: bool,
 }
 
+/// The AKS tab's side of the run: the worker thread, the clusters it has been
+/// told about, and whether it knows the tab is showing.
+#[derive(Default)]
+pub(super) struct AksRuntime {
+    pub(super) worker: Option<AksHandle>,
+    pub(super) clusters: Vec<Cluster>,
+    pub(super) showing: bool,
+}
+
 /// Everything the event loop needs to keep the database in step with Azure
 /// DevOps: the worker thread, the timer that feeds it, and why there is no
 /// worker when there is none.
@@ -44,6 +53,8 @@ pub(super) struct SyncRuntime {
     /// Clones on this machine: their own thread, so a clone that takes a
     /// minute never holds up an edit.
     pub(super) local: LocalRuntime,
+    /// Pods, on a thread of their own with its own `kubectl` processes.
+    pub(super) aks: AksRuntime,
     pub(super) scheduler: SyncScheduler,
     pub(super) config: Option<AzureConfig>,
     /// Why Azure DevOps could not be resolved, reported when the user asks for

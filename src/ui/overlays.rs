@@ -107,7 +107,7 @@ pub(super) fn render_help_popup(
         Line::from("  Paste           Insert sanitized text"),
         Line::from(""),
         Line::styled("Tabs", Style::default().add_modifier(Modifier::BOLD)),
-        Line::from("  1/2/3/4         Work items, Repos, Pull requests, Pipelines"),
+        Line::from("  1/2/3/4/5       Work items, Repos, Pull requests, Pipelines, AKS"),
         Line::from(""),
         Line::styled("Everywhere", Style::default().add_modifier(Modifier::BOLD)),
     ];

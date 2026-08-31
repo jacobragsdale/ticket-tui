@@ -73,6 +73,10 @@ impl ConfigWatch {
             }
             Err(error) => app.shell.set_error(format!("Theme: {error:#}")),
         }
+        // The clusters travel with the theme: one file, one read, and a run
+        // started before `[[clusters]]` existed picks them up as soon as they
+        // are written.
+        app.aks.set_clusters(config.clusters.clone());
         true
     }
 
@@ -169,6 +173,62 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 runtime.local.scanned = None;
             }
             LocalEvent::Stopped => runtime.local.worker = None,
+        }
+    }
+    redraw
+}
+
+/// Tells the cluster worker what is worth reading and folds in what it has
+/// read. Pods live in the screen only: nothing here touches SQLite.
+pub(super) fn poll_aks(app: &mut App, runtime: &mut SyncRuntime) -> bool {
+    // The thread is started by the first cluster the file names, and never
+    // started again once it has stopped.
+    if runtime.aks.worker.is_none()
+        && runtime.aks.clusters.is_empty()
+        && !app.aks.clusters().is_empty()
+    {
+        match AksHandle::spawn(Box::new(Kubectl)) {
+            Ok(handle) => runtime.aks.worker = Some(handle),
+            Err(error) => {
+                // Said once: without a thread there is nothing to try again
+                // with, and the clusters recorded here are what stops it.
+                runtime.aks.clusters = app.aks.clusters().to_vec();
+                app.shell
+                    .set_error(format!("Could not start the cluster worker: {error:#}"));
+            }
+        }
+    }
+    let Some(worker) = runtime.aks.worker.as_ref() else {
+        return false;
+    };
+    if app.aks.clusters() != runtime.aks.clusters {
+        runtime.aks.clusters = app.aks.clusters().to_vec();
+        let _ = worker.send(AksRequest::Clusters(runtime.aks.clusters.clone()));
+    }
+    let showing = app.tab == TabId::Aks;
+    if showing != runtime.aks.showing {
+        runtime.aks.showing = showing;
+        let _ = worker.send(AksRequest::TabShowing(showing));
+    }
+    // Drained first, so an event can be answered without holding a borrow of
+    // the thread that sent it.
+    let events: Vec<AksEvent> = std::iter::from_fn(|| worker.try_event()).collect();
+    let redraw = !events.is_empty();
+    for event in events {
+        match event {
+            AksEvent::Pods {
+                cluster,
+                namespace,
+                pods,
+            } => {
+                if let Some(toast) = app.aks.set_pods(&cluster, namespace.as_deref(), pods) {
+                    app.shell.set_error(toast);
+                }
+            }
+            AksEvent::Stopped => runtime.aks.worker = None,
+            // The log tail, describe and delete arrive with the tickets that
+            // draw them.
+            _ => {}
         }
     }
     redraw

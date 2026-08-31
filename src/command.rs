@@ -773,7 +773,11 @@ fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
             TabId::Repos => "Open repository in browser",
             TabId::PullRequests => "Open pull request in browser",
             TabId::Pipelines => "Open run in browser",
+            TabId::Aks => "Open in browser",
         },
+        // A pod is read live, so the sync key reads the clusters again rather
+        // than pulling from Azure DevOps.
+        CommandId::Sync if tab == TabId::Aks => "Refresh pods",
         _ => return command,
     };
     Command { title, ..command }
@@ -1025,6 +1029,16 @@ mod tests {
                 CommandId::CancelRun,
                 CommandId::RetryRun,
                 CommandId::WatchRun,
+                CommandId::Quit,
+                CommandId::ToggleDetails,
+                CommandId::ResetPaneSplit,
+            ],
+            TabId::Aks => &[
+                CommandId::Search,
+                CommandId::Open,
+                CommandId::Sync,
+                CommandId::HistoryBack,
+                CommandId::HistoryForward,
                 CommandId::Quit,
                 CommandId::ToggleDetails,
                 CommandId::ResetPaneSplit,

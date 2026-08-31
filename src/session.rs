@@ -71,6 +71,8 @@ pub struct Session {
     #[serde(default)]
     pub pipelines: TabSession,
     #[serde(default)]
+    pub aks: TabSession,
+    #[serde(default)]
     pub bookmarks: Vec<TicketKey>,
     /// Everywhere the run had been, oldest last, across every tab.
     #[serde(default)]
@@ -141,6 +143,7 @@ impl Session {
             TabId::Repos => &self.repos,
             TabId::PullRequests => &self.pull_requests,
             TabId::Pipelines => &self.pipelines,
+            TabId::Aks => &self.aks,
         }
     }
 
@@ -150,6 +153,7 @@ impl Session {
             TabId::Repos => self.repos = session,
             TabId::PullRequests => self.pull_requests = session,
             TabId::Pipelines => self.pipelines = session,
+            TabId::Aks => self.aks = session,
         }
     }
 }
@@ -184,6 +188,7 @@ impl Default for Session {
             repos: TabSession::default(),
             pull_requests: TabSession::default(),
             pipelines: TabSession::default(),
+            aks: TabSession::default(),
             bookmarks: Vec::new(),
             history: Vec::new(),
             show_finished: false,
@@ -508,7 +513,9 @@ mod tests {
         );
         assert_eq!(work_items.active_view.as_deref(), Some("Mine"));
         assert!(
-            loaded.repos.query.is_empty() && loaded.pipelines.views.is_empty(),
+            loaded.repos.query.is_empty()
+                && loaded.pipelines.views.is_empty()
+                && loaded.aks.query.is_empty(),
             "and the tabs that did not exist start empty"
         );
         assert_eq!(

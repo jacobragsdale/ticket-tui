@@ -48,6 +48,7 @@ use crate::sync::{ReparentApplied, ReparentRejection};
 use crate::text_input::TextInput;
 use crate::timestamp::Timestamp;
 
+pub mod aks;
 pub mod cursor;
 pub mod pipelines;
 pub mod pull_requests;
@@ -56,6 +57,7 @@ mod screen;
 pub mod shell;
 pub mod work_items;
 
+pub use aks::AksScreen;
 pub use cursor::ListCursor;
 pub use pipelines::PipelinesScreen;
 pub use pull_requests::PullRequestsScreen;
@@ -118,6 +120,9 @@ pub enum AppAction {
     /// Clone one repository into the workspace, or fetch or pull the one
     /// already there. The local thread runs git; nothing here waits on it.
     LocalGit(crate::local::LocalRequest),
+    /// Something for the cluster worker: read the pods again, follow a log,
+    /// restart a pod. Nothing here waits on it either.
+    Aks(crate::aks::AksRequest),
     /// Read the pending approvals now rather than at the next poll.
     RefreshApprovals,
     /// Approve or reject one approval, with an optional word about why.
@@ -225,7 +230,7 @@ impl CopiedContent {
 /// The application: the shell every screen shares, and the screens themselves.
 pub struct App {
     pub shell: Shell,
-    /// The tab keys `1`–`4` switch between. Every screen keeps its own state
+    /// The tab keys `1`–`5` switch between. Every screen keeps its own state
     /// while another is showing.
     pub tab: TabId,
     /// Which tab one of the shared overlays — help, the palette, the columns
@@ -238,6 +243,7 @@ pub struct App {
     pub repos: ReposScreen,
     pub pull_requests: PullRequestsScreen,
     pub pipelines: PipelinesScreen,
+    pub aks: AksScreen,
 }
 
 impl App {
@@ -253,6 +259,7 @@ impl App {
             repos: ReposScreen::default(),
             pull_requests: PullRequestsScreen::default(),
             pipelines: PipelinesScreen::default(),
+            aks: AksScreen::default(),
         }
     }
 
@@ -273,6 +280,7 @@ impl App {
             TabId::Repos => &self.repos,
             TabId::PullRequests => &self.pull_requests,
             TabId::Pipelines => &self.pipelines,
+            TabId::Aks => &self.aks,
         }
     }
 
@@ -325,6 +333,7 @@ impl App {
             TabId::Repos => self.repos.run_command(&mut self.shell, id),
             TabId::PullRequests => self.pull_requests.run_command(&mut self.shell, id),
             TabId::Pipelines => self.pipelines.run_command(&mut self.shell, id),
+            TabId::Aks => self.aks.run_command(&mut self.shell, id),
         };
         self.apply(action)
     }
@@ -340,6 +349,7 @@ impl App {
                 repos,
                 pull_requests,
                 pipelines,
+                aks,
                 tab,
                 ..
             } = self;
@@ -349,6 +359,7 @@ impl App {
                 TabId::WorkItems | TabId::Repos => &mut repos.layout,
                 TabId::PullRequests => &mut pull_requests.layout,
                 TabId::Pipelines => pipelines.columns_mut(),
+                TabId::Aks => aks.columns_mut(),
             };
             work_items.handle_columns_key_on(shell, key, layout);
             AppAction::None
@@ -383,6 +394,7 @@ impl App {
                     repos,
                     pull_requests,
                     pipelines,
+                    aks,
                     tab,
                     ..
                 } = self;
@@ -390,6 +402,7 @@ impl App {
                     TabId::WorkItems | TabId::Repos => &mut repos.layout,
                     TabId::PullRequests => &mut pull_requests.layout,
                     TabId::Pipelines => pipelines.columns_mut(),
+                    TabId::Aks => aks.columns_mut(),
                 };
                 if work_items.apply_column_target(shell, &target, layout) {
                     shell.pointer.clear_press();
@@ -566,12 +579,14 @@ impl App {
                 TabId::Repos => "repos",
                 TabId::PullRequests => "pull_requests",
                 TabId::Pipelines => "pipelines",
+                TabId::Aks => "aks",
             }
             .to_owned(),
             work_items: self.work_items.agent_context(&self.shell),
             repos: self.repos.agent_context(&self.shell),
             pull_requests: self.pull_requests.agent_context(&self.shell),
             pipelines: self.pipelines.agent_context(&self.shell),
+            aks: self.aks.agent_context(&self.shell),
         }
     }
 
@@ -622,6 +637,7 @@ impl App {
             repos,
             pull_requests,
             pipelines,
+            aks,
             ..
         } = session;
         self.work_items
@@ -629,6 +645,7 @@ impl App {
         Screen::restore(&mut self.repos, &mut self.shell, repos);
         Screen::restore(&mut self.pull_requests, &mut self.shell, pull_requests);
         Screen::restore(&mut self.pipelines, &mut self.shell, pipelines);
+        Screen::restore(&mut self.aks, &mut self.shell, aks);
         self.shell.session_dirty = false;
     }
 
@@ -640,6 +657,7 @@ impl App {
             TabId::Repos => &mut self.repos,
             TabId::PullRequests => &mut self.pull_requests,
             TabId::Pipelines => &mut self.pipelines,
+            TabId::Aks => &mut self.aks,
         };
         (&mut self.shell, screen)
     }
@@ -648,7 +666,7 @@ impl App {
         if self.shell_overlay_open() {
             return self.handle_overlay_key(key);
         }
-        // `1`–`4` switch tabs from anywhere the digit is not being typed into
+        // `1`–`5` switch tabs from anywhere the digit is not being typed into
         // something. An overlay is closed on the way out rather than left open
         // behind the tab that comes back.
         if let KeyCode::Char(character) = key.code

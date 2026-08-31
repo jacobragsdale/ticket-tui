@@ -21,6 +21,7 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use serde_json::Value;
 use ticket_tui::agent_context::{self, AgentContext};
+use ticket_tui::aks::{AksEvent, AksHandle, AksRequest, Cluster, Kubectl};
 use ticket_tui::app::{
     App, AppAction, CopiedContent, DividerOrientation, PointerTarget, Snapshot, SyncTarget, TabId,
 };
@@ -174,6 +175,7 @@ pub(super) fn run() -> Result<()> {
             worker: LocalHandle::spawn().ok(),
             ..LocalRuntime::default()
         },
+        aks: AksRuntime::default(),
     };
     if let Some(config) = config.filter(|_| wrong_project.is_none()) {
         runtime.worker = Some(SyncHandle::spawn(

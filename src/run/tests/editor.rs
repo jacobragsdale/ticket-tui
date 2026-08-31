@@ -16,6 +16,7 @@ fn offline_runtime() -> SyncRuntime {
         watching_run: (None, None),
         watched_runs: Vec::new(),
         local: LocalRuntime::default(),
+        aks: AksRuntime::default(),
     }
 }
 

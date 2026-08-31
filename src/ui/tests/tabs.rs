@@ -15,13 +15,14 @@ fn row_text(terminal: &Terminal<TestBackend>, y: u16, width: u16) -> String {
 }
 
 #[test]
-fn the_tab_bar_names_four_tabs_and_marks_the_one_showing_at_every_breakpoint() {
+fn the_tab_bar_names_five_tabs_and_marks_the_one_showing_at_every_breakpoint() {
     let mut app = App::new(vec![ticket()]);
     for width in [120, 90, 60] {
         let text = render_text(width, 30, &mut app);
         let bar = text.lines().next().expect("a tab bar row").to_owned();
         assert!(bar.contains("1 Work items"), "{width} columns: {bar}");
         assert!(bar.contains("4 Pipelines"), "{width} columns: {bar}");
+        assert!(bar.contains("5 AKS"), "{width} columns: {bar}");
     }
 
     // Narrower than the names, every tab is still there and still clickable.
@@ -29,10 +30,11 @@ fn the_tab_bar_names_four_tabs_and_marks_the_one_showing_at_every_breakpoint() {
     let bar = narrow.lines().next().expect("a tab bar row");
     assert!(bar.contains("1 Items"), "{bar}");
     assert!(bar.contains("4 Runs"), "{bar}");
+    assert!(bar.contains("5 AKS"), "{bar}");
     assert!(
         app.shell
             .hit_regions
-            .find_target(|target| matches!(target, PointerTarget::SelectTab { index: 3 }))
+            .find_target(|target| matches!(target, PointerTarget::SelectTab { index: 4 }))
             .is_some(),
         "the last tab keeps its click target when its name is shortened"
     );
@@ -138,6 +140,7 @@ fn a_tab_with_something_waiting_wears_a_badge() {
         (TabId::Repos, false, None),
         (TabId::PullRequests, false, Some("3".to_owned())),
         (TabId::Pipelines, false, Some("◐2".to_owned())),
+        (TabId::Aks, false, Some("✗1".to_owned())),
     ];
     let mut terminal = Terminal::new(TestBackend::new(80, 3)).unwrap();
     terminal
@@ -150,6 +153,7 @@ fn a_tab_with_something_waiting_wears_a_badge() {
     let bar = row_text(&terminal, 0, 80);
     assert!(bar.contains("3 Pull requests 3"), "{bar}");
     assert!(bar.contains("4 Pipelines ◐2"), "{bar}");
+    assert!(bar.contains("5 AKS ✗1"), "{bar}");
     assert!(
         shell
             .hit_regions
