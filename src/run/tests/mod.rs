@@ -317,23 +317,11 @@ fn ticket(id: i64) -> Ticket {
             organization: "example-org".into(),
             id,
         },
-        project: "atlas".into(),
-        revision: 1,
-        work_item_type: "Task".into(),
-        title: format!("Ticket {id}"),
-        state: "Active".into(),
-        reason: None,
         assigned_to: Some("Avery Chen".into()),
         priority: Some(2),
-        area_path: "Atlas".into(),
-        iteration_path: "Atlas\\Sprint 1".into(),
-        tags: Vec::new(),
-        description: String::new(),
-        description_html: String::new(),
-        created_at: Timestamp::parse("2026-01-01T00:00:00Z").unwrap(),
         changed_at: Timestamp::parse(&format!("2026-0{id}-01T00:00:00Z")).unwrap(),
         web_url: format!("https://dev.azure.com/example-org/atlas/_workitems/edit/{id}"),
-        details_rev: 0,
+        ..Ticket::fixture(id, format!("Ticket {id}"))
     }
 }
 

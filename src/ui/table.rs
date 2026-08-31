@@ -558,10 +558,6 @@ pub(super) fn table_cell(
         SortField::Created => Line::from(ticket.created_at.relative_to(now))
             .right_aligned()
             .style(plain),
-        SortField::Organization => {
-            highlight_searchable(&ticket.key.organization, plain, highlighter)
-        }
-        SortField::Project => highlight_searchable(&ticket.project, plain, highlighter),
         // Only the leaf fits a table column; the details pane keeps the full path.
         SortField::Area => highlight_searchable(path_leaf(&ticket.area_path), plain, highlighter),
         SortField::Iteration => {

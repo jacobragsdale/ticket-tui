@@ -50,7 +50,6 @@ use crate::timestamp::Timestamp;
 
 pub mod cursor;
 pub mod pipelines;
-mod placeholder;
 pub mod pull_requests;
 pub mod repos;
 mod screen;
@@ -59,7 +58,6 @@ pub mod work_items;
 
 pub use cursor::ListCursor;
 pub use pipelines::PipelinesScreen;
-pub use placeholder::PlaceholderScreen;
 pub use pull_requests::PullRequestsScreen;
 pub use repos::ReposScreen;
 pub use screen::{Screen, TabId};
@@ -225,7 +223,6 @@ impl CopiedContent {
 }
 
 /// The application: the shell every screen shares, and the screens themselves.
-/// There is one today; #665 puts a tab bar over them.
 pub struct App {
     pub shell: Shell,
     /// The tab keys `1`–`4` switch between. Every screen keeps its own state
@@ -636,8 +633,7 @@ impl App {
     }
 
     /// The shell and the screen the keyboard and the mouse are talking to,
-    /// handed back apart so an event can be given one with the other. #665
-    /// makes which screen this is a matter of the tab bar.
+    /// handed back apart so an event can be given one with the other.
     pub fn screen(&mut self) -> (&mut Shell, &mut dyn Screen) {
         let screen: &mut dyn Screen = match self.tab {
             TabId::WorkItems => &mut self.work_items,

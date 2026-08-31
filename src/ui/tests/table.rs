@@ -1,5 +1,6 @@
 use super::*;
-use crate::columns::{ColumnId, ColumnLayout, TableLayout};
+use crate::app::repos::RepoColumn;
+use crate::columns::{ColumnLayout, TableLayout};
 use crate::pointer::SelectableSurface;
 use crate::ui::details::ticket_badge_line;
 use crate::ui::table::tag_color;
@@ -391,85 +392,25 @@ fn underlines_mark_search_matches_and_stop_after_the_id_digits() {
     );
 }
 
-/// A column set that is not the work items', to prove the list table is not
-/// theirs either. It is the shape #668's repositories tab will bring.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RepoColumn {
-    Name,
-    Branch,
-    Behind,
-}
-
-impl ColumnId for RepoColumn {
-    fn all() -> &'static [Self] {
-        &[Self::Name, Self::Branch, Self::Behind]
-    }
-
-    fn from_key(key: &str) -> Option<Self> {
-        Self::all()
-            .iter()
-            .copied()
-            .find(|column| column.key() == key)
-    }
-
-    fn key(self) -> &'static str {
-        match self {
-            Self::Name => "name",
-            Self::Branch => "branch",
-            Self::Behind => "behind",
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Name => "Repository",
-            Self::Branch => "Branch",
-            Self::Behind => "Behind",
-        }
-    }
-
-    fn default_width(self) -> u16 {
-        match self {
-            Self::Name => 0,
-            Self::Branch => 16,
-            Self::Behind => 7,
-        }
-    }
-
-    fn default_visible(self) -> bool {
-        true
-    }
-
-    fn right_aligned(self) -> bool {
-        matches!(self, Self::Behind)
-    }
-
-    fn pinned(self) -> bool {
-        matches!(self, Self::Name)
-    }
-
-    fn flexible(self) -> bool {
-        matches!(self, Self::Name)
-    }
-}
-
 #[test]
 fn the_list_table_draws_another_screens_columns_and_sorts_by_their_keys() {
     let repositories = [
-        ["ticket-tui", "main", "0"],
-        ["skillbook", "main", "3"],
-        ["home-server", "develop", "12"],
+        ["ticket-tui", "main", "1", "2", "cloned"],
+        ["skillbook", "main", "3", "0", "cloned"],
+        ["home-server", "develop", "12", "1", "—"],
     ];
     let layout = TableLayout::<RepoColumn>::default();
     let mut shell = Shell::default();
-    let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(80, 10)).unwrap();
     terminal
         .draw(|frame| {
             let mut cell = |row: usize, column: RepoColumn| {
                 let index = match column {
                     RepoColumn::Name => 0,
-                    RepoColumn::Branch => 1,
-                    RepoColumn::Behind => 2,
+                    RepoColumn::DefaultBranch => 1,
+                    RepoColumn::PullRequests => 2,
+                    RepoColumn::Pipelines => 3,
+                    RepoColumn::Local => 4,
                 };
                 Cell::from(repositories[row][index])
             };
@@ -478,7 +419,7 @@ fn the_list_table_draws_another_screens_columns_and_sorts_by_their_keys() {
                 status: "3/3".to_owned(),
                 focused: true,
                 layout: &layout,
-                sorted: Some((RepoColumn::Behind, "↓")),
+                sorted: Some((RepoColumn::PullRequests, "↓")),
                 count: repositories.len(),
                 offset: 0,
                 selected: Some(1),
@@ -496,7 +437,7 @@ fn the_list_table_draws_another_screens_columns_and_sorts_by_their_keys() {
     let buffer = terminal.backend().buffer();
     let mut text = String::new();
     for y in 0..10 {
-        for x in 0..60 {
+        for x in 0..80 {
             text.push_str(buffer[(x, y)].symbol());
         }
         text.push('\n');
@@ -506,12 +447,9 @@ fn the_list_table_draws_another_screens_columns_and_sorts_by_their_keys() {
         text.contains("3/3"),
         "the status is on the bottom border: {text}"
     );
+    assert!(text.contains("Name"), "the header is this screen's: {text}");
     assert!(
-        text.contains("Repository"),
-        "the header is this screen's: {text}"
-    );
-    assert!(
-        text.contains("Behind↓"),
+        text.contains("PRs↓"),
         "with the arrow on the sorted one: {text}"
     );
     assert!(text.contains("home-server"), "{text}");

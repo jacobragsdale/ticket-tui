@@ -437,7 +437,7 @@ fn git(path: &Path, arguments: &[&str]) -> Result<String> {
 #[must_use]
 pub fn workspace_root(flag: Option<PathBuf>) -> Option<PathBuf> {
     flag.or_else(|| std::env::var_os("TICKET_TUI_WORKSPACE").map(PathBuf::from))
-        .or_else(|| directories::UserDirs::new().map(|dirs| dirs.home_dir().join("Development")))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Development")))
 }
 
 #[cfg(test)]

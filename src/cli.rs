@@ -2289,34 +2289,21 @@ mod tests {
     use crate::edit;
     use crate::model::{StateOption, StoredWorkItem};
     use crate::timestamp::ts;
-    use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
     use tempfile::{TempDir, tempdir};
 
     fn ticket(id: i64, title: &str, state: &str, assignee: Option<&str>) -> Ticket {
         Ticket {
-            key: TicketKey {
-                organization: "demo".into(),
-                id,
-            },
-            project: "atlas".into(),
             revision: 4,
-            work_item_type: "Task".into(),
-            title: title.into(),
             state: state.into(),
-            reason: None,
             assigned_to: assignee.map(ToOwned::to_owned),
             priority: Some(2),
-            area_path: "Atlas".into(),
-            iteration_path: "Atlas\\Sprint 1".into(),
             tags: vec!["cli".into()],
             description: "Ship the subcommands.".into(),
             description_html: "<p>Ship the subcommands.</p>".into(),
-            created_at: ts("2026-01-01T00:00:00Z"),
             changed_at: ts("2026-02-01T00:00:00Z"),
-            web_url: format!("https://dev.azure.com/demo/atlas/_workitems/edit/{id}"),
-            details_rev: 0,
+            ..Ticket::fixture(id, title)
         }
     }
 

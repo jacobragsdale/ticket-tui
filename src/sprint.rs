@@ -406,32 +406,21 @@ pub fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::TicketKey;
     use crate::timestamp::ts;
 
     fn ticket(id: i64, state: &str, assignee: Option<&str>, changed_at: &str) -> Ticket {
         Ticket {
-            key: TicketKey {
-                organization: "demo".into(),
-                id,
-            },
             project: "development".into(),
-            revision: 1,
-            work_item_type: "Task".into(),
             title: format!("Work item {id}"),
             state: state.into(),
-            reason: None,
             assigned_to: assignee.map(Into::into),
             priority: Some(2),
             area_path: "development".into(),
             iteration_path: "development\\Sprint 1".into(),
-            tags: vec![],
-            description: String::new(),
-            description_html: String::new(),
             created_at: ts("2026-08-01T00:00:00Z"),
             changed_at: ts(changed_at),
             web_url: String::new(),
-            details_rev: 0,
+            ..Ticket::fixture(id, format!("Work item {id}"))
         }
     }
 

@@ -77,5 +77,18 @@ pub(super) fn open_https_url(raw_url: &str, opener: &dyn Fn(&Url) -> Result<()>)
 }
 
 pub(super) fn open_in_browser(url: &Url) -> Result<()> {
-    open::that(url.as_str()).map_err(Into::into)
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let status = Command::new(program)
+        .arg(url.as_str())
+        .status()
+        .with_context(|| format!("failed to start {program}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("{program} exited with {status}")
+    }
 }

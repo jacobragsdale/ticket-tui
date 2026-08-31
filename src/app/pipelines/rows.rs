@@ -30,11 +30,9 @@ impl PipelineRow {
     /// them — is in this row.
     #[must_use]
     pub fn matches_fuzzy(&self, needle: &str) -> bool {
-        let needle = needle.trim().to_lowercase();
-        needle.is_empty()
-            || self.pipeline.name.to_lowercase().contains(&needle)
-            || self.pipeline.folder.to_lowercase().contains(&needle)
-            || self.repo.to_lowercase().contains(&needle)
+        crate::filter::contains_ignore_case(&self.pipeline.name, needle)
+            || crate::filter::contains_ignore_case(&self.pipeline.folder, needle)
+            || crate::filter::contains_ignore_case(&self.repo, needle)
     }
 }
 
@@ -80,18 +78,13 @@ impl RunRow {
 
     #[must_use]
     pub fn matches_fuzzy(&self, needle: &str) -> bool {
-        let needle = needle.trim().to_lowercase();
-        needle.is_empty()
-            || self.run.build_number.to_lowercase().contains(&needle)
-            || self.pipeline.to_lowercase().contains(&needle)
-            || self.branch().to_lowercase().contains(&needle)
-            || self
-                .run
-                .requested_for
-                .as_deref()
-                .unwrap_or_default()
-                .to_lowercase()
-                .contains(&needle)
+        crate::filter::contains_ignore_case(&self.run.build_number, needle)
+            || crate::filter::contains_ignore_case(&self.pipeline, needle)
+            || crate::filter::contains_ignore_case(&self.branch(), needle)
+            || crate::filter::contains_ignore_case(
+                self.run.requested_for.as_deref().unwrap_or_default(),
+                needle,
+            )
     }
 }
 

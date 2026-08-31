@@ -86,18 +86,11 @@ impl PrRow {
 
     #[must_use]
     pub fn matches_fuzzy(&self, needle: &str) -> bool {
-        let needle = needle.trim().to_lowercase();
-        needle.is_empty()
-            || self.request.title.to_lowercase().contains(&needle)
-            || self.request.id.to_string().contains(&needle)
-            || self.repo.to_lowercase().contains(&needle)
-            || self
-                .request
-                .created_by
-                .display_name
-                .to_lowercase()
-                .contains(&needle)
-            || self.source_branch().to_lowercase().contains(&needle)
+        crate::filter::contains_ignore_case(&self.request.title, needle)
+            || self.request.id.to_string().contains(needle.trim())
+            || crate::filter::contains_ignore_case(&self.repo, needle)
+            || crate::filter::contains_ignore_case(&self.request.created_by.display_name, needle)
+            || crate::filter::contains_ignore_case(&self.source_branch(), needle)
     }
 }
 

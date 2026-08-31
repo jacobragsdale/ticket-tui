@@ -38,9 +38,7 @@ use ticket_tui::sync::{
 };
 use ticket_tui::timestamp::Timestamp;
 use ticket_tui::ui::{ThemeChoice, chosen_theme, set_theme};
-use ticket_tui::watch::{
-    AzureWatchConnector, LIVE_RUNS_CADENCE, LogTarget, WatchEvent, WatchHandle, WatchRequest,
-};
+use ticket_tui::watch::{LIVE_RUNS_CADENCE, LogTarget, WatchEvent, WatchHandle, WatchRequest};
 use url::Url;
 
 mod desktop;
@@ -182,7 +180,7 @@ pub(super) fn run() -> Result<()> {
             database_path.clone(),
             Box::new(AzureConnector::new(config.clone())),
         )?);
-        runtime.pipelines = WatchHandle::spawn(Box::new(AzureWatchConnector::new(config))).ok();
+        runtime.pipelines = WatchHandle::spawn(config).ok();
         app.shell
             .set_watch_state(runtime.pipelines.as_ref().map(|_| {
                 format!(

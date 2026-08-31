@@ -445,27 +445,14 @@ mod tests {
 
     fn ticket() -> Ticket {
         Ticket {
-            key: TicketKey {
-                organization: "demo".into(),
-                id: 613,
-            },
-            project: "atlas".into(),
             revision: 4,
-            work_item_type: "Task".into(),
             title: "Edit dispatcher".into(),
             state: "To Do".into(),
-            reason: None,
             assigned_to: Some("Avery Chen".into()),
             priority: Some(2),
-            area_path: "Atlas".into(),
-            iteration_path: "Atlas\\Sprint 1".into(),
             tags: vec!["rust".into()],
-            description: String::new(),
-            description_html: String::new(),
-            created_at: ts("2026-01-01T00:00:00Z"),
             changed_at: ts("2026-02-01T00:00:00Z"),
-            web_url: "https://dev.azure.com/demo/atlas/_workitems/edit/613".into(),
-            details_rev: 0,
+            ..Ticket::fixture(613, "Edit dispatcher")
         }
     }
 

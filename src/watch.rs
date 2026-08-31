@@ -157,12 +157,6 @@ pub trait PipelineSource: Send {
     }
 }
 
-/// Opens a client for the watcher's own thread, the way [`crate::sync::SourceConnector`]
-/// does for the sync worker.
-pub trait PipelineConnector: Send {
-    fn connect(&mut self) -> Result<Box<dyn PipelineSource>>;
-}
-
 /// One thing the watcher polls: how often it is meant to, how often it is
 /// actually managing, and when it is next due.
 #[derive(Clone, Copy, Debug)]
@@ -514,27 +508,6 @@ impl PipelineSource for crate::azure::AzureClient {
     }
 }
 
-/// Opens the watcher's own client on the configured project.
-#[derive(Clone, Debug)]
-pub struct AzureWatchConnector {
-    config: crate::azure::AzureConfig,
-}
-
-impl AzureWatchConnector {
-    #[must_use]
-    pub const fn new(config: crate::azure::AzureConfig) -> Self {
-        Self { config }
-    }
-}
-
-impl PipelineConnector for AzureWatchConnector {
-    fn connect(&mut self) -> Result<Box<dyn PipelineSource>> {
-        Ok(Box::new(crate::azure::AzureClient::connect(
-            self.config.clone(),
-        )?))
-    }
-}
-
 /// The handle the main thread holds: requests in, events out.
 pub struct WatchHandle {
     requests: Sender<WatchRequest>,
@@ -544,16 +517,20 @@ pub struct WatchHandle {
 
 impl WatchHandle {
     /// Starts the watcher on its own thread with its own client.
-    pub fn spawn(mut connector: Box<dyn PipelineConnector>) -> Result<Self> {
+    pub fn spawn(config: crate::azure::AzureConfig) -> Result<Self> {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         thread::Builder::new()
             .name("ticket-watch".into())
             .spawn(move || {
-                let Ok(source) = connector.connect() else {
+                let Ok(source) = crate::azure::AzureClient::connect(config) else {
                     return;
                 };
-                watch(Watcher::new(source), &request_receiver, &event_sender);
+                watch(
+                    Watcher::new(Box::new(source)),
+                    &request_receiver,
+                    &event_sender,
+                );
             })
             .context("failed to start the pipeline watcher")?;
         Ok(Self {

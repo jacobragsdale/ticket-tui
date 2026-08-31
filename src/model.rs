@@ -43,6 +43,34 @@ pub struct Ticket {
 }
 
 impl Ticket {
+    /// A work item with the fields tests usually share already filled in.
+    #[must_use]
+    pub fn fixture(id: i64, title: impl Into<String>) -> Self {
+        Self {
+            key: TicketKey {
+                organization: "demo".into(),
+                id,
+            },
+            project: "atlas".into(),
+            revision: 1,
+            work_item_type: "Task".into(),
+            title: title.into(),
+            state: "Active".into(),
+            reason: None,
+            assigned_to: None,
+            priority: None,
+            area_path: "Atlas".into(),
+            iteration_path: "Atlas\\Sprint 1".into(),
+            tags: Vec::new(),
+            description: String::new(),
+            description_html: String::new(),
+            created_at: Timestamp::parse("2026-01-01T00:00:00Z").expect("fixture timestamp"),
+            changed_at: Timestamp::parse("2026-01-01T00:00:00Z").expect("fixture timestamp"),
+            web_url: format!("https://dev.azure.com/demo/atlas/_workitems/edit/{id}"),
+            details_rev: 0,
+        }
+    }
+
     #[must_use]
     pub fn searchable_text(&self) -> String {
         format!(
@@ -747,8 +775,6 @@ pub enum SortField {
     State,
     Type,
     Assignee,
-    Organization,
-    Project,
     Area,
     Iteration,
     Created,
@@ -760,7 +786,7 @@ pub enum SortField {
 }
 
 impl SortField {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 12] = [
         Self::Changed,
         Self::Priority,
         Self::Id,
@@ -768,8 +794,6 @@ impl SortField {
         Self::State,
         Self::Type,
         Self::Assignee,
-        Self::Organization,
-        Self::Project,
         Self::Area,
         Self::Iteration,
         Self::Created,
@@ -787,8 +811,6 @@ impl SortField {
             Self::State => "State",
             Self::Type => "Type",
             Self::Assignee => "Assignee",
-            Self::Organization => "Org",
-            Self::Project => "Project",
             Self::Area => "Area",
             Self::Iteration => "Iteration",
             Self::Created => "Created",
@@ -815,21 +837,12 @@ impl crate::columns::ColumnId for SortField {
             Self::Priority,
             Self::Changed,
             Self::Assignee,
-            Self::Organization,
-            Self::Project,
             Self::Area,
             Self::Iteration,
             Self::Created,
             Self::Tags,
             Self::Progress,
         ]
-    }
-
-    fn from_key(key: &str) -> Option<Self> {
-        <Self as crate::columns::ColumnId>::all()
-            .iter()
-            .copied()
-            .find(|field| field.key() == key)
     }
 
     fn key(self) -> &'static str {
@@ -841,8 +854,6 @@ impl crate::columns::ColumnId for SortField {
             Self::State => "state",
             Self::Type => "type",
             Self::Assignee => "assignee",
-            Self::Organization => "organization",
-            Self::Project => "project",
             Self::Area => "area",
             Self::Iteration => "iteration",
             Self::Created => "created",
@@ -856,7 +867,6 @@ impl crate::columns::ColumnId for SortField {
     fn label(self) -> &'static str {
         match self {
             Self::Priority => "Pri",
-            Self::Organization => "Org",
             other => other.label(),
         }
     }
@@ -867,12 +877,12 @@ impl crate::columns::ColumnId for SortField {
             Self::Priority => 4,
             Self::Id => 7,
             Self::Progress => 9,
-            Self::Changed | Self::Created | Self::Project => 10,
+            Self::Changed | Self::Created => 10,
             // Two more than the word needs: the state's glyph goes in front.
             Self::State => 12,
             // Wide enough for the badge around the longest type Azure DevOps
             // ships, `[User Story]`.
-            Self::Organization | Self::Type => 12,
+            Self::Type => 12,
             Self::Assignee => 14,
             Self::Area | Self::Iteration | Self::Tags => 16,
         }
@@ -1574,8 +1584,6 @@ pub fn compare_tickets(
             right.assigned_to.as_deref(),
             direction,
         ),
-        SortField::Organization => compare_text(&left.key.organization, &right.key.organization),
-        SortField::Project => compare_text(&left.project, &right.project),
         SortField::Area => compare_text(&left.area_path, &right.area_path),
         SortField::Iteration => compare_text(&left.iteration_path, &right.iteration_path),
         SortField::Tags => compare_text(&left.tags.join(";"), &right.tags.join(";")),
@@ -1645,24 +1653,16 @@ mod tests {
                 id,
             },
             project: "demo".into(),
-            revision: 1,
-            work_item_type: "Task".into(),
-            title: title.into(),
-            state: "Active".into(),
-            reason: None,
-            assigned_to: None,
             priority,
             area_path: "demo".into(),
             iteration_path: "demo\\Sprint 1".into(),
             tags: vec!["rust".into()],
             description: "not searchable sentinel".into(),
-            description_html: String::new(),
-            created_at: ts("2026-01-01T00:00:00Z"),
             changed_at: Timestamp::from_offset_date_time(
                 time::OffsetDateTime::UNIX_EPOCH + time::Duration::seconds(id),
             ),
             web_url: format!("https://dev.azure.com/demo/demo/_workitems/edit/{id}"),
-            details_rev: 0,
+            ..Ticket::fixture(id, title)
         }
     }
 

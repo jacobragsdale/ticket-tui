@@ -3,7 +3,6 @@
 use super::rows::PrRow;
 use crate::filter::{FilterSchema, MatchContext, Sentinel};
 use crate::model::same_text;
-use crate::timestamp::Timestamp;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PrSchema;
@@ -96,10 +95,6 @@ impl FilterSchema for PrSchema {
         }
     }
 
-    fn is_date(_field: Self::Field) -> bool {
-        false
-    }
-
     fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
         match field {
             PrField::Repo => vec![row.repo.clone()],
@@ -128,10 +123,6 @@ impl FilterSchema for PrSchema {
                 row.build_word()
             }],
         }
-    }
-
-    fn date_value(_field: Self::Field, _row: &Self::Row) -> Option<Timestamp> {
-        None
     }
 
     fn sentinel(field: Self::Field, value: &str) -> Option<Sentinel> {

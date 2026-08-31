@@ -698,7 +698,6 @@ fn escape_attribute(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::html::html_to_text;
-    use pretty_assertions::assert_eq;
 
     /// Whether a description carries formatting the Markdown cannot write
     /// down, which is what earns the file its notice line.

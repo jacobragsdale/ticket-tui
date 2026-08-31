@@ -5,7 +5,6 @@ use std::slice;
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, bail};
-use directories::ProjectDirs;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 use crate::classification::{ClassificationNode, NodeKind};
@@ -1338,10 +1337,24 @@ fn file_stamp(path: &Path) -> u64 {
 
 #[must_use]
 pub fn default_database_path() -> PathBuf {
-    ProjectDirs::from("", "", "ticket-tui").map_or_else(
-        || PathBuf::from("tickets.sqlite3"),
-        |dirs| dirs.data_dir().join("tickets.sqlite3"),
-    )
+    data_home()
+        .map(|home| home.join("ticket-tui").join("tickets.sqlite3"))
+        .unwrap_or_else(|| PathBuf::from("tickets.sqlite3"))
+}
+
+fn data_home() -> Option<PathBuf> {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            let home = PathBuf::from(std::env::var_os("HOME")?);
+            Some(if cfg!(target_os = "macos") {
+                home.join("Library/Application Support")
+            } else {
+                home.join(".local/share")
+            })
+        })
+        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
 }
 
 /// One connection to the file, configured the way every reader and writer
@@ -1595,11 +1608,8 @@ mod tests {
                 organization: "example-org".into(),
                 id,
             },
-            project: "atlas".into(),
             revision: 3,
             work_item_type: "Bug".into(),
-            title: format!("Ticket {id}"),
-            state: "Active".into(),
             reason: Some("Investigating".into()),
             assigned_to: Some("Avery Chen".into()),
             priority: Some(2),
@@ -1608,10 +1618,9 @@ mod tests {
             tags: vec!["backend".into(), "rust".into()],
             description: "Cached from Azure DevOps.".into(),
             description_html: "<p>Cached from <b>Azure DevOps</b>.</p>".into(),
-            created_at: ts("2026-01-01T00:00:00Z"),
             changed_at: ts("2026-02-01T00:00:00Z"),
             web_url: format!("https://dev.azure.com/example-org/atlas/_workitems/edit/{id}"),
-            details_rev: 0,
+            ..Ticket::fixture(id, format!("Ticket {id}"))
         }
     }
 

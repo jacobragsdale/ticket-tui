@@ -40,7 +40,12 @@ pub trait ColumnId: Copy + Eq + Sized + 'static {
 
     /// The column that key names, if this table has one. An unknown key comes
     /// out of a session file written by an older build, and is dropped.
-    fn from_key(key: &str) -> Option<Self>;
+    fn from_key(key: &str) -> Option<Self> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|column| column.key() == key)
+    }
 
     fn key(self) -> &'static str;
 
@@ -381,17 +386,17 @@ mod tests {
     #[test]
     fn editing_the_columns_leaves_the_pinned_ones_alone() {
         let mut layout = TableLayout::<SortField>::default();
-        let org = layout
+        let area = layout
             .columns
             .iter()
-            .position(|column| column.id == SortField::Organization)
+            .position(|column| column.id == SortField::Area)
             .unwrap();
 
-        layout.toggle_visible(org);
-        assert!(layout.columns[org].visible);
+        layout.toggle_visible(area);
+        assert!(layout.columns[area].visible);
 
-        let moved = layout.move_column(org, -1);
-        assert_eq!(layout.columns[moved].id, SortField::Organization);
+        let moved = layout.move_column(area, -1);
+        assert_eq!(layout.columns[moved].id, SortField::Area);
 
         let title = 1;
         assert_eq!(layout.columns[title].id, SortField::Title);
@@ -401,91 +406,31 @@ mod tests {
         assert!(layout.columns[title].visible);
     }
 
-    /// A second column set, to prove the layout is not a work-item one. It is
-    /// what #668's repositories tab will look like.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    enum RepoColumn {
-        Name,
-        Branch,
-        Status,
-        Size,
-    }
-
-    impl ColumnId for RepoColumn {
-        fn all() -> &'static [Self] {
-            &[Self::Name, Self::Branch, Self::Status, Self::Size]
-        }
-
-        fn from_key(key: &str) -> Option<Self> {
-            Self::all()
-                .iter()
-                .copied()
-                .find(|column| column.key() == key)
-        }
-
-        fn key(self) -> &'static str {
-            match self {
-                Self::Name => "name",
-                Self::Branch => "branch",
-                Self::Status => "status",
-                Self::Size => "size",
-            }
-        }
-
-        fn label(self) -> &'static str {
-            match self {
-                Self::Name => "Repository",
-                Self::Branch => "Branch",
-                Self::Status => "Status",
-                Self::Size => "Size",
-            }
-        }
-
-        fn default_width(self) -> u16 {
-            match self {
-                Self::Name => 0,
-                Self::Branch => 18,
-                Self::Status => 12,
-                Self::Size => 8,
-            }
-        }
-
-        fn default_visible(self) -> bool {
-            !matches!(self, Self::Size)
-        }
-
-        fn right_aligned(self) -> bool {
-            matches!(self, Self::Size)
-        }
-
-        fn pinned(self) -> bool {
-            matches!(self, Self::Name)
-        }
-
-        fn flexible(self) -> bool {
-            matches!(self, Self::Name)
-        }
-    }
-
     #[test]
     fn a_second_column_set_gets_the_same_layout_and_the_same_session_shape() {
+        use crate::app::repos::RepoColumn;
+
         let mut layout = TableLayout::<RepoColumn>::default();
         assert_eq!(
             layout
-                .visible_columns(120)
+                .visible_columns(200)
                 .into_iter()
                 .map(|column| column.id)
                 .collect::<Vec<_>>(),
-            vec![RepoColumn::Name, RepoColumn::Branch, RepoColumn::Status],
-            "the hidden column stays off until it is asked for"
+            vec![
+                RepoColumn::Name,
+                RepoColumn::DefaultBranch,
+                RepoColumn::PullRequests,
+                RepoColumn::Pipelines,
+                RepoColumn::Local,
+            ],
         );
 
-        let size = 3;
-        layout.toggle_visible(size);
-        layout.resize(size, 2);
+        let local = 4;
+        layout.resize(local, 2);
         let stored = layout.to_session_columns();
         assert_eq!(stored[0].id, "name");
-        assert_eq!(stored[size].width, 10);
+        assert_eq!(stored[local].width, 22);
 
         let restored = TableLayout::<RepoColumn>::from_session_columns(&stored);
         assert_eq!(restored, layout, "the file round-trips through the keys");

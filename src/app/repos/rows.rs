@@ -45,9 +45,7 @@ impl RepoRow {
 
     #[must_use]
     pub fn matches_fuzzy(&self, needle: &str) -> bool {
-        let needle = needle.trim().to_lowercase();
-        needle.is_empty()
-            || self.repo.name.to_lowercase().contains(&needle)
-            || self.branch().to_lowercase().contains(&needle)
+        crate::filter::contains_ignore_case(&self.repo.name, needle)
+            || crate::filter::contains_ignore_case(&self.branch(), needle)
     }
 }

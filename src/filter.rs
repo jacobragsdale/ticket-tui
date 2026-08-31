@@ -32,28 +32,43 @@ pub trait FilterSchema: Clone + Copy + std::fmt::Debug + Default + Eq + 'static 
 
     /// Whether the field is compared as a date rather than drawn from a list
     /// of values.
-    fn is_date(field: Self::Field) -> bool;
+    fn is_date(_field: Self::Field) -> bool {
+        false
+    }
 
     /// The values one row carries for a field: usually one, several for a
     /// field like tags, none for a date.
     fn values(field: Self::Field, row: &Self::Row) -> Vec<String>;
 
     /// The instant a date field compares against, and `None` for the rest.
-    fn date_value(field: Self::Field, row: &Self::Row) -> Option<Timestamp>;
+    fn date_value(_field: Self::Field, _row: &Self::Row) -> Option<Timestamp> {
+        None
+    }
 
     /// The sentinel a value asks for on a field, if that field has one.
-    fn sentinel(field: Self::Field, value: &str) -> Option<Sentinel>;
+    fn sentinel(_field: Self::Field, _value: &str) -> Option<Sentinel> {
+        None
+    }
 
     /// Whether a row satisfies a sentinel on one field. Each screen decides
     /// what `@me` means, and the field is part of that: on pull requests
     /// `author:@me` and `reviewer:@me` are the same sentinel asking two
     /// different questions.
     fn matches_sentinel(
-        field: Self::Field,
-        sentinel: Sentinel,
-        row: &Self::Row,
-        context: &MatchContext,
-    ) -> bool;
+        _field: Self::Field,
+        _sentinel: Sentinel,
+        _row: &Self::Row,
+        _context: &MatchContext,
+    ) -> bool {
+        false
+    }
+}
+
+/// Case-insensitive substring match used by the tabs that do not run nucleo.
+#[must_use]
+pub fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+    let needle = needle.trim();
+    needle.is_empty() || haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
 /// The work items screen's grammar, which is the one the CLI reads too.
@@ -102,7 +117,6 @@ impl FilterSchema for WorkItemSchema {
                 row.priority
                     .map_or_else(|| "—".into(), |priority| priority.to_string()),
             ],
-            FilterField::Project => vec![row.project.clone()],
             FilterField::Area => vec![row.area_path.clone()],
             FilterField::Iteration => vec![row.iteration_path.clone()],
             FilterField::Tags => row.tags.clone(),
@@ -164,7 +178,6 @@ pub enum FilterField {
     Type,
     Assignee,
     Priority,
-    Project,
     Area,
     Iteration,
     Tags,
@@ -173,13 +186,12 @@ pub enum FilterField {
 }
 
 impl FilterField {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 10] = [
         Self::Id,
         Self::State,
         Self::Type,
         Self::Assignee,
         Self::Priority,
-        Self::Project,
         Self::Area,
         Self::Iteration,
         Self::Tags,
@@ -192,12 +204,11 @@ impl FilterField {
     /// The fields the Filters overlay lists: every one whose values are worth
     /// offering. `id:` is typed or jumped to, never picked off a list as long
     /// as the database.
-    pub const OVERLAY: [Self; 10] = [
+    pub const OVERLAY: [Self; 9] = [
         Self::State,
         Self::Type,
         Self::Assignee,
         Self::Priority,
-        Self::Project,
         Self::Area,
         Self::Iteration,
         Self::Tags,
@@ -225,7 +236,6 @@ impl FilterField {
             Self::Type => "type",
             Self::Assignee => "assignee",
             Self::Priority => "priority",
-            Self::Project => "project",
             Self::Area => "area",
             Self::Iteration => "iteration",
             Self::Tags => "tag",
@@ -242,7 +252,6 @@ impl FilterField {
             Self::Type => "Type",
             Self::Assignee => "Assignee",
             Self::Priority => "Priority",
-            Self::Project => "Project",
             Self::Area => "Area",
             Self::Iteration => "Iteration",
             Self::Tags => "Tags",
@@ -259,7 +268,6 @@ impl FilterField {
             "type" => Some(Self::Type),
             "assignee" | "assigned" => Some(Self::Assignee),
             "priority" | "pri" => Some(Self::Priority),
-            "project" => Some(Self::Project),
             "area" => Some(Self::Area),
             "iteration" | "sprint" => Some(Self::Iteration),
             "tag" | "tags" => Some(Self::Tags),
@@ -973,32 +981,19 @@ fn quote_if_needed(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::TicketKey;
     use crate::timestamp::ts;
 
     fn ticket(state: &str, work_item_type: &str, assignee: Option<&str>, tag: &str) -> Ticket {
         Ticket {
-            key: TicketKey {
-                organization: "demo".into(),
-                id: 1,
-            },
-            project: "atlas".into(),
-            revision: 1,
             work_item_type: work_item_type.into(),
             title: "Fix search".into(),
             state: state.into(),
-            reason: None,
             assigned_to: assignee.map(str::to_owned),
             priority: Some(1),
             area_path: "Atlas\\Platform".into(),
-            iteration_path: "Atlas\\Sprint 1".into(),
             tags: vec![tag.into()],
-            description: String::new(),
-            description_html: String::new(),
-            created_at: ts("2026-01-01T00:00:00Z"),
             changed_at: ts("2026-01-02T00:00:00Z"),
-            web_url: "https://dev.azure.com/demo/atlas/_workitems/edit/1".into(),
-            details_rev: 0,
+            ..Ticket::fixture(1, "Fix search")
         }
     }
 
@@ -1627,241 +1622,14 @@ mod tests {
 }
 
 #[cfg(test)]
-mod second_schema_tests {
-    use super::*;
-
-    /// A screen that is not the work items one: its own fields, its own rows,
-    /// and `@me` meaning whoever raised the pull request. It is the shape
-    /// Epic 658's tab will bring.
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-    struct PullRequestSchema;
-
-    #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-    enum PullRequestField {
-        Repo,
-        Author,
-        Reviewer,
-        Created,
-    }
-
-    struct PullRequest {
-        repo: &'static str,
-        author: &'static str,
-        reviewers: Vec<&'static str>,
-        created_at: Timestamp,
-    }
-
-    impl FilterSchema for PullRequestSchema {
-        type Field = PullRequestField;
-        type Row = PullRequest;
-
-        fn all() -> &'static [Self::Field] {
-            &[
-                PullRequestField::Repo,
-                PullRequestField::Author,
-                PullRequestField::Reviewer,
-                PullRequestField::Created,
-            ]
-        }
-
-        fn bar() -> &'static [Self::Field] {
-            &[PullRequestField::Repo, PullRequestField::Author]
-        }
-
-        fn parse(name: &str) -> Option<Self::Field> {
-            match name.to_ascii_lowercase().as_str() {
-                "repo" | "repository" => Some(PullRequestField::Repo),
-                "author" => Some(PullRequestField::Author),
-                "reviewer" => Some(PullRequestField::Reviewer),
-                "created" => Some(PullRequestField::Created),
-                _ => None,
-            }
-        }
-
-        fn key(field: Self::Field) -> &'static str {
-            match field {
-                PullRequestField::Repo => "repo",
-                PullRequestField::Author => "author",
-                PullRequestField::Reviewer => "reviewer",
-                PullRequestField::Created => "created",
-            }
-        }
-
-        fn label(field: Self::Field) -> &'static str {
-            match field {
-                PullRequestField::Repo => "Repository",
-                PullRequestField::Author => "Author",
-                PullRequestField::Reviewer => "Reviewer",
-                PullRequestField::Created => "Created",
-            }
-        }
-
-        fn is_date(field: Self::Field) -> bool {
-            matches!(field, PullRequestField::Created)
-        }
-
-        fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
-            match field {
-                PullRequestField::Repo => vec![row.repo.to_owned()],
-                PullRequestField::Author => vec![row.author.to_owned()],
-                PullRequestField::Reviewer => row
-                    .reviewers
-                    .iter()
-                    .map(|name| (*name).to_owned())
-                    .collect(),
-                PullRequestField::Created => Vec::new(),
-            }
-        }
-
-        fn date_value(field: Self::Field, row: &Self::Row) -> Option<Timestamp> {
-            matches!(field, PullRequestField::Created).then_some(row.created_at)
-        }
-
-        fn sentinel(field: Self::Field, value: &str) -> Option<Sentinel> {
-            let name = value.strip_prefix('@')?.to_ascii_lowercase();
-            match (field, name.as_str()) {
-                (PullRequestField::Author, "me") => Some(Sentinel::Me),
-                _ => None,
-            }
-        }
-
-        fn matches_sentinel(
-            _field: Self::Field,
-            sentinel: Sentinel,
-            row: &Self::Row,
-            context: &MatchContext,
-        ) -> bool {
-            match sentinel {
-                Sentinel::Me => context
-                    .me
-                    .as_deref()
-                    .is_some_and(|me| same_text(row.author, me)),
-                _ => false,
-            }
-        }
-    }
-
-    fn pull_requests() -> Vec<PullRequest> {
-        vec![
-            PullRequest {
-                repo: "ticket-tui",
-                author: "Jacob Ragsdale",
-                reviewers: vec!["Avery"],
-                created_at: crate::timestamp::ts("2026-08-20T00:00:00Z"),
-            },
-            PullRequest {
-                repo: "ticket-tui",
-                author: "Avery",
-                reviewers: vec!["Jacob Ragsdale", "Sam"],
-                created_at: crate::timestamp::ts("2026-01-02T00:00:00Z"),
-            },
-            PullRequest {
-                repo: "skillbook",
-                author: "Sam",
-                reviewers: vec![],
-                created_at: crate::timestamp::ts("2026-08-28T00:00:00Z"),
-            },
-        ]
-    }
-
-    #[test]
-    fn a_second_schema_parses_matches_facets_and_formats_its_own_fields() {
-        let rows = pull_requests();
-        let context = MatchContext::at(crate::timestamp::ts("2026-08-29T00:00:00Z"))
-            .with_me(Some("Jacob Ragsdale".into()));
-
-        let parsed = parse_query::<PullRequestSchema>("repo:ticket-tui author:@me needs review");
-        assert_eq!(
-            parsed.fuzzy, "needs review",
-            "the words are still the words"
-        );
-        assert!(
-            parsed
-                .filters
-                .contains(PullRequestField::Repo, "ticket-tui"),
-            "and this screen's names are its fields"
-        );
-
-        let matched: Vec<&str> = rows
-            .iter()
-            .filter(|row| parsed.filters.matches_in(row, false, &context))
-            .map(|row| row.author)
-            .collect();
-        assert_eq!(
-            matched,
-            ["Jacob Ragsdale"],
-            "@me is whoever raised it on this screen"
-        );
-
-        let facets = facet_values::<PullRequestSchema>(
-            &rows,
-            &FilterSet::<PullRequestSchema>::default(),
-            PullRequestField::Reviewer,
-            |_| false,
-            &context,
-        );
-        let counted: Vec<(&str, usize)> = facets
-            .iter()
-            .map(|facet| (facet.value.as_str(), facet.count))
-            .collect();
-        assert_eq!(
-            counted,
-            [("Avery", 1), ("Jacob Ragsdale", 1), ("Sam", 1)],
-            "a field with several values per row counts every one of them"
-        );
-
-        let dates = facet_values::<PullRequestSchema>(
-            &rows,
-            &FilterSet::<PullRequestSchema>::default(),
-            PullRequestField::Created,
-            |_| false,
-            &context,
-        );
-        assert_eq!(
-            dates
-                .iter()
-                .find(|facet| facet.value == "<7d")
-                .map(|facet| facet.count),
-            Some(1),
-            "the date presets come free with the grammar"
-        );
-
-        assert_eq!(
-            format_query(&parsed.filters, &parsed.fuzzy),
-            "repo:ticket-tui author:@me needs review",
-            "and the query round-trips through this screen's keys"
-        );
-    }
-}
-
-#[cfg(test)]
 mod id_filter_tests {
     use super::*;
-    use crate::model::{Ticket, TicketKey};
+    use crate::model::Ticket;
 
     fn ticket(id: i64, title: &str) -> Ticket {
         Ticket {
-            key: TicketKey {
-                organization: "demo".into(),
-                id,
-            },
-            project: "atlas".into(),
-            revision: 1,
-            work_item_type: "Task".into(),
-            title: title.into(),
-            state: "Active".into(),
-            reason: None,
-            assigned_to: None,
-            priority: None,
-            area_path: "Atlas".into(),
-            iteration_path: "Atlas\\Sprint 1".into(),
-            tags: vec![],
-            description: String::new(),
-            description_html: String::new(),
-            created_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
-            changed_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
             web_url: String::new(),
-            details_rev: 0,
+            ..Ticket::fixture(id, title)
         }
     }
 

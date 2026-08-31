@@ -1,8 +1,7 @@
 //! The Repos tab's filter grammar.
 
 use super::rows::RepoRow;
-use crate::filter::{FilterSchema, MatchContext, Sentinel};
-use crate::timestamp::Timestamp;
+use crate::filter::FilterSchema;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RepoSchema;
@@ -61,10 +60,6 @@ impl FilterSchema for RepoSchema {
         }
     }
 
-    fn is_date(_field: Self::Field) -> bool {
-        false
-    }
-
     fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
         match field {
             RepoField::Name => vec![row.repo.name.clone()],
@@ -74,22 +69,5 @@ impl FilterSchema for RepoSchema {
                 vec![if row.repo.is_disabled { "yes" } else { "no" }.to_owned()]
             }
         }
-    }
-
-    fn date_value(_field: Self::Field, _row: &Self::Row) -> Option<Timestamp> {
-        None
-    }
-
-    fn sentinel(_field: Self::Field, _value: &str) -> Option<Sentinel> {
-        None
-    }
-
-    fn matches_sentinel(
-        _field: Self::Field,
-        _sentinel: Sentinel,
-        _row: &Self::Row,
-        _context: &MatchContext,
-    ) -> bool {
-        false
     }
 }

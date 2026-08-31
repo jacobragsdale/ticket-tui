@@ -1,32 +1,34 @@
 use crate::model::Ticket;
 
+fn copy(tickets: &[&Ticket], line: impl Fn(&Ticket) -> String) -> String {
+    join_lines(tickets.iter().copied().map(line))
+}
+
 #[must_use]
 pub fn copy_ids(tickets: &[&Ticket]) -> String {
-    join_lines(tickets.iter().map(|ticket| ticket.key.id.to_string()))
+    copy(tickets, |ticket| ticket.key.id.to_string())
 }
 
 #[must_use]
 pub fn copy_urls(tickets: &[&Ticket]) -> String {
-    join_lines(tickets.iter().map(|ticket| ticket.web_url.clone()))
+    copy(tickets, |ticket| ticket.web_url.clone())
 }
 
 #[must_use]
 pub fn copy_titles(tickets: &[&Ticket]) -> String {
-    join_lines(tickets.iter().map(|ticket| ticket.title.clone()))
+    copy(tickets, |ticket| ticket.title.clone())
 }
 
 #[must_use]
 pub fn copy_markdown_links(tickets: &[&Ticket]) -> String {
-    join_lines(
-        tickets
-            .iter()
-            .map(|ticket| format!("[{}]({})", ticket.title, ticket.web_url)),
-    )
+    copy(tickets, |ticket| {
+        format!("[{}]({})", ticket.title, ticket.web_url)
+    })
 }
 
 #[must_use]
 pub fn copy_summaries(tickets: &[&Ticket]) -> String {
-    join_lines(tickets.iter().map(|ticket| {
+    copy(tickets, |ticket| {
         format!(
             "{} {} [{}] {} · {}",
             ticket.key.id,
@@ -35,7 +37,7 @@ pub fn copy_summaries(tickets: &[&Ticket]) -> String {
             ticket.state,
             ticket.assigned_to.as_deref().unwrap_or("Unassigned")
         )
-    }))
+    })
 }
 
 #[must_use]
@@ -110,31 +112,17 @@ fn csv_field(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::TicketKey;
 
     fn ticket() -> Ticket {
         Ticket {
-            key: TicketKey {
-                organization: "demo".into(),
-                id: 42,
-            },
-            project: "atlas".into(),
-            revision: 1,
             work_item_type: "Bug".into(),
             title: "Fix, please".into(),
-            state: "Active".into(),
-            reason: None,
             assigned_to: Some("Avery Chen".into()),
             priority: Some(1),
             area_path: "Atlas\\Platform".into(),
-            iteration_path: "Atlas\\Sprint 1".into(),
             tags: vec!["rust".into(), "search".into()],
-            description: String::new(),
-            description_html: String::new(),
-            created_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
             changed_at: crate::timestamp::ts("2026-01-02T00:00:00Z"),
-            web_url: "https://dev.azure.com/demo/atlas/_workitems/edit/42".into(),
-            details_rev: 0,
+            ..Ticket::fixture(42, "Fix, please")
         }
     }
 

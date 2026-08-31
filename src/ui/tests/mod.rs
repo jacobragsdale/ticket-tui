@@ -36,27 +36,16 @@ use crate::pointer::PointerTarget;
 
 fn ticket() -> Ticket {
     Ticket {
-        key: TicketKey {
-            organization: "demo".into(),
-            id: 10_001,
-        },
-        project: "atlas".into(),
         revision: 3,
         work_item_type: "Bug".into(),
-        title: "Fix ticket search".into(),
-        state: "Active".into(),
         reason: Some("Implementation started".into()),
         assigned_to: Some("Avery Chen".into()),
         priority: Some(1),
         area_path: "Atlas\\Platform".into(),
-        iteration_path: "Atlas\\Sprint 1".into(),
         tags: vec!["rust".into(), "search".into()],
         description: "A ticket description".into(),
-        description_html: String::new(),
-        created_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
         changed_at: crate::timestamp::ts("2026-01-02T00:00:00Z"),
-        web_url: "https://dev.azure.com/demo/atlas/_workitems/edit/10001".into(),
-        details_rev: 0,
+        ..Ticket::fixture(10_001, "Fix ticket search")
     }
 }
 

@@ -31,13 +31,6 @@ impl ColumnId for PrColumn {
         ]
     }
 
-    fn from_key(key: &str) -> Option<Self> {
-        Self::all()
-            .iter()
-            .copied()
-            .find(|column| column.key() == key)
-    }
-
     fn key(self) -> &'static str {
         match self {
             Self::Id => "id",

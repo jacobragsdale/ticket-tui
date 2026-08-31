@@ -5,7 +5,6 @@
 use super::rows::{PipelineRow, RunRow, short_branch};
 use crate::filter::{FilterSchema, MatchContext, Sentinel};
 use crate::model::same_text;
-use crate::timestamp::Timestamp;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PipelineSchema;
@@ -65,10 +64,6 @@ impl FilterSchema for PipelineSchema {
         }
     }
 
-    fn is_date(_field: Self::Field) -> bool {
-        false
-    }
-
     fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
         match field {
             PipelineField::Name => vec![row.pipeline.name.clone()],
@@ -86,23 +81,6 @@ impl FilterSchema for PipelineSchema {
                 .into_iter()
                 .collect(),
         }
-    }
-
-    fn date_value(_field: Self::Field, _row: &Self::Row) -> Option<Timestamp> {
-        None
-    }
-
-    fn sentinel(_field: Self::Field, _value: &str) -> Option<Sentinel> {
-        None
-    }
-
-    fn matches_sentinel(
-        _field: Self::Field,
-        _sentinel: Sentinel,
-        _row: &Self::Row,
-        _context: &MatchContext,
-    ) -> bool {
-        false
     }
 }
 
@@ -173,10 +151,6 @@ impl FilterSchema for RunSchema {
         }
     }
 
-    fn is_date(_field: Self::Field) -> bool {
-        false
-    }
-
     fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
         match field {
             RunField::Pipeline => vec![row.pipeline.clone()],
@@ -186,10 +160,6 @@ impl FilterSchema for RunSchema {
             RunField::Reason => vec![row.run.reason.clone()],
             RunField::By => row.run.requested_for.clone().into_iter().collect(),
         }
-    }
-
-    fn date_value(_field: Self::Field, _row: &Self::Row) -> Option<Timestamp> {
-        None
     }
 
     fn sentinel(field: Self::Field, value: &str) -> Option<Sentinel> {

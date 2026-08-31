@@ -32,27 +32,10 @@ use crate::session;
 
 fn ticket(id: i64, title: &str, changed_at: &str) -> Ticket {
     Ticket {
-        key: TicketKey {
-            organization: "demo".into(),
-            id,
-        },
-        project: "atlas".into(),
-        revision: 1,
-        work_item_type: "Task".into(),
-        title: title.into(),
-        state: "Active".into(),
-        reason: None,
         assigned_to: Some("Avery".into()),
         priority: Some(2),
-        area_path: "Atlas".into(),
-        iteration_path: "Atlas\\Sprint 1".into(),
-        tags: vec![],
-        description: String::new(),
-        description_html: String::new(),
-        created_at: crate::timestamp::ts("2026-01-01T00:00:00Z"),
         changed_at: crate::timestamp::ts(changed_at),
-        web_url: format!("https://dev.azure.com/demo/atlas/_workitems/edit/{id}"),
-        details_rev: 0,
+        ..Ticket::fixture(id, title)
     }
 }
 

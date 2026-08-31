@@ -522,7 +522,6 @@ fn decode_entity(body: &str) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pretty_assertions::assert_eq;
 
     #[test]
     fn a_roadmap_ticket_reads_as_paragraphs_bullets_and_inline_code() {
