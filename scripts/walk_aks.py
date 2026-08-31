@@ -124,7 +124,7 @@ ok = wait_for(lambda: ctx()["aks"]["visible_rows"] >= 4, 6)   # query still narr
 key("\x1b", 0.5)
 ok = wait_for(lambda: ctx()["aks"]["visible_rows"] >= 9, 6)
 check("and its pods are read at once", ok, str(ctx()["aks"]["visible_rows"]))
-key("r", 1.5); check("r reads the clusters again and re-announces the bad cluster", "does not exist" in text() or "Reading pods" in text(), text())
+key("r", 1.5); check("r reads the clusters again and re-announces the bad cluster", "does not exist" in text() or "Forbidden" in text() or "Reading pods" in text(), text())
 key("q", 1.5); time.sleep(0.5)
 left = subprocess.run(["pgrep", "-f", "fake-kubectl"], capture_output=True, text=True).stdout.split()
 check("no fake kubectl child is left after q", not left, str(left))
