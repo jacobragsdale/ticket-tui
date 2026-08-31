@@ -247,8 +247,8 @@ fn the_log_pane_tails_the_selected_pod_and_says_what_it_is_following() {
 
     let text = render_text(170, 40, &mut app);
     assert!(
-        text.contains("3 lines \u{00b7} orders-api-7d9f5b-abc12 \u{00b7} api"),
-        "the title names the size, the pod and the container: {text}"
+        text.contains("orders-api-7d9f5b-abc12 \u{00b7} api \u{00b7} 3 lines"),
+        "the title names the pod, the container and the size: {text}"
     );
     assert!(text.contains("following"), "{text}");
     assert!(text.contains("starting up"), "{text}");
@@ -401,7 +401,7 @@ fn clicking_a_container_line_picks_the_one_the_log_follows() {
     );
     assert!(text.contains("\u{203a} istio-proxy"), "{text}");
     assert!(
-        text.contains("lines \u{00b7} orders-api-7d9f5b-abc12 \u{00b7} istio-proxy"),
+        text.contains("orders-api-7d9f5b-abc12 \u{00b7} istio-proxy"),
         "{text}"
     );
 }
