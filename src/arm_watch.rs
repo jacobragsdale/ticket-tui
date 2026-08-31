@@ -414,6 +414,18 @@ fn refuse(reason: &str, events: &Sender<ArmEvent>, requests: &Receiver<ArmReques
         match request {
             ArmRequest::Stop => return,
             ArmRequest::TabShowing(None) | ArmRequest::Blur => {}
+            // A reveal is waited on by name: it has to be answered, or the
+            // pane shows its dots for ever.
+            ArmRequest::Reveal { vault, name } => {
+                let answer = ArmEvent::Revealed {
+                    vault,
+                    name,
+                    value: Err(reason.to_owned()),
+                };
+                if events.send(answer).is_err() {
+                    return;
+                }
+            }
             _ => {
                 if !std::mem::replace(&mut said, true)
                     && events.send(ArmEvent::Failed(reason.to_owned())).is_err()
@@ -840,7 +852,10 @@ mod tests {
         assert!(handle.try_event().is_none(), "Stopped is said once");
     }
 
+    /// Runs `az account show` on this machine, so it is not part of the gate:
+    /// `cargo test -- --ignored` runs it where an Azure CLI is signed in.
     #[test]
+    #[ignore = "shells out to az account show"]
     fn a_thread_given_no_subscription_settles_one_of_its_own_off_the_startup_path() {
         // The one place `az account show` runs. Whether this machine has a
         // signed-in CLI or none at all, the answer comes back as an event
@@ -860,5 +875,33 @@ mod tests {
             other => panic!("the thread answered with {other:?}"),
         }
         handle.send(ArmRequest::Stop).unwrap();
+    }
+
+    #[test]
+    fn a_thread_that_refused_still_answers_a_reveal() {
+        let (request_sender, requests) = mpsc::channel();
+        let (events, receiver) = mpsc::channel();
+        let thread = thread::spawn(move || refuse("no Azure subscription", &events, &requests));
+        request_sender
+            .send(ArmRequest::TabShowing(Some(TabId::KeyVault)))
+            .unwrap();
+        request_sender
+            .send(ArmRequest::Reveal {
+                vault: "kv".to_owned(),
+                name: "db-password".to_owned(),
+            })
+            .unwrap();
+        request_sender.send(ArmRequest::Stop).unwrap();
+        thread.join().unwrap();
+        let events: Vec<ArmEvent> = receiver.try_iter().collect();
+        assert_eq!(events.len(), 2, "{:?}", named(&events));
+        assert!(
+            matches!(&events[0], ArmEvent::Failed(reason) if reason == "no Azure subscription")
+        );
+        assert!(matches!(
+            &events[1],
+            ArmEvent::Revealed { name, value: Err(reason), .. }
+                if name == "db-password" && reason == "no Azure subscription"
+        ));
     }
 }

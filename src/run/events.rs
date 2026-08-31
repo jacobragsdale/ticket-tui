@@ -186,9 +186,12 @@ pub(super) fn handle_action(
         // run with none says what to write rather than doing nothing.
         AppAction::Aks(request) => match runtime.aks.worker.as_ref() {
             Some(worker) => drop(worker.send(request)),
-            None => app
-                .shell
-                .set_error("No clusters are configured; add [[clusters]] to config.toml"),
+            None => {
+                // Nothing is coming back for it, so nothing waits on it.
+                app.aks.request_refused();
+                app.shell
+                    .set_error("No clusters are configured; add [[clusters]] to config.toml");
+            }
         },
         // The shell out is the editor's round trip again: the terminal goes
         // back, kubectl runs in it, and the screen is repainted from scratch.
@@ -209,6 +212,11 @@ pub(super) fn handle_action(
                     .shell
                     .arm_state()
                     .map_or_else(|| "Azure is not configured".to_owned(), str::to_owned);
+                // A reveal is waited on by name, so it is answered here.
+                if let ArmRequest::Reveal { vault, name } = &request {
+                    app.key_vault
+                        .set_revealed(vault, name, Err(refusal.clone()));
+                }
                 app.shell.set_error(refusal);
             }
         },
@@ -284,12 +292,18 @@ pub(super) fn handle_action(
 /// a git job, the details fetch, or a row waiting on an edit. Nothing running
 /// and the loop goes back to waking a second at a time.
 fn spinning(app: &App) -> bool {
+    // A tab's own reads spin only while it is showing: a hidden tab is told
+    // nothing is worth reading, so what it waits on is not coming until it
+    // is back.
+    let tab_busy = match app.tab {
+        TabId::Aks => app.aks.busy(),
+        TabId::Acr => app.acr.busy(),
+        TabId::KeyVault => app.key_vault.busy(),
+        _ => false,
+    };
     app.shell.sync_pending
         || app.repos.busy()
-        || app.aks.busy()
-        // A drill into a registry or a vault, in flight.
-        || app.acr.busy()
-        || app.key_vault.busy()
+        || tab_busy
         || app.work_items.details_pending.is_some()
         || app.shell.flashing()
 }

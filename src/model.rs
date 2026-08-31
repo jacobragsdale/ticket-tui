@@ -744,6 +744,8 @@ pub enum Jump {
     },
     Pipeline(i64),
     Run(i64),
+    /// One pod, by cluster, namespace and name.
+    Pod(crate::aks::PodKey),
     /// One container registry, by name.
     Registry(String),
     /// One repository inside one registry, which is two levels down the ACR
@@ -777,11 +779,27 @@ impl Jump {
             Self::PullRequest { repo, id } => format!("Pull request !{id} in {repo}"),
             Self::Pipeline(id) => format!("Pipeline #{id}"),
             Self::Run(id) => format!("Run #{id}"),
+            Self::Pod(key) => format!("Pod {} in {}/{}", key.name, key.cluster, key.namespace),
             Self::Registry(name) => format!("Registry {name}"),
             Self::Repository { registry, name } => format!("Repository {name} in {registry}"),
             Self::Vault(name) => format!("Vault {name}"),
             Self::VaultItem { vault, kind, name } => format!("The {kind} {name} in {vault}"),
         }
+    }
+
+    /// What the shell says when a jump lands nowhere: what was looked for,
+    /// and where it was looked for.
+    #[must_use]
+    pub fn missing_message(&self) -> String {
+        let place = match self {
+            Self::Pod(_) => "cluster",
+            Self::Registry(_)
+            | Self::Repository { .. }
+            | Self::Vault(_)
+            | Self::VaultItem { .. } => "subscription",
+            _ => "database",
+        };
+        format!("{} is not in this {place}", self.describe())
     }
 }
 

@@ -78,8 +78,10 @@ pub struct Session {
     pub key_vault: TabSession,
     #[serde(default)]
     pub bookmarks: Vec<TicketKey>,
-    /// Everywhere the run had been, oldest last, across every tab.
-    #[serde(default)]
+    /// Everywhere the run had been, oldest last, across every tab. A kind
+    /// this build does not know — one a newer build wrote — is dropped on
+    /// its own rather than taking the whole file with it.
+    #[serde(default, deserialize_with = "known_jumps")]
     pub history: Vec<Jump>,
     /// Whether the table lists finished work. Absent from every session
     /// written before the toggle existed, so `false` is what those load as and
@@ -245,6 +247,15 @@ pub struct NamedView {
 /// whole session load. A column whose key no name in this screen's set is kept
 /// here and dropped by [`crate::columns::TableLayout::from_session_columns`],
 /// which is the only place that knows what the keys mean.
+/// The jumps this build knows, and none of the others: a session written by a
+/// newer build must still open in this one.
+fn known_jumps<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Jump>, D::Error> {
+    Ok(Vec::<serde_json::Value>::deserialize(deserializer)?
+        .into_iter()
+        .filter_map(|jump| serde_json::from_value(jump).ok())
+        .collect())
+}
+
 fn known_columns<'de, D>(deserializer: D) -> Result<Vec<SessionColumn>, D::Error>
 where
     D: Deserializer<'de>,
@@ -572,5 +583,14 @@ mod tests {
             [crate::model::SortField::Id, crate::model::SortField::Title],
             "and the work-item layout drops a column it has no name for"
         );
+    }
+
+    #[test]
+    fn a_history_entry_of_an_unknown_kind_is_dropped_without_the_file() {
+        let loaded: Session = serde_json::from_str(
+            r#"{"active_tab":"work-items","history":[{"kind":"holodeck","at":"x"},{"kind":"repo","at":"ado-helper"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(loaded.history, vec![Jump::Repo("ado-helper".to_owned())]);
     }
 }

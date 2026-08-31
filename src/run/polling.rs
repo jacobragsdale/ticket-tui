@@ -250,7 +250,10 @@ pub(super) fn poll_aks(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 }
                 app.aks.set_description(&key, text);
             }
-            AksEvent::Stopped => runtime.aks.worker = None,
+            AksEvent::Stopped => {
+                runtime.aks.worker = None;
+                app.aks.request_refused();
+            }
             AksEvent::Deleted { key, error } => {
                 app.aks.delete_answered(&mut app.shell, &key, error);
             }
@@ -306,7 +309,12 @@ pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     // the thread that sent it.
     let events: Vec<ArmEvent> = std::iter::from_fn(|| worker.try_event()).collect();
     // A read in flight redraws on its own, so its spinner turns.
-    let redraw = !events.is_empty() || app.acr.busy() || app.key_vault.busy();
+    let tab_busy = match showing {
+        Some(TabId::Acr) => app.acr.busy(),
+        Some(TabId::KeyVault) => app.key_vault.busy(),
+        _ => false,
+    };
+    let redraw = !events.is_empty() || tab_busy;
     for event in events {
         let toast = match event {
             ArmEvent::Subscription(Ok(subscription)) => {
@@ -366,6 +374,12 @@ pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
             ArmEvent::Stopped => {
                 runtime.arm.worker = None;
                 runtime.arm.failed_to_start = true;
+                // Said on both tabs, so a read that will never come back is
+                // not waited on and `r` is refused for the right reason.
+                let gone = "The Azure subscription worker stopped".to_owned();
+                app.acr.set_arm_error(gone.clone());
+                app.key_vault.set_arm_error(gone.clone());
+                app.shell.set_arm_state(Some(gone));
                 break;
             }
         };

@@ -105,9 +105,20 @@ impl Timestamp {
     /// it started from rather than wrapping.
     #[must_use]
     pub fn plus_seconds(self, seconds: i64) -> Self {
+        // Past the calendar's end the answer is the calendar's end, so a
+        // span that overflows still points the way it was asked to.
         self.instant
             .checked_add(time::Duration::seconds(seconds))
-            .map_or(self, Self::from_offset_date_time)
+            .map_or_else(
+                || {
+                    if seconds >= 0 {
+                        Self::from_offset_date_time(time::PrimitiveDateTime::MAX.assume_utc())
+                    } else {
+                        Self::from_offset_date_time(time::PrimitiveDateTime::MIN.assume_utc())
+                    }
+                },
+                Self::from_offset_date_time,
+            )
     }
 
     #[must_use]
@@ -251,5 +262,13 @@ mod tests {
             ts("2025-07-01T22:00:00-05:00").relative_to(now),
             "2025-07-02"
         );
+    }
+
+    #[test]
+    fn plus_seconds_saturates_at_the_calendars_end() {
+        let now = Timestamp::now();
+        assert!(now.plus_seconds(i64::MAX) > now);
+        assert!(now.plus_seconds(i64::MIN) < now);
+        assert_eq!(now.plus_seconds(0), now);
     }
 }

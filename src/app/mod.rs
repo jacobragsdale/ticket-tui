@@ -413,6 +413,14 @@ impl App {
                 .hit_regions
                 .resolve(mouse.column, mouse.row)
                 .filter(|region| region.layer != crate::pointer::PointerLayer::Base)
+                // A tab's search row sits on the modal layer so it wins over
+                // its own table, not so it can be reached through an overlay.
+                .filter(|region| {
+                    !matches!(
+                        region.target,
+                        PointerTarget::SearchField | PointerTarget::ClearQuery
+                    )
+                })
                 .map(|region| region.target.clone());
             let Some(target) = target else {
                 self.shell.pointer.clear_press();
@@ -472,6 +480,7 @@ impl App {
             Jump::Repo(_) => TabId::Repos,
             Jump::PullRequest { .. } => TabId::PullRequests,
             Jump::Pipeline(_) | Jump::Run(_) => TabId::Pipelines,
+            Jump::Pod(_) => TabId::Aks,
             Jump::Registry(_) | Jump::Repository { .. } => TabId::Acr,
             Jump::Vault(_) | Jump::VaultItem { .. } => TabId::KeyVault,
         };
@@ -483,8 +492,7 @@ impl App {
             self.shell.record_jump(jump.clone());
         } else {
             self.tab = previous;
-            self.shell
-                .set_error(format!("{} is not in this database", jump.describe()));
+            self.shell.set_error(jump.missing_message());
         }
         found
     }
@@ -721,10 +729,16 @@ impl App {
         // `1`–`7` switch tabs from anywhere the digit is not being typed into
         // something. An overlay is closed on the way out rather than left open
         // behind the tab that comes back.
+        // A confirmation that is up answers every key first, so nothing
+        // switches tabs or opens over it while it is armed.
+        let screen_is_free = {
+            let screen = self.screen().1;
+            screen.active_editor().is_none() && !screen.modal_open()
+        };
         if let KeyCode::Char(character) = key.code
             && !key.modifiers.contains(KeyModifiers::CONTROL)
             && let Some(tab) = TabId::from_number(character)
-            && self.screen().1.active_editor().is_none()
+            && screen_is_free
         {
             self.select_tab(tab);
             return AppAction::None;
@@ -732,7 +746,7 @@ impl App {
         // The shared overlays open over any tab; the work items screen
         // answers its own keys, the others hand these four up.
         if self.tab != TabId::WorkItems
-            && self.screen().1.active_editor().is_none()
+            && screen_is_free
             && let Some(id) = command_for_key(key, self.tab)
             && Self::SHELL_OVERLAYS.contains(&id)
         {

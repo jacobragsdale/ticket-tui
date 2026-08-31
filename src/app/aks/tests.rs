@@ -682,3 +682,150 @@ fn o_says_what_does_get_you_inside_a_pod() {
         Some("A pod has no page to open; s opens a shell in it")
     );
 }
+
+#[test]
+fn narrowing_a_clusters_namespaces_drops_the_pods_it_no_longer_reads() {
+    let mut app = aks_app();
+    app.aks.set_pods(
+        &app.shell,
+        "qa",
+        Some("billing"),
+        Ok(vec![pod("qa", "billing", "billing-api-1", "Running")]),
+    );
+    assert!(names(&app).iter().any(|name| name == "billing-api-1"));
+    app.aks
+        .set_clusters(vec![cluster("qa", &["orders"]), cluster("prod", &[])]);
+    assert!(
+        !names(&app).iter().any(|name| name == "billing-api-1"),
+        "a namespace the file no longer names goes: {:?}",
+        names(&app)
+    );
+    // A cluster reading every namespace keeps them all.
+    app.aks.set_pods(
+        &app.shell,
+        "prod",
+        Some("billing"),
+        Ok(vec![pod("prod", "billing", "billing-api-2", "Running")]),
+    );
+    app.aks
+        .set_clusters(vec![cluster("qa", &["orders"]), cluster("prod", &[])]);
+    assert!(names(&app).iter().any(|name| name == "billing-api-2"));
+}
+
+#[test]
+fn a_describe_that_lands_after_the_cursor_moved_is_dropped_and_l_in_the_meantime_stands() {
+    let mut app = aks_app();
+    app.select_tab(TabId::Aks);
+    settle(&mut app);
+    let first = target(&app).key;
+    assert_eq!(
+        app.aks.run_command(&mut app.shell, CommandId::DescribePod),
+        AppAction::Aks(AksRequest::Describe(first.clone()))
+    );
+    // `L` before the answer: the pane is the log's again and stays so.
+    app.aks.run_command(&mut app.shell, CommandId::ShowLogs);
+    app.aks
+        .set_description(&first, Ok(vec!["Name: first".to_owned()]));
+    assert_eq!(app.aks.pane(), PaneText::Log, "an answer switches nothing");
+    assert!(app.aks.describe_lines().is_some(), "but it is held for D");
+
+    // Asked again, then moved on: the old pod's answer is dropped. `D` put
+    // the keyboard on the pane, so it goes back to the list first.
+    app.aks.run_command(&mut app.shell, CommandId::DescribePod);
+    app.shell.focus = Focus::Tickets;
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    settle(&mut app);
+    let second = target(&app).key;
+    assert_ne!(first, second);
+    app.aks
+        .set_description(&first, Ok(vec!["Name: first".to_owned()]));
+    assert!(
+        app.aks.describe_lines().is_none(),
+        "{:?}",
+        app.aks.describe_lines()
+    );
+    app.aks
+        .set_description(&second, Ok(vec!["Name: second".to_owned()]));
+    assert!(app.aks.describe_lines().is_some());
+}
+
+#[test]
+fn the_skipped_line_count_keeps_counting_past_the_cap() {
+    let mut app = aks_app();
+    settle(&mut app);
+    let target = target(&app);
+    let lines: Vec<String> = (0..LOG_LINE_CAP + 2).map(|i| format!("line {i}")).collect();
+    app.aks.append_log(&target, lines, false);
+    assert_eq!(app.aks.log_lines().len(), LOG_LINE_CAP);
+    assert_eq!(app.aks.log_lines()[0], "\u{2026} 3 earlier lines skipped");
+    app.aks
+        .append_log(&target, vec!["one more".to_owned()], false);
+    assert_eq!(app.aks.log_lines()[0], "\u{2026} 4 earlier lines skipped");
+    assert_eq!(app.aks.log_lines().len(), LOG_LINE_CAP);
+}
+
+#[test]
+fn a_refused_request_leaves_nothing_waiting() {
+    let mut app = aks_app();
+    settle(&mut app);
+    app.aks.run_command(&mut app.shell, CommandId::DescribePod);
+    assert!(app.aks.busy());
+    app.aks.request_refused();
+    assert!(!app.aks.busy());
+}
+
+#[test]
+fn g_records_the_pod_so_the_history_comes_back_to_it() {
+    let mut app = aks_app();
+    app.relate_repos(&[]);
+    app.select_tab(TabId::Aks);
+    settle(&mut app);
+    let index = app
+        .aks
+        .visible_pods(&app.shell)
+        .iter()
+        .position(|row| row.repo.is_some())
+        .expect("a pod with a repository on file");
+    app.aks.cursor.focus(index);
+    settle(&mut app);
+    let key = target(&app).key;
+    let AppAction::Follow(jump) = app.aks.run_command(&mut app.shell, CommandId::OpenRepo) else {
+        panic!("g did not follow");
+    };
+    assert!(app.follow(&jump), "the repository is on file");
+    assert_eq!(app.tab, TabId::Repos);
+    app.history_back();
+    assert_eq!(app.tab, TabId::Aks, "[ comes back to the pod");
+    assert_eq!(
+        app.aks.selected_pod(&app.shell).map(|row| row.pod.key),
+        Some(key)
+    );
+}
+
+#[test]
+fn a_global_key_or_a_digit_does_not_reach_past_the_restart_confirm() {
+    let mut app = aks_app();
+    app.select_tab(TabId::Aks);
+    settle(&mut app);
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert_eq!(app.aks.mode, AksMode::ConfirmRestart);
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+    assert!(
+        !app.shell_overlay_open(),
+        "the columns editor does not open over an armed confirm"
+    );
+    assert_eq!(
+        app.aks.mode,
+        AksMode::Browse,
+        "c answered the confirm: it is left"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+    assert_eq!(
+        app.tab,
+        TabId::Aks,
+        "a digit does not switch tabs past it either"
+    );
+    assert_eq!(app.aks.mode, AksMode::Browse);
+    assert!(app.aks.restarting.is_none());
+}

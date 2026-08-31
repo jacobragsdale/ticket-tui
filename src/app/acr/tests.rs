@@ -476,3 +476,61 @@ fn a_refusal_is_shown_once_and_leaves_what_was_read_standing() {
     app.acr.set_inventory(Ok(inventory()));
     assert_eq!(app.acr.arm_error(), None);
 }
+
+#[test]
+fn r_inside_a_registry_asks_for_its_catalog_again() {
+    let mut app = acr_app();
+    press(&mut app, KeyCode::Enter);
+    app.acr.set_repositories(
+        "atlas",
+        Ok(vec![repository(
+            "team/api",
+            Some(3),
+            Some("2026-08-29T09:00:00Z"),
+        )]),
+    );
+    app.acr.sync_focus();
+    assert_ne!(
+        app.acr.focus(),
+        Some(ArmFocus::Registry("atlas".to_owned())),
+        "the catalog is held"
+    );
+    assert_eq!(
+        press(&mut app, KeyCode::Char('r')),
+        AppAction::Arm(ArmRequest::Refresh)
+    );
+    assert_eq!(
+        app.acr.focus(),
+        Some(ArmFocus::Registry("atlas".to_owned())),
+        "and asked for again"
+    );
+}
+
+#[test]
+fn repositories_with_no_stamp_sort_last_whichever_way_the_column_is_turned() {
+    let mut app = acr_app();
+    press(&mut app, KeyCode::Enter);
+    app.acr.set_repositories(
+        "atlas",
+        Ok(vec![
+            repository("team/unread", None, None),
+            repository("team/old", Some(1), Some("2026-01-01T00:00:00Z")),
+            repository("team/new", Some(2), Some("2026-08-01T00:00:00Z")),
+        ]),
+    );
+    app.acr.toggle_sort("updated");
+    let one_way = repository_names(&app);
+    app.acr.toggle_sort("updated");
+    let other_way = repository_names(&app);
+    assert_eq!(
+        one_way.last().map(String::as_str),
+        Some("team/unread"),
+        "{one_way:?}"
+    );
+    assert_eq!(
+        other_way.last().map(String::as_str),
+        Some("team/unread"),
+        "{other_way:?}"
+    );
+    assert_eq!(one_way[0], other_way[1], "{one_way:?} vs {other_way:?}");
+}

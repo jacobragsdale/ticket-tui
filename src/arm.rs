@@ -15,6 +15,7 @@
 //! without anyone editing a work item.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::fmt;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -176,18 +177,30 @@ fn az(arguments: &[&str]) -> Result<String> {
 /// trades an ARM token for a refresh token, and the refresh token for an
 /// access token scoped to the one thing about to be read.
 pub fn acr_token(client: &ArmClient, login_server: &str, scope: &str) -> Result<String> {
-    let arm = client.arm_bearer()?;
-    let exchanged = client.request(
-        &format!("https://{login_server}/oauth2/exchange"),
-        None,
-        Some(&Body::Form(vec![
-            ("grant_type".to_owned(), "access_token".to_owned()),
-            ("service".to_owned(), login_server.to_owned()),
-            ("access_token".to_owned(), arm),
-        ])),
-    )?;
-    let refresh = text(&exchanged["refresh_token"])
-        .with_context(|| format!("{login_server} did not answer the exchange with a token"))?;
+    let cached = client.refresh_tokens.borrow().get(login_server).cloned();
+    let refresh = match cached {
+        Some(refresh) => refresh,
+        None => {
+            let arm = client.arm_bearer()?;
+            let exchanged = client.request(
+                &format!("https://{login_server}/oauth2/exchange"),
+                None,
+                Some(&Body::Form(vec![
+                    ("grant_type".to_owned(), "access_token".to_owned()),
+                    ("service".to_owned(), login_server.to_owned()),
+                    ("access_token".to_owned(), arm),
+                ])),
+            )?;
+            let refresh = text(&exchanged["refresh_token"]).with_context(|| {
+                format!("{login_server} did not answer the exchange with a token")
+            })?;
+            client
+                .refresh_tokens
+                .borrow_mut()
+                .insert(login_server.to_owned(), refresh.clone());
+            refresh
+        }
+    };
     let issued = client.request(
         &format!("https://{login_server}/oauth2/token"),
         None,
@@ -494,6 +507,10 @@ pub struct ArmClient {
     /// it is spent: a CLI token lasts about an hour and a running TUI outlives
     /// that.
     token: RefCell<Option<String>>,
+    /// Each registry's refresh token, by login server: the exchange that
+    /// mints one costs a round trip, and the token it mints is good for
+    /// every scope the registry is asked for.
+    refresh_tokens: RefCell<HashMap<String, String>>,
     /// How long the last refusal asked to be left alone, until something reads
     /// it.
     throttled: Cell<Option<Duration>>,
@@ -513,6 +530,7 @@ impl ArmClient {
             transport,
             subscription: config.subscription,
             token: RefCell::new(None),
+            refresh_tokens: RefCell::new(HashMap::new()),
             throttled: Cell::new(None),
         }
     }
@@ -577,6 +595,12 @@ impl ArmClient {
             );
         }
         if status == 401 || status == 403 {
+            // Spent rather than wrong: whatever was cached is forgotten, so
+            // the next call — on any path, not only the one that retries at
+            // once — mints afresh instead of failing the same way for an
+            // hour.
+            self.token.borrow_mut().take();
+            self.refresh_tokens.borrow_mut().clear();
             return Err(anyhow::Error::new(SignedOut(format!(
                 "Azure rejected the credentials ({status}) for {url}; run `az login` and retry: {}",
                 failure_message(&response.body)
@@ -616,13 +640,25 @@ impl ArmClient {
 /// anything else is worth the front of its body rather than nothing.
 fn failure_message(text: &str) -> String {
     let parsed = serde_json::from_str::<Value>(text).unwrap_or(Value::Null);
+    // ARM puts the reason a person can act on under `error.details`, and a
+    // stub about correlation ids in `error.message`; both are said.
+    let details: Vec<&str> = parsed["error"]["details"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|detail| detail["message"].as_str())
+        .collect();
     for candidate in [
         &parsed["error"]["message"],
         &parsed["errors"][0]["message"],
         &parsed["message"],
     ] {
         if let Some(said) = candidate.as_str() {
-            return said.to_owned();
+            return if details.is_empty() {
+                said.to_owned()
+            } else {
+                format!("{said} \u{2014} {}", details.join("; "))
+            };
         }
     }
     text.trim().chars().take(200).collect()
@@ -636,9 +672,11 @@ fn retry_after(header: Option<&str>, now: OffsetDateTime) -> Duration {
     let Some(raw) = header.map(str::trim).filter(|raw| !raw.is_empty()) else {
         return DEFAULT_RETRY_AFTER;
     };
+    // `nan` parses as a number and would take the clamp — and the
+    // `Duration` — down with it.
     let seconds = match raw.parse::<f64>() {
-        Ok(seconds) => seconds,
-        Err(_) => match PrimitiveDateTime::parse(raw, HTTP_DATE) {
+        Ok(seconds) if seconds.is_finite() => seconds,
+        _ => match PrimitiveDateTime::parse(raw, HTTP_DATE) {
             Ok(when) => (when.assume_utc() - now).as_seconds_f64(),
             Err(_) => return DEFAULT_RETRY_AFTER,
         },
@@ -1616,5 +1654,84 @@ pub(crate) mod tests {
         fn throttled_for(&self) -> Option<Duration> {
             self.throttle.lock().unwrap().take()
         }
+    }
+
+    #[test]
+    fn a_rejected_registry_call_forgets_the_token_so_the_next_read_mints_again() {
+        let mut answers = acr_handshake();
+        answers.push((
+            401,
+            None,
+            json!({ "errors": [{ "message": "expired" }] }).to_string(),
+        ));
+        answers.push((200, None, json!({ "data": [] }).to_string()));
+        let transport = FakeHttp::answering(&answers);
+        let arm = client(&transport);
+        let registry = registry_of("myacr.azurecr.io");
+        assert!(arm.repositories(&registry).is_err());
+        assert_eq!(transport.mints(), 1);
+        assert_eq!(arm.inventory().unwrap(), Inventory::default());
+        assert_eq!(
+            transport.mints(),
+            2,
+            "the rejection spent the cached token, so the next read minted"
+        );
+    }
+
+    #[test]
+    fn a_registrys_refresh_token_is_exchanged_once_and_reused() {
+        let mut answers = acr_handshake();
+        answers.push((200, None, json!({ "tags": [] }).to_string()));
+        answers.push((200, None, json!({ "access_token": "acr-2" }).to_string()));
+        answers.push((200, None, json!({ "tags": [] }).to_string()));
+        let transport = FakeHttp::answering(&answers);
+        let arm = client(&transport);
+        let registry = registry_of("myacr.azurecr.io");
+        arm.tags(&registry, "team/api").unwrap();
+        arm.tags(&registry, "team/api").unwrap();
+        let urls: Vec<String> = transport
+            .sent()
+            .iter()
+            .map(|held| held.url.clone())
+            .collect();
+        assert_eq!(
+            urls.iter()
+                .filter(|url| url.ends_with("/oauth2/exchange"))
+                .count(),
+            1,
+            "{urls:?}"
+        );
+        assert_eq!(
+            urls.iter()
+                .filter(|url| url.ends_with("/oauth2/token"))
+                .count(),
+            2,
+            "{urls:?}"
+        );
+    }
+
+    #[test]
+    fn retry_after_ignores_a_header_that_is_not_a_number_of_seconds() {
+        let now = OffsetDateTime::now_utc();
+        assert_eq!(retry_after(Some("nan"), now), DEFAULT_RETRY_AFTER);
+        assert_eq!(retry_after(Some("inf"), now), DEFAULT_RETRY_AFTER);
+        assert_eq!(retry_after(Some("7"), now), Duration::from_secs(7));
+    }
+
+    #[test]
+    fn a_refusals_details_are_part_of_its_message() {
+        let body = json!({ "error": {
+            "code": "BadRequest",
+            "message": "Please provide below info when asking for support",
+            "details": [{
+                "code": "NoValidSubscriptionsInQueryRequest",
+                "message": "There must be at least one subscription that is eligible to contain resources"
+            }]
+        }})
+        .to_string();
+        assert_eq!(
+            failure_message(&body),
+            "Please provide below info when asking for support \u{2014} There must be at least one subscription that is eligible to contain resources"
+        );
     }
 }

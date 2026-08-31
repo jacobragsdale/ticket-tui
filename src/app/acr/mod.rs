@@ -382,6 +382,15 @@ impl AcrScreen {
                 ordering
             }
         });
+        // A repository whose attributes have not landed has nothing to
+        // compare, and sorts last whichever way the column is turned.
+        match column {
+            RepositoryColumn::Tags => rows.sort_by_key(|row| row.repository.tags.is_none()),
+            RepositoryColumn::Updated => {
+                rows.sort_by_key(|row| row.repository.updated.is_none());
+            }
+            RepositoryColumn::Name => {}
+        }
         rows
     }
 
@@ -702,6 +711,13 @@ impl AcrScreen {
             // Nothing on this tab comes from Azure DevOps, so the sync key
             // reads the subscription again.
             CommandId::Sync => {
+                // The open registry is read again too: what it holds is
+                // dropped, so the focus asks for it afresh.
+                if let Level::Repositories(registry) = self.level.clone() {
+                    self.repositories.retain(|(held, _)| *held != registry);
+                    self.tags.retain(|(held, ..)| *held != registry);
+                    self.manifests.retain(|(held, ..)| *held != registry);
+                }
                 shell.set_status("Reading registries\u{2026}");
                 return AppAction::Arm(ArmRequest::Refresh);
             }

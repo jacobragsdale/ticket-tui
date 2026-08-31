@@ -377,14 +377,24 @@ fn render_item_details(
     }
     buttons.push((" Copy name ", PointerTarget::RunCommand(CommandId::CopyId)));
     buttons.push((" Open ", PointerTarget::RunCommand(CommandId::Open)));
+    // The value shown is this row's secret and nobody else's: a key by the
+    // same name has none.
+    let shown = screen.revealed().filter(|revealed| {
+        revealed.name == row.item.name
+            && revealed.vault == row.vault
+            && row.item.kind == ItemKind::Secret
+    });
+    if shown.is_some() {
+        buttons.push((
+            " Copy value ",
+            PointerTarget::RunCommand(CommandId::CopyValue),
+        ));
+    }
     let buttons_index = lines.len();
     lines.push(button_row(&buttons));
     if screen.reveal_pending() {
         lines.push(Line::styled(MASK, Style::default().fg(theme().muted)));
-    } else if let Some(revealed) = screen
-        .revealed()
-        .filter(|revealed| revealed.name == row.item.name && revealed.vault == row.vault)
-    {
+    } else if let Some(revealed) = shown {
         lines.push(render_revealed(revealed));
     }
     push_problem(&mut lines, screen, inner.width);
@@ -417,10 +427,13 @@ fn render_revealed(revealed: crate::app::key_vault::Revealed<'_>) -> Line<'stati
 
 /// `Expires`, coloured the way the table's own cell is.
 fn expires_line(row: &ItemRow, now: Timestamp) -> Line<'static> {
+    // A disabled item's running out is nobody's business, in the pane as
+    // in the table: it reads muted, whatever the date.
     let value = Span::styled(
         stamp_label(row.item.expires, now),
         match expiry_colour(row.item.expires, now) {
-            Some(colour) => Style::default().fg(colour),
+            Some(colour) if row.item.enabled => Style::default().fg(colour),
+            Some(_) => Style::default().fg(theme().muted),
             None => Style::default(),
         },
     );

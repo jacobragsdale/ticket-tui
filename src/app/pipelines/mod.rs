@@ -1016,6 +1016,10 @@ impl Screen for PipelinesScreen {
         self.cancelling = None;
     }
 
+    fn modal_open(&self) -> bool {
+        self.mode == PipelineMode::ConfirmCancel
+    }
+
     fn active_editor(&self) -> Option<TextEditor> {
         match self.mode {
             PipelineMode::Search => Some(TextEditor::Search),

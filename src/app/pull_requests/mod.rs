@@ -885,6 +885,10 @@ impl Screen for PullRequestsScreen {
         self.mode = PrMode::Browse;
     }
 
+    fn modal_open(&self) -> bool {
+        self.mode == PrMode::ConfirmAbandon
+    }
+
     fn active_editor(&self) -> Option<TextEditor> {
         match self.mode {
             PrMode::Search => Some(TextEditor::Search),

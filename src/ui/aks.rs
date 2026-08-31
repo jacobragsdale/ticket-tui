@@ -25,6 +25,16 @@ pub(crate) fn render(frame: &mut Frame<'_>, screen: &mut AksScreen, shell: &mut 
     render_content(frame, screen, shell, sections[1]);
     render_status_bar(frame, shell, sections[2], screen.footer_hint(shell));
     if screen.mode == AksMode::ConfirmRestart {
+        // The modal takes the whole pointer: a click anywhere but on it
+        // closes it, and nothing underneath — least of all the details
+        // pane's own Restart chip — can be reached through it.
+        shell.hit_regions.push(region(
+            frame.area(),
+            PointerTarget::DismissOverlay,
+            PointerLayer::Modal,
+            None,
+            None,
+        ));
         render_restart_confirm(frame, screen, shell);
     }
 }
@@ -172,25 +182,20 @@ fn render_table(frame: &mut Frame<'_>, screen: &mut AksScreen, shell: &mut Shell
 /// or, when a cluster could not be read, what it said instead. A refusal is
 /// worth the whole line: the count is already on the table.
 fn table_status(screen: &AksScreen, matching: usize) -> String {
-    if let Some((cluster, namespace, message)) = screen.errors().first() {
-        return format!(
-            "{matching} pods \u{00b7} {}: {}",
-            where_it_failed(cluster, namespace.as_deref()),
-            first_line(message)
-        );
-    }
+    // A refusal is named in the details pane's Problems section; here it is
+    // a count, so the reading's age stays on the border beside it.
+    let problems = match screen.errors().len() {
+        0 => String::new(),
+        1 => " \u{00b7} 1 problem".to_owned(),
+        count => format!(" \u{00b7} {count} problems"),
+    };
     match screen.read_at() {
         Some(read_at) => format!(
-            "{matching} pods \u{00b7} read {}",
+            "{matching} pods \u{00b7} read {}{problems}",
             crate::app::relative_age(read_at.elapsed())
         ),
         None => format!("{matching} pods"),
     }
-}
-
-/// The first line of a complaint, which is the one that says what to fix.
-fn first_line(message: &str) -> &str {
-    message.lines().next().unwrap_or(message)
 }
 
 fn pod_cell(row: &PodRow, column: PodColumn, now: Timestamp) -> Cell<'static> {
@@ -333,13 +338,14 @@ fn log_title(screen: &AksScreen, row: Option<&PodRow>) -> String {
         })
         .unwrap_or_else(|| "\u{2014}".to_owned());
     // A stream that has ended has nothing left to wait for and says so
-    // plainly; one still arriving spins.
+    // plainly. No spinner on one still arriving: a quiet pod sends nothing
+    // to repaint on, and a glyph that stands still says the wrong thing.
     let state = if screen.log_ended() {
-        "ended".to_owned()
+        "ended"
     } else if screen.log_following() {
-        format!("{} following", spinner_frame())
+        "following"
     } else {
-        "scrolled".to_owned()
+        "scrolled"
     };
     // The state first and the count last: a narrow pane cuts the title
     // short, and whether the log is still arriving is the one thing it has to
@@ -577,6 +583,11 @@ fn nothing_selected(screen: &AksScreen) -> Vec<Line<'static>> {
         return vec![Line::from(
             "No clusters configured \u{2014} add [[clusters]] to ~/.config/ticket-tui/config.toml",
         )];
+    }
+    // A query that leaves nothing is the query's doing, whatever else went
+    // wrong: the refusals keep their own section under a pod.
+    if screen.has_read() && !screen.query().is_empty() {
+        return vec![Line::from("No pods match")];
     }
     if !screen.errors().is_empty() {
         return screen

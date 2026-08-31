@@ -593,3 +593,105 @@ fn both_cursors_stay_where_they_were_when_a_read_replaces_the_lists() {
         "the cursor keeps its item by name, wherever it now sorts"
     );
 }
+
+#[test]
+fn r_inside_a_vault_asks_for_its_items_again() {
+    let mut app = key_vault_app();
+    press(&mut app, KeyCode::Enter);
+    if let Some(ArmFocus::Vault(vault)) = app.key_vault.focus() {
+        app.key_vault.set_items(&vault, Ok(Vec::new()));
+    }
+    assert_eq!(app.key_vault.focus(), None, "the vault's items are held");
+    assert_eq!(
+        press(&mut app, KeyCode::Char('r')),
+        AppAction::Arm(ArmRequest::Refresh)
+    );
+    assert!(
+        matches!(app.key_vault.focus(), Some(ArmFocus::Vault(_))),
+        "and asked for again: {:?}",
+        app.key_vault.focus()
+    );
+}
+
+#[test]
+fn a_value_is_never_hung_on_a_key_of_the_same_name() {
+    let mut app = key_vault_app();
+    press(&mut app, KeyCode::Enter);
+    app.key_vault.set_items(
+        "atlas-kv",
+        Ok(vec![
+            item(ItemKind::Secret, "dup", true, None),
+            item(ItemKind::Key, "dup", true, None),
+        ]),
+    );
+    app.key_vault.set_query("kind:key".to_owned());
+    assert_eq!(
+        app.key_vault.selected_item().map(|row| row.item.kind),
+        Some(ItemKind::Key)
+    );
+    app.key_vault
+        .set_revealed("atlas-kv", "dup", Ok(secret("hunter2")));
+    assert!(
+        app.key_vault.revealed().is_none(),
+        "a key has no value to show, whatever a secret of the same name said"
+    );
+}
+
+#[test]
+fn walking_away_from_a_pending_reveal_stops_waiting_on_it() {
+    let mut app = opened_on("db-password");
+    assert!(matches!(
+        press(&mut app, KeyCode::Char('R')),
+        AppAction::Arm(ArmRequest::Reveal { .. })
+    ));
+    assert!(app.key_vault.busy());
+    app.select_tab(TabId::WorkItems);
+    assert!(!app.key_vault.reveal_pending());
+    assert!(
+        !app.key_vault.busy(),
+        "nothing waits on a reveal walked away from"
+    );
+}
+
+#[test]
+fn a_disabled_certificate_is_not_counted_as_running_out() {
+    let mut app = key_vault_app();
+    app.key_vault.set_items(
+        "atlas-kv",
+        Ok(vec![
+            item(ItemKind::Certificate, "live", true, Some(in_days(10))),
+            item(ItemKind::Certificate, "dead", false, Some(in_days(10))),
+        ]),
+    );
+    app.key_vault.set_items("labs-kv", Ok(Vec::new()));
+    assert_eq!(app.key_vault.expiring_certificates(), 1);
+}
+
+#[test]
+fn items_with_no_date_sort_last_whichever_way_the_column_is_turned() {
+    let mut app = key_vault_app();
+    press(&mut app, KeyCode::Enter);
+    app.key_vault.set_items(
+        "atlas-kv",
+        Ok(vec![
+            item(ItemKind::Secret, "undated", true, None),
+            item(ItemKind::Secret, "soon", true, Some(in_days(5))),
+            item(ItemKind::Secret, "later", true, Some(in_days(50))),
+        ]),
+    );
+    let one_way = item_names(&app);
+    app.key_vault.toggle_sort("expires");
+    let other_way = item_names(&app);
+    assert_eq!(
+        one_way.last().map(String::as_str),
+        Some("undated"),
+        "{one_way:?}"
+    );
+    assert_eq!(
+        other_way.last().map(String::as_str),
+        Some("undated"),
+        "{other_way:?}"
+    );
+    assert_eq!(one_way[0], other_way[1], "{one_way:?} vs {other_way:?}");
+    assert_eq!(one_way[1], other_way[0]);
+}

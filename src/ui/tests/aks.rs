@@ -125,11 +125,17 @@ fn an_unreadable_cluster_says_what_it_said_on_the_table_and_in_the_pane() {
         Some("orders"),
         Err("Unable to connect to the server: dial tcp: i/o timeout".to_owned()),
     );
-    let text = aks_text(150, 40, &mut app);
+    // Tall enough for the pane's Problems section, under the pod's fields
+    // and containers, to be on screen.
+    let text = aks_text(150, 60, &mut app);
 
     assert!(
-        text.contains("qa/orders: Unable to connect"),
-        "the border says which cluster and why: {text}"
+        text.contains("1 problem"),
+        "the border counts the refusal: {text}"
+    );
+    assert!(
+        text.contains("Unable to connect"),
+        "and the pane says which cluster and why: {text}"
     );
     assert!(
         text.contains("orders-api-9a1c2d-ghi56"),
@@ -482,4 +488,40 @@ fn the_restart_confirm_answers_the_mouse_and_leave_it_deletes_nothing() {
     assert!(!app.aks.busy());
     let text = render_text(150, 40, &mut app);
     assert!(!text.contains("Restart pod "), "the modal is gone: {text}");
+}
+
+#[test]
+fn the_restart_confirm_takes_the_whole_pointer() {
+    let mut app = aks_app();
+    aks_text(150, 40, &mut app);
+    // The details pane's own Restart chip, before the modal is up.
+    let chip = target_rect(&app, |target| {
+        matches!(target, PointerTarget::RunCommand(CommandId::RestartPod))
+    });
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    render_text(150, 40, &mut app);
+    // A click where that chip was closes the confirm and deletes nothing:
+    // the modal has the whole pointer.
+    let action = click(&mut app, chip.x + 1, chip.y);
+    assert_eq!(action, crate::app::AppAction::None, "nothing was sent");
+    assert_eq!(app.aks.mode, crate::app::aks::AksMode::Browse);
+    assert!(app.aks.restarting.is_none());
+}
+
+#[test]
+fn a_query_that_matches_nothing_says_so_even_while_a_cluster_is_down() {
+    let mut app = aks_app();
+    app.aks.set_pods(
+        &app.shell,
+        "qa",
+        Some("orders"),
+        Err("context \"aks-qa\" does not exist".to_owned()),
+    );
+    app.aks.set_query("nothing-by-this-name".to_owned());
+    let text = aks_text(150, 40, &mut app);
+    assert!(text.contains("No pods match"), "{text}");
+    assert!(
+        text.contains("1 problem"),
+        "the refusal is a count on the border: {text}"
+    );
 }

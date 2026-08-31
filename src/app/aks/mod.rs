@@ -72,6 +72,9 @@ pub struct AksScreen {
     /// follow. The lines held are this target's and nobody else's.
     log_target: Option<LogFollow>,
     log_lines: Vec<String>,
+    /// How many lines have gone off the top of the buffer, for the line that
+    /// says so.
+    log_skipped: usize,
     /// The container chosen with `C`, if the pod has one by that name, and
     /// whether `P` has asked for the run before the last restart.
     container: Option<String>,
@@ -87,9 +90,6 @@ pub struct AksScreen {
     /// When the last read landed, which the table's status says: nothing here
     /// is stored, so how old the answer is matters.
     read_at: Option<Instant>,
-    /// Whether the user has just asked for a read. The next failure after one
-    /// is said out loud even if it says what the last one said.
-    refresh_pending: bool,
     /// Whether anything has been read at all, which is what tells "nothing
     /// matches" from "nothing has come back yet".
     reads_seen: usize,
@@ -114,6 +114,7 @@ impl Default for AksScreen {
             log_finished: false,
             log_target: None,
             log_lines: Vec::new(),
+            log_skipped: 0,
             container: None,
             previous: false,
             describe: None,
@@ -121,7 +122,6 @@ impl Default for AksScreen {
             restarting: None,
             deleting: None,
             read_at: None,
-            refresh_pending: false,
             reads_seen: 0,
         }
     }
@@ -131,10 +131,22 @@ impl AksScreen {
     /// The clusters the file names, as `config.toml` is read and whenever it
     /// changes. Pods of a cluster nobody names any more go with it.
     pub fn set_clusters(&mut self, clusters: Vec<Cluster>) {
+        // A namespace the file no longer names is never read again, so what
+        // it held goes now rather than sitting on the table as it last was.
+        let kept = |cluster: &str, namespace: &str| {
+            clusters.iter().any(|held| {
+                held.name == cluster
+                    && (held.namespaces.is_empty()
+                        || held.namespaces.iter().any(|name| name == namespace))
+            })
+        };
         self.pods
-            .retain(|pod| clusters.iter().any(|held| held.name == pod.key.cluster));
+            .retain(|pod| kept(&pod.key.cluster, &pod.key.namespace));
         self.errors
-            .retain(|(cluster, _, _)| clusters.iter().any(|held| held.name == *cluster));
+            .retain(|(cluster, namespace, _)| match namespace {
+                Some(namespace) => kept(cluster, namespace),
+                None => clusters.iter().any(|held| held.name == *cluster),
+            });
         self.clusters = clusters;
     }
 
@@ -189,8 +201,7 @@ impl AksScreen {
                     namespace.map(str::to_owned),
                     message.clone(),
                 ));
-                let forced = std::mem::take(&mut self.refresh_pending);
-                (!repeated || forced).then(|| format!("{cluster}: {message}"))
+                (!repeated).then(|| format!("{cluster}: {message}"))
             }
         };
         // The rows the cursor is counted over have moved: it stays on its own
@@ -257,6 +268,11 @@ impl AksScreen {
                 ordering
             }
         });
+        // A pod with no timestamp has no age to compare and sorts last
+        // whichever way the column is turned.
+        if column == PodColumn::Age {
+            rows.sort_by_key(|row| row.pod.created.is_none());
+        }
         rows
     }
 
@@ -312,6 +328,7 @@ impl AksScreen {
         }
         self.log_target = target;
         self.log_lines.clear();
+        self.log_skipped = 0;
         self.log_finished = false;
         self.log_follow = true;
         self.pane_scroll = ScrollState::default();
@@ -326,11 +343,16 @@ impl AksScreen {
         self.log_lines.extend(lines);
         if self.log_lines.len() > LOG_LINE_CAP {
             // One more than the overflow, because the line saying what went
-            // takes a place of its own.
-            let skipped = self.log_lines.len() - LOG_LINE_CAP + 1;
-            self.log_lines.drain(..skipped);
-            self.log_lines
-                .insert(0, format!("\u{2026} {skipped} earlier lines skipped"));
+            // takes a place of its own — and when there already is one, it
+            // is the first line to go and its count carries on.
+            let overflow = self.log_lines.len() - LOG_LINE_CAP + 1;
+            let dropped = overflow - usize::from(self.log_skipped > 0);
+            self.log_lines.drain(..overflow);
+            self.log_skipped += dropped;
+            self.log_lines.insert(
+                0,
+                format!("\u{2026} {} earlier lines skipped", self.log_skipped),
+            );
         }
         self.log_finished = finished;
         if self.log_follow {
@@ -347,14 +369,24 @@ impl AksScreen {
         if self.describe_pending.as_ref() == Some(key) {
             self.describe_pending = None;
         }
-        if self
+        // Only the pod the pane is on: the cursor may have moved since the
+        // describe went out, and `D` already put the pane on Describe, so an
+        // answer switches nothing — `L` in the meantime stands.
+        if !self
             .log_target
             .as_ref()
             .is_some_and(|target| target.key == *key)
         {
-            self.show_pane(PaneText::Describe);
+            return;
         }
         self.describe = Some((key.clone(), text));
+    }
+
+    /// A request the run could not send: nothing is coming back for it, so
+    /// nothing waits on it.
+    pub fn request_refused(&mut self) {
+        self.describe_pending = None;
+        self.deleting = None;
     }
 
     /// Moves the log to the next of the pod's containers, round to the first
@@ -592,7 +624,9 @@ impl AksScreen {
             // The sync key reads the clusters again rather than pulling from
             // Azure DevOps: nothing on this tab comes from there.
             CommandId::Sync => {
-                self.refresh_pending = true;
+                // A read the user asked for forgets what went wrong before,
+                // so whatever goes wrong now is said out loud again.
+                self.errors.clear();
                 shell.set_status("Reading pods\u{2026}");
                 return AppAction::Aks(AksRequest::Refresh);
             }
@@ -706,7 +740,12 @@ impl AksScreen {
         AppAction::ExecShell {
             context: cluster.context.clone(),
             key: row.pod.key.clone(),
-            container: self.container.clone(),
+            // The container the pane is on, which is the chosen one only
+            // when the pod has it.
+            container: self
+                .log_target
+                .as_ref()
+                .and_then(|target| target.container.clone()),
         }
     }
 
@@ -922,6 +961,44 @@ impl Screen for AksScreen {
     fn close_overlay(&mut self, _shell: &mut Shell) {
         self.mode = AksMode::Browse;
         self.restarting = None;
+    }
+
+    fn modal_open(&self) -> bool {
+        self.mode == AksMode::ConfirmRestart
+    }
+
+    /// The pod under the cursor, which is what `[` comes back to after `g`.
+    fn here(&self, shell: &Shell) -> Option<Jump> {
+        self.selected_pod(shell).map(|row| Jump::Pod(row.pod.key))
+    }
+
+    fn select(&mut self, shell: &mut Shell, jump: &Jump) -> bool {
+        let Jump::Pod(key) = jump else {
+            return false;
+        };
+        if !self.pods.iter().any(|pod| pod.key == *key) {
+            return false;
+        }
+        let position = |screen: &Self| {
+            screen
+                .visible_pods(shell)
+                .iter()
+                .position(|row| row.pod.key == *key)
+        };
+        let index = match position(self) {
+            Some(index) => index,
+            // Held but filtered out: the reference wins over the query.
+            None => {
+                self.query.clear();
+                match position(self) {
+                    Some(index) => index,
+                    None => return false,
+                }
+            }
+        };
+        self.cursor.focus(index);
+        self.sync_focus(shell);
+        true
     }
 
     fn active_editor(&self) -> Option<TextEditor> {

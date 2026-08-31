@@ -205,10 +205,11 @@ impl KeyVaultScreen {
             Err(message) => return self.set_arm_error(message),
         };
         self.error = None;
-        if self
-            .selected_item()
-            .is_some_and(|row| row.vault == vault && row.item.name == name)
-        {
+        // The secret by that name, and not a key or a certificate that
+        // happens to share it.
+        if self.selected_item().is_some_and(|row| {
+            row.vault == vault && row.item.name == name && row.item.kind == ItemKind::Secret
+        }) {
             self.revealed = Some((vault.to_owned(), name.to_owned(), secret, Instant::now()));
         }
         None
@@ -277,6 +278,8 @@ impl KeyVaultScreen {
     /// a refresh, and the minute running out.
     pub fn clear_reveal(&mut self) {
         self.revealed = None;
+        // A reveal walked away from is not waited on either.
+        self.reveal_pending = None;
     }
 
     /// Clears a value whose minute is up, and says whether it did — which is
@@ -389,6 +392,13 @@ impl KeyVaultScreen {
                 ordering
             }
         });
+        // An item with no date has nothing to compare on that column, and
+        // sorts last whichever way the column is turned.
+        match column {
+            ItemColumn::Updated => rows.sort_by_key(|row| row.item.updated.is_none()),
+            ItemColumn::Expires => rows.sort_by_key(|row| row.item.expires.is_none()),
+            _ => {}
+        }
         rows
     }
 
@@ -420,8 +430,12 @@ impl KeyVaultScreen {
         self.items
             .iter()
             .flat_map(|(_, items)| items)
+            // A disabled certificate is not serving anything, so its
+            // running out is nobody's Tuesday.
             .filter(|item| {
-                item.kind == ItemKind::Certificate && Expiry::of(item.expires, now).is_some()
+                item.kind == ItemKind::Certificate
+                    && item.enabled
+                    && Expiry::of(item.expires, now).is_some()
             })
             .count()
     }
@@ -562,7 +576,14 @@ impl KeyVaultScreen {
 
     /// `Y`: the value on screen, and only while it is on screen.
     fn copy_value(&mut self, shell: &mut Shell) -> AppAction {
-        match &self.revealed {
+        // Only what the pane is showing: the value is the selected secret's,
+        // or there is nothing to copy.
+        let shown = self.selected_item().and_then(|row| {
+            self.revealed.as_ref().filter(|(vault, name, _, _)| {
+                *vault == row.vault && *name == row.item.name && row.item.kind == ItemKind::Secret
+            })
+        });
+        match shown {
             Some((_, _, secret, _)) => AppAction::CopySecret(secret.clone()),
             None => {
                 shell.set_error("Nothing is revealed to copy");
@@ -618,6 +639,11 @@ impl KeyVaultScreen {
             // reads the subscription again.
             CommandId::Sync => {
                 self.clear_reveal();
+                // The open vault is read again too: what it holds is
+                // dropped, so the focus asks for it afresh.
+                if let Level::Items(vault) = self.level.clone() {
+                    self.items.retain(|(held, _)| *held != vault);
+                }
                 shell.set_status("Reading vaults\u{2026}");
                 return AppAction::Arm(ArmRequest::Refresh);
             }

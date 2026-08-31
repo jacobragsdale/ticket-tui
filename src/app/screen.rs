@@ -287,6 +287,12 @@ pub trait Screen {
     /// The editor the caret is in, if the screen has one open.
     fn active_editor(&self) -> Option<TextEditor>;
 
+    /// Whether a confirmation is up that every key has to answer first: a
+    /// digit or a shared overlay does not reach past an armed delete.
+    fn modal_open(&self) -> bool {
+        false
+    }
+
     /// Where one of the screen's scrolling surfaces has got to.
     fn scroll_state(&self, surface: ScrollSurface) -> ScrollState;
 

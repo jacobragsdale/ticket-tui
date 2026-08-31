@@ -17,6 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use crate::config::Cluster;
@@ -36,7 +37,7 @@ const REQUEST_TIMEOUT: &str = "--request-timeout=10s";
 const TAIL_LINES: &str = "--tail=500";
 
 /// One pod, by where it lives.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct PodKey {
     /// The cluster's name in `config.toml`, not its context.
     pub cluster: String,
@@ -791,6 +792,10 @@ pub struct PodWatcher {
     /// Each cluster and when it is next worth reading. One cadence each, so
     /// a dead cluster backing off never slows a live one.
     clusters: Vec<(Cluster, Cadence)>,
+    /// The sweep under way: which cluster, the namespaces still to read, and
+    /// whether one of them found the cluster unreachable. One namespace is
+    /// read per poll, so a request never waits behind a whole sweep.
+    sweep: Option<Sweep>,
     tab_showing: bool,
     /// The stream on, the process behind it, and the flag that tells its
     /// reader the pane has moved on.
@@ -804,6 +809,7 @@ impl PodWatcher {
             source,
             events,
             clusters: Vec::new(),
+            sweep: None,
             tab_showing: false,
             follow: None,
         }
@@ -857,6 +863,8 @@ impl PodWatcher {
     /// The file's clusters, keeping the cadence of any already known so a
     /// theme edit does not read everything again.
     fn set_clusters(&mut self, clusters: Vec<Cluster>) {
+        // The sweep indexes the old list.
+        self.sweep = None;
         let known = std::mem::take(&mut self.clusters);
         self.clusters = clusters
             .into_iter()
@@ -889,56 +897,96 @@ impl PodWatcher {
             .ok_or_else(|| anyhow!("cluster {name} is no longer in config.toml"))
     }
 
-    /// Reads every cluster that is due. Nothing while the tab is hidden: a
-    /// cluster nobody is looking at is not worth a request.
+    /// Reads one namespace of the cluster whose turn it is, starting a sweep
+    /// of the first cluster that is due when none is under way. One read a
+    /// call, so a follow, a describe or a delete sent during a sweep is taken
+    /// between two reads rather than after the last. Nothing while the tab is
+    /// hidden: a cluster nobody is looking at is not worth a request.
     pub fn poll(&mut self, now: Instant) {
         if !self.tab_showing {
             return;
+        }
+        if self.sweep.is_none() {
+            let Some(index) = self
+                .clusters
+                .iter()
+                .position(|(_, cadence)| cadence.is_due(now))
+            else {
+                return;
+            };
+            self.sweep = Some(Sweep {
+                index,
+                queue: self.clusters[index]
+                    .0
+                    .targets()
+                    .into_iter()
+                    .map(|namespace| namespace.map(str::to_owned))
+                    .collect(),
+                unreachable: false,
+            });
         }
         let Self {
             source,
             events,
             clusters,
+            sweep,
             ..
         } = self;
-        for (cluster, cadence) in clusters.iter_mut() {
-            if !cadence.is_due(now) {
-                continue;
+        let Some(under_way) = sweep.as_mut() else {
+            return;
+        };
+        let Some((cluster, cadence)) = clusters.get_mut(under_way.index) else {
+            *sweep = None;
+            return;
+        };
+        if !under_way.queue.is_empty() {
+            let namespace = under_way.queue.remove(0);
+            let pods = source.pods(cluster, namespace.as_deref());
+            let failed = pods.as_ref().err().map(|error| format!("{error:#}"));
+            let _ = events.send(AksEvent::Pods {
+                cluster: cluster.name.clone(),
+                namespace,
+                pods: pods.map_err(|error| format!("{error:#}")),
+            });
+            // A server that answered with a refusal for one namespace will
+            // answer for the next; one that could not be reached will not,
+            // and is not asked twice.
+            if let Some(message) = failed
+                && !message.starts_with("Error from server")
+            {
+                under_way.unreachable = true;
+                under_way.queue.clear();
             }
-            let mut unreachable = false;
-            for namespace in cluster.targets() {
-                let pods = source.pods(cluster, namespace);
-                let failed = pods.as_ref().err().map(|error| format!("{error:#}"));
-                let _ = events.send(AksEvent::Pods {
-                    cluster: cluster.name.clone(),
-                    namespace: namespace.map(str::to_owned),
-                    pods: pods.map_err(|error| format!("{error:#}")),
-                });
-                // A server that answered with a refusal for one namespace
-                // will answer for the next; one that could not be reached
-                // will not, and is not asked twice.
-                if let Some(message) = failed
-                    && !message.starts_with("Error from server")
-                {
-                    unreachable = true;
-                    break;
-                }
-            }
-            if unreachable {
+        }
+        if under_way.queue.is_empty() {
+            if under_way.unreachable {
                 cadence.stretch();
             } else {
                 cadence.relax();
             }
             cadence.polled(now);
+            *sweep = None;
+        }
+    }
+
+    /// Every read that is due at `now`, for a test that wants the whole
+    /// sweep in one call.
+    #[cfg(test)]
+    pub(crate) fn poll_all(&mut self, now: Instant) {
+        while self.until_due(now) == Some(Duration::ZERO) {
+            self.poll(now);
         }
     }
 
     /// How long until something is due, or `None` while nothing is: a hidden
-    /// tab, or no clusters at all.
+    /// tab, or no clusters at all. A sweep under way is due at once.
     #[must_use]
     pub fn until_due(&self, now: Instant) -> Option<Duration> {
         if !self.tab_showing {
             return None;
+        }
+        if self.sweep.is_some() {
+            return Some(Duration::ZERO);
         }
         self.clusters
             .iter()
@@ -994,6 +1042,13 @@ impl PodWatcher {
     fn following(&self) -> Option<&LogFollow> {
         self.follow.as_ref().map(|(target, _, _)| target)
     }
+}
+
+/// One sweep of one cluster: what is left to read, and how it has gone.
+struct Sweep {
+    index: usize,
+    queue: Vec<Option<String>>,
+    unreachable: bool,
 }
 
 impl Drop for PodWatcher {
@@ -1597,7 +1652,7 @@ pub(crate) mod tests {
             cluster("prod", &[]),
         ]));
         let start = Instant::now();
-        watcher.poll(start);
+        watcher.poll_all(start);
         assert!(
             fake.reads.lock().unwrap().is_empty(),
             "hidden tab, no reads"
@@ -1606,7 +1661,7 @@ pub(crate) mod tests {
 
         watcher.handle(AksRequest::TabShowing(true));
         assert_eq!(watcher.until_due(start), Some(Duration::ZERO));
-        watcher.poll(start);
+        watcher.poll_all(start);
         assert_eq!(
             *fake.reads.lock().unwrap(),
             vec![
@@ -1624,17 +1679,17 @@ pub(crate) mod tests {
             ]
         );
         // Not again until the cadence is up.
-        watcher.poll(start + Duration::from_secs(14));
+        watcher.poll_all(start + Duration::from_secs(14));
         assert_eq!(fake.reads.lock().unwrap().len(), 3);
         assert_eq!(
             watcher.until_due(start + Duration::from_secs(14)),
             Some(Duration::from_secs(1))
         );
-        watcher.poll(start + POD_CADENCE);
+        watcher.poll_all(start + POD_CADENCE);
         assert_eq!(fake.reads.lock().unwrap().len(), 6);
         // Hidden again: quiet, whatever is due.
         watcher.handle(AksRequest::TabShowing(false));
-        watcher.poll(start + POD_CADENCE * 3);
+        watcher.poll_all(start + POD_CADENCE * 3);
         assert_eq!(fake.reads.lock().unwrap().len(), 6);
     }
 
@@ -1659,7 +1714,7 @@ pub(crate) mod tests {
         ]));
         watcher.handle(AksRequest::TabShowing(true));
         let start = Instant::now();
-        watcher.poll(start);
+        watcher.poll_all(start);
         // qa's second namespace was not asked: the cluster could not be
         // reached at all.
         assert_eq!(
@@ -1674,7 +1729,7 @@ pub(crate) mod tests {
             ]
         );
         // The failing cluster backs off; the live one keeps its cadence.
-        watcher.poll(start + POD_CADENCE);
+        watcher.poll_all(start + POD_CADENCE);
         let reads = fake.reads.lock().unwrap().clone();
         assert_eq!(
             reads.iter().filter(|(cluster, _)| cluster == "qa").count(),
@@ -1689,7 +1744,7 @@ pub(crate) mod tests {
             2,
             "{reads:?}"
         );
-        watcher.poll(start + POD_CADENCE * 2);
+        watcher.poll_all(start + POD_CADENCE * 2);
         assert_eq!(
             fake.reads
                 .lock()
@@ -1721,7 +1776,7 @@ pub(crate) mod tests {
         )]));
         watcher.handle(AksRequest::TabShowing(true));
         let start = Instant::now();
-        watcher.poll(start);
+        watcher.poll_all(start);
         let events = pods_events(&drain(&receiver));
         assert_eq!(events.len(), 2, "{events:?}");
         assert!(events[0].2.is_err());
@@ -1737,14 +1792,14 @@ pub(crate) mod tests {
         watcher.handle(AksRequest::Clusters(vec![cluster("qa", &["orders"])]));
         watcher.handle(AksRequest::TabShowing(true));
         let start = Instant::now();
-        watcher.poll(start);
+        watcher.poll_all(start);
         assert_eq!(fake.reads.lock().unwrap().len(), 1);
         watcher.handle(AksRequest::Refresh);
         assert_eq!(
             watcher.until_due(start + Duration::from_secs(1)),
             Some(Duration::ZERO)
         );
-        watcher.poll(start + Duration::from_secs(1));
+        watcher.poll_all(start + Duration::from_secs(1));
         assert_eq!(fake.reads.lock().unwrap().len(), 2);
 
         watcher.handle(AksRequest::Delete(key("qa", "a")));
@@ -1753,7 +1808,7 @@ pub(crate) mod tests {
             watcher.until_due(start + Duration::from_secs(2)),
             Some(Duration::ZERO)
         );
-        watcher.poll(start + Duration::from_secs(2));
+        watcher.poll_all(start + Duration::from_secs(2));
         assert_eq!(fake.reads.lock().unwrap().len(), 3);
         let deleted = drain(&receiver).into_iter().find_map(|event| match event {
             AksEvent::Deleted { key, error } => Some((key, error)),
@@ -1917,7 +1972,7 @@ pub(crate) mod tests {
         watcher.handle(AksRequest::Clusters(vec![cluster("qa", &["orders"])]));
         watcher.handle(AksRequest::TabShowing(true));
         let start = Instant::now();
-        watcher.poll(start);
+        watcher.poll_all(start);
         assert_eq!(fake.reads.lock().unwrap().len(), 1);
         // The same cluster again keeps its cadence; a new one is due at once.
         watcher.handle(AksRequest::Clusters(vec![
@@ -1928,7 +1983,7 @@ pub(crate) mod tests {
             watcher.until_due(start + Duration::from_secs(1)),
             Some(Duration::ZERO)
         );
-        watcher.poll(start + Duration::from_secs(1));
+        watcher.poll_all(start + Duration::from_secs(1));
         assert_eq!(
             *fake.reads.lock().unwrap(),
             vec![
@@ -1987,5 +2042,37 @@ pub(crate) mod tests {
         }
         assert_eq!(stopped, 1);
         assert!(handle.try_event().is_none(), "Stopped is said once");
+    }
+
+    #[test]
+    fn one_namespace_is_read_per_poll_so_a_request_never_waits_for_a_whole_sweep() {
+        let fake = FakeKube::default();
+        let (mut watcher, _receiver) = watcher(&fake);
+        watcher.handle(AksRequest::Clusters(vec![
+            cluster("qa", &["orders", "billing"]),
+            cluster("prod", &["orders", "billing"]),
+        ]));
+        watcher.handle(AksRequest::TabShowing(true));
+        let start = Instant::now();
+        for expected in 1..=4 {
+            assert_eq!(
+                watcher.until_due(start),
+                Some(Duration::ZERO),
+                "read {expected} is due at once"
+            );
+            watcher.poll(start);
+            assert_eq!(
+                fake.reads.lock().unwrap().len(),
+                expected,
+                "one read a poll"
+            );
+        }
+        assert_eq!(watcher.until_due(start), Some(POD_CADENCE));
+        watcher.poll(start);
+        assert_eq!(
+            fake.reads.lock().unwrap().len(),
+            4,
+            "nothing more until the cadence is up"
+        );
     }
 }
