@@ -264,6 +264,7 @@ fn synced_app(path: &Path, source: FakeAzure) -> (App, SqliteTicketRepository, S
         watched_runs: Vec::new(),
         local: LocalRuntime::default(),
         aks: AksRuntime::default(),
+        arm_config: None,
     };
     (app, repository, runtime)
 }

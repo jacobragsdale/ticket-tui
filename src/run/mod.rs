@@ -25,6 +25,7 @@ use ticket_tui::aks::{AksEvent, AksHandle, AksRequest, Cluster, Kubectl};
 use ticket_tui::app::{
     App, AppAction, CopiedContent, DividerOrientation, PointerTarget, Snapshot, SyncTarget, TabId,
 };
+use ticket_tui::arm::ArmConfig;
 use ticket_tui::azure::AzureConfig;
 use ticket_tui::cli::{self, Cli, resolve_me};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
@@ -176,7 +177,22 @@ pub(super) fn run() -> Result<()> {
             ..LocalRuntime::default()
         },
         aks: AksRuntime::default(),
+        arm_config: None,
     };
+    // Which subscription the ACR and Key Vault tabs read. No token is minted
+    // here: that costs an `az` shell-out, and the worker thread does it when
+    // one of those tabs first asks for something.
+    match ArmConfig::resolve(
+        cli.subscription.clone(),
+        std::env::var("TICKET_TUI_SUBSCRIPTION").ok(),
+    ) {
+        Ok(config) => {
+            app.shell
+                .set_arm_subscription(Some(config.subscription.clone()));
+            runtime.arm_config = Some(config);
+        }
+        Err(error) => app.shell.set_arm_state(Some(format!("{error:#}"))),
+    }
     if let Some(config) = config.filter(|_| wrong_project.is_none()) {
         runtime.worker = Some(SyncHandle::spawn(
             database_path.clone(),

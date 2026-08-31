@@ -21,6 +21,10 @@ fn tabs() -> Vec<(TabId, App, &'static str, &'static str)> {
     pipelines.select_tab(TabId::Pipelines);
     let mut aks = aks_app();
     aks.select_tab(TabId::Aks);
+    let mut acr = App::new(Vec::new());
+    acr.select_tab(TabId::Acr);
+    let mut key_vault = App::new(Vec::new());
+    key_vault.select_tab(TabId::KeyVault);
     vec![
         (TabId::WorkItems, work_items, "Tickets", "Details"),
         (TabId::Repos, repos, "Repos", "Repository"),
@@ -32,6 +36,8 @@ fn tabs() -> Vec<(TabId, App, &'static str, &'static str)> {
         ),
         (TabId::Pipelines, pipelines, "Pipelines", "Run"),
         (TabId::Aks, aks, "Pods", "Pod"),
+        (TabId::Acr, acr, "Registries", "Registry"),
+        (TabId::KeyVault, key_vault, "Vaults", "Vault"),
     ]
 }
 
@@ -245,6 +251,11 @@ fn the_pane_commands_answer_on_every_tab() {
 #[test]
 fn dragging_across_a_row_copies_its_text_on_every_tab() {
     for (tab, mut app, _, _) in tabs() {
+        // The two ARM tabs have no rows to drag across until B3 and C1 read
+        // them.
+        if matches!(tab, TabId::Acr | TabId::KeyVault) {
+            continue;
+        }
         render_text(130, 30, &mut app);
         let row = app
             .shell

@@ -10,8 +10,8 @@ use ratatui::widgets::TableState;
 use serde_json::Value;
 
 use crate::agent_context::{
-    AgentContext, PendingEditContext, SearchContext, SortContext, SyncContext, TicketContext,
-    TicketReference, TicketsContext, WorkItemsContext,
+    AgentContext, ArmContext, PendingEditContext, SearchContext, SortContext, SyncContext,
+    TicketContext, TicketReference, TicketsContext, WorkItemsContext,
 };
 use crate::classification::{self, ClassificationNode, NodeKind};
 use crate::columns::{ColumnLayout, TableLayout};
@@ -48,8 +48,10 @@ use crate::sync::{ReparentApplied, ReparentRejection};
 use crate::text_input::TextInput;
 use crate::timestamp::Timestamp;
 
+pub mod acr;
 pub mod aks;
 pub mod cursor;
+pub mod key_vault;
 pub mod pipelines;
 pub mod pull_requests;
 pub mod repos;
@@ -57,8 +59,10 @@ mod screen;
 pub mod shell;
 pub mod work_items;
 
+pub use acr::AcrScreen;
 pub use aks::AksScreen;
 pub use cursor::ListCursor;
+pub use key_vault::KeyVaultScreen;
 pub use pipelines::PipelinesScreen;
 pub use pull_requests::PullRequestsScreen;
 pub use repos::ReposScreen;
@@ -230,7 +234,7 @@ impl CopiedContent {
 /// The application: the shell every screen shares, and the screens themselves.
 pub struct App {
     pub shell: Shell,
-    /// The tab keys `1`–`5` switch between. Every screen keeps its own state
+    /// The tab keys `1`–`7` switch between. Every screen keeps its own state
     /// while another is showing.
     pub tab: TabId,
     /// Which tab one of the shared overlays — help, the palette, the columns
@@ -244,6 +248,8 @@ pub struct App {
     pub pull_requests: PullRequestsScreen,
     pub pipelines: PipelinesScreen,
     pub aks: AksScreen,
+    pub acr: AcrScreen,
+    pub key_vault: KeyVaultScreen,
 }
 
 impl App {
@@ -260,6 +266,8 @@ impl App {
             pull_requests: PullRequestsScreen::default(),
             pipelines: PipelinesScreen::default(),
             aks: AksScreen::default(),
+            acr: AcrScreen::default(),
+            key_vault: KeyVaultScreen::default(),
         }
     }
 
@@ -281,6 +289,8 @@ impl App {
             TabId::PullRequests => &self.pull_requests,
             TabId::Pipelines => &self.pipelines,
             TabId::Aks => &self.aks,
+            TabId::Acr => &self.acr,
+            TabId::KeyVault => &self.key_vault,
         }
     }
 
@@ -334,6 +344,8 @@ impl App {
             TabId::PullRequests => self.pull_requests.run_command(&mut self.shell, id),
             TabId::Pipelines => self.pipelines.run_command(&mut self.shell, id),
             TabId::Aks => self.aks.run_command(&mut self.shell, id),
+            TabId::Acr => self.acr.run_command(&mut self.shell, id),
+            TabId::KeyVault => self.key_vault.run_command(&mut self.shell, id),
         };
         self.apply(action)
     }
@@ -350,6 +362,8 @@ impl App {
                 pull_requests,
                 pipelines,
                 aks,
+                acr,
+                key_vault,
                 tab,
                 ..
             } = self;
@@ -360,6 +374,8 @@ impl App {
                 TabId::PullRequests => &mut pull_requests.layout,
                 TabId::Pipelines => pipelines.columns_mut(),
                 TabId::Aks => aks.columns_mut(),
+                TabId::Acr => acr.columns_mut(),
+                TabId::KeyVault => key_vault.columns_mut(),
             };
             work_items.handle_columns_key_on(shell, key, layout);
             AppAction::None
@@ -395,6 +411,8 @@ impl App {
                     pull_requests,
                     pipelines,
                     aks,
+                    acr,
+                    key_vault,
                     tab,
                     ..
                 } = self;
@@ -403,6 +421,8 @@ impl App {
                     TabId::PullRequests => &mut pull_requests.layout,
                     TabId::Pipelines => pipelines.columns_mut(),
                     TabId::Aks => aks.columns_mut(),
+                    TabId::Acr => acr.columns_mut(),
+                    TabId::KeyVault => key_vault.columns_mut(),
                 };
                 if work_items.apply_column_target(shell, &target, layout) {
                     shell.pointer.clear_press();
@@ -580,6 +600,8 @@ impl App {
                 TabId::PullRequests => "pull_requests",
                 TabId::Pipelines => "pipelines",
                 TabId::Aks => "aks",
+                TabId::Acr => "acr",
+                TabId::KeyVault => "key_vault",
             }
             .to_owned(),
             work_items: self.work_items.agent_context(&self.shell),
@@ -587,6 +609,13 @@ impl App {
             pull_requests: self.pull_requests.agent_context(&self.shell),
             pipelines: self.pipelines.agent_context(&self.shell),
             aks: self.aks.agent_context(&self.shell),
+            acr: self.acr.agent_context(),
+            key_vault: self.key_vault.agent_context(),
+            arm: ArmContext {
+                subscription: self.shell.arm_subscription().map(str::to_owned),
+                offline: self.shell.arm_state().is_some(),
+                last_error: self.shell.arm_state().map(str::to_owned),
+            },
         }
     }
 
@@ -638,6 +667,8 @@ impl App {
             pull_requests,
             pipelines,
             aks,
+            acr,
+            key_vault,
             ..
         } = session;
         self.work_items
@@ -646,6 +677,8 @@ impl App {
         Screen::restore(&mut self.pull_requests, &mut self.shell, pull_requests);
         Screen::restore(&mut self.pipelines, &mut self.shell, pipelines);
         Screen::restore(&mut self.aks, &mut self.shell, aks);
+        Screen::restore(&mut self.acr, &mut self.shell, acr);
+        Screen::restore(&mut self.key_vault, &mut self.shell, key_vault);
         self.shell.session_dirty = false;
     }
 
@@ -658,6 +691,8 @@ impl App {
             TabId::PullRequests => &mut self.pull_requests,
             TabId::Pipelines => &mut self.pipelines,
             TabId::Aks => &mut self.aks,
+            TabId::Acr => &mut self.acr,
+            TabId::KeyVault => &mut self.key_vault,
         };
         (&mut self.shell, screen)
     }
@@ -666,7 +701,7 @@ impl App {
         if self.shell_overlay_open() {
             return self.handle_overlay_key(key);
         }
-        // `1`–`5` switch tabs from anywhere the digit is not being typed into
+        // `1`–`7` switch tabs from anywhere the digit is not being typed into
         // something. An overlay is closed on the way out rather than left open
         // behind the tab that comes back.
         if let KeyCode::Char(character) = key.code

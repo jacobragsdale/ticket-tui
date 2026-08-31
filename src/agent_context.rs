@@ -24,16 +24,45 @@ pub struct AgentContext {
     /// them, so a value named here is optimistic until the edit leaves this
     /// list.
     pub pending_edits: Vec<PendingEditContext>,
-    /// Which tab is showing: `work_items`, `repos`, `pull_requests` or
-    /// `pipelines`. Every tab is described whether or not it is the one on
-    /// screen, so an agent can read the whole workspace; this says where the
-    /// user actually is.
+    /// Which tab is showing: `work_items`, `repos`, `pull_requests`,
+    /// `pipelines`, `aks`, `acr` or `key_vault`. Every tab is described
+    /// whether or not it is the one on screen, so an agent can read the whole
+    /// workspace; this says where the user actually is.
     pub active_tab: String,
     pub work_items: WorkItemsContext,
     pub repos: ReposContext,
     pub pull_requests: PullRequestsContext,
     pub pipelines: PipelinesContext,
     pub aks: AksContext,
+    pub acr: AcrContext,
+    pub key_vault: KeyVaultContext,
+    /// What the ARM tabs can reach: the subscription they read, and why they
+    /// read nothing when they cannot.
+    pub arm: ArmContext,
+}
+
+/// The ACR tab. A placeholder while the tab is a shell: B3 fills it in.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct AcrContext {
+    pub level: String,
+    pub visible_rows: usize,
+}
+
+/// The Key Vault tab, the same way round: C1 fills it in.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct KeyVaultContext {
+    pub level: String,
+    pub visible_rows: usize,
+}
+
+/// Whether the ACR and Key Vault tabs have a subscription to read at all. An
+/// offline run shows both tabs and neither reads anything; `last_error` is the
+/// one line that says why.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct ArmContext {
+    pub subscription: Option<String>,
+    pub offline: bool,
+    pub last_error: Option<String>,
 }
 
 /// The AKS tab: the clusters `config.toml` names, the pod under the cursor,
@@ -447,6 +476,9 @@ mod tests {
             pull_requests: PullRequestsContext::default(),
             pipelines: PipelinesContext::default(),
             aks: AksContext::default(),
+            acr: AcrContext::default(),
+            key_vault: KeyVaultContext::default(),
+            arm: ArmContext::default(),
             work_items: WorkItemsContext {
                 mode: "browse".into(),
                 focus: "tickets".into(),

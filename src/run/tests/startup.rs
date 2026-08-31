@@ -120,6 +120,7 @@ fn a_database_another_project_filled_is_browsed_rather_than_replaced() {
         watched_runs: Vec::new(),
         local: LocalRuntime::default(),
         aks: AksRuntime::default(),
+        arm_config: None,
     };
 
     handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
@@ -180,6 +181,7 @@ fn an_offline_run_explains_why_it_cannot_sync_and_says_nothing_in_the_title() {
         watched_runs: Vec::new(),
         local: LocalRuntime::default(),
         aks: AksRuntime::default(),
+        arm_config: None,
     };
 
     handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);

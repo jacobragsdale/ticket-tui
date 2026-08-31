@@ -1,5 +1,5 @@
 //! `Screen`: what a tab is. The shell hands one of these every event and every
-//! frame, and knows nothing else about it. All five tabs implement it, and the
+//! frame, and knows nothing else about it. All seven tabs implement it, and the
 //! mouse is read here rather than by any of them, so a press, a drag and a
 //! click mean the same thing wherever they land.
 
@@ -17,7 +17,7 @@ use crate::pointer::{
 use crate::session::TabSession;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
-/// The five screens the shell puts behind keys `1`–`5`.
+/// The seven screens the shell puts behind keys `1`–`7`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TabId {
@@ -27,15 +27,19 @@ pub enum TabId {
     PullRequests,
     Pipelines,
     Aks,
+    Acr,
+    KeyVault,
 }
 
 impl TabId {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::WorkItems,
         Self::Repos,
         Self::PullRequests,
         Self::Pipelines,
         Self::Aks,
+        Self::Acr,
+        Self::KeyVault,
     ];
 
     /// What the tab bar calls it.
@@ -47,6 +51,8 @@ impl TabId {
             Self::PullRequests => "Pull requests",
             Self::Pipelines => "Pipelines",
             Self::Aks => "AKS",
+            Self::Acr => "ACR",
+            Self::KeyVault => "Key Vault",
         }
     }
 
@@ -59,6 +65,8 @@ impl TabId {
             Self::PullRequests => "PRs",
             Self::Pipelines => "Runs",
             Self::Aks => "AKS",
+            Self::Acr => "ACR",
+            Self::KeyVault => "Vault",
         }
     }
 
@@ -71,10 +79,12 @@ impl TabId {
             Self::PullRequests => '3',
             Self::Pipelines => '4',
             Self::Aks => '5',
+            Self::Acr => '6',
+            Self::KeyVault => '7',
         }
     }
 
-    /// The tab a digit asks for, if it is one of the five.
+    /// The tab a digit asks for, if it is one of the seven.
     #[must_use]
     pub fn from_number(character: char) -> Option<Self> {
         Self::ALL.into_iter().find(|tab| tab.number() == character)

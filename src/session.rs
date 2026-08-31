@@ -73,6 +73,10 @@ pub struct Session {
     #[serde(default)]
     pub aks: TabSession,
     #[serde(default)]
+    pub acr: TabSession,
+    #[serde(default)]
+    pub key_vault: TabSession,
+    #[serde(default)]
     pub bookmarks: Vec<TicketKey>,
     /// Everywhere the run had been, oldest last, across every tab.
     #[serde(default)]
@@ -144,6 +148,8 @@ impl Session {
             TabId::PullRequests => &self.pull_requests,
             TabId::Pipelines => &self.pipelines,
             TabId::Aks => &self.aks,
+            TabId::Acr => &self.acr,
+            TabId::KeyVault => &self.key_vault,
         }
     }
 
@@ -154,6 +160,8 @@ impl Session {
             TabId::PullRequests => self.pull_requests = session,
             TabId::Pipelines => self.pipelines = session,
             TabId::Aks => self.aks = session,
+            TabId::Acr => self.acr = session,
+            TabId::KeyVault => self.key_vault = session,
         }
     }
 }
@@ -189,6 +197,8 @@ impl Default for Session {
             pull_requests: TabSession::default(),
             pipelines: TabSession::default(),
             aks: TabSession::default(),
+            acr: TabSession::default(),
+            key_vault: TabSession::default(),
             bookmarks: Vec::new(),
             history: Vec::new(),
             show_finished: false,
@@ -515,7 +525,11 @@ mod tests {
         assert!(
             loaded.repos.query.is_empty()
                 && loaded.pipelines.views.is_empty()
-                && loaded.aks.query.is_empty(),
+                && loaded.aks.query.is_empty()
+                && loaded.acr.query.is_empty()
+                && loaded.acr.columns.is_empty()
+                && loaded.key_vault.query.is_empty()
+                && loaded.key_vault.columns.is_empty(),
             "and the tabs that did not exist start empty"
         );
         assert_eq!(

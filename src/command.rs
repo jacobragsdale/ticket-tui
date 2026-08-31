@@ -774,10 +774,14 @@ fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
             TabId::PullRequests => "Open pull request in browser",
             TabId::Pipelines => "Open run in browser",
             TabId::Aks => "Open in browser",
+            TabId::Acr | TabId::KeyVault => "Open in the Azure portal",
         },
         // A pod is read live, so the sync key reads the clusters again rather
         // than pulling from Azure DevOps.
         CommandId::Sync if tab == TabId::Aks => "Refresh pods",
+        // The same for the two ARM tabs: neither pulls from Azure DevOps.
+        CommandId::Sync if tab == TabId::Acr => "Refresh registries",
+        CommandId::Sync if tab == TabId::KeyVault => "Refresh vaults",
         _ => return command,
     };
     Command { title, ..command }
@@ -983,6 +987,18 @@ mod tests {
     /// each of those over whichever tab is showing, so every tab answers them.
     fn answered_by(tab: TabId) -> &'static [CommandId] {
         match tab {
+            // Two tabs with no data yet: everything they answer is a verb
+            // every screen has.
+            TabId::Acr | TabId::KeyVault => &[
+                CommandId::Search,
+                CommandId::Open,
+                CommandId::Sync,
+                CommandId::HistoryBack,
+                CommandId::HistoryForward,
+                CommandId::Quit,
+                CommandId::ToggleDetails,
+                CommandId::ResetPaneSplit,
+            ],
             TabId::Repos => &[
                 CommandId::Search,
                 CommandId::Open,

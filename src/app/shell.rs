@@ -266,6 +266,13 @@ pub struct Shell {
     /// Display name of the signed-in Azure DevOps user, so their own work
     /// items can stand out. `None` until a sync records one.
     pub(crate) me: Option<String>,
+    /// Why ARM cannot be reached, in one line, for the tabs that read it:
+    /// no subscription resolved, or the Azure CLI is not signed in. `None`
+    /// once a subscription has resolved, which is when those tabs can read.
+    pub(crate) arm_state: Option<String>,
+    /// The subscription the ACR and Key Vault tabs read, as the agent context
+    /// publishes it. `None` until one resolves.
+    pub(crate) arm_subscription: Option<String>,
 }
 
 impl Default for Shell {
@@ -307,6 +314,8 @@ impl Default for Shell {
             sync_error: None,
             sync_paused_until: None,
             me: None,
+            arm_state: None,
+            arm_subscription: None,
         }
     }
 }
@@ -804,6 +813,27 @@ impl Shell {
     /// Why the TUI cannot write anything, told to whoever tries to.
     pub fn set_offline_reason(&mut self, reason: Option<String>) {
         self.offline_reason = reason;
+    }
+
+    /// Why ARM cannot be reached, or `None` once a subscription resolved.
+    pub fn set_arm_state(&mut self, state: Option<String>) {
+        self.arm_state = state;
+    }
+
+    /// The same reason, for the tab that has to say why its table is empty.
+    #[must_use]
+    pub fn arm_state(&self) -> Option<&str> {
+        self.arm_state.as_deref()
+    }
+
+    /// The subscription the ARM tabs read, once one has resolved.
+    pub fn set_arm_subscription(&mut self, subscription: Option<String>) {
+        self.arm_subscription = subscription;
+    }
+
+    #[must_use]
+    pub fn arm_subscription(&self) -> Option<&str> {
+        self.arm_subscription.as_deref()
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {

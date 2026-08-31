@@ -29,8 +29,10 @@ use crate::search::QueryHighlighter;
 use crate::sprint::{SummaryRow, SummaryRowKind};
 use crate::timestamp::Timestamp;
 
+pub(crate) mod acr;
 pub(crate) mod aks;
 mod details;
+pub(crate) mod key_vault;
 mod overlays;
 mod panes;
 mod pickers;
@@ -137,6 +139,8 @@ fn render_shell_overlay(frame: &mut Frame<'_>, app: &mut App) {
         TabId::PullRequests => column_rows(&app.pull_requests.layout),
         TabId::Pipelines => column_rows(Screen::columns(&app.pipelines)),
         TabId::Aks => column_rows(Screen::columns(&app.aks)),
+        TabId::Acr => column_rows(Screen::columns(&app.acr)),
+        TabId::KeyVault => column_rows(Screen::columns(&app.key_vault)),
     };
     let App {
         shell, work_items, ..

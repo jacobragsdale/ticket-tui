@@ -57,6 +57,9 @@ pub(super) struct SyncRuntime {
     pub(super) aks: AksRuntime,
     pub(super) scheduler: SyncScheduler,
     pub(super) config: Option<AzureConfig>,
+    /// The subscription the ACR and Key Vault tabs read, resolved at startup.
+    /// `None` when none did, which is what puts the reason on those tabs.
+    pub(super) arm_config: Option<ArmConfig>,
     /// Why Azure DevOps could not be resolved, reported when the user asks for
     /// a sync anyway.
     pub(super) offline_reason: Option<String>,
