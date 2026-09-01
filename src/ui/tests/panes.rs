@@ -4,6 +4,7 @@
 use super::*;
 use crate::app::acr::tests::acr_app;
 use crate::app::aks::tests::aks_app;
+use crate::app::environments::tests::environments_app;
 use crate::app::key_vault::tests::key_vault_app;
 use crate::app::pipelines::tests::pipelines_app;
 use crate::app::pull_requests::tests::pull_requests_app;
@@ -27,6 +28,8 @@ fn tabs() -> Vec<(TabId, App, &'static str, &'static str)> {
     acr.select_tab(TabId::Acr);
     let mut key_vault = key_vault_app();
     key_vault.select_tab(TabId::KeyVault);
+    let mut environments = environments_app();
+    environments.select_tab(TabId::Environments);
     vec![
         (TabId::WorkItems, work_items, "Tickets", "Details"),
         (TabId::Repos, repos, "Repos", "Repository"),
@@ -40,6 +43,12 @@ fn tabs() -> Vec<(TabId, App, &'static str, &'static str)> {
         (TabId::Aks, aks, "Pods", "Pod"),
         (TabId::Acr, acr, "Registries", "Registry"),
         (TabId::KeyVault, key_vault, "Vaults", "Vault"),
+        (
+            TabId::Environments,
+            environments,
+            "Environments",
+            "Promotion",
+        ),
     ]
 }
 

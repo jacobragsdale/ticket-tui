@@ -83,9 +83,11 @@ impl ConfigWatch {
             .set_notifier(Notifier::new(config.notify.command.clone()));
         // And so does the deployment repository: `[deployment]` written into
         // the file is a pre-flight on the next pull request selected against
-        // it, without a restart.
-        app.pull_requests
-            .set_deployment(Deployment::resolve(&config, app.shell.workspace()));
+        // it, and a board on tab `8`, without a restart.
+        let deployment = Deployment::resolve(&config, app.shell.workspace());
+        app.pull_requests.set_deployment(deployment.clone());
+        app.environments
+            .set_deployment(deployment, no_environments(&config, app.shell.workspace()));
         true
     }
 
@@ -94,6 +96,24 @@ impl ConfigWatch {
             .and_then(|metadata| metadata.modified())
             .ok()
     }
+}
+
+/// Why the environments board has nothing to draw, in the one line that says
+/// where it looked — the Repos tab's rule. Nothing at all when the file names
+/// a repository, the environments it declares, and a clone of it is here.
+fn no_environments(
+    config: &ticket_tui::config::Config,
+    workspace: Option<&Path>,
+) -> Option<String> {
+    if config.environments.is_empty() {
+        return Some(
+            "no [[environments]] in config.toml; add one per environment the deployment repository declares"
+                .to_owned(),
+        );
+    }
+    ticket_tui::kustomize::deployment_clone(config, workspace)
+        .err()
+        .map(|error| format!("{error:#}"))
 }
 
 /// What a finished watch says: the glyph, the build number, how it went, and
@@ -212,11 +232,26 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     {
         let _ = worker.send(request);
     }
+    // The environments board renders on focus and on `r`, never on a timer:
+    // the repository only changes when somebody pushes.
+    if app.tab == TabId::Environments {
+        // `r` asks for the vaults again as well as the overlays, and the
+        // listing belongs to the tab that reads vaults.
+        let stale = app.environments.take_stale_vaults();
+        app.key_vault.forget_items(&stale);
+        app.environments.set_vaults(read_vaults(app));
+        for request in app.environments.renders_due() {
+            let _ = worker.send(request);
+        }
+    }
     // Drained first, so the events can be answered without holding a borrow of
     // the thread that sent them.
     let events: Vec<LocalEvent> = std::iter::from_fn(|| worker.try_event()).collect();
     // A running job redraws on its own, so its glyph turns.
-    let redraw = !events.is_empty() || app.repos.busy() || app.pull_requests.preflight_running();
+    let redraw = !events.is_empty()
+        || app.repos.busy()
+        || app.pull_requests.preflight_running()
+        || app.environments.busy();
     for event in events {
         match event {
             LocalEvent::Scanned(local) => app.repos.set_local(local),
@@ -238,12 +273,22 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 } else {
                     app.shell.set_news(message);
                 }
-                // Whatever git did, the workspace is not what it was.
+                // Whatever git did, the workspace is not what it was — and a
+                // pull of the deployment clone is a repository the board has
+                // to read again.
                 runtime.local.scanned = None;
+                if job == GitJob::Pulling && !error {
+                    let repo = app.shell.repo_name(&repo_id);
+                    app.environments.repo_pulled(&repo);
+                }
             }
-            // Nothing in the TUI asks for a render yet; the environments board
-            // is what reads these.
-            LocalEvent::Rendered { .. } => {}
+            LocalEvent::Rendered {
+                environment,
+                overlay,
+                rendered,
+            } => app
+                .environments
+                .set_rendered(&environment, &overlay, rendered),
             LocalEvent::Preflighted { id, commit, found } => {
                 app.pull_requests.set_preflight(id, commit, found);
             }
@@ -251,6 +296,23 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
         }
     }
     redraw
+}
+
+/// What every vault the Key Vault tab has listed holds, by name, kind and
+/// date. What the environments board answers its vault half against, and no
+/// value is among it.
+fn read_vaults(app: &App) -> Vec<ticket_tui::kustomize::VaultNames> {
+    let now = Timestamp::now();
+    app.key_vault
+        .listed_vaults()
+        .into_iter()
+        .filter_map(|vault| {
+            let items = app.key_vault.items_of(vault)?;
+            Some(ticket_tui::kustomize::VaultNames::from_items(
+                vault, items, now,
+            ))
+        })
+        .collect()
 }
 
 /// Tells the cluster worker what is worth reading and folds in what it has
@@ -350,8 +412,10 @@ pub(super) fn poll_aks(app: &mut App, runtime: &mut SyncRuntime) -> bool {
 /// has read. Registries, repositories and tags live in the screen only:
 /// nothing here touches SQLite.
 pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
+    // The board reads vaults too: what an overlay pulls is only half the
+    // question, and the other half is what the vault actually holds.
     let showing = match app.tab {
-        TabId::Acr | TabId::KeyVault => Some(app.tab),
+        TabId::Acr | TabId::KeyVault | TabId::Environments => Some(app.tab),
         _ => None,
     };
     // Started by the first of the two tabs to be opened, and never started
@@ -383,11 +447,19 @@ pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     let focus = match showing {
         Some(TabId::Acr) => app.acr.focus(),
         Some(TabId::KeyVault) => app.key_vault.focus(),
+        // One vault at a time, the environments' own, and only the ones
+        // nobody has listed yet.
+        Some(TabId::Environments) => app
+            .environments
+            .vault_names()
+            .into_iter()
+            .find(|vault| app.key_vault.items_of(vault).is_none())
+            .map(ArmFocus::Vault),
         _ => None,
     };
     if focus != runtime.arm.focus {
         runtime.arm.focus = focus.clone();
-        let _ = worker.send(focus.map_or(ArmRequest::Blur, ArmRequest::Focus));
+        let _ = worker.send(focus.clone().map_or(ArmRequest::Blur, ArmRequest::Focus));
     }
     // Drained first, so an event can be answered without holding a borrow of
     // the thread that sent it.
@@ -396,6 +468,7 @@ pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     let tab_busy = match showing {
         Some(TabId::Acr) => app.acr.busy(),
         Some(TabId::KeyVault) => app.key_vault.busy(),
+        Some(TabId::Environments) => focus.is_some(),
         _ => false,
     };
     let redraw = !events.is_empty() || tab_busy;

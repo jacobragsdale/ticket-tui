@@ -1,5 +1,5 @@
 //! `Screen`: what a tab is. The shell hands one of these every event and every
-//! frame, and knows nothing else about it. All seven tabs implement it, and the
+//! frame, and knows nothing else about it. All eight tabs implement it, and the
 //! mouse is read here rather than by any of them, so a press, a drag and a
 //! click mean the same thing wherever they land.
 
@@ -17,7 +17,7 @@ use crate::pointer::{
 use crate::session::TabSession;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
-/// The seven screens the shell puts behind keys `1`–`7`.
+/// The eight screens the shell puts behind keys `1`–`8`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TabId {
@@ -29,10 +29,11 @@ pub enum TabId {
     Aks,
     Acr,
     KeyVault,
+    Environments,
 }
 
 impl TabId {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::WorkItems,
         Self::Repos,
         Self::PullRequests,
@@ -40,6 +41,7 @@ impl TabId {
         Self::Aks,
         Self::Acr,
         Self::KeyVault,
+        Self::Environments,
     ];
 
     /// What the tab bar calls it.
@@ -53,6 +55,7 @@ impl TabId {
             Self::Aks => "AKS",
             Self::Acr => "ACR",
             Self::KeyVault => "Key Vault",
+            Self::Environments => "Environments",
         }
     }
 
@@ -67,6 +70,7 @@ impl TabId {
             Self::Aks => "AKS",
             Self::Acr => "ACR",
             Self::KeyVault => "Vault",
+            Self::Environments => "Env",
         }
     }
 
@@ -81,10 +85,11 @@ impl TabId {
             Self::Aks => '5',
             Self::Acr => '6',
             Self::KeyVault => '7',
+            Self::Environments => '8',
         }
     }
 
-    /// The tab a digit asks for, if it is one of the seven.
+    /// The tab a digit asks for, if it is one of the eight.
     #[must_use]
     pub fn from_number(character: char) -> Option<Self> {
         Self::ALL.into_iter().find(|tab| tab.number() == character)

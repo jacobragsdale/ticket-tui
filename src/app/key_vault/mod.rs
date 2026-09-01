@@ -421,6 +421,33 @@ impl KeyVaultScreen {
         self.visible_items().get(self.item_cursor.index).cloned()
     }
 
+    /// One vault's items exactly as they were listed, for the checks that join
+    /// what an overlay pulls to what the vault holds. Unfiltered — a query is
+    /// the table's business and not theirs — and `None` for a vault nobody has
+    /// listed, which is not the same thing as an empty vault.
+    #[must_use]
+    pub fn items_of(&self, vault: &str) -> Option<&[VaultItem]> {
+        self.items
+            .iter()
+            .find(|(held, _)| held.eq_ignore_ascii_case(vault))
+            .map(|(_, items)| items.as_slice())
+    }
+
+    /// Every vault that has been listed, by name, so a caller can answer for
+    /// all of them without knowing which.
+    #[must_use]
+    pub fn listed_vaults(&self) -> Vec<&str> {
+        self.items.iter().map(|(name, _)| name.as_str()).collect()
+    }
+
+    /// Drops what these vaults hold, so the next focus reads them again. What
+    /// the environments board's `r` asks for: it renders the overlays afresh
+    /// and the vault half has to be as new as the repository half.
+    pub fn forget_items(&mut self, vaults: &[String]) {
+        self.items
+            .retain(|(held, _)| !vaults.iter().any(|name| name.eq_ignore_ascii_case(held)));
+    }
+
     /// Certificates within thirty days of expiring, across every vault whose
     /// contents have been read. What the tab bar badges, and the one number
     /// this tab exists to put in front of somebody.

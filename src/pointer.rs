@@ -119,6 +119,13 @@ pub enum PointerTarget {
     TableRow {
         index: usize,
     },
+    /// One cell of a grid, where the column is a place rather than a field:
+    /// the environments board, whose columns are environments, so a click
+    /// settles which promotion the details pane reads as well as which row.
+    TableCell {
+        row: usize,
+        column: usize,
+    },
     OpenInBrowser {
         index: usize,
     },

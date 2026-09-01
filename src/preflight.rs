@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::config::{Config, Environment};
-use crate::kustomize::{self, EnvManifest, Finding, ObjectKind};
+use crate::kustomize::{self, EnvManifest, Finding, Missing, ObjectKind, Source};
 use crate::local;
 use crate::model::Jump;
 
@@ -156,7 +156,7 @@ impl Report {
             notes.extend(mine.into_iter().map(|finding| Note {
                 mark: Mark::Missing,
                 text: finding.to_string(),
-                jump: vault_jump(deployment, finding),
+                jump: finding_jump(&deployment.environments, finding),
             }));
         }
         notes.extend(promotion(self).into_iter().flatten());
@@ -172,31 +172,60 @@ impl Report {
 
 /// What this pull request adds to the environments it touches: the target
 /// branch's render of the same overlay against the source's, in the words of
-/// the board — `this pull request adds RATE_LIMIT_PER_MIN to prod/orders-config`.
+/// the board.
 ///
-/// TODO(#747): `env diff` lands the comparison itself; this is the hook it is
-/// wired into, and until then the pane says only what would be missing.
+/// TODO(#749): the pre-flight renders the target branch's tree too; this is the
+/// hook it is wired into, and until then the pane says only what would be
+/// missing.
 fn promotion(_report: &Report) -> Option<Vec<Note>> {
     None
 }
 
-/// Where a finding points. A key an overlay never defines is a question for
-/// the vault the environment pulls its secrets from, which is the tab that
-/// answers it.
-///
-/// TODO(#746): the vault check names the vault object itself, which is a
-/// `Jump::VaultItem` rather than the vault as a whole.
-fn vault_jump(deployment: &Deployment, finding: &Finding) -> Option<Jump> {
+/// Where a finding points. The vault half names the object itself, which is a
+/// row on the Key Vault tab; the repository half names a Secret, which is a
+/// question for the vault the environment pulls its secrets from as a whole.
+#[must_use]
+pub fn finding_jump(environments: &[Environment], finding: &Finding) -> Option<Jump> {
+    if finding.reference.object == ObjectKind::Vault {
+        let vault = finding.vault.clone()?;
+        // A provider pulling from the wrong vault names that vault rather than
+        // an object in it, and an `ExternalSecret` says no kind at all, so
+        // neither is a row this can point at.
+        return Some(
+            match (finding.missing, item_kind(&finding.reference.source)) {
+                (Missing::WrongVault, _) | (_, None) => Jump::Vault(vault),
+                (_, Some(kind)) => Jump::VaultItem {
+                    vault,
+                    kind,
+                    name: finding.reference.name.clone(),
+                },
+            },
+        );
+    }
     if finding.reference.object != ObjectKind::Secret {
         return None;
     }
-    deployment
-        .environments
+    environments
         .iter()
         .find(|environment| environment.name == finding.environment)?
         .vault
         .clone()
         .map(Jump::Vault)
+}
+
+/// What the Key Vault tab files a vault object under, out of the `objectType`
+/// a provider wrote. `certificate` and `cert` are the same kind spelled two
+/// ways; anything else is a kind this cannot name.
+fn item_kind(source: &Source) -> Option<String> {
+    let Source::Vault { kind } = source else {
+        return None;
+    };
+    match kind.as_deref()? {
+        "secret" => Some("secret".to_owned()),
+        "key" => Some("key".to_owned()),
+        "cert" | "certificate" => Some("cert".to_owned()),
+        _ => None,
+    }
 }
 
 /// One pull request, pre-flown: fetch what it is, put its head in a scratch
@@ -209,19 +238,18 @@ pub fn run(deployment: &Deployment, source: &str, target: &str, commit: &str) ->
     // to reach — the fixture repository the tests build — pre-flies from what
     // it already has.
     let _ = local::remote_git(clone, &["fetch", "origin", source, target]);
-    let changed = changed_files(clone, target, commit)?;
+    let changed = changed_files(clone, &target_ref(clone, target), commit)?;
     let scratch = Scratch::add(clone, commit)?;
-    let mut rendered = Vec::new();
+    let rendered = touched(&scratch.path, &deployment.environments, &changed);
     let mut manifests: BTreeMap<String, EnvManifest> = BTreeMap::new();
-    for (environment, overlay) in touched(&scratch.path, &deployment.environments, &changed) {
-        let yaml = kustomize::render(&scratch.path, &overlay, &deployment.render)?;
-        let mut parsed = kustomize::parse(&environment, &yaml);
+    for (environment, overlay) in &rendered {
+        let yaml = kustomize::render(&scratch.path, overlay, &deployment.render)?;
+        let mut parsed = kustomize::parse(environment, &yaml);
         parsed.overlays.push(overlay.clone());
         manifests
             .entry(environment.clone())
-            .or_insert_with(|| EnvManifest::named(&environment))
+            .or_insert_with(|| EnvManifest::named(environment))
             .absorb(parsed);
-        rendered.push((environment, overlay));
     }
     let mut findings = Vec::new();
     for manifest in manifests.values_mut() {
@@ -292,9 +320,10 @@ fn nearest_kustomization(tree: &Path, file: &str) -> Option<String> {
 }
 
 /// What the pull request changes: everything between where it left the target
-/// branch and the head it was read at.
+/// branch and the head it was read at. `target` is the ref as this clone has
+/// it, which [`target_ref`] has already settled.
 fn changed_files(clone: &Path, target: &str, commit: &str) -> Result<Vec<String>> {
-    let range = format!("{}...{commit}", target_ref(clone, target));
+    let range = format!("{target}...{commit}");
     let output = local::git(clone, &["diff", "--name-only", &range])
         .with_context(|| format!("could not read what {commit} changes"))?;
     Ok(output

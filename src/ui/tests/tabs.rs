@@ -15,9 +15,9 @@ fn row_text(terminal: &Terminal<TestBackend>, y: u16, width: u16) -> String {
 }
 
 #[test]
-fn the_tab_bar_names_seven_tabs_and_marks_the_one_showing_at_every_breakpoint() {
+fn the_tab_bar_names_eight_tabs_and_marks_the_one_showing_at_every_breakpoint() {
     let mut app = App::new(vec![ticket()]);
-    for width in [120, 90] {
+    for width in [140, 120] {
         let text = render_text(width, 30, &mut app);
         let bar = text.lines().next().expect("a tab bar row").to_owned();
         assert!(bar.contains("1 Work items"), "{width} columns: {bar}");
@@ -25,26 +25,31 @@ fn the_tab_bar_names_seven_tabs_and_marks_the_one_showing_at_every_breakpoint() 
         assert!(bar.contains("5 AKS"), "{width} columns: {bar}");
         assert!(bar.contains("6 ACR"), "{width} columns: {bar}");
         assert!(bar.contains("7 Key Vault"), "{width} columns: {bar}");
+        assert!(bar.contains("8 Environments"), "{width} columns: {bar}");
     }
 
-    // Narrower than the seven names, they shorten but every tab stays.
-    let short = render_text(60, 30, &mut app);
-    let bar = short.lines().next().expect("a tab bar row");
-    assert!(bar.contains("1 Items"), "{bar}");
-    assert!(bar.contains("4 Runs"), "{bar}");
-    assert!(bar.contains("5 AKS"), "{bar}");
-    assert!(bar.contains("6 ACR"), "{bar}");
-    assert!(bar.contains("7 Vault"), "{bar}");
+    // Narrower than the eight names, they shorten but every tab stays.
+    for width in [90, 70] {
+        let short = render_text(width, 30, &mut app);
+        let bar = short.lines().next().expect("a tab bar row");
+        assert!(bar.contains("1 Items"), "{width} columns: {bar}");
+        assert!(bar.contains("4 Runs"), "{width} columns: {bar}");
+        assert!(bar.contains("5 AKS"), "{width} columns: {bar}");
+        assert!(bar.contains("6 ACR"), "{width} columns: {bar}");
+        assert!(bar.contains("7 Vault"), "{width} columns: {bar}");
+        assert!(bar.contains("8 Env"), "{width} columns: {bar}");
+    }
 
     // Narrower than that, the numbers stand alone and stay clickable.
     let narrow = render_text(40, 30, &mut app);
     let bar = narrow.lines().next().expect("a tab bar row");
     assert!(bar.contains(" 1 ") && bar.contains(" 5 "), "{bar}");
     assert!(bar.contains(" 6 ") && bar.contains(" 7 "), "{bar}");
+    assert!(bar.contains(" 8 "), "{bar}");
     assert!(
         app.shell
             .hit_regions
-            .find_target(|target| matches!(target, PointerTarget::SelectTab { index: 6 }))
+            .find_target(|target| matches!(target, PointerTarget::SelectTab { index: 7 }))
             .is_some(),
         "the last tab keeps its click target when its name is shortened"
     );
@@ -153,19 +158,21 @@ fn a_tab_with_something_waiting_wears_a_badge() {
         (TabId::Aks, false, Some("✗1".to_owned())),
         (TabId::Acr, false, None),
         (TabId::KeyVault, false, None),
+        (TabId::Environments, false, Some("\u{2717}1".to_owned())),
     ];
-    let mut terminal = Terminal::new(TestBackend::new(100, 3)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(130, 3)).unwrap();
     terminal
         .draw(|frame| {
-            let area = Rect::new(0, 0, 100, 1);
+            let area = Rect::new(0, 0, 130, 1);
             render_tab_bar(frame, &mut shell, &tabs, area);
         })
         .unwrap();
 
-    let bar = row_text(&terminal, 0, 100);
+    let bar = row_text(&terminal, 0, 130);
     assert!(bar.contains("3 Pull requests 3"), "{bar}");
     assert!(bar.contains("4 Pipelines ◐2"), "{bar}");
     assert!(bar.contains("5 AKS ✗1"), "{bar}");
+    assert!(bar.contains("8 Environments ✗1"), "{bar}");
     assert!(
         shell
             .hit_regions

@@ -299,6 +299,7 @@ fn spinning(app: &App) -> bool {
         TabId::Aks => app.aks.busy(),
         TabId::Acr => app.acr.busy(),
         TabId::KeyVault => app.key_vault.busy(),
+        TabId::Environments => app.environments.busy(),
         _ => false,
     };
     app.shell.sync_pending

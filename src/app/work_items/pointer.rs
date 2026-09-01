@@ -247,6 +247,7 @@ impl WorkItemsScreen {
             // out of; its family rows are Follow targets.
             PointerTarget::SelectTab { .. }
             | PointerTarget::TreeRow { .. }
+            | PointerTarget::TableCell { .. }
             | PointerTarget::ApprovalRow { .. }
             | PointerTarget::CopyText { .. }
             | PointerTarget::RunCommand(_) => {}

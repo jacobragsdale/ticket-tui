@@ -939,6 +939,7 @@ impl WorkItemsScreen {
             | CommandId::AutoCompletePr
             | CommandId::CommentPr
             | CommandId::ToggleClosedPrs
+            | CommandId::ToggleFindings
             | CommandId::RunPipeline
             | CommandId::CancelRun
             | CommandId::RetryRun
