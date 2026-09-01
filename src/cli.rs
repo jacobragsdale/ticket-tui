@@ -296,6 +296,10 @@ pub enum EnvCommand {
         environments: Vec<String>,
         #[arg(long)]
         json: bool,
+        /// Skip the vault half: report what the repository alone answers for,
+        /// without reading any key vault
+        #[arg(long)]
+        offline: bool,
     },
 }
 
@@ -3624,10 +3628,15 @@ impl<'a> From<&'a Approval> for ApprovalJson<'a> {
 fn run_env(cli: &Cli, command: &EnvCommand) -> Result<()> {
     let config = config::load(&config::default_path())?;
     let workspace = local::workspace_root(cli.workspace.clone());
-    run_env_with(&config, workspace.as_deref(), command)
+    run_env_with(cli, &config, workspace.as_deref(), command)
 }
 
-fn run_env_with(config: &Config, workspace: Option<&Path>, command: &EnvCommand) -> Result<()> {
+fn run_env_with(
+    cli: &Cli,
+    config: &Config,
+    workspace: Option<&Path>,
+    command: &EnvCommand,
+) -> Result<()> {
     match command {
         EnvCommand::List { json } => run_env_list(config, workspace, *json),
         EnvCommand::Show { environment, json } => {
@@ -3644,15 +3653,17 @@ fn run_env_with(config: &Config, workspace: Option<&Path>, command: &EnvCommand)
         // The exit code is the point of this one — the deployment repository's
         // own pipeline runs it as a gate — so it ends the process itself
         // rather than leaving 1 to stand for everything.
-        EnvCommand::Check { environments, json } => {
-            match run_env_check(config, workspace, environments, *json) {
-                Ok(code) => std::process::exit(code),
-                Err(error) => {
-                    eprintln!("error: {error:#}");
-                    std::process::exit(2)
-                }
+        EnvCommand::Check {
+            environments,
+            json,
+            offline,
+        } => match run_env_check(cli, config, workspace, environments, *json, *offline) {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("error: {error:#}");
+                std::process::exit(2)
             }
-        }
+        },
     }
 }
 
@@ -3752,23 +3763,88 @@ fn list_table(rendered: &[Rendered<'_>], json: bool) -> Result<String> {
 /// the gate reads: 1 for any finding, 0 for clean, 2 for an overlay that would
 /// not render.
 fn run_env_check(
+    cli: &Cli,
     config: &Config,
     workspace: Option<&Path>,
     names: &[String],
     json: bool,
+    offline: bool,
 ) -> Result<i32> {
-    let (report, code) = check_report(&render_all(config, workspace, names)?, json)?;
+    let rendered = render_all(config, workspace, names)?;
+    let vaults = vault_names(cli, &rendered, offline);
+    let (report, code) = check_report(&rendered, json, &vaults)?;
     if !report.is_empty() {
         emit(&report);
     }
     Ok(code)
 }
 
+/// What each environment's vault holds, or the one reason there is nothing.
+/// The vault half wants a token and the repository half does not, so a run
+/// without one still answers for the overlays rather than refusing.
+fn vault_names(
+    cli: &Cli,
+    rendered: &[Rendered<'_>],
+    offline: bool,
+) -> Result<Vec<kustomize::VaultNames>, String> {
+    if offline {
+        return Err("--offline".to_owned());
+    }
+    let mut wanted: Vec<&str> = rendered
+        .iter()
+        .filter_map(|(environment, _)| environment.vault.as_deref())
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    if wanted.is_empty() {
+        return Ok(Vec::new());
+    }
+    let resolved = cli
+        .arm_config()
+        .resolve()
+        .map_err(|error| format!("{error:#}"))?;
+    read_vaults(&ArmClient::new(resolved), &wanted, Timestamp::now())
+        .map_err(|error| format!("{error:#}"))
+}
+
+/// One listing per vault the environments name, which is the pair of calls
+/// `secrets list` makes. Names and dates come back; a value never does.
+fn read_vaults(
+    source: &dyn ArmSource,
+    wanted: &[&str],
+    now: Timestamp,
+) -> Result<Vec<kustomize::VaultNames>> {
+    let inventory = source.inventory()?;
+    wanted
+        .iter()
+        .map(|name| {
+            let vault = find_vault(&inventory, name)?;
+            Ok(kustomize::VaultNames::from_items(
+                &vault.name,
+                &source.items(vault)?,
+                now,
+            ))
+        })
+        .collect()
+}
+
 /// What the check prints and the code it exits with, pure over what the
 /// renders answered with. An overlay that would not render is one line on
 /// stderr, the way an unreadable cluster is under `pods`, and it takes the
-/// exit code with it: a gate that could not look must not read as clean.
-fn check_report(rendered: &[Rendered<'_>], json: bool) -> Result<(String, i32)> {
+/// exit code with it: a gate that could not look must not read as clean. A
+/// vault that could not be read is one line on stderr too, and takes only its
+/// own half with it.
+fn check_report(
+    rendered: &[Rendered<'_>],
+    json: bool,
+    vaults: &Result<Vec<kustomize::VaultNames>, String>,
+) -> Result<(String, i32)> {
+    // A vault half that could not be read is one line on stderr rather than a
+    // finding per object, and it does not touch the exit code: an unread vault
+    // says nothing about the overlays, which still answer for themselves.
+    if let Err(reason) = vaults {
+        eprintln!("vault check skipped: {reason}");
+    }
     let mut lines: Vec<String> = Vec::new();
     let mut reports: Vec<EnvCheckJson> = Vec::new();
     let (mut found, mut unrenderable) = (false, false);
@@ -3781,7 +3857,11 @@ fn check_report(rendered: &[Rendered<'_>], json: bool) -> Result<(String, i32)> 
                 continue;
             }
         };
-        let findings = kustomize::check(manifest);
+        let vault = vaults.as_ref().ok().and_then(|held| {
+            let wanted = environment.vault.as_deref()?;
+            held.iter().find(|names| same_text(&names.vault, wanted))
+        });
+        let findings = kustomize::check_with(manifest, vault);
         found |= !findings.is_empty();
         if json {
             reports.push(EnvCheckJson::new(manifest, findings));
@@ -6819,13 +6899,24 @@ mod tests {
         };
         assert_eq!(environments, ["qa", "prod"]);
 
-        let Some(Command::Env(EnvCommand::Check { environments, json })) =
-            Cli::parse_from(["ticket-tui", "env", "check", "--json"]).command
+        let Some(Command::Env(EnvCommand::Check {
+            environments,
+            json,
+            offline,
+        })) = Cli::parse_from(["ticket-tui", "env", "check", "--json"]).command
         else {
             panic!("env check --json")
         };
         assert!(environments.is_empty(), "none named is every environment");
         assert!(json);
+        assert!(!offline, "the vault half is on unless it is turned off");
+
+        let Some(Command::Env(EnvCommand::Check { offline, .. })) =
+            Cli::parse_from(["ticket-tui", "env", "check", "prod", "--offline"]).command
+        else {
+            panic!("env check --offline")
+        };
+        assert!(offline);
     }
 
     #[test]
@@ -6838,7 +6929,7 @@ mod tests {
             (&qa, Ok(env_fixture("qa"))),
             (&prod, Ok(env_fixture("prod"))),
         ];
-        let (report, code) = check_report(&rendered, false).unwrap();
+        let (report, code) = check_report(&rendered, false, &Ok(Vec::new())).unwrap();
         assert_eq!(
             report,
             concat!(
@@ -6850,30 +6941,96 @@ mod tests {
         assert_eq!(code, 1, "any finding at all is a failed gate");
 
         let clean = vec![(&qa, Ok(env_fixture("qa")))];
-        let (report, code) = check_report(&clean, false).unwrap();
+        let (report, code) = check_report(&clean, false, &Ok(Vec::new())).unwrap();
         assert_eq!(report, "qa: clean (3 workloads, 1 configmap)");
         assert_eq!(code, 0);
 
         // An overlay that would not render is 2: a gate that could not look
         // must not read as clean.
         let broken: Vec<Rendered<'_>> = vec![(&prod, Err(anyhow::anyhow!("no such overlay")))];
-        let (report, code) = check_report(&broken, false).unwrap();
+        let (report, code) = check_report(&broken, false, &Ok(Vec::new())).unwrap();
         assert!(report.is_empty(), "{report}");
         assert_eq!(code, 2);
         let mixed = vec![
             (&qa, Ok(env_fixture("qa"))),
             (&prod, Err(anyhow::anyhow!("boom"))),
         ];
-        assert_eq!(check_report(&mixed, false).unwrap().1, 2);
+        assert_eq!(check_report(&mixed, false, &Ok(Vec::new())).unwrap().1, 2);
 
         // `--json` carries the counts a clean run reports as well as the
         // findings, so a pipeline reads one shape either way.
-        let (report, code) = check_report(&clean, true).unwrap();
+        let (report, code) = check_report(&clean, true, &Ok(Vec::new())).unwrap();
         let parsed: Value = serde_json::from_str(&report).unwrap();
         assert_eq!(parsed[0]["environment"], "qa");
         assert_eq!(parsed[0]["clean"], true);
         assert_eq!(parsed[0]["workloads"], 3);
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn env_check_joins_the_overlay_to_the_vault_and_offline_skips_that_half_alone() {
+        let prod = env_table("prod", &["overlays/prod"]);
+        let rendered = vec![(&prod, Ok(env_fixture("prod")))];
+        let now = ts("2026-09-01T00:00:00Z");
+        let fake = arm_tests::FakeArm::default();
+        *fake.vaults.lock().unwrap() = vec![Vault {
+            id: "/subscriptions/s/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/kv-prod"
+                .to_owned(),
+            name: "kv-prod".to_owned(),
+            resource_group: "rg".to_owned(),
+            location: "westeurope".to_owned(),
+            sku: "standard".to_owned(),
+            uri: "https://kv-prod.vault.azure.net/".to_owned(),
+        }];
+        *fake.items.lock().unwrap() =
+            ["billing-signing-key", "billing-db-password", "reaper-token"]
+                .into_iter()
+                .map(|name| VaultItem {
+                    kind: ItemKind::Secret,
+                    name: name.to_owned(),
+                    enabled: true,
+                    created: None,
+                    updated: None,
+                    expires: None,
+                    content_type: None,
+                    recovery_level: None,
+                })
+                .collect();
+
+        // One inventory and one listing per vault named, which is what
+        // `secrets list` costs.
+        let vaults = read_vaults(&fake, &["kv-prod"], now).unwrap();
+        assert_eq!(*fake.reads.lock().unwrap(), ["inventory", "items"]);
+        assert_eq!(vaults[0].vault, "kv-prod");
+
+        let (report, code) = check_report(&rendered, false, &Ok(vaults)).unwrap();
+        assert!(
+            report.contains(
+                "prod shop-prod/billing-vault SecretProviderClass kv-prod secret billing-legacy-token missing"
+            ),
+            "{report}"
+        );
+        assert_eq!(code, 1);
+
+        // The skipped half takes its findings with it and leaves the exit code
+        // to the repository's own.
+        let (offline, code) = check_report(&rendered, false, &Err("--offline".to_owned())).unwrap();
+        assert!(!offline.contains("billing-legacy-token"), "{offline}");
+        assert_eq!(offline.lines().count(), 2, "{offline}");
+        assert_eq!(code, 1, "the two findings the overlays answer for");
+
+        // And the reason is the one the line names.
+        let cli = Cli::parse_from(["ticket-tui"]);
+        assert_eq!(vault_names(&cli, &rendered, true).unwrap_err(), "--offline");
+        // An environment naming no vault has no vault half to skip, and no
+        // token is asked for on its account.
+        let mut bare = env_table("dev", &["overlays/dev"]);
+        bare.vault = None;
+        assert!(
+            vault_names(&cli, &[(&bare, Ok(env_fixture("qa")))], false)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

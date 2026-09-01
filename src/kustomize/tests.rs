@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use super::*;
+use crate::timestamp::ts;
 
 /// `fixtures/kustomize`, wherever the repository is checked out.
 fn fixtures() -> PathBuf {
@@ -518,6 +519,154 @@ fn an_absent_object_a_missing_class_and_an_optional_reference_read_as_they_shoul
             .iter()
             .all(|held| held.missing == Missing::Object)
     );
+}
+
+/// One thing a vault lists, with only the fields the join reads.
+fn item(kind: ItemKind, name: &str, expires: Option<&str>) -> VaultItem {
+    VaultItem {
+        kind,
+        name: name.to_owned(),
+        enabled: true,
+        created: None,
+        updated: None,
+        expires: expires.map(ts),
+        content_type: None,
+        recovery_level: None,
+    }
+}
+
+/// The clock the vault tests read against, and a vault that holds everything
+/// prod's overlay asks for but `billing-legacy-token` — the object that was
+/// made in qa when the feature was built and never in prod.
+fn today() -> Timestamp {
+    ts("2026-09-01T00:00:00Z")
+}
+
+fn kv_prod() -> VaultNames {
+    VaultNames::from_items(
+        "kv-prod",
+        &[
+            item(ItemKind::Secret, "billing-signing-key", None),
+            item(ItemKind::Secret, "billing-db-password", None),
+            item(ItemKind::Secret, "reaper-token", None),
+            // The ExternalSecret's remoteRef does not say which kind this is,
+            // so it is found on the third look — and it is on its way out.
+            item(
+                ItemKind::Certificate,
+                "reaper-config",
+                Some("2026-09-10T00:00:00Z"),
+            ),
+            // Expiring too, and nothing in the overlay pulls it.
+            item(
+                ItemKind::Certificate,
+                "billing-tls",
+                Some("2026-09-10T00:00:00Z"),
+            ),
+        ],
+        today(),
+    )
+}
+
+#[test]
+fn a_vault_object_the_overlay_pulls_and_the_vault_lacks_is_found_and_an_unused_expiry_is_not() {
+    let lines: Vec<String> = check_with(&fixture("prod"), Some(&kv_prod()))
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "prod shop-prod/billing-api Deployment env SIGNING_KEY \u{2190} secret billing-kv key SIGNING_KEY missing",
+            "prod shop-prod/billing-vault SecretProviderClass kv-prod secret billing-legacy-token missing",
+            "prod shop-prod/orders-api Deployment env RATE_LIMIT_PER_MIN \u{2190} configmap orders-config key RATE_LIMIT_PER_MIN missing",
+            "prod shop-prod/reaper ExternalSecret kv-prod object reaper-config expires 2026-09-10",
+        ],
+        "the vault half joins the repository half under the one sort"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("billing-tls")),
+        "an expiry nothing in the overlay pulls is the vault tab's business, not the gate's"
+    );
+
+    // The two halves are separable: without a vault it is the repository's own
+    // findings and nothing else, which is what #745 shipped.
+    assert_eq!(check(&fixture("prod")).len(), 2);
+
+    // Every finding says which vault it was answered against, and the date
+    // rides through the JSON as a stamp like every other.
+    let findings = check_with(&fixture("prod"), Some(&kv_prod()));
+    let printed = serde_json::to_string(&findings).unwrap();
+    assert!(printed.contains("\"vault\":\"kv-prod\""), "{printed}");
+    assert!(
+        printed.contains("\"expiring\":{\"on\":\"2026-09-10T00:00:00Z\"}"),
+        "{printed}"
+    );
+    assert!(printed.contains("\"vaultObject\""), "{printed}");
+}
+
+#[test]
+fn a_provider_naming_another_environments_vault_is_one_warning_and_not_a_list_of_absences() {
+    let manifest = parse(
+        "prod",
+        concat!(
+            "apiVersion: secrets-store.csi.x-k8s.io/v1\nkind: SecretProviderClass\n",
+            "metadata:\n  name: billing-vault\n  namespace: shop-prod\n",
+            "spec:\n  parameters:\n    keyvaultName: kv-qa\n    objects: |\n",
+            "      array:\n        - objectName: billing-signing-key\n          objectType: secret\n",
+        ),
+    );
+    let lines: Vec<String> = check_with(&manifest, Some(&kv_prod()))
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        lines,
+        ["prod shop-prod/billing-vault SecretProviderClass pulls from kv-qa, not kv-prod"],
+        "the copy-paste is the finding; what it asks the wrong vault for is not"
+    );
+}
+
+#[test]
+fn a_kind_the_provider_gives_is_looked_up_under_it_and_one_it_does_not_is_looked_up_thrice() {
+    let vault = kv_prod();
+    let object = |name: &str, kind: Option<&str>| VaultObject {
+        name: name.to_owned(),
+        kind: kind.map(str::to_owned),
+        alias: None,
+    };
+    assert!(vault.holds(&object("billing-signing-key", Some("secret"))));
+    assert!(vault.holds(&object("BILLING-SIGNING-KEY", Some("secret"))));
+    assert!(vault.holds(&object("reaper-config", Some("cert"))));
+    assert!(
+        !vault.holds(&object("reaper-config", Some("secret"))),
+        "an objectType says which, so a certificate is no answer for a secret"
+    );
+    assert!(
+        vault.holds(&object("reaper-config", None)),
+        "a remoteRef says nothing, so it is a secret, then a key, then a certificate"
+    );
+    assert!(!vault.holds(&object("billing-legacy-token", None)));
+
+    // What the tab holds is what this reads: names by kind, and the dates near
+    // enough for the tab to have coloured them.
+    assert_eq!(vault.certs, ["reaper-config", "billing-tls"]);
+    assert_eq!(
+        vault.expires("reaper-config"),
+        Some(ts("2026-09-10T00:00:00Z"))
+    );
+    assert_eq!(vault.expires("billing-signing-key"), None);
+
+    // A disabled object is listed but is nobody's renewal, the way the tab
+    // fades its row whole rather than colouring the date.
+    let mut disabled = item(
+        ItemKind::Certificate,
+        "retired-tls",
+        Some("2026-09-10T00:00:00Z"),
+    );
+    disabled.enabled = false;
+    let held = VaultNames::from_items("kv-prod", &[disabled], today());
+    assert_eq!(held.certs, ["retired-tls"]);
+    assert!(held.expiring.is_empty());
 }
 
 /// The one test that runs the real renderer: it re-renders the fixture and

@@ -2191,7 +2191,7 @@ ticket-tui certs list --vault NAME [--json]
 ticket-tui status [--json]
 ticket-tui env list [--json]
 ticket-tui env show <environment> [--json]
-ticket-tui env check [ENV...] [--json]
+ticket-tui env check [ENV...] [--json] [--offline]
 ```
 
 `sync` pulls and exits, printing what moved — `Synced 3 changes from
@@ -2518,10 +2518,37 @@ waiting on one.
 ```console
 $ ticket-tui env check prod
 prod shop-prod/billing-api Deployment env SIGNING_KEY ← secret billing-kv key SIGNING_KEY missing
+prod shop-prod/billing-vault SecretProviderClass kv-prod secret billing-legacy-token missing
 prod shop-prod/orders-api Deployment env RATE_LIMIT_PER_MIN ← configmap orders-config key RATE_LIMIT_PER_MIN missing
 $ ticket-tui env check qa
 qa: clean (3 workloads, 1 configmap)
 ```
+
+The second line is the other half of a missing secret, and the half the
+repository cannot answer alone: the overlay is right and the vault is not,
+because the object was made in `kv-qa` when the feature was built and nobody
+ever made the prod one. `[[environments]].vault` names the vault, the CLI reads
+it the way `secrets list` does and the TUI uses what the Key Vault tab already
+holds, and either way it is names, kinds and dates — no value is read, on the
+same rule `Secret` keeps everywhere else. Three things come of the join:
+
+- an object a provider pulls that the vault does not hold. An `objectType` says
+  which of the three to look under; an `ExternalSecret`'s `remoteRef` says
+  nothing, so it is looked for as a secret, then a key, then a certificate.
+- a provider whose `keyvaultName` — or whose store's `vaultUrl` — names a vault
+  other than the environment's own: `prod shop-prod/billing-vault
+  SecretProviderClass pulls from kv-qa, not kv-prod`. That is the whole
+  copy-paste in one line, so what it asks the wrong vault for is left alone.
+- an object the overlay pulls that falls due inside the Key Vault tab's own
+  thirty days, by the date: `prod shop-prod/billing-vault SecretProviderClass
+  kv-prod cert billing-wildcard expires 2026-09-10`. One the overlay does not
+  pull is the Key Vault tab's business rather than the gate's.
+
+`--offline` — and a run that cannot get a token, which is the same thing on a
+machine with no `az` — skips the vault half in one line on stderr, `vault check
+skipped: --offline`, rather than reporting every object as missing. The
+findings on stdout stay diffable and the exit code is the overlays' own.
+`--json` carries `vault` on every finding.
 
 The line is the environment, `namespace/workload`, the workload's kind, where
 the reference is written, and what it points at that is not there. Findings are
@@ -2534,8 +2561,8 @@ clean. That is what lets the deployment repository's own pipeline run
 
 `fixtures/kustomize` is the worked example the tests read: a base with two
 services, a CronJob, a ConfigMap with a block scalar and a `secretGenerator`,
-and two overlays, one of which is deliberately missing a ConfigMap key and a
-produced Secret key. `rendered/{qa,prod}.yaml` beside it is what
+and two overlays, one of which is deliberately missing a ConfigMap key, a
+produced Secret key, and a vault object prod's provider pulls. `rendered/{qa,prod}.yaml` beside it is what
 `kubectl kustomize` makes of them, checked in so the parse and the check are
 tested without `kubectl`; one `#[ignore]`d test re-renders and compares.
 
