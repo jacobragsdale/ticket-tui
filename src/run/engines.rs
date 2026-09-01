@@ -31,6 +31,11 @@ pub(super) struct AksRuntime {
     /// The log the worker was last told to follow, so the message is sent when
     /// it changes rather than every turn.
     pub(super) following: Option<LogFollow>,
+    /// What each cluster and namespace held on the read before this one, so a
+    /// pod that has started crash-looping or restarted again can be told from
+    /// one that was already doing it. A read this map has never held is the
+    /// baseline for that cluster and namespace.
+    pub(super) pods_seen: HashMap<(String, Option<String>), PodMarks>,
 }
 
 /// The two subscription tabs' side of the run: the worker thread, which of
@@ -63,6 +68,10 @@ pub(super) struct SyncRuntime {
     pub(super) watching_run: (Option<i64>, Option<LogTarget>),
     /// The runs the watcher has been asked to follow.
     pub(super) watched_runs: Vec<i64>,
+    /// The approvals the last read found, so only one that was not there
+    /// before is announced. `None` until the first read, which is the
+    /// baseline: a queue that was already waiting is not news.
+    pub(super) approvals_seen: Option<HashSet<String>>,
     /// Clones on this machine: their own thread, so a clone that takes a
     /// minute never holds up an edit.
     pub(super) local: LocalRuntime,

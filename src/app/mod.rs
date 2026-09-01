@@ -35,6 +35,7 @@ use crate::model::{
     path_leaf, same_text,
 };
 pub use crate::model::{RowDensity, SearchOrder};
+use crate::notify::PrMarks;
 use crate::pointer::{
     DragKind, PointerState, ScrollState, ScrollSurface, SelectableSurface, TextEditor, TextPos,
     TextSelection,
@@ -265,6 +266,10 @@ pub struct App {
     pub aks: AksScreen,
     pub acr: AcrScreen,
     pub key_vault: KeyVaultScreen,
+    /// The pull requests as the last snapshot left them, for telling a vote
+    /// that has landed from a pull that changed nothing. `None` until the
+    /// first snapshot of the run, which is the baseline rather than news.
+    pull_request_marks: Option<PrMarks>,
 }
 
 impl App {
@@ -283,6 +288,7 @@ impl App {
             aks: AksScreen::default(),
             acr: AcrScreen::default(),
             key_vault: KeyVaultScreen::default(),
+            pull_request_marks: None,
         }
     }
 
@@ -583,6 +589,26 @@ impl App {
         self.pull_requests
             .set_pull_requests(pull_requests.clone(), &self.shell);
         self.relate_repos(&pull_requests);
+        self.announce_pull_requests(&pull_requests);
+    }
+
+    /// A vote landing on one you wrote, one of yours closing, or one turning
+    /// up wanting your review: news wherever you are, whichever tab is
+    /// showing. A snapshot with no pull requests in it at all — the database
+    /// reload carries none — says nothing about them and is left alone.
+    fn announce_pull_requests(&mut self, pull_requests: &[PullRequest]) {
+        if pull_requests.is_empty() {
+            return;
+        }
+        let (marks, news) = crate::notify::pull_request_news(
+            self.pull_request_marks.as_ref(),
+            pull_requests,
+            self.shell.me(),
+        );
+        self.pull_request_marks = Some(marks);
+        for (title, body) in news {
+            self.shell.notify(NotificationLevel::Info, &title, &body);
+        }
     }
 
     /// Gives the Repos tab the repositories the shell holds and what the other

@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::model::{PrStatus, RunResult, RunStatus};
+use crate::notify::Notifier;
 use work_items::clamp_pos_to_snapshot;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -273,6 +274,10 @@ pub struct Shell {
     /// The subscription the ACR and Key Vault tabs read, as the agent context
     /// publishes it. `None` until one resolves.
     pub(crate) arm_subscription: Option<String>,
+    /// What says on the desktop that something worth interrupting for has
+    /// happened, from `[notify]` in `config.toml`. Without that table it does
+    /// nothing and the status line is all there is.
+    pub(crate) notifier: Notifier,
 }
 
 impl Default for Shell {
@@ -316,6 +321,7 @@ impl Default for Shell {
             me: None,
             arm_state: None,
             arm_subscription: None,
+            notifier: Notifier::default(),
         }
     }
 }
@@ -838,6 +844,28 @@ impl Shell {
 
     pub fn set_status(&mut self, message: impl Into<String>) {
         self.set_notification(message, NotificationLevel::Info, INFO_NOTIFICATION_DURATION);
+    }
+
+    /// The `[notify]` command, as `config.toml` names it. Set when the file is
+    /// read, and again whenever it changes.
+    pub fn set_notifier(&mut self, notifier: Notifier) {
+        self.notifier = notifier;
+    }
+
+    /// News worth interrupting for: the footer says it for as long as an error
+    /// stays up, and the `[notify]` command — when there is one — says the same
+    /// words on the desktop, because the two must never disagree. A command
+    /// that will not start is said in the footer instead, once a run.
+    pub fn notify(&mut self, level: NotificationLevel, title: &str, body: &str) {
+        let message = if body.is_empty() {
+            title.to_owned()
+        } else {
+            format!("{title} \u{2014} {body}")
+        };
+        self.set_notification(message, level, ERROR_NOTIFICATION_DURATION);
+        if let Some(refusal) = self.notifier.fire(title, body) {
+            self.set_error(refusal);
+        }
     }
 
     /// A notice worth the longer wait an error gets, without being one: a

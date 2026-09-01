@@ -75,8 +75,12 @@ impl ConfigWatch {
         }
         // The clusters travel with the theme: one file, one read, and a run
         // started before `[[clusters]]` existed picks them up as soon as they
-        // are written.
+        // are written. So does the notification command, which is the same
+        // bargain: write `[notify]` and the next thing worth interrupting for
+        // interrupts you.
         app.aks.set_clusters(config.clusters.clone());
+        app.shell
+            .set_notifier(Notifier::new(config.notify.command.clone()));
         true
     }
 
@@ -110,6 +114,58 @@ fn run_finished_summary(run: &Run) -> String {
         _ => String::new(),
     };
     format!("{glyph} Build {} {word}{duration}", run.build_number)
+}
+
+/// A watched run has stopped: say so wherever the user is, which is the whole
+/// point of having watched it. The footer and the desktop get the same words,
+/// and a run that failed is red in the footer as it always was.
+pub(super) fn run_finished(app: &mut App, run: Run) {
+    let level = if matches!(run.result, Some(RunResult::Failed)) {
+        NotificationLevel::Error
+    } else {
+        // Eight seconds, like an error: it is news whether it went well or
+        // badly, and you may have looked away.
+        NotificationLevel::Info
+    };
+    app.shell
+        .notify(level, &run_finished_summary(&run), &run_source(app, &run));
+    app.pipelines.unwatch_run(run.id);
+    app.pipelines.merge_live_runs(vec![run], &app.shell);
+}
+
+/// What a finished run's notification says under its headline: the pipeline it
+/// was, and the branch it built.
+fn run_source(app: &App, run: &Run) -> String {
+    let branch = run
+        .source_branch
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&run.source_branch);
+    app.pipelines
+        .pipelines()
+        .iter()
+        .find(|pipeline| pipeline.id == run.pipeline_id)
+        .map_or_else(
+            || branch.to_owned(),
+            |pipeline| format!("{} \u{00b7} {branch}", pipeline.name),
+        )
+}
+
+/// Says what one read of a cluster found that the read before it did not: a
+/// pod that has started crash-looping, or one that has restarted again. The
+/// first read of each cluster and namespace is the baseline and says nothing.
+pub(super) fn announce_pods(
+    app: &mut App,
+    seen: &mut HashMap<(String, Option<String>), PodMarks>,
+    cluster: &str,
+    namespace: Option<&str>,
+    pods: &[Pod],
+) {
+    let scope = (cluster.to_owned(), namespace.map(str::to_owned));
+    let (marks, news) = notify::pod_news(seen.get(&scope), pods);
+    seen.insert(scope, marks);
+    for (title, body) in news {
+        app.shell.notify(NotificationLevel::Info, &title, &body);
+    }
 }
 
 /// Reads the workspace while the Repos tab is showing, and folds in whatever
@@ -232,6 +288,15 @@ pub(super) fn poll_aks(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 namespace,
                 pods,
             } => {
+                if let Ok(read) = &pods {
+                    announce_pods(
+                        app,
+                        &mut runtime.aks.pods_seen,
+                        &cluster,
+                        namespace.as_deref(),
+                        read,
+                    );
+                }
                 if let Some(toast) =
                     app.aks
                         .set_pods(&app.shell, &cluster, namespace.as_deref(), pods)
@@ -443,24 +508,21 @@ pub(super) fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
         redraw = true;
         match event {
             WatchEvent::LiveRuns(runs) => app.pipelines.merge_live_runs(runs, &app.shell),
-            WatchEvent::Approvals(approvals) => app.pipelines.set_approvals(approvals),
+            WatchEvent::Approvals(approvals) => {
+                // One that was already waiting when the run started is not
+                // news; one that turns up while you are elsewhere is.
+                let (seen, news) =
+                    notify::approval_news(runtime.approvals_seen.as_ref(), &approvals);
+                runtime.approvals_seen = Some(seen);
+                app.pipelines.set_approvals(approvals);
+                for (title, body) in news {
+                    app.shell.notify(NotificationLevel::Info, &title, &body);
+                }
+            }
             WatchEvent::RunWorkItems { run_id, work_items } => {
                 app.pipelines.set_run_work_items(run_id, work_items);
             }
-            // A watched run has stopped: say so wherever the user is, which is
-            // the whole point of having watched it.
-            WatchEvent::RunFinished(run) => {
-                let summary = run_finished_summary(&run);
-                if matches!(run.result, Some(RunResult::Failed)) {
-                    app.shell.set_error(summary);
-                } else {
-                    // Eight seconds, like an error: it is news whether it went
-                    // well or badly, and you may have looked away.
-                    app.shell.set_news(summary);
-                }
-                app.pipelines.unwatch_run(run.id);
-                app.pipelines.merge_live_runs(vec![run], &app.shell);
-            }
+            WatchEvent::RunFinished(run) => run_finished(app, run),
             WatchEvent::Timeline { run_id, records } => {
                 app.pipelines.set_timeline(run_id, records);
             }

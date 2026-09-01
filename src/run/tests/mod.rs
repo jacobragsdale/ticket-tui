@@ -7,6 +7,7 @@ mod desktop;
 mod details;
 mod editor;
 mod edits;
+mod notify;
 mod startup;
 mod sync;
 
@@ -264,6 +265,7 @@ fn synced_app(path: &Path, source: FakeAzure) -> (App, SqliteTicketRepository, S
         watching_tab: false,
         watching_run: (None, None),
         watched_runs: Vec::new(),
+        approvals_seen: None,
         local: LocalRuntime::default(),
         aks: AksRuntime::default(),
         arm: ArmRuntime::default(),

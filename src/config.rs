@@ -43,6 +43,9 @@
 //! name = "qa"                # what the tab calls it
 //! context = "aks-qa"         # the kubeconfig context kubectl uses
 //! namespaces = ["orders"]    # left out or empty: --all-namespaces
+//!
+//! [notify]                   # a desktop notification when a watched thing moves
+//! command = "notify-send {title} {body}"   # left out: nothing is ever run
 //! ```
 //!
 //! Every value here is a default: a flag or a `TICKET_TUI_*` variable still
@@ -69,6 +72,18 @@ pub struct Config {
     /// The clusters the AKS tab reads, in the order the file lists them.
     #[serde(default)]
     pub clusters: Vec<Cluster>,
+    /// What says a watched thing has moved, when the file says anything.
+    #[serde(default)]
+    pub notify: Notify,
+}
+
+/// The desktop-notification side of the file. `{title}` and `{body}` are
+/// substituted into the command, each as one single-quoted shell word, and it
+/// is run through `sh -c`. No table, and nothing is ever run.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+pub struct Notify {
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 /// The Azure DevOps side of the file. Everything is optional: what is left out
@@ -296,6 +311,7 @@ pub fn parse(source: &str) -> Result<Config> {
         ("devops.project", config.devops.project.as_deref()),
         ("devops.code_project", config.devops.code_project.as_deref()),
         ("devops.query", config.devops.query.as_deref()),
+        ("notify.command", config.notify.command.as_deref()),
     ] {
         if value.is_some_and(|value| value.trim().is_empty()) {
             bail!("{key} is blank; give it a value or leave it out");
@@ -446,6 +462,32 @@ ansi = ["#0b0d14"]
                 parse("[azure]\nvaults = [\"kv\", \"\"]\n").unwrap_err()
             ),
             "azure.vaults holds a blank name; give it a value or leave it out"
+        );
+    }
+
+    #[test]
+    fn the_notify_table_parses_and_a_blank_command_is_refused() {
+        let config = parse("[notify]\ncommand = \"notify-send {title} {body}\"\n").unwrap();
+        assert_eq!(
+            config.notify.command.as_deref(),
+            Some("notify-send {title} {body}")
+        );
+        // No table at all is the whole point: nothing is ever run.
+        assert_eq!(parse("").unwrap().notify, Notify::default());
+        assert_eq!(
+            format!("{:#}", parse("[notify]\ncommand = \" \"\n").unwrap_err()),
+            "notify.command is blank; give it a value or leave it out"
+        );
+    }
+
+    /// The file the README tells people to copy is the file this build reads.
+    #[test]
+    fn the_example_file_parses_and_its_notify_command_is_the_documented_one() {
+        let config = parse(include_str!("../config.example.toml")).unwrap();
+        let command = config.notify.command.unwrap();
+        assert!(
+            command.contains("{title}") && command.contains("{body}"),
+            "{command}"
         );
     }
 
