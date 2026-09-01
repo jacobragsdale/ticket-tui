@@ -6,92 +6,62 @@ Last updated 2026-09-01. The backlog itself lives in Azure DevOps
 
 ## State of `main`
 
-- **The ergonomics round is done** (Epic #735, 2026-09-01; Issues #736–#741,
+- **The infrastructure tabs were torn out on 2026-09-01.** `main` is Work
+  items, Repos, Pull requests and Pipelines, and nothing else. What came out:
+  tabs `5`-`8` (AKS, ACR, Key Vault, Environments), the pull request
+  pre-flight, `src/aks.rs`, `src/arm.rs`, `src/arm_watch.rs`, `src/kustomize*`,
+  `src/preflight*`, the `pods`/`acr`/`vaults`/`secrets`/`keys`/`certs`/`env`
+  subcommands, the `--subscription` flag, the `[azure]`, `[[clusters]]`,
+  `[deployment]` and `[[environments]]` config tables, the `✗N pods`/`◇N certs`
+  status segments, the pod notification, and the pty walk scripts and fixtures
+  behind them. **The complete pre-teardown tree is on the `azure-infra`
+  branch** (`origin/azure-infra`, at `c84ca7f`) if any of it is wanted back.
+- **The Work items tab opens on Mine** when there is no session file yet
+  (#753); a remembered session is restored over it.
+- **The ergonomics round is done** (Epic #735, 2026-09-01; Issues #736-#741,
   see "Ergonomics and environment board, 2026-09-01" below): `g` follows the
   link on every tab, `[`/`]` retrace every visit, `+` captures a thought into
   an `inbox` Issue from any tab, `ticket-tui comment ID -` reads its body from
   a pipe, `ticket-tui status` prints the tab badges for a prompt, and
   `[notify]` in `config.toml` raises a desktop notification when a watched run,
-  a vote, a review request, a pod or an approval changes.
-- **The environment board is done** (Epic #743, 2026-09-01; Issues #744–#749):
-  `[deployment]` + `[[environments]]` name a kustomize repository and its
-  overlays; `ticket-tui env list|show|check|diff` render them with `kubectl
-  kustomize` and read names only; `env check` is the pre-deploy gate (exit 1
-  on findings, 2 when an overlay will not render), joined to the environment's
-  Key Vault; tab `8` is the board with the promotion diff in its pane; a pull
-  request against the deployment repository carries a pre-flight on tab 3.
-  **No real deployment repository has been rendered yet** — everything was
-  built against `fixtures/kustomize`; see "Environment board — integration
-  checklist" below for the day one is cloned.
-- **A review + QA round followed both epics** (#750, 2026-09-01): three
-  read-only reviewers over `e286f63..main`, every finding fixed or accepted
-  with a reason on the ticket, the theme matrix and the ignored real-`kubectl`
-  test green, and two pty walks kept beside the AKS one:
-  `scripts/walk_ergonomics.py` and `scripts/walk_environments.py`.
-- **The Work items tab opens on Mine** when there is no session file yet
-  (#753); a remembered session is restored over it.
-- Two ideas are written down as `maybe` tickets and not scheduled: #742 (`T`
-  dispatches an agent: gather → prompt → launch, one worded verb per tab) and
-  #752 (tab 9 Artifacts: Azure Artifacts, PyPI, npm, NuGet feeds).
-- **The four-tab roadmap is done**: Epics 656 (#661–#667), 657 (#669–#673),
-  658 (#674–#679), 659 (#680–#689) and 660 (#690–#694) are all closed, as is
+  a vote, a review request or an approval changes.
+- **The four-tab roadmap is done**: Epics 656 (#661-#667), 657 (#669-#673),
+  658 (#674-#679), 659 (#680-#689) and 660 (#690-#694) are all closed, as is
   #668, and the gate below was green when it closed.
 - **A review round followed the roadmap** (evening of 2026-08-29; see "Review
   round" below): the four tabs were read end to end as a QA pass, and what it
   found is fixed and on `main`.
-- **The look-and-feel round is done** (Epic #701, Issues #702–#710, planned in
+- **The look-and-feel round is done** (Epic #701, Issues #702-#710, planned in
   `LOOK_AND_FEEL_PLAN.md`; see "Look and feel, 2026-08-29" below). The theme
   engine, the table's width rule, the rounded frame with one seam between
   panes, the one-row search, the two-segment status bar, dimmed modals with
   chip buttons, the details pane's badge row and rules, and one spinner for
   every wait are all on `main`.
 - **Every tab is drawn by one pane system** (2026-08-29; see "One pane system"
-  below): the same two panes, three layouts and draggable seam on all seven.
-- **The AKS tab is done** (Epic #718: #719 the worker and the config, #720 the
-  table, #721 the log pane, #722 the verbs, #723 the CLI and these docs). Tab
-  `5` reads the clusters `config.toml` names through `kubectl` on a worker of
-  its own, and `ticket-tui pods` is the same read without the TUI. There is no
-  cluster reachable from this machine yet, so every one of those tickets was
-  built and tested against `aks::tests::FakeKube` — see "AKS tab — integration
-  checklist" below for the day one is.
-- **The ACR tab is done** (Epic #724). Tab `6` lists the subscription's
-  container registries and drills into one registry's repositories, tags and
-  manifests, and `ticket-tui acr` is the same read without the TUI.
-- **The Key Vault tab is done** (Epic #725: #730 the tab, #731 the CLI, #732
-  the context, the skill and these docs). Tab `7` lists the subscription's
-  vaults, drills into one vault's secrets, keys and certificates, and reveals
-  one secret's value on `R` for a minute and nowhere else.
-- **One `config.toml` now holds the whole setup** (#734, 2026-08-31; see
+  below): the same two panes, three layouts and draggable seam on all four.
+- **One `config.toml` holds the whole setup** (#734, 2026-08-31; see
   "Configuration, 2026-08-31" below): `[devops]` names the organization, the
   project the work items live in and the `code_project` the repositories, pull
-  requests and pipelines live in; `[azure]` names the subscriptions and,
-  optionally, which registries and vaults out of them are worth listing.
-- **The review round over all three new tabs is done** (#733, 2026-08-31; see
-  "Review round, 2026-08-31" below): three read-only reviewers over
-  `0745f38..main` plus a pty walk-through of every AKS verb against
-  `scripts/fake-kubectl` (`scripts/walk_aks.py`). Everything it confirmed is
-  fixed on `main`, each with the test that would have caught it.
-- **Neither ARM tab has ever been run against a real subscription**: there is
-  none reachable from this machine, so `src/arm.rs`, `src/arm_watch.rs`, both
-  tabs and all five CLI groups were built against `arm::tests::FakeArm`. See
-  "ARM tabs — integration checklist" below for the day one is.
+  requests and pipelines live in. The `[azure]` half of that ticket is gone
+  with the tabs it fed.
+- One idea is written down as a `maybe` ticket and not scheduled: #742 (`T`
+  dispatches an agent: gather -> prompt -> launch, one worded verb per tab).
+  #752 (tab 9 Artifacts) is superseded by the teardown.
 - The gate is `cargo fmt --check`, `cargo clippy --all-targets --all-features
-  -D warnings`, `cargo test --all-targets` (817 lib + 34 bin tests, two ignored because they
-  shell out to `az` and to `kubectl kustomize` — `cargo test -- --ignored
-  kustomize` runs the second) and
+  -D warnings`, `cargo test --all-targets` (606 lib + 32 bin tests) and
   `cargo build --release`, with the test run repeated under `NO_COLOR=1`,
-  `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` — the theme
+  `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` - the theme
   matrix, which is real because `Theme::from_env` reads the variable.
-- Database schema is `PRAGMA user_version = 17`. A schema bump drops and
-  rebuilds rather than migrating, so the first launch of a build that raises it
-  does one full pull automatically — and a running `ticket-tui` binary from
-  before the bump refuses to open the file until it is rebuilt.
+- Database schema is `PRAGMA user_version = 17`; the agent context file is
+  schema 4, which dropped the five infra blocks schema 3 carried. A schema bump
+  drops and rebuilds rather than migrating, so the first launch of a build that
+  raises it does one full pull automatically - and a running `ticket-tui`
+  binary from before the bump refuses to open the file until it is rebuilt.
 
 ## The module tree (#661, #662, #698)
 
 `src/app.rs`, `src/ui.rs` and `src/run.rs` are directory modules; every file is
-under 1,500 lines. `App` is `{ shell, tab, work_items, repos, pull_requests, pipelines, aks, acr,
-key_vault, environments }`:
+under 1,500 lines. `App` is `{ shell, tab, work_items, repos, pull_requests, pipelines }`:
 `Shell` is the state every screen shares and each tab is a `Screen`. A screen
 method that needs the shell takes `shell: &mut Shell` (or `&Shell`) as its
 first argument after the receiver; nothing else reaches across.
@@ -115,44 +85,14 @@ first argument after the receiver; nothing else reaches across.
         repos/          the Repos tab: the table, the workspace, the git keys
         pull_requests/  the Pull requests tab: votes, complete, comment
         pipelines/      the Pipelines tab: two levels, the timeline, the log
-        aks/            the AKS tab: the pod table, the details and text panes,
-                        and the verbs — mod.rs, columns.rs, tests.rs
-        acr/            the ACR tab: registries and one registry's catalog —
-                        mod.rs, columns.rs, filters.rs, rows.rs, tests.rs
-        key_vault/      the Key Vault tab: vaults and one vault's items, and
-                        the reveal that clears itself — the same five files
-        environments/   tab 8: services × environments, the column cursor,
-                        the promotion pane — the same five files
-    src/kustomize.rs    the environment model: render (kubectl kustomize, with
-                        a deadline), parse (names only, never a value), expand
-                        (the `*` glob), check and check_with (the repo-only and
-                        vault findings), VaultNames
-        kustomize/diff.rs  the promotion diff between two environments and the
-                        image read-back to runs, pull requests and work items
-    src/preflight.rs    a pull request's pre-flight: the touched overlays
-                        rendered at both branches in scratch worktrees, checked
-                        and diffed, the worktrees removed however it leaves
-    src/notify.rs       [notify]: the command, its quoting, and the three
-                        edge diffs (votes, pods, approvals) behind the events
+    src/notify.rs       [notify]: the command, its quoting, and the two
+                        edge diffs (votes, approvals) behind the events
     src/status.rs       `ticket-tui status`: the badges from SQLite and the
                         context file, on one line
     src/watch.rs        the pipeline watcher thread: live runs, timelines, logs,
                         approvals — cadences that stretch, and no SQLite at all
     src/local.rs        the local-repos thread: the workspace scan and the three
                         git commands the Repos tab runs — also no SQLite
-    src/aks.rs          the AKS worker thread: Pod, PodRow, PodSchema, the
-                        KubeSource trait and the Kubectl behind it, PodWatcher
-                        with a 15 s Cadence per cluster, and the one
-                        `kubectl logs -f` child — no SQLite either
-    src/arm.rs          the Azure Resource Manager client the ACR and Key Vault
-                        tabs read through: ArmConfig and how a subscription is
-                        resolved, the three token audiences, the Resource Graph
-                        inventory query, the two data planes, and Secret —
-                        whose Debug and Display both print [redacted]
-    src/arm_watch.rs    the ARM worker thread, one for both tabs: the 60 s
-                        inventory cadence while either is showing, one read per
-                        focus under it, and the reveal that is answered once
-                        and never held — no SQLite here either
     src/main.rs         opens the module below and reports what it returns
     src/run/mod.rs      run: the database, the workers, the terminal, and back
         engines.rs      the sync, details, local and reload workers, and the
@@ -163,8 +103,7 @@ first argument after the receiver; nothing else reaches across.
         editor.rs       the description round trip through $VISUAL/$EDITOR/vi
         desktop.rs      the clipboard and the browser
         pointer.rs      the mouse pointer shape, and what the hover means
-        tests/          the same split, over one fake Azure DevOps — and
-                        tests/aks.rs, over one fake kubectl
+        tests/          the same split, over one fake Azure DevOps
     src/ui/mod.rs       render, render_screen, the layout, the theme, anchoring
         panes.rs        the pane system every tab is arranged by: the three
                         layouts, the draggable seam, the narrow switcher
@@ -176,23 +115,7 @@ first argument after the receiver; nothing else reaches across.
         repos.rs        the Repos tab's own renderer
         pull_requests.rs  the Pull requests tab's own renderer
         pipelines.rs    the Pipelines tab's own renderer
-        aks.rs          the AKS tab's own renderer: the table, the pod details
-                        and the log pane under them
-        acr.rs          the ACR tab's own renderer: the two tables, the
-                        registry and repository panes, the tags and manifest
-        key_vault.rs    the Key Vault tab's own renderer: the two tables, the
-                        vault and item panes, the expiry colours and the one
-                        line a revealed value is drawn on
-        tests/          the same split, plus tests/acr.rs and
-                        tests/key_vault.rs
-    scripts/fake-kubectl  a kubectl that answers from fixtures: get pods, a
-                        streaming logs -f, describe, delete and exec
-    scripts/walk_aks.py walks every AKS verb in the release binary under a pty
-                        against that fake, PASS/FAIL per step (needs `pyte`)
-    scripts/walk_ergonomics.py  the same shape over the ergonomics round: g,
-                        [ ], +, status against the live TUI, the session
-    scripts/walk_environments.py  the same over tab 8, with fixtures/kustomize
-                        made into a clone and rendered by the real kubectl
+        tests/          the same split, one file per renderer
 
 Every ui function takes `screen` and `shell` rather than `app`, and
 `ui::render` paints the tab bar itself and then goes through `App::screen()`
@@ -260,6 +183,10 @@ used to do.
 
 ## Configuration, 2026-08-31 (#734)
 
+*Written before the 2026-09-01 teardown: `[azure]` and `[[clusters]]` are gone
+with the tabs they fed, and so is `--subscription`. The `[devops]` half below
+is still how `main` works.*
+
 `config.toml` is now the one file a machine is set up with, and
 `config.example.toml` at the root is a commented copy of the whole of it. Two
 tables joined the theme and `[[clusters]]`, both optional and both ignored by
@@ -300,6 +227,9 @@ organization or a multi-subscription tenant — there is neither on this machine
 so both paths are covered by tests only.
 
 ## Review round, 2026-08-31
+
+*Written before the 2026-09-01 teardown: everything below about the AKS, ACR
+and Key Vault tabs is history, kept for the shapes of bug it names.*
 
 The three new tabs (5 AKS, 6 ACR, 7 Key Vault) were read as one change by
 three reviewers — the AKS side, the ARM side, the seams with the rest of the
@@ -384,7 +314,7 @@ subcommands and context v3.
 ## What is left
 
 Nothing on the four-tab roadmap: Epics 656–660 are all closed. The last slice
-(Epic 660) added the artifact links a work item carries, context schema 3, the
+(Epic 660) added the artifact links a work item carries, the context schema, the
 `repos`/`prs`/`pipelines`/`runs`/`approvals` subcommands, and the rewritten
 `ticket-tui-context` skill in `.agents/skills/`, which is the place to start for
 anything an agent should know about this project.
@@ -418,6 +348,9 @@ implemented what the real client did not**.
 
 ## Ergonomics and environment board, 2026-09-01 (Epics #735, #743)
 
+*The environment-board half (#743) was torn out the same day; the ergonomics
+half (#735) is on `main`.*
+
 Twelve issues, implemented by one Opus agent each in a git worktree — five in
 parallel, then three, then the board — with the orchestrator reading every
 diff, merging, gating and closing the ticket. The decisions made at the seams
@@ -442,148 +375,6 @@ are on the tickets themselves; the ones worth knowing before touching the code:
 - The pre-flight is cached per `(pull request, source head)`; `r` re-flies;
   one is in the air at a time; scratch worktrees under `$TMPDIR` are swept on
   the next run even after a kill.
-
-## Environment board — integration checklist
-
-The day a real deployment repository is in the workspace:
-
-1. `config.toml`: `[deployment] repo = "<name as the Repos tab shows it>"`,
-   and one `[[environments]]` per overlay set with `overlays` globs relative to
-   the clone, `vault`, `registry`, `cluster`. `render = "kustomize build"` if
-   the repository needs a newer kustomize than kubectl embeds.
-2. `ticket-tui env list` — every environment says `rendered` or the renderer's
-   own last line. A remote `resources:` URL in a kustomization will hit the
-   120 s render deadline; vendor it or raise `RENDER_TIMEOUT`.
-3. `ticket-tui env show prod` — read the providers block: the vault name each
-   `SecretProviderClass`/`ExternalSecret` resolves to must be the environment's
-   own, or every check for it reads as `pulls from <other>`.
-4. `ticket-tui env check` — expect noise first: `envFrom` on a Secret the
-   provider fills whole (`dataFrom`) is silent, a volume with `items` is
-   checked per key; a projected volume is read. Anything false is a parse gap
-   in `src/kustomize.rs` — add the YAML to the tests and fix the reader.
-5. `ticket-tui env diff qa prod <service>` — the image read-back needs the
-   runs on file (`build_number` or `source_version` prefix) and a clone of the
-   service's repository named like the workload; the OCI `revision` rule is a
-   parameter nobody passes yet.
-6. Tab `8`, then `r`; then a pull request against the repository on tab 3 —
-   the pre-flight fetches through `local::remote_git`, so the MSA header
-   applies, and the scratch worktrees appear under `$TMPDIR` for the render.
-
-## AKS tab — integration checklist
-
-Nothing in Epic #718 was ever run against a real cluster: there is none
-reachable from this machine, so the worker, the tab and `ticket-tui pods` were
-all built against `aks::tests::FakeKube`. That is not the same as working. The
-day a cluster is reachable, walk this list in order — it is the shortest path
-from nothing to a tab that is definitely honest.
-
-**1. Get `kubectl` working outside ticket-tui first.** The TUI shells out to it
-and shows what it says; a login problem here reads as a broken tab.
-
-```console
-brew install Azure/kubelogin/kubelogin
-az aks get-credentials -g <rg> -n <cluster> --subscription <sub>   # per cluster
-kubelogin convert-kubeconfig -l azurecli
-kubectl --context <ctx> get pods -n <ns>                           # in a plain shell
-```
-
-**2. Then the CLI, before the TUI.** Add a `[[clusters]]` table per cluster to
-`~/.config/ticket-tui/config.toml` — `name`, `context`, and `namespaces` (leave
-it out for `--all-namespaces`) — and run:
-
-```console
-ticket-tui pods
-ticket-tui pods --json
-```
-
-They take the same read path the tab does, with none of the drawing, so a
-failure here is the read and not the screen.
-
-**3. Then the tab.** `5`, and work down:
-
-- Both clusters' rows appear as each read lands, not only when the slowest one
-  does.
-- `/` `cluster:prod status:running` narrows; a header click sorts; `c` puts Node
-  and Repo on the table.
-- Select a pod: the log tails within a second. Scroll up — the title says
-  `scrolled`; `End` — `following`.
-- `P` on a CrashLoopBackOff pod shows the run before the last restart. `C` on a
-  multi-container pod moves between them. `D` then `L` swaps describe and log.
-- `s` opens a shell in the pod, and the TUI repaints when it exits.
-- `x` on a qa pod: the confirmation names the owner, a second `x` sends it, the
-  row goes `Terminating`, and the replacement appears within about a second.
-- `g` jumps to the repository — only for a pod whose image or app label names
-  one the project has.
-- Edit `config.toml` while it runs: the new cluster is read at once.
-- Set one cluster's context to a name that does not exist: its message shows in
-  the table status and in the details pane, and the other cluster is unaffected.
-- Leave the tab and come back: the stream survives. Quit with `q` and check
-  `pgrep kubectl` leaves nothing behind.
-
-## ARM tabs — integration checklist
-
-Same story as AKS: nothing in Epics #724 and #725 was ever run against a real
-subscription, so the client, the worker, both tabs and all five CLI groups were
-built against `arm::tests::FakeArm`. That is not the same as working. The day a
-subscription is reachable, walk this in order.
-
-**1. Get the Azure CLI working outside ticket-tui first.** Everything here
-borrows its login, and a login problem reads as two broken tabs.
-
-```console
-az login
-az account set --subscription <id>          # or pass --subscription / set TICKET_TUI_SUBSCRIPTION
-az account show --query id -o tsv
-```
-
-An Azure DevOps personal access token does not reach a subscription:
-`AZURE_DEVOPS_EXT_PAT` alone leaves both tabs offline, on purpose.
-
-**2. Then the CLI, before the TUI.** Same read path, none of the drawing, so a
-failure here is the read and not the screen.
-
-```console
-ticket-tui acr list
-ticket-tui vaults list
-ticket-tui acr repos list --registry <r>
-ticket-tui certs list --vault <v>
-```
-
-**3. Then tab `6`.**
-
-- Registries land within a minute of opening the tab, and again on `r`.
-- `Enter` on one: the catalog appears, the counts fill in behind it, and the
-  bottom border counts the attributes reads while they land.
-- The details pane's tags fill, and the Manifest section follows the tag cursor
-  (`Tab`, then `j`/`k`, or a click).
-- `y` copies a pull reference that actually pulls — paste it after `docker pull`.
-- `D` copies the digest. `o` opens the registry in the portal.
-- `h` or `Backspace` goes back up and the cursor stays where it was.
-
-**4. Then tab `7`.**
-
-- Vaults land; `Enter` opens one and the three kinds arrive as one listing.
-- `kind:cert expires:<+30d` narrows to what is running out, and the `◇N` badge
-  on the tab agrees with the rows.
-- `R` on **one secret you are allowed to see**: the value shows, `clears in 60s`
-  counts down, and it is gone after a minute. Leave the tab and come back — it
-  is gone. Press `r` — it is gone.
-- `Y` while it is showing copies it; `Y` after it has cleared says
-  `Nothing is revealed to copy`.
-- A secret you are *not* allowed to read: the refusal shows under `Problem` and
-  the rest of the listing stays on screen.
-- `grep` the context file and the session file for the value you revealed. Both
-  must be clean.
-
-**5. Both tabs, wrong on purpose.** Start with `--subscription
-00000000-0000-0000-0000-000000000000`: both tabs say so rather than drawing an
-empty table with no explanation. Start with no subscription at all and no `az
-account`: the same, in `arm.last_error`.
-
-Settled in #733 (`r` now re-reads the open registry or vault too); the note as it stood: `r` re-reads the *inventory* and re-asks for the
-current focus, but not the items of a registry or vault that is already open and
-already read — the focus reads are once-per-focus by design. Decide there
-whether `r` should force those too.
 
 ## Known data issue, not a code bug
 

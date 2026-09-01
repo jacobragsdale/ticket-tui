@@ -232,12 +232,6 @@ pub struct Shell {
     /// nothing about what it does not.
     pub(crate) pull_request_labels: Vec<(i64, String, PrStatus)>,
     pub(crate) run_labels: Vec<(i64, String, RunStatus, Option<RunResult>)>,
-    /// Every container image the AKS tab has read, with the pod running it,
-    /// in the order the pods are held. The ACR tab reads it to go from a tag
-    /// to what is running it: the pods live on another screen, and asking the
-    /// cluster again for a question the last read already answered is a read
-    /// nobody asked for.
-    pub(crate) pod_images: Vec<(String, crate::aks::PodKey)>,
     /// What the pipeline watcher is doing, as the database overlay reports
     /// it. `None` for a run with no watcher at all.
     pub(crate) watch_state: Option<String>,
@@ -273,13 +267,6 @@ pub struct Shell {
     /// Display name of the signed-in Azure DevOps user, so their own work
     /// items can stand out. `None` until a sync records one.
     pub(crate) me: Option<String>,
-    /// Why ARM cannot be reached, in one line, for the tabs that read it:
-    /// no subscription resolved, or the Azure CLI is not signed in. `None`
-    /// once a subscription has resolved, which is when those tabs can read.
-    pub(crate) arm_state: Option<String>,
-    /// The subscription the ACR and Key Vault tabs read, as the agent context
-    /// publishes it. `None` until one resolves.
-    pub(crate) arm_subscription: Option<String>,
     /// What says on the desktop that something worth interrupting for has
     /// happened, from `[notify]` in `config.toml`. Without that table it does
     /// nothing and the status line is all there is.
@@ -312,7 +299,6 @@ impl Default for Shell {
             work_item_titles: Vec::new(),
             pull_request_labels: Vec::new(),
             run_labels: Vec::new(),
-            pod_images: Vec::new(),
             watch_state: None,
             history: Vec::new(),
             future: Vec::new(),
@@ -326,8 +312,6 @@ impl Default for Shell {
             sync_error: None,
             sync_paused_until: None,
             me: None,
-            arm_state: None,
-            arm_subscription: None,
             notifier: Notifier::default(),
         }
     }
@@ -364,28 +348,6 @@ impl Shell {
             .iter()
             .find(|(held, _, _)| *held == id)
             .map(|(_, title, status)| (title.as_str(), *status))
-    }
-
-    /// What the AKS tab has read, for the ACR tab to match a tag against.
-    pub fn set_pod_images(&mut self, images: Vec<(String, crate::aks::PodKey)>) {
-        self.pod_images = images;
-    }
-
-    /// The first pod whose image is one of these references, if the clusters
-    /// read so far hold one.
-    #[must_use]
-    pub fn pod_running(
-        &self,
-        references: &[String],
-        cluster: Option<&str>,
-    ) -> Option<&crate::aks::PodKey> {
-        self.pod_images
-            .iter()
-            .find(|(image, key)| {
-                references.iter().any(|held| held == image)
-                    && cluster.is_none_or(|held| key.cluster == held)
-            })
-            .map(|(_, key)| key)
     }
 
     /// One run's build number and how it went, when the database holds it.
@@ -848,27 +810,6 @@ impl Shell {
     /// Why the TUI cannot write anything, told to whoever tries to.
     pub fn set_offline_reason(&mut self, reason: Option<String>) {
         self.offline_reason = reason;
-    }
-
-    /// Why ARM cannot be reached, or `None` once a subscription resolved.
-    pub fn set_arm_state(&mut self, state: Option<String>) {
-        self.arm_state = state;
-    }
-
-    /// The same reason, for the tab that has to say why its table is empty.
-    #[must_use]
-    pub fn arm_state(&self) -> Option<&str> {
-        self.arm_state.as_deref()
-    }
-
-    /// The subscription the ARM tabs read, once one has resolved.
-    pub fn set_arm_subscription(&mut self, subscription: Option<String>) {
-        self.arm_subscription = subscription;
-    }
-
-    #[must_use]
-    pub fn arm_subscription(&self) -> Option<&str> {
-        self.arm_subscription.as_deref()
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {

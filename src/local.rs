@@ -54,32 +54,6 @@ pub enum LocalRequest {
         repo_id: String,
         path: PathBuf,
     },
-    /// Render one kustomize overlay of the deployment clone. It sits here
-    /// rather than on the sync worker for the same reason a clone does: a
-    /// render shells out to `kubectl` and takes as long as it takes, and an
-    /// edit may not wait on it.
-    Render {
-        environment: String,
-        clone: PathBuf,
-        overlay: String,
-        command: String,
-    },
-    /// Pre-fly one pull request against the deployment repository: what the
-    /// head it was read at would leave an environment missing. It sits here
-    /// for the same reason a render does — a fetch, a worktree and a `kubectl`
-    /// per overlay take as long as they take.
-    Preflight {
-        id: i64,
-        /// The head it is flown at, which is what the answer is cached under.
-        commit: String,
-        source: String,
-        target: String,
-        deployment: crate::preflight::Deployment,
-        /// What the vaults hold, as whoever reads vaults read them. This
-        /// thread has no way to reach a subscription, so the half of the check
-        /// that needs one travels with the request as names.
-        vaults: Vec<crate::kustomize::VaultNames>,
-    },
     Stop,
 }
 
@@ -99,22 +73,6 @@ pub enum LocalEvent {
         job: GitJob,
         message: String,
         error: bool,
-    },
-    /// One overlay, rendered: the YAML, or the one line of the renderer's
-    /// complaint that says what to fix.
-    Rendered {
-        environment: String,
-        overlay: String,
-        rendered: Result<String, String>,
-    },
-    /// One pull request, pre-flown: what its overlays would be missing, or the
-    /// one line saying why it could not be looked at. Boxed: a report carries
-    /// both renders of every overlay it touched, and every other event on this
-    /// channel is a line or two.
-    Preflighted {
-        id: i64,
-        commit: String,
-        found: Result<Box<crate::preflight::Report>, String>,
     },
     Stopped,
 }
@@ -179,31 +137,6 @@ fn work(requests: &Receiver<LocalRequest>, events: &Sender<LocalEvent>) {
                     remote_git(&path, &["pull", "--ff-only"]).map(|_| "Pulled".to_owned())
                 })
             }
-            LocalRequest::Render {
-                environment,
-                clone,
-                overlay,
-                command,
-            } => events.send(LocalEvent::Rendered {
-                rendered: crate::kustomize::render(&clone, &overlay, &command)
-                    .map_err(|error| last_line(&format!("{error:#}"))),
-                environment,
-                overlay,
-            }),
-            LocalRequest::Preflight {
-                id,
-                commit,
-                source,
-                target,
-                deployment,
-                vaults,
-            } => events.send(LocalEvent::Preflighted {
-                found: crate::preflight::run(&deployment, &source, &target, &commit, &vaults)
-                    .map(Box::new)
-                    .map_err(|error| last_line(&format!("{error:#}"))),
-                id,
-                commit,
-            }),
         };
         if sent.is_err() {
             return;

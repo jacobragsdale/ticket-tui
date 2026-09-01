@@ -1,7 +1,7 @@
 //! Everything the interactive run does, from claiming the terminal to
 //! putting it back. `main` opens the database and hands over to `run`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -21,13 +21,10 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use serde_json::Value;
 use ticket_tui::agent_context::{self, AgentContext};
-use ticket_tui::aks::{AksEvent, AksHandle, AksRequest, Cluster, Kubectl, LogFollow, Pod, PodKey};
 use ticket_tui::app::{
     App, AppAction, CopiedContent, DividerOrientation, NotificationLevel, PointerTarget, Snapshot,
     SyncTarget, TabId,
 };
-use ticket_tui::arm::ArmConfig;
-use ticket_tui::arm_watch::{ArmEvent, ArmFocus, ArmHandle, ArmRequest};
 use ticket_tui::azure::AzureConfig;
 use ticket_tui::cli::{self, Cli, resolve_me, resolve_refresh, resolve_stale_days};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
@@ -35,8 +32,7 @@ use ticket_tui::edit::{EditRejection, EditRequest, FieldEdit};
 use ticket_tui::local::{self, LocalEvent, LocalHandle, LocalRequest};
 use ticket_tui::markdown;
 use ticket_tui::model::{GitJob, Run, RunResult, Ticket, TicketKey};
-use ticket_tui::notify::{self, Notifier, PodMarks};
-use ticket_tui::preflight::Deployment;
+use ticket_tui::notify::{self, Notifier};
 use ticket_tui::session;
 use ticket_tui::sync::{
     self, AzureConnector, DetailsOutcome, PullOrigin, PulledExtras, ReparentRejection, SyncEvent,
@@ -199,19 +195,7 @@ pub(super) fn run() -> Result<()> {
             worker: LocalHandle::spawn().ok(),
             ..LocalRuntime::default()
         },
-        aks: AksRuntime::default(),
-        arm: ArmRuntime::default(),
-        // Which subscriptions the ACR and Key Vault tabs read, and which of
-        // the registries and vaults in them are worth listing: the flags, the
-        // variable and the file, and nothing else. Asking the Azure CLI costs
-        // a shell-out, so the worker thread does that instead — and only once
-        // one of those tabs is opened.
-        arm_config: cli.arm_config(),
     };
-    app.shell.set_arm_subscription(
-        (!runtime.arm_config.subscriptions.is_empty())
-            .then(|| runtime.arm_config.subscriptions.join(", ")),
-    );
     if let Some(config) = config.filter(|_| wrong_project.is_none()) {
         runtime.worker = Some(SyncHandle::spawn(
             database_path.clone(),

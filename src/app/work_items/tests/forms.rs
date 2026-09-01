@@ -778,11 +778,12 @@ fn a_refused_create_reopens_the_form_with_everything_still_in_it() {
     );
 }
 
-/// The whole point of `+`: a thought that arrives while reading a pod log goes
-/// down as a work item without leaving the pod log.
+/// The whole point of `+`: a thought that arrives while reading a pipeline run
+/// goes down as a work item without leaving the run.
 #[test]
 fn a_capture_files_an_issue_on_me_in_the_current_sprint_and_moves_no_cursor() {
-    let mut app = crate::app::aks::tests::aks_app();
+    let mut app = crate::app::pipelines::tests::pipelines_app();
+    app.select_tab(TabId::Pipelines);
     app.shell.enable_sync();
     app.shell.set_me(Some("Avery Chen".into()));
     app.work_items.set_identities(vec![Identity::new(
@@ -792,14 +793,14 @@ fn a_capture_files_an_issue_on_me_in_the_current_sprint_and_moves_no_cursor() {
     app.work_items
         .merge_classification_nodes(classification_trees());
     press(&mut app, KeyCode::Down);
-    let pod = Screen::here(&app.aks, &app.shell);
-    assert!(pod.is_some(), "the AKS cursor is on a pod");
+    let run = Screen::here(&app.pipelines, &app.shell);
+    assert!(run.is_some(), "the Pipelines cursor is on a row");
 
     press(&mut app, KeyCode::Char('+'));
     assert_eq!(
         app.work_items.mode,
         WorkItemMode::Capture,
-        "`+` opens the capture row over the pods"
+        "`+` opens the capture row over the runs"
     );
     type_text(&mut app, "the retry loop in sync.rs swallows the 412");
     let action = press(&mut app, KeyCode::Enter);
@@ -835,13 +836,13 @@ fn a_capture_files_an_issue_on_me_in_the_current_sprint_and_moves_no_cursor() {
     );
     assert_eq!(
         app.tab,
-        TabId::Aks,
+        TabId::Pipelines,
         "the tab it was captured from is showing"
     );
     assert_eq!(
-        Screen::here(&app.aks, &app.shell),
-        pod,
-        "and the AKS cursor has not moved"
+        Screen::here(&app.pipelines, &app.shell),
+        run,
+        "and the Pipelines cursor has not moved"
     );
     assert_eq!(
         app.shell.notification().map(|(message, _)| message),
@@ -927,7 +928,8 @@ fn esc_leaves_nothing_behind_a_capture() {
 
 #[test]
 fn a_refused_capture_comes_back_as_the_row_with_the_thought_still_in_it() {
-    let mut app = crate::app::aks::tests::aks_app();
+    let mut app = crate::app::pipelines::tests::pipelines_app();
+    app.select_tab(TabId::Pipelines);
     app.shell.enable_sync();
     app.shell.set_me(Some("Avery Chen".into()));
     press(&mut app, KeyCode::Char('+'));
@@ -939,6 +941,6 @@ fn a_refused_capture_comes_back_as_the_row_with_the_thought_still_in_it() {
     assert_eq!(app.work_items.capture.text(), "a thought");
     assert!(
         app.shell_overlay_open(),
-        "the row is painted over the AKS tab again, not a form nobody opened"
+        "the row is painted over the Pipelines tab again, not a form nobody opened"
     );
 }

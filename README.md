@@ -11,7 +11,7 @@ field changed in the TUI is written straight back over the REST API. Everything
 else it does is local.
 
 ```
- 1 Work items  2 Repos  3 Pull requests  4 Pipelines  5 AKS  6 ACR  7 Key Vault  8 Env  ?
+ 1 Work items  2 Repos  3 Pull requests  4 Pipelines                                  ?
 / Type / to search, or pick a filter from the bar below
  State ▾   Assignee ▾   Iteration ▾   Type ▾   Priority ▾   Tags ▾   +
 ╭ Tickets 116/116 · Changed ↑ ───────────────────────────────────────────────────────╮
@@ -51,12 +51,11 @@ cargo run --release -- sync                               # fills the database
 cargo run --release                                       # later runs open at once
 ```
 
-`config.toml` names the organization, the project the work items live in, the
-project the code lives in, the subscriptions the ACR and Key Vault tabs read,
-and the clusters the AKS tab reads. Every one of them can still be overridden
-by a flag — `--org`, `--project`, `--code-project`, `--subscription` — or by
-the matching `TICKET_TUI_*` variable, and whatever none of the three name is
-left for the Azure CLI to answer.
+`config.toml` names the organization, the project the work items live in, and
+the project the code lives in. Every one of them can still be overridden by a
+flag — `--org`, `--project`, `--code-project` — or by the matching
+`TICKET_TUI_*` variable, and whatever none of the three name is left for the
+Azure CLI to answer.
 
 The first `sync` fills the database; every run after it opens immediately and
 pulls in the background. The Work items tab opens on **Mine** — the rows
@@ -68,23 +67,16 @@ offline, browsing whatever the database already holds.
 
 | Key | Does |
 |---|---|
-| `1`–`8` | Work items, Repos, Pull requests, Pipelines, AKS, ACR, Key Vault, Environments |
+| `1`–`4` | Work items, Repos, Pull requests, Pipelines |
 | `/` | Live fuzzy search — `state:active`, `assignee:@me`, `id:642` |
 | `p` / `:` | The command palette: every action the tab can take |
 | `e` | The Actions menu — edit title, state, assignee, tags, description |
 | `n` / `N` | New work item, or a new child of the selected one |
 | `+` | Quick capture, on every tab: one row, a title, `Enter` — an Issue on you, in the current sprint, tagged `inbox` |
-| `r` | Sync now, without waiting for the timer — on AKS, ACR and Key Vault it re-reads that tab's own source, on Pull requests it flies the pre-flight again, and on Environments it renders the overlays again |
-| `o` | Open the selected row in the system browser; the Azure portal on ACR and Key Vault |
+| `r` | Sync now, without waiting for the timer |
+| `o` | Open the selected row in the system browser |
 | `?` | The in-app help, generated from the same table the keys are bound in |
-| `L` / `D` | On AKS: tail the selected pod's log, or `kubectl describe` it |
-| `x` / `s` | On AKS: restart the pod after a confirm, or open a shell in it |
-| `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a repository's open pull request, a pod's repository, a tag's pod |
-| `Enter` / `h` | On ACR and Key Vault: into the registry or vault under the cursor, and back out |
-| `y` / `D` | On ACR: copy the pull reference, or the tag's digest |
-| `R` / `Y` | On Key Vault: show a secret's value for one minute, or copy it while it is up |
-| `h` / `l` | On Environments: move the column cursor, which is the environment a promotion is read into |
-| `F` | On Environments: only the services something is missing |
+| `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a repository's open pull request |
 | `[` / `]` | Back and forward through everywhere you have been, across tabs |
 | `q` | Quit |
 
@@ -118,40 +110,10 @@ project = "ISTO"
 code_project = "Fiquants"
 ```
 
-`[azure]` says what the ACR and Key Vault tabs read. They address an **Azure
-subscription** rather than the Azure DevOps project, so they need `az login`;
-an Azure DevOps personal access token does not reach a subscription, and a
-tenant other than the login's default wants `az login --tenant <tenant>`.
-`subscriptions` may name several at once, and `registries` and `vaults` narrow
-what is listed to the ones worth seeing, in the order they are written:
-
-```toml
-[azure]
-subscriptions = ["<dev-guid>", "<qa-guid>"]
-registries = ["acrdev", "acrqa"]
-vaults = ["kv-dev", "kv-qa"]
-```
-
-Left out, the subscription is `--subscription <id>`, else
-`TICKET_TUI_SUBSCRIPTION`, else whichever one `az account set` left the Azure
-CLI on; with none of the four both tabs draw empty and say why.
-
-The same file names the clusters the AKS tab reads, one table each — the name
-the tab shows, the kubeconfig context `kubectl` reaches it by, and the
-namespaces to read, or none for all of them. The contexts are the ones
-`az aks get-credentials` writes into the kubeconfig:
-
-```toml
-[[clusters]]
-name = "qa"
-context = "aks-qa"
-namespaces = ["orders", "billing"]
-```
-
 `[notify]` is one command, run through `sh -c` when something worth
 interrupting for happens: a run you pressed `w` on finishes, a vote lands on a
-pull request you wrote, one turns up wanting your review, a pod restarts or
-starts crash-looping, an approval lands on a run. The status line says the same words
+pull request you wrote, one turns up wanting your review, an approval lands on
+a run. The status line says the same words
 whether or not the table is there, so this is the copy you get when ticket-tui
 is in a pane you are not looking at:
 
@@ -166,36 +128,6 @@ shell word, so write them where an argument goes and quote nothing around them;
 hands both to `osascript` through `argv`. Nothing is announced for what was
 already there when the run started.
 
-`[deployment]` and `[[environments]]` say where the kustomize overlays live and
-what each environment is made of. `repo` is the deployment repository as the
-Repos tab names it — its clone is found by the same workspace scan — and
-`overlays` are directories relative to that clone, with `*` matching within one
-path segment so one line covers every service:
-
-```toml
-[deployment]
-repo = "deployment"
-
-[[environments]]
-name = "prod"
-overlays = ["services/*/overlays/prod"]
-vault = "kv-prod"
-```
-
-Without a `[deployment]` table, or without a clone, the `env` commands and tab
-`8` say where they looked and do nothing else.
-
-Tab `8` is the glance those commands answer one at a time: one row per service,
-one column per `[[environments]]`, each cell the image tag with `✗N` for what
-that environment would be missing and `◇N` for the vault objects it uses that
-are about to lapse. `h` and `l` move the column cursor, and the details pane
-reads the promotion into the environment under it from the one to its left —
-image, secrets, config, variables and expiry — with every line that names a
-run, a vault object or a pod one `g` away from the tab that holds it. The
-overlays are rendered when the tab is first opened, when `r` asks, and when a
-`git pull` on the Repos tab moves the deployment clone; never on a timer,
-because a repository only changes when somebody pushes.
-
 And it holds the colour theme: a `[theme.custom]` palette in the vocabulary of
 the `theme` tool, which applies one palette to every program on the machine,
 writes this file for you, and repaints a running ticket-tui when it changes.
@@ -203,25 +135,8 @@ Without one the sixteen ANSI colours of the terminal show through; `--theme
 terminal-light` suits a white ground, and `NO_COLOR` turns colour off.
 
 `ticket-tui` is also a CLI — `list`, `show`, `edit`, `comment`, `create`,
-`repos`, `prs`, `pipelines`, `runs`, `approvals`, `pods`, `acr`, `vaults`,
-`secrets`, `keys`, `certs`, `status`, `env` — so a script or an agent can do anything
-the TUI can. `ticket-tui env check prod` is the pre-deploy gate: it renders the
-environment's own overlays and reports every ConfigMap and Secret key a
-workload reads that the overlay never defines, offline and before the merge —
-exit 1 for any finding, 0 for clean, 2 when an overlay would not render, so the
-deployment repository's pipeline can run it as a step. It also reads the
-environment's own key vault and reports every object the overlay pulls that the
-vault does not hold, every provider pulling from another environment's vault,
-and every object in use inside thirty days of its expiry; `--offline`, or no
-`az` to get a token with, skips that half in one line on stderr and leaves the
-exit code to the overlays alone. `ticket-tui env diff qa
-prod orders` is the promotion read before it is made: every ConfigMap and
-Secret key, vault object and variable qa has that prod has not, and the image
-gap read back through the runs to the pull requests and work items between
-them. The vault commands print names, dates and whether a thing is enabled;
-`ticket-tui secrets show --vault V NAME --value` is the only one that prints a
-secret's value, raw, to stdout — so run it deliberately and keep what it prints
-out of anything you save.
+`repos`, `prs`, `pipelines`, `runs`, `approvals`, `status` — so a script or an
+agent can do anything the TUI can.
 
 `comment` takes its body down a pipe, so the tail of a test run reaches a work
 item — or a pull request — without going through the clipboard:
@@ -239,7 +154,7 @@ milliseconds, and nothing at all when there is nothing to say:
 
 ```console
 $ ticket-tui status
-doing 4 · stale 2 · review 3 · rejected 1 · ◐1 · failed 1 · ✗2 pods · ◇2 certs
+doing 4 · stale 2 · review 3 · rejected 1 · ◐1 · failed 1
 ```
 
 ## More

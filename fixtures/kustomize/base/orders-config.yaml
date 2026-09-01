@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: orders-config
-data:
-  LOG_LEVEL: info
-  BANNER: |
-    orders api
-    two lines of it, and a colon: here

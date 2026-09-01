@@ -804,30 +804,6 @@ pub enum Jump {
     },
     Pipeline(i64),
     Run(i64),
-    /// One pod, by cluster, namespace and name.
-    Pod(crate::aks::PodKey),
-    /// One container registry, by name.
-    Registry(String),
-    /// One repository inside one registry, which is two levels down the ACR
-    /// tab and so carries both names.
-    Repository {
-        registry: String,
-        name: String,
-    },
-    /// One key vault, by name.
-    Vault(String),
-    /// One secret, key or certificate in it. The kind travels with the name
-    /// because a vault may hold all three under it.
-    VaultItem {
-        vault: String,
-        kind: String,
-        name: String,
-    },
-    /// One service on the environments board, in one environment's column.
-    Service {
-        environment: String,
-        service: String,
-    },
 }
 
 impl Jump {
@@ -844,15 +820,6 @@ impl Jump {
             Self::PullRequest { repo, id } => format!("Pull request !{id} in {repo}"),
             Self::Pipeline(id) => format!("Pipeline #{id}"),
             Self::Run(id) => format!("Run #{id}"),
-            Self::Pod(key) => format!("Pod {} in {}/{}", key.name, key.cluster, key.namespace),
-            Self::Registry(name) => format!("Registry {name}"),
-            Self::Repository { registry, name } => format!("Repository {name} in {registry}"),
-            Self::Vault(name) => format!("Vault {name}"),
-            Self::VaultItem { vault, kind, name } => format!("The {kind} {name} in {vault}"),
-            Self::Service {
-                environment,
-                service,
-            } => format!("Service {service} in {environment}"),
         }
     }
 
@@ -860,16 +827,7 @@ impl Jump {
     /// and where it was looked for.
     #[must_use]
     pub fn missing_message(&self) -> String {
-        let place = match self {
-            Self::Pod(_) => "cluster",
-            Self::Registry(_)
-            | Self::Repository { .. }
-            | Self::Vault(_)
-            | Self::VaultItem { .. } => "subscription",
-            Self::Service { .. } => "board",
-            _ => "database",
-        };
-        format!("{} is not in this {place}", self.describe())
+        format!("{} is not in this database", self.describe())
     }
 }
 

@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import cast
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def default_database_path() -> Path:
@@ -163,22 +163,6 @@ def validate_context(data: dict[str, object]) -> None:
     pipelines = object_mapping(data.get("pipelines"))
     text(pipelines.get("level"), "pipelines.level")
     object_list(pipelines.get("watched"))
-    aks = object_mapping(data.get("aks"))
-    integer(aks.get("visible_rows"), "aks.visible_rows")
-    integer(aks.get("unhealthy"), "aks.unhealthy")
-    acr = object_mapping(data.get("acr"))
-    text(acr.get("level"), "acr.level")
-    integer(acr.get("visible_rows"), "acr.visible_rows")
-    key_vault = object_mapping(data.get("key_vault"))
-    text(key_vault.get("level"), "key_vault.level")
-    integer(key_vault.get("visible_rows"), "key_vault.visible_rows")
-    integer(key_vault.get("expiring_certificates"), "key_vault.expiring_certificates")
-    arm = object_mapping(data.get("arm"))
-    boolean(arm.get("offline"), "arm.offline")
-    for name in ("subscription", "last_error"):
-        field = arm.get(name)
-        if field is not None:
-            text(field, f"arm.{name}")
 
 
 def validate_work_items(data: dict[str, object]) -> None:
@@ -277,10 +261,6 @@ def print_summary(context_path: Path, data: dict[str, object]) -> None:
     print_repos(object_mapping(data.get("repos")))
     print_pull_requests(object_mapping(data.get("pull_requests")))
     print_pipelines(object_mapping(data.get("pipelines")))
-    print_aks(object_mapping(data.get("aks")))
-    print_arm(object_mapping(data.get("arm")))
-    print_acr(object_mapping(data.get("acr")))
-    print_key_vault(object_mapping(data.get("key_vault")))
 
     if not live:
         print(
@@ -473,126 +453,6 @@ def print_pipelines(data: dict[str, object]) -> None:
     watched = object_list(data.get("watched"))
     if watched:
         print(f"  Watching: {', '.join(str(run) for run in watched)}")
-
-
-def print_aks(data: dict[str, object]) -> None:
-    """The AKS tab. Pods are read live through kubectl and never stored, so this
-    is the last read rather than the cluster's state right now."""
-    print("")
-    clusters = [str(value) for value in object_list(data.get("clusters") or [])]
-    print(
-        f"[aks] {', '.join(clusters) or 'no clusters in config.toml'} · "
-        f"{data.get('visible_rows', 0)} pods · "
-        f"{data.get('unhealthy', 0)} unhealthy"
-    )
-    pod = data.get("selected")
-    if pod is not None:
-        chosen = object_mapping(pod)
-        print(
-            f"  Pod: {chosen.get('cluster', '?')}/{chosen.get('namespace', '?')}/"
-            f"{chosen.get('name', '?')} · {chosen.get('status', '?')} · "
-            f"{chosen.get('ready', '?')} ready · "
-            f"{chosen.get('restarts', 0)} restarts"
-        )
-        owner = chosen.get("owner")
-        if owner:
-            print(f"    Owner: {owner}")
-        repo = chosen.get("repo")
-        if repo:
-            print(f"    Repository: {repo}")
-        for value in object_list(chosen.get("containers") or []):
-            container = object_mapping(value)
-            print(
-                f"    {container.get('name', '?')}  {container.get('state', '?')}"
-                f"  {container.get('image', '?')}"
-            )
-    log = data.get("following_log")
-    if log is not None:
-        tail = object_mapping(log)
-        print(
-            f"  Log: {tail.get('pod', '?')}"
-            f"{' -c ' + str(tail['container']) if tail.get('container') else ''}"
-            f"{' (previous)' if tail.get('previous') else ''} · "
-            f"{tail.get('line_count', 0)} lines"
-            f"{' · following' if tail.get('following') else ' · scrolled'}"
-        )
-    for message in object_list(data.get("errors") or []):
-        print(f"  ! {message}")
-
-
-def print_arm(data: dict[str, object]) -> None:
-    """What the two subscription tabs can reach at all. A run with no
-    subscription draws both of them empty, and this is the line that says why."""
-    print("")
-    subscription = data.get("subscription") or "(none resolved)"
-    state = "offline" if data.get("offline") else "ok"
-    print(f"[arm] subscription={subscription} · {state}")
-    if data.get("last_error"):
-        print(f"  ! {data['last_error']}")
-
-
-def print_acr(data: dict[str, object]) -> None:
-    """The ACR tab. Registries are read live through Resource Manager and never
-    stored, so this is the last read rather than the subscription right now."""
-    print("")
-    print(
-        f"[acr] level={data.get('level') or '?'} · "
-        f"{data.get('visible_rows', 0)} rows"
-    )
-    registry = data.get("selected_registry")
-    if registry is not None:
-        chosen = object_mapping(registry)
-        print(
-            f"  Registry: {chosen.get('name', '?')} · {chosen.get('sku', '?')} · "
-            f"{chosen.get('resource_group', '?')}/{chosen.get('location', '?')} · "
-            f"{chosen.get('login_server', '?')}"
-        )
-    repository = data.get("selected_repository")
-    if repository is not None:
-        chosen = object_mapping(repository)
-        tags = chosen.get("tags")
-        print(
-            f"  Repository: {chosen.get('name', '?')} · "
-            f"{'—' if tags is None else tags} tags · "
-            f"updated {chosen.get('updated') or '—'}"
-        )
-    tag = data.get("selected_tag")
-    if tag is not None:
-        chosen = object_mapping(tag)
-        print(
-            f"  Tag: {chosen.get('name', '?')} · {chosen.get('digest', '?')} · "
-            f"created {chosen.get('created') or '—'}"
-        )
-
-
-def print_key_vault(data: dict[str, object]) -> None:
-    """The Key Vault tab. `revealed` says a value is on the user's screen this
-    minute; the value itself is not in the document and never will be."""
-    print("")
-    print(
-        f"[key vault] level={data.get('level') or '?'} · "
-        f"{data.get('visible_rows', 0)} rows · "
-        f"{data.get('expiring_certificates', 0)} certificates expiring"
-    )
-    vault = data.get("selected_vault")
-    if vault is not None:
-        chosen = object_mapping(vault)
-        print(
-            f"  Vault: {chosen.get('name', '?')} · {chosen.get('sku', '?')} · "
-            f"{chosen.get('resource_group', '?')}/{chosen.get('location', '?')} · "
-            f"{chosen.get('uri', '?')}"
-        )
-    item = data.get("selected_item")
-    if item is not None:
-        chosen = object_mapping(item)
-        print(
-            f"  Item: {chosen.get('kind', '?')} {chosen.get('name', '?')} · "
-            f"{'enabled' if chosen.get('enabled') else 'disabled'} · "
-            f"updated {chosen.get('updated') or '—'} · "
-            f"expires {chosen.get('expires') or 'never'}"
-        )
-        if chosen.get("revealed"):
-            print("    value showing on screen (not in this document)")
 
 
 def print_selected_details(database: Path, selected_value: object) -> None:

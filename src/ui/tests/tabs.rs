@@ -15,41 +15,35 @@ fn row_text(terminal: &Terminal<TestBackend>, y: u16, width: u16) -> String {
 }
 
 #[test]
-fn the_tab_bar_names_eight_tabs_and_marks_the_one_showing_at_every_breakpoint() {
+fn the_tab_bar_names_four_tabs_and_marks_the_one_showing_at_every_breakpoint() {
     let mut app = App::new(vec![ticket()]);
     for width in [140, 120] {
         let text = render_text(width, 30, &mut app);
         let bar = text.lines().next().expect("a tab bar row").to_owned();
         assert!(bar.contains("1 Work items"), "{width} columns: {bar}");
+        assert!(bar.contains("2 Repos"), "{width} columns: {bar}");
+        assert!(bar.contains("3 Pull requests"), "{width} columns: {bar}");
         assert!(bar.contains("4 Pipelines"), "{width} columns: {bar}");
-        assert!(bar.contains("5 AKS"), "{width} columns: {bar}");
-        assert!(bar.contains("6 ACR"), "{width} columns: {bar}");
-        assert!(bar.contains("7 Key Vault"), "{width} columns: {bar}");
-        assert!(bar.contains("8 Environments"), "{width} columns: {bar}");
     }
 
-    // Narrower than the eight names, they shorten but every tab stays.
-    for width in [90, 70] {
+    // Narrower than the four names, they shorten but every tab stays.
+    for width in [50, 40] {
         let short = render_text(width, 30, &mut app);
         let bar = short.lines().next().expect("a tab bar row");
         assert!(bar.contains("1 Items"), "{width} columns: {bar}");
+        assert!(bar.contains("3 PRs"), "{width} columns: {bar}");
         assert!(bar.contains("4 Runs"), "{width} columns: {bar}");
-        assert!(bar.contains("5 AKS"), "{width} columns: {bar}");
-        assert!(bar.contains("6 ACR"), "{width} columns: {bar}");
-        assert!(bar.contains("7 Vault"), "{width} columns: {bar}");
-        assert!(bar.contains("8 Env"), "{width} columns: {bar}");
     }
 
     // Narrower than that, the numbers stand alone and stay clickable.
-    let narrow = render_text(40, 30, &mut app);
+    let narrow = render_text(36, 30, &mut app);
     let bar = narrow.lines().next().expect("a tab bar row");
-    assert!(bar.contains(" 1 ") && bar.contains(" 5 "), "{bar}");
-    assert!(bar.contains(" 6 ") && bar.contains(" 7 "), "{bar}");
-    assert!(bar.contains(" 8 "), "{bar}");
+    assert!(bar.contains(" 1 ") && bar.contains(" 2 "), "{bar}");
+    assert!(bar.contains(" 3 ") && bar.contains(" 4 "), "{bar}");
     assert!(
         app.shell
             .hit_regions
-            .find_target(|target| matches!(target, PointerTarget::SelectTab { index: 7 }))
+            .find_target(|target| matches!(target, PointerTarget::SelectTab { index: 3 }))
             .is_some(),
         "the last tab keeps its click target when its name is shortened"
     );
@@ -155,10 +149,6 @@ fn a_tab_with_something_waiting_wears_a_badge() {
         (TabId::Repos, false, None),
         (TabId::PullRequests, false, Some("3".to_owned())),
         (TabId::Pipelines, false, Some("◐2".to_owned())),
-        (TabId::Aks, false, Some("✗1".to_owned())),
-        (TabId::Acr, false, None),
-        (TabId::KeyVault, false, None),
-        (TabId::Environments, false, Some("\u{2717}1".to_owned())),
     ];
     let mut terminal = Terminal::new(TestBackend::new(130, 3)).unwrap();
     terminal
@@ -171,8 +161,6 @@ fn a_tab_with_something_waiting_wears_a_badge() {
     let bar = row_text(&terminal, 0, 130);
     assert!(bar.contains("3 Pull requests 3"), "{bar}");
     assert!(bar.contains("4 Pipelines ◐2"), "{bar}");
-    assert!(bar.contains("5 AKS ✗1"), "{bar}");
-    assert!(bar.contains("8 Environments ✗1"), "{bar}");
     assert!(
         shell
             .hit_regions
@@ -180,79 +168,6 @@ fn a_tab_with_something_waiting_wears_a_badge() {
             .is_some(),
         "a badged tab is still clickable"
     );
-}
-
-#[test]
-fn the_digits_reach_the_registry_and_vault_tabs_and_each_says_why_it_is_empty() {
-    let mut app = App::new(vec![ticket()]);
-
-    press(&mut app, KeyCode::Char('6'));
-    assert_eq!(app.tab, TabId::Acr);
-    let text = render_text(120, 30, &mut app);
-    assert!(pane_reads(&text, "Registries", "0 registries"), "{text}");
-    assert!(
-        text.contains("Reading the subscription"),
-        "the details pane says the read is on its way: {text}"
-    );
-
-    press(&mut app, KeyCode::Char('7'));
-    assert_eq!(app.tab, TabId::KeyVault);
-    let text = render_text(120, 30, &mut app);
-    assert!(pane_reads(&text, "Vaults", "0 vaults"), "{text}");
-    assert!(
-        text.contains("Reading the subscription"),
-        "the details pane says the read is on its way: {text}"
-    );
-
-    // With no subscription to read, both tabs say so instead: the reason is
-    // what tells a missing subscription from an empty one.
-    app.shell
-        .set_arm_state(Some("Not signed in to Azure: run `az login`".to_owned()));
-    let text = render_text(120, 30, &mut app);
-    assert!(text.contains("Not signed in to Azure"), "{text}");
-    press(&mut app, KeyCode::Char('6'));
-    let text = render_text(120, 30, &mut app);
-    assert!(text.contains("Not signed in to Azure"), "{text}");
-}
-
-#[test]
-fn the_agent_context_says_which_arm_tab_is_showing_and_whether_it_can_read() {
-    let mut app = App::new(vec![ticket()]);
-    app.select_tab(TabId::Acr);
-    app.shell.set_arm_state(Some(
-        "no Azure subscription: pass --subscription, set TICKET_TUI_SUBSCRIPTION, or run `az account set`"
-            .to_owned(),
-    ));
-
-    let context = app.agent_context();
-    assert_eq!(context.active_tab, "acr");
-    assert_eq!(context.acr.level, "registries");
-    assert_eq!(context.key_vault.level, "vaults");
-    assert!(context.arm.offline, "no subscription resolved");
-    assert!(context.arm.subscription.is_none());
-    assert!(
-        context
-            .arm
-            .last_error
-            .as_deref()
-            .is_some_and(|reason| reason.contains("--subscription")),
-        "the reason names what to do about it: {:?}",
-        context.arm.last_error
-    );
-
-    // With one resolved, the tabs are online and the document names it.
-    app.shell.set_arm_state(None);
-    app.shell
-        .set_arm_subscription(Some("00000000-0000-0000-0000-000000000000".to_owned()));
-    app.select_tab(TabId::KeyVault);
-    let context = app.agent_context();
-    assert_eq!(context.active_tab, "key_vault");
-    assert!(!context.arm.offline);
-    assert_eq!(
-        context.arm.subscription.as_deref(),
-        Some("00000000-0000-0000-0000-000000000000")
-    );
-    assert!(context.arm.last_error.is_none());
 }
 
 #[test]
@@ -591,38 +506,23 @@ fn the_history_records_every_tab_it_is_left_from_rather_than_the_cursor_moving()
 }
 
 #[test]
-fn a_reloaded_session_still_walks_back_through_a_pull_request_and_a_pod() {
-    use crate::aks::tests::{cluster, pod};
-
+fn a_reloaded_session_still_walks_back_through_a_pull_request_and_a_repository() {
     let build = || {
         let mut app = crate::app::pull_requests::tests::pull_requests_app();
         app.repos.set_repos(&app.shell);
-        app.aks
-            .set_clusters(vec![cluster("qa", &["orders"])], &mut app.shell);
-        app.aks.set_pods(
-            &mut app.shell,
-            "qa",
-            Some("orders"),
-            Ok(vec![pod(
-                "qa",
-                "orders",
-                "orders-api-7d9f5b-abc12",
-                "Running",
-            )]),
-        );
         app
     };
 
     let mut app = build();
     app.select_tab(TabId::PullRequests);
     render_text(160, 40, &mut app);
-    press(&mut app, KeyCode::Char('5'));
-    assert_eq!(app.tab, TabId::Aks);
+    press(&mut app, KeyCode::Char('2'));
+    assert_eq!(app.tab, TabId::Repos);
     let session = app.snapshot_session();
 
     let mut reopened = build();
     reopened.restore_session(session);
-    assert_eq!(reopened.tab, TabId::Aks);
+    assert_eq!(reopened.tab, TabId::Repos);
 
     press(&mut reopened, KeyCode::Char('['));
     assert_eq!(
@@ -631,12 +531,5 @@ fn a_reloaded_session_still_walks_back_through_a_pull_request_and_a_pod() {
         "the walk is on file, so the next run can take it"
     );
     press(&mut reopened, KeyCode::Char(']'));
-    assert_eq!(reopened.tab, TabId::Aks);
-    assert_eq!(
-        reopened
-            .aks
-            .selected_pod(&reopened.shell)
-            .map(|row| row.pod.key.name),
-        Some("orders-api-7d9f5b-abc12".to_owned())
-    );
+    assert_eq!(reopened.tab, TabId::Repos);
 }

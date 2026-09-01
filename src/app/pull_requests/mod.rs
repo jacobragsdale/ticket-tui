@@ -2,8 +2,6 @@
 //! the decisions worth making without opening a browser. The diff, the threads
 //! and the line comments stay in the browser, behind `o`.
 
-use std::collections::HashMap;
-
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -12,10 +10,8 @@ use super::{AppAction, Focus, ListCursor, Screen, Shell, TabId};
 use crate::columns::{ColumnLayout, TableLayout};
 use crate::command::{CommandId, command_for_key};
 use crate::filter::{MatchContext, ParsedQuery, parse_query};
-use crate::local::LocalRequest;
 use crate::model::{CompletionOptions, Jump, MergeStrategy, PullRequest};
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
-use crate::preflight::{Deployment, Note, Preflight};
 use crate::session::TabSession;
 use crate::sync::PrAction;
 use crate::text_input::TextInput;
@@ -92,12 +88,6 @@ pub struct PullRequestsScreen {
     /// than completing now.
     auto_completing: bool,
     comment: TextInput,
-    /// The deployment repository, when `config.toml` names one and its clone
-    /// is on this machine. Without it nothing is pre-flown.
-    deployment: Option<Deployment>,
-    /// What the pre-flight found, by pull request and the head it was flown
-    /// at, so a re-selection costs nothing until the branch moves.
-    preflight: HashMap<(i64, String), Preflight>,
 }
 
 impl Default for PullRequestsScreen {
@@ -121,8 +111,6 @@ impl Default for PullRequestsScreen {
             completion_field: 0,
             auto_completing: false,
             comment: TextInput::default(),
-            deployment: None,
-            preflight: HashMap::new(),
         }
     }
 }
@@ -215,13 +203,7 @@ impl PullRequestsScreen {
             .collect();
         let (column, descending) = self.sort;
         rows.sort_by(|left, right| {
-            // The Pre-flight column orders on what was flown, which the
-            // comparison over two rows alone cannot see.
-            let ordering = if column == PrColumn::Preflight {
-                self.preflight_rank(left).cmp(&self.preflight_rank(right))
-            } else {
-                columns::compare(left, right, column)
-            };
+            let ordering = columns::compare(left, right, column);
             if descending {
                 ordering.reverse()
             } else {
@@ -288,37 +270,11 @@ impl PullRequestsScreen {
                         .iter()
                         .filter(|thread| thread.status == "active")
                         .count(),
-                    preflight: self.preflight_context(row),
                 }
             }),
             visible_rows: rows.iter().map(|row| self.row_context(row, &me)).collect(),
             to_review_count: self.to_review(shell),
             closed_shown: self.show_closed,
-        }
-    }
-
-    /// The pre-flight as the context file has it: nothing to fly, still
-    /// flying, clean, what would be missing, or why it could not be looked at.
-    fn preflight_context(&self, row: &PrRow) -> crate::agent_context::PreflightContext {
-        use crate::agent_context::PreflightContext;
-        if !self.pre_flyable(row) {
-            return PreflightContext::NotApplicable;
-        }
-        match self.preflight.get(&self.preflight_key(row)) {
-            None | Some(Preflight::Running) => PreflightContext::Running,
-            Some(Preflight::Failed(error)) => PreflightContext::Failed {
-                error: error.clone(),
-            },
-            Some(Preflight::Ready(report)) if report.missing() == 0 => PreflightContext::Clean {
-                overlays: report
-                    .rendered
-                    .iter()
-                    .map(|(environment, overlay)| format!("{environment} {overlay}"))
-                    .collect(),
-            },
-            Some(Preflight::Ready(report)) => PreflightContext::Findings {
-                findings: report.findings.iter().map(ToString::to_string).collect(),
-            },
         }
     }
 
@@ -349,142 +305,6 @@ impl PullRequestsScreen {
     #[must_use]
     pub fn to_review(&self, shell: &Shell) -> usize {
         crate::model::awaiting_review(&self.requests, shell.me())
-    }
-
-    /// What `[deployment]` names, as `config.toml` was last read. A file that
-    /// names a different repository throws away what was flown against the old
-    /// one.
-    pub fn set_deployment(&mut self, deployment: Option<Deployment>) {
-        if self.deployment != deployment {
-            self.preflight.clear();
-        }
-        self.deployment = deployment;
-    }
-
-    /// Whether a pull request is one to pre-fly: it is against the deployment
-    /// repository, and there is a head to fly it at.
-    fn pre_flyable(&self, row: &PrRow) -> bool {
-        self.deployment
-            .as_ref()
-            .is_some_and(|deployment| deployment.covers(&row.repo))
-            && !row.request.last_merge_source_commit.is_empty()
-    }
-
-    /// What a pre-flight is cached under: the pull request, and the head it
-    /// was flown at.
-    fn preflight_key(&self, row: &PrRow) -> (i64, String) {
-        (row.request.id, row.request.last_merge_source_commit.clone())
-    }
-
-    /// The pre-flight of one pull request at the head the table has it, and
-    /// nothing at all for a pull request on any other repository.
-    #[must_use]
-    pub fn preflight(&self, row: &PrRow) -> Option<&Preflight> {
-        self.pre_flyable(row)
-            .then(|| self.preflight.get(&self.preflight_key(row)))
-            .flatten()
-    }
-
-    /// The pre-flight worth asking the local thread for now: the selection is
-    /// on a pull request against the deployment repository and nothing has been
-    /// flown at this head yet. One at a time, so holding `j` down the table
-    /// never queues a render per row it crosses.
-    ///
-    /// `vaults` is what whoever reads vaults holds of them. The local thread
-    /// cannot reach a subscription, so the half of the check that needs one
-    /// travels with the request; an environment whose vault is not among them
-    /// is answered against its own overlays and the pane says so.
-    pub fn preflight_due(
-        &mut self,
-        shell: &Shell,
-        vaults: Vec<crate::kustomize::VaultNames>,
-    ) -> Option<LocalRequest> {
-        let deployment = self.deployment.clone()?;
-        let row = self.selected(shell)?;
-        if !self.pre_flyable(&row) || self.preflight_running() {
-            return None;
-        }
-        let key = self.preflight_key(&row);
-        if self.preflight.contains_key(&key) {
-            return None;
-        }
-        self.preflight.insert(key.clone(), Preflight::Running);
-        Some(LocalRequest::Preflight {
-            id: key.0,
-            commit: key.1,
-            source: row.source_branch(),
-            target: row.target_branch(),
-            deployment,
-            vaults,
-        })
-    }
-
-    /// Whether the selected pull request wants a pre-flight this tick: the
-    /// guards of `preflight_due` without the request, so the vault names are
-    /// only gathered when there is a flight to give them to.
-    #[must_use]
-    pub fn preflight_wanted(&self, shell: &Shell) -> bool {
-        self.deployment.is_some()
-            && !self.preflight_running()
-            && self.selected(shell).is_some_and(|row| {
-                self.pre_flyable(&row) && !self.preflight.contains_key(&self.preflight_key(&row))
-            })
-    }
-
-    /// Whether one is in the air, which is what turns the spinner.
-    #[must_use]
-    pub fn preflight_running(&self) -> bool {
-        self.preflight
-            .values()
-            .any(|held| *held == Preflight::Running)
-    }
-
-    /// What the local thread found, or the one line saying why it could not
-    /// look.
-    pub fn set_preflight(
-        &mut self,
-        id: i64,
-        commit: String,
-        found: Result<crate::preflight::Report, String>,
-    ) {
-        self.preflight.insert(
-            (id, commit),
-            match found {
-                Ok(report) => Preflight::Ready(report),
-                Err(error) => Preflight::Failed(error),
-            },
-        );
-    }
-
-    /// The Pre-flight section as the details pane draws it, and nothing at all
-    /// for a pull request on any other repository.
-    #[must_use]
-    pub fn preflight_notes(&self, row: &PrRow) -> Option<Vec<Note>> {
-        let deployment = self.deployment.as_ref()?;
-        Some(match self.preflight(row)? {
-            Preflight::Running => vec![Note {
-                mark: crate::preflight::Mark::Running,
-                text: "Rendering the overlays it touches".to_owned(),
-                jump: None,
-            }],
-            Preflight::Failed(error) => vec![Note {
-                mark: crate::preflight::Mark::Failed,
-                text: error.clone(),
-                jump: None,
-            }],
-            Preflight::Ready(report) => report.notes(deployment),
-        })
-    }
-
-    /// How the Pre-flight column orders: most to look at first.
-    fn preflight_rank(&self, row: &PrRow) -> u8 {
-        match self.preflight(row) {
-            None => 0,
-            Some(Preflight::Ready(report)) if report.missing() == 0 => 1,
-            Some(Preflight::Running) => 2,
-            Some(Preflight::Failed(_)) => 3,
-            Some(Preflight::Ready(_)) => 4,
-        }
     }
 
     /// Loads one of the built-in views, which are queries and nothing more.
@@ -938,19 +758,7 @@ impl PullRequestsScreen {
         match id {
             CommandId::Search => self.mode = PrMode::Search,
             CommandId::Open => return self.open_in_browser(shell),
-            CommandId::Sync => {
-                // `r` flies the selected pull request again rather than
-                // answering from what was found before.
-                if let Some(row) = self.selected(shell) {
-                    let key = self.preflight_key(&row);
-                    // One already in the air is left to land: taking its
-                    // marker away would only queue the same flight twice.
-                    if self.preflight.get(&key) != Some(&Preflight::Running) {
-                        self.preflight.remove(&key);
-                    }
-                }
-                return AppAction::Sync;
-            }
+            CommandId::Sync => return AppAction::Sync,
             CommandId::HistoryBack => return AppAction::HistoryBack,
             CommandId::HistoryForward => return AppAction::HistoryForward,
             CommandId::ApprovePr => return self.vote(shell, 10),

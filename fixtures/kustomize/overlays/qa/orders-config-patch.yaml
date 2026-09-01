@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: orders-config
-data:
-  RATE_LIMIT_PER_MIN: "60"

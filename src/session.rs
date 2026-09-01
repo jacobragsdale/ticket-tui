@@ -71,14 +71,6 @@ pub struct Session {
     #[serde(default)]
     pub pipelines: TabSession,
     #[serde(default)]
-    pub aks: TabSession,
-    #[serde(default)]
-    pub acr: TabSession,
-    #[serde(default)]
-    pub key_vault: TabSession,
-    #[serde(default)]
-    pub environments: TabSession,
-    #[serde(default)]
     pub bookmarks: Vec<TicketKey>,
     /// Everywhere the run had been, oldest last, across every tab. A kind
     /// this build does not know — one a newer build wrote — is dropped on
@@ -151,10 +143,6 @@ impl Session {
             TabId::Repos => &self.repos,
             TabId::PullRequests => &self.pull_requests,
             TabId::Pipelines => &self.pipelines,
-            TabId::Aks => &self.aks,
-            TabId::Acr => &self.acr,
-            TabId::KeyVault => &self.key_vault,
-            TabId::Environments => &self.environments,
         }
     }
 
@@ -164,10 +152,6 @@ impl Session {
             TabId::Repos => self.repos = session,
             TabId::PullRequests => self.pull_requests = session,
             TabId::Pipelines => self.pipelines = session,
-            TabId::Aks => self.aks = session,
-            TabId::Acr => self.acr = session,
-            TabId::KeyVault => self.key_vault = session,
-            TabId::Environments => self.environments = session,
         }
     }
 }
@@ -202,10 +186,6 @@ impl Default for Session {
             repos: TabSession::default(),
             pull_requests: TabSession::default(),
             pipelines: TabSession::default(),
-            aks: TabSession::default(),
-            acr: TabSession::default(),
-            key_vault: TabSession::default(),
-            environments: TabSession::default(),
             bookmarks: Vec::new(),
             history: Vec::new(),
             show_finished: false,
@@ -539,13 +519,7 @@ mod tests {
         );
         assert_eq!(work_items.active_view.as_deref(), Some("Mine"));
         assert!(
-            loaded.repos.query.is_empty()
-                && loaded.pipelines.views.is_empty()
-                && loaded.aks.query.is_empty()
-                && loaded.acr.query.is_empty()
-                && loaded.acr.columns.is_empty()
-                && loaded.key_vault.query.is_empty()
-                && loaded.key_vault.columns.is_empty(),
+            loaded.repos.query.is_empty() && loaded.pipelines.views.is_empty(),
             "and the tabs that did not exist start empty"
         );
         assert_eq!(

@@ -2,10 +2,6 @@
 //! in, and the seam between them.
 
 use super::*;
-use crate::app::acr::tests::acr_app;
-use crate::app::aks::tests::aks_app;
-use crate::app::environments::tests::environments_app;
-use crate::app::key_vault::tests::key_vault_app;
 use crate::app::pipelines::tests::pipelines_app;
 use crate::app::pull_requests::tests::pull_requests_app;
 use crate::app::repos::tests::repos_app;
@@ -22,14 +18,6 @@ fn tabs() -> Vec<(TabId, App, &'static str, &'static str)> {
     pull_requests.select_tab(TabId::PullRequests);
     let mut pipelines = pipelines_app();
     pipelines.select_tab(TabId::Pipelines);
-    let mut aks = aks_app();
-    aks.select_tab(TabId::Aks);
-    let mut acr = acr_app();
-    acr.select_tab(TabId::Acr);
-    let mut key_vault = key_vault_app();
-    key_vault.select_tab(TabId::KeyVault);
-    let mut environments = environments_app();
-    environments.select_tab(TabId::Environments);
     vec![
         (TabId::WorkItems, work_items, "Tickets", "Details"),
         (TabId::Repos, repos, "Repos", "Repository"),
@@ -40,15 +28,6 @@ fn tabs() -> Vec<(TabId, App, &'static str, &'static str)> {
             "Pull request",
         ),
         (TabId::Pipelines, pipelines, "Pipelines", "Run"),
-        (TabId::Aks, aks, "Pods", "Pod"),
-        (TabId::Acr, acr, "Registries", "Registry"),
-        (TabId::KeyVault, key_vault, "Vaults", "Vault"),
-        (
-            TabId::Environments,
-            environments,
-            "Environments",
-            "Promotion",
-        ),
     ]
 }
 

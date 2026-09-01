@@ -2,7 +2,6 @@
 //! Azure DevOps and the helpers that drive it live here; each submodule
 //! covers one file's worth of behaviour.
 
-mod aks;
 mod desktop;
 mod details;
 mod editor;
@@ -267,9 +266,6 @@ fn synced_app(path: &Path, source: FakeAzure) -> (App, SqliteTicketRepository, S
         watched_runs: Vec::new(),
         approvals_seen: None,
         local: LocalRuntime::default(),
-        aks: AksRuntime::default(),
-        arm: ArmRuntime::default(),
-        arm_config: ArmConfig::default(),
     };
     (app, repository, runtime)
 }

@@ -24,7 +24,6 @@ use std::io;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use crate::aks::{Pod, PodKey};
 use crate::model::{Approval, PrStatus, PullRequest, same_text};
 
 /// One notification: the headline, and the line under it. The status line
@@ -231,54 +230,6 @@ fn changed_vote(was: &PrMark, request: &PullRequest) -> Option<String> {
     } else {
         format!("!{id} {} by {who}", reviewer.word())
     })
-}
-
-/// Every pod of one cluster and namespace as the last read left it: how often
-/// it had restarted, and whether it was crash-looping.
-pub type PodMarks = HashMap<PodKey, (u32, bool)>;
-
-/// What one read of a cluster's pods is worth saying, against the read before
-/// it of the same cluster and namespace, and the marks to hold on to.
-#[must_use]
-pub fn pod_news(previous: Option<&PodMarks>, pods: &[Pod]) -> (PodMarks, Vec<Notice>) {
-    let marks: PodMarks = pods
-        .iter()
-        .map(|pod| (pod.key.clone(), (pod.restarts, crash_looping(pod))))
-        .collect();
-    let Some(previous) = previous else {
-        return (marks, Vec::new());
-    };
-    let mut news = Vec::new();
-    for pod in pods {
-        // A pod that was not there last time has not restarted since — but it
-        // can already be crash-looping, and that is news the moment it lands.
-        let (was_restarts, was_looping) = previous
-            .get(&pod.key)
-            .copied()
-            .unwrap_or((pod.restarts, false));
-        let headline = if crash_looping(pod) && !was_looping {
-            format!("{} is crash-looping", pod.key.name)
-        } else if pod.restarts > was_restarts {
-            format!("{} restarted ({} in all)", pod.key.name, pod.restarts)
-        } else {
-            continue;
-        };
-        news.push((
-            headline,
-            format!(
-                "{} \u{00b7} {} \u{00b7} {}",
-                pod.key.cluster, pod.key.namespace, pod.status
-            ),
-        ));
-    }
-    (marks, news)
-}
-
-/// Whether the pod's STATUS word is a crash loop — `Init:CrashLoopBackOff`
-/// counts, because a container that will not start is a container that will
-/// not start.
-fn crash_looping(pod: &Pod) -> bool {
-    pod.status.contains("CrashLoopBackOff")
 }
 
 /// The approvals that were not in the read before this one, and the ids to
@@ -529,65 +480,6 @@ mod tests {
         assert!(
             news.is_empty(),
             "the same queue on the next pull is not news"
-        );
-    }
-
-    fn pod(name: &str, status: &str, restarts: u32) -> Pod {
-        Pod {
-            key: PodKey {
-                cluster: "qa".to_owned(),
-                namespace: "orders".to_owned(),
-                name: name.to_owned(),
-            },
-            status: status.to_owned(),
-            ready: (1, 1),
-            restarts,
-            created: None,
-            node: String::new(),
-            ip: String::new(),
-            owner: None,
-            containers: Vec::new(),
-            labels: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn a_pod_restarting_or_starting_to_crash_loop_is_news_and_the_first_read_is_not() {
-        let first = vec![pod("orders-api-1", "CrashLoopBackOff", 4)];
-        let (marks, news) = pod_news(None, &first);
-        assert!(news.is_empty(), "what was already broken is not news");
-
-        let (marks, news) = pod_news(Some(&marks), &first);
-        assert!(news.is_empty(), "the same read again says nothing");
-
-        let restarted = vec![pod("orders-api-1", "CrashLoopBackOff", 5)];
-        let (marks, news) = pod_news(Some(&marks), &restarted);
-        assert_eq!(
-            news,
-            [(
-                "orders-api-1 restarted (5 in all)".to_owned(),
-                "qa \u{00b7} orders \u{00b7} CrashLoopBackOff".to_owned()
-            )]
-        );
-
-        // A healthy one that starts crash-looping, and a new one that lands
-        // crash-looping already.
-        let mut running = restarted.clone();
-        running[0].status = "Running".to_owned();
-        let (marks, _) = pod_news(Some(&marks), &running);
-        let looping = vec![
-            pod("orders-api-1", "CrashLoopBackOff", 5),
-            pod("orders-api-2", "Init:CrashLoopBackOff", 0),
-        ];
-        let (_, news) = pod_news(Some(&marks), &looping);
-        assert_eq!(
-            news.iter()
-                .map(|(title, _)| title.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "orders-api-1 is crash-looping",
-                "orders-api-2 is crash-looping"
-            ]
         );
     }
 

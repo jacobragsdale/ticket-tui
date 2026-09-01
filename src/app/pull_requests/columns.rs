@@ -14,10 +14,6 @@ pub enum PrColumn {
     Author,
     Votes,
     Build,
-    /// What a pre-flight of a pull request against the deployment repository
-    /// found. Always on the table, blank for a pull request on any other
-    /// repository.
-    Preflight,
     Age,
 }
 
@@ -31,7 +27,6 @@ impl ColumnId for PrColumn {
             Self::Author,
             Self::Votes,
             Self::Build,
-            Self::Preflight,
             Self::Age,
         ]
     }
@@ -45,7 +40,6 @@ impl ColumnId for PrColumn {
             Self::Author => "author",
             Self::Votes => "votes",
             Self::Build => "build",
-            Self::Preflight => "preflight",
             Self::Age => "age",
         }
     }
@@ -59,7 +53,6 @@ impl ColumnId for PrColumn {
             Self::Author => "Author",
             Self::Votes => "Votes",
             Self::Build => "Build",
-            Self::Preflight => "Pre-flight",
             Self::Age => "Age",
         }
     }
@@ -74,7 +67,6 @@ impl ColumnId for PrColumn {
             Self::Author => 16,
             Self::Votes => 8,
             Self::Build => 12,
-            Self::Preflight => 10,
             Self::Age => 8,
         }
     }
@@ -109,9 +101,6 @@ pub(super) fn compare(left: &PrRow, right: &PrRow, column: PrColumn) -> Ordering
         // Most approved first, so what is ready to go rises.
         PrColumn::Votes => left.vote_total().cmp(&right.vote_total()),
         PrColumn::Build => text(&left.build_word(), &right.build_word()),
-        // Ordered on what was flown, which the screen holds and this does not,
-        // so the table sorts this column itself.
-        PrColumn::Preflight => Ordering::Equal,
         PrColumn::Age => left.changed_at().cmp(&right.changed_at()),
     }
 }

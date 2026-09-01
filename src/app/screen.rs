@@ -1,5 +1,5 @@
 //! `Screen`: what a tab is. The shell hands one of these every event and every
-//! frame, and knows nothing else about it. All eight tabs implement it, and the
+//! frame, and knows nothing else about it. All four tabs implement it, and the
 //! mouse is read here rather than by any of them, so a press, a drag and a
 //! click mean the same thing wherever they land.
 
@@ -17,7 +17,7 @@ use crate::pointer::{
 use crate::session::TabSession;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 
-/// The eight screens the shell puts behind keys `1`–`8`.
+/// The four screens the shell puts behind keys `1`–`4`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TabId {
@@ -26,22 +26,14 @@ pub enum TabId {
     Repos,
     PullRequests,
     Pipelines,
-    Aks,
-    Acr,
-    KeyVault,
-    Environments,
 }
 
 impl TabId {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 4] = [
         Self::WorkItems,
         Self::Repos,
         Self::PullRequests,
         Self::Pipelines,
-        Self::Aks,
-        Self::Acr,
-        Self::KeyVault,
-        Self::Environments,
     ];
 
     /// What the tab bar calls it.
@@ -52,10 +44,6 @@ impl TabId {
             Self::Repos => "Repos",
             Self::PullRequests => "Pull requests",
             Self::Pipelines => "Pipelines",
-            Self::Aks => "AKS",
-            Self::Acr => "ACR",
-            Self::KeyVault => "Key Vault",
-            Self::Environments => "Environments",
         }
     }
 
@@ -67,10 +55,6 @@ impl TabId {
             Self::Repos => "Repos",
             Self::PullRequests => "PRs",
             Self::Pipelines => "Runs",
-            Self::Aks => "AKS",
-            Self::Acr => "ACR",
-            Self::KeyVault => "Vault",
-            Self::Environments => "Env",
         }
     }
 
@@ -82,14 +66,10 @@ impl TabId {
             Self::Repos => '2',
             Self::PullRequests => '3',
             Self::Pipelines => '4',
-            Self::Aks => '5',
-            Self::Acr => '6',
-            Self::KeyVault => '7',
-            Self::Environments => '8',
         }
     }
 
-    /// The tab a digit asks for, if it is one of the eight.
+    /// The tab a digit asks for, if it is one of the four.
     #[must_use]
     pub fn from_number(character: char) -> Option<Self> {
         Self::ALL.into_iter().find(|tab| tab.number() == character)

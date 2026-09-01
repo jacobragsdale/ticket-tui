@@ -512,11 +512,11 @@ fn the_capture_row_takes_the_search_rows_place_on_every_tab() {
         "Esc gives the search row its place back"
     );
 
-    let mut app = crate::app::aks::tests::aks_app();
+    let mut app = crate::app::pipelines::tests::pipelines_app();
     app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
-    let over_pods = render_text(120, 20, &mut app);
+    let over_runs = render_text(120, 20, &mut app);
     assert!(
-        row(&over_pods).starts_with("+ Title"),
-        "and it draws over the pods the same way:\n{over_pods}"
+        row(&over_runs).starts_with("+ Title"),
+        "and it draws over the runs the same way:\n{over_runs}"
     );
 }

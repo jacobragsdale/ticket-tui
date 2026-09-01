@@ -3,14 +3,10 @@
 //! screen.
 //!
 //! Versioning: adding a block, or a field to one, is additive and leaves
-//! [`SCHEMA_VERSION`] where it is — `aks`, `acr`, `key_vault`, `arm` and
-//! `environments` all arrived within schema 3, and a reader that does not know
-//! a field ignores it. Only removing or reshaping something already documented
-//! bumps the version.
-//!
-//! There is no field here for a secret's value and there is not meant to be
-//! one: this file is written to disk, and a vault is read for the screen
-//! alone.
+//! [`SCHEMA_VERSION`] where it is, and a reader that does not know a field
+//! ignores it. Only removing or reshaping something already documented bumps
+//! the version — schema 4 dropped the `aks`, `acr`, `key_vault`, `arm` and
+//! `environments` blocks schema 3 had carried.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -23,7 +19,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::model::{RowDensity, SearchOrder, SortDirection, SortField};
 
-pub const SCHEMA_VERSION: u8 = 3;
+pub const SCHEMA_VERSION: u8 = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct AgentContext {
@@ -38,231 +34,15 @@ pub struct AgentContext {
     /// them, so a value named here is optimistic until the edit leaves this
     /// list.
     pub pending_edits: Vec<PendingEditContext>,
-    /// Which tab is showing: `work_items`, `repos`, `pull_requests`,
-    /// `pipelines`, `aks`, `acr`, `key_vault` or `environments`. Every tab is
-    /// described whether or not it is the one on screen, so an agent can read
-    /// the whole workspace; this says where the user actually is.
+    /// Which tab is showing: `work_items`, `repos`, `pull_requests` or
+    /// `pipelines`. Every tab is described whether or not it is the one on
+    /// screen, so an agent can read the whole workspace; this says where the
+    /// user actually is.
     pub active_tab: String,
     pub work_items: WorkItemsContext,
     pub repos: ReposContext,
     pub pull_requests: PullRequestsContext,
     pub pipelines: PipelinesContext,
-    pub aks: AksContext,
-    pub acr: AcrContext,
-    pub key_vault: KeyVaultContext,
-    pub environments: EnvironmentsContext,
-    /// What the ARM tabs can reach: the subscription they read, and why they
-    /// read nothing when they cannot.
-    pub arm: ArmContext,
-}
-
-/// The ACR tab: which level it is on, and what the two cursors and the details
-/// pane are showing.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct AcrContext {
-    /// `registries` or `repositories`.
-    pub level: String,
-    pub selected_registry: Option<RegistryContext>,
-    pub selected_repository: Option<RepositoryContext>,
-    pub selected_tag: Option<TagContext>,
-    pub visible_rows: usize,
-    /// Where `g` would go from the row under the cursor on this tab, or
-    /// `null` when it has nowhere to go. Written the way a jump is stored:
-    /// `{"kind": "pull-request", "at": {"repo": "…", "id": 812}}`.
-    pub follow: Option<crate::model::Jump>,
-}
-
-/// One container registry, as an agent reads it.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct RegistryContext {
-    pub name: String,
-    pub resource_group: String,
-    pub sku: String,
-    pub location: String,
-    /// The data-plane host a pull reference starts with.
-    pub login_server: String,
-    pub portal_url: String,
-}
-
-/// One repository in it. The counts and the stamp are `null` until the
-/// attributes call has landed: a catalog listing is names and nothing else.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct RepositoryContext {
-    pub name: String,
-    pub tags: Option<u64>,
-    pub updated: Option<String>,
-}
-
-/// The tag the details pane's cursor is on.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct TagContext {
-    pub name: String,
-    pub digest: String,
-    pub created: Option<String>,
-}
-
-/// The Key Vault tab, the same way round: which level it is on, and what the
-/// cursor and the details pane are showing.
-///
-/// There is no field for a secret's value, and there is not meant to be one: a
-/// value is read for the screen alone, and this file is written to disk.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct KeyVaultContext {
-    /// `vaults` or `items`.
-    pub level: String,
-    pub selected_vault: Option<VaultContext>,
-    pub selected_item: Option<VaultItemContext>,
-    pub visible_rows: usize,
-    /// Certificates within thirty days of expiring, across every vault whose
-    /// items have been read. The same count the tab bar badges.
-    pub expiring_certificates: usize,
-    /// Where `g` would go from the row under the cursor on this tab, or
-    /// `null` when it has nowhere to go. Written the way a jump is stored:
-    /// `{"kind": "pull-request", "at": {"repo": "…", "id": 812}}`.
-    pub follow: Option<crate::model::Jump>,
-}
-
-/// One key vault, as an agent reads it.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct VaultContext {
-    pub name: String,
-    pub resource_group: String,
-    pub location: String,
-    pub sku: String,
-    /// The data-plane host its items are read from.
-    pub uri: String,
-    pub portal_url: String,
-}
-
-/// One thing a vault holds. `revealed` says whether its value is on screen
-/// this minute; the value itself is nowhere in this document.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct VaultItemContext {
-    /// `secret`, `key`, or `cert`.
-    pub kind: String,
-    pub name: String,
-    pub enabled: bool,
-    pub updated: Option<String>,
-    pub expires: Option<String>,
-    pub revealed: bool,
-}
-
-/// The environments board: what the deployment repository declares, what each
-/// environment would be missing, and the promotion the details pane is reading.
-///
-/// Nothing here is stored and nothing here is on a timer: the overlays are
-/// rendered when the tab is opened, when `r` asks, and when a `git pull` moves
-/// the deployment clone, so this is as current as the last render.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct EnvironmentsContext {
-    /// Why the board is empty, when it is: no `[deployment]` in `config.toml`,
-    /// no `[[environments]]`, or no clone of the repository on this machine —
-    /// in the line that says where it looked.
-    pub reason: Option<String>,
-    /// One per `[[environments]]`, in the order the file lists them, which is
-    /// the order of the board's columns.
-    pub environments: Vec<EnvironmentContext>,
-    /// The workload the row cursor is on.
-    pub selected_service: Option<String>,
-    /// The environment the column cursor is on, which is the one a promotion
-    /// is read *into*.
-    pub selected_environment: Option<String>,
-    /// What that cell is missing, one line each, as `env check` writes it.
-    pub findings: Vec<String>,
-    /// The promotion the details pane is reading, when there is a column to
-    /// the left of the cursor to promote from.
-    pub diff: Option<PromotionContext>,
-    pub visible_rows: usize,
-    /// Where `g` would go from the line the details pane's cursor is on, or
-    /// `null` when it points nowhere. Written the way a jump is stored:
-    /// `{"kind": "run", "at": 14}`.
-    pub follow: Option<crate::model::Jump>,
-}
-
-/// One environment the deployment repository declares.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct EnvironmentContext {
-    pub name: String,
-    /// The key vault it pulls its secrets from, when the file names one.
-    pub vault: Option<String>,
-    /// The overlay patterns it is made of, relative to the clone.
-    pub overlays: Vec<String>,
-    /// Whether its overlays rendered at all.
-    pub rendered: bool,
-    /// The renderer's own line, for an environment that would not render.
-    pub error: Option<String>,
-    /// How many things it asks for that it does not answer, expiries apart.
-    pub findings: usize,
-    /// Vault objects in use that fall due inside thirty days.
-    pub expiring: usize,
-}
-
-/// The promotion the details pane is reading: one environment into the next.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PromotionContext {
-    pub from: String,
-    pub to: String,
-    /// One line each, in the same words the pull request pre-flight uses.
-    pub lines: Vec<String>,
-}
-
-/// Whether the ACR and Key Vault tabs have a subscription to read at all. An
-/// offline run shows both tabs and neither reads anything; `last_error` is the
-/// one line that says why.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct ArmContext {
-    pub subscription: Option<String>,
-    pub offline: bool,
-    pub last_error: Option<String>,
-}
-
-/// The AKS tab: the clusters `config.toml` names, the pod under the cursor,
-/// and whatever could not be read.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct AksContext {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub clusters: Vec<String>,
-    pub selected: Option<PodContext>,
-    pub visible_rows: usize,
-    /// How many of the pods on the table are in trouble.
-    pub unhealthy: usize,
-    /// The log the text pane is tailing, when it is on one.
-    pub following_log: Option<FollowingPodLogContext>,
-    /// One line per `(cluster, namespace)` that could not be read.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub errors: Vec<String>,
-    /// Where `g` would go from the row under the cursor on this tab, or
-    /// `null` when it has nowhere to go. Written the way a jump is stored:
-    /// `{"kind": "pull-request", "at": {"repo": "…", "id": 812}}`.
-    pub follow: Option<crate::model::Jump>,
-}
-
-/// One pod, as an agent reads it.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct PodContext {
-    pub cluster: String,
-    pub namespace: String,
-    pub name: String,
-    pub status: String,
-    /// Containers ready over containers in the spec: `1/2`.
-    pub ready: String,
-    pub restarts: u32,
-    pub node: String,
-    /// What made it: `Deployment/orders-api`, or `null` for a bare pod.
-    pub owner: Option<String>,
-    pub created_at: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub containers: Vec<ContainerContext>,
-    /// The repository on file its image or app label names, when one does.
-    pub repo: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct ContainerContext {
-    pub name: String,
-    pub image: String,
-    pub state: String,
-    pub restarts: u32,
 }
 
 /// The work items tab, which is everything schema 2 described at the top
@@ -373,35 +153,6 @@ pub struct PullRequestContext {
     /// How many comment threads it has, and how many are unresolved.
     pub thread_count: usize,
     pub unresolved_threads: usize,
-    /// What a pre-flight of it against the deployment repository found.
-    /// `not_applicable` for a pull request on any other repository.
-    pub preflight: PreflightContext,
-}
-
-/// The pre-flight of a pull request against the deployment repository: what
-/// the environments it touches would be missing if it merged. Findings are
-/// read, never enforced — the pull request can still be approved.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum PreflightContext {
-    /// Not against the deployment repository, or no clone of it to fly in.
-    #[default]
-    NotApplicable,
-    Running,
-    /// Every overlay it touches renders with nothing missing.
-    Clean {
-        overlays: Vec<String>,
-    },
-    /// One line per thing an overlay asks for that it does not answer, as the
-    /// details pane and `env check` both write it.
-    Findings {
-        findings: Vec<String>,
-    },
-    /// It could not be looked at: the head is not on this machine, or the
-    /// renderer refused an overlay.
-    Failed {
-        error: String,
-    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -469,19 +220,6 @@ pub struct StageContext {
     pub name: String,
     pub state: String,
     pub result: Option<String>,
-}
-
-/// The pod log the AKS text pane is tailing.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct FollowingPodLogContext {
-    pub pod: String,
-    /// The container chosen, or nothing while the pane follows the first.
-    pub container: Option<String>,
-    /// Whether it is the run before the last restart.
-    pub previous: bool,
-    pub line_count: usize,
-    /// Whether the pane is pinned to the tail rather than scrolled back.
-    pub following: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -690,11 +428,6 @@ mod tests {
             repos: ReposContext::default(),
             pull_requests: PullRequestsContext::default(),
             pipelines: PipelinesContext::default(),
-            aks: AksContext::default(),
-            acr: AcrContext::default(),
-            key_vault: KeyVaultContext::default(),
-            environments: EnvironmentsContext::default(),
-            arm: ArmContext::default(),
             work_items: WorkItemsContext {
                 follow: None,
                 mode: "browse".into(),
@@ -727,123 +460,6 @@ mod tests {
                 details_scroll_line: 0,
             },
         }
-    }
-
-    /// The two ARM tabs as an agent reads them: which subscription answered,
-    /// what each cursor is on, and — the point of the Key Vault block — that a
-    /// value on screen is reported as showing and never written down.
-    #[test]
-    fn the_document_names_the_arm_state_and_both_tabs_selections_and_never_a_value() {
-        use crate::app::{App, TabId};
-        use crate::arm::tests::FakeArm;
-        use crate::arm::{
-            ArmSource, Inventory, ItemKind, Registry, Repository, Tag, Vault, VaultItem,
-        };
-        use crate::timestamp::ts;
-
-        let registry = Registry {
-            id: "/subscriptions/sub-1/resourceGroups/platform/providers/Microsoft.ContainerRegistry/registries/atlas".to_owned(),
-            name: "atlas".to_owned(),
-            resource_group: "platform".to_owned(),
-            location: "westeurope".to_owned(),
-            sku: "Premium".to_owned(),
-            login_server: "atlas.azurecr.io".to_owned(),
-        };
-        let vault = Vault {
-            id: "/subscriptions/sub-1/resourceGroups/platform/providers/Microsoft.KeyVault/vaults/atlas-kv".to_owned(),
-            name: "atlas-kv".to_owned(),
-            resource_group: "platform".to_owned(),
-            location: "westeurope".to_owned(),
-            sku: "standard".to_owned(),
-            uri: "https://atlas-kv.vault.azure.net/".to_owned(),
-        };
-        // A `Secret` is only ever made by reading one out of a vault, which is
-        // what the fake source is here for.
-        let source = FakeArm::default();
-        *source.secret.lock().unwrap() = "hunter2".to_owned();
-        let secret = source.secret_value(&vault, "db-password").unwrap();
-
-        let inventory = Inventory {
-            registries: vec![registry],
-            vaults: vec![vault],
-        };
-        let mut app = App::new(Vec::new());
-        app.select_tab(TabId::KeyVault);
-        app.shell.set_arm_subscription(Some("sub-1".to_owned()));
-        app.acr.set_inventory(Ok(inventory.clone()));
-        app.acr.set_repositories(
-            "atlas",
-            Ok(vec![Repository {
-                name: "team/api".to_owned(),
-                tags: Some(4),
-                manifests: Some(4),
-                updated: Some(ts("2026-08-29T09:00:00Z")),
-            }]),
-        );
-        app.acr.set_tags(
-            "atlas",
-            "team/api",
-            Ok(vec![Tag {
-                name: "latest".to_owned(),
-                digest: "sha256:aaaaaaaaaaaaaaaa".to_owned(),
-                created: Some(ts("2026-08-29T09:00:00Z")),
-                updated: Some(ts("2026-08-29T09:00:00Z")),
-            }]),
-        );
-        app.key_vault.set_inventory(Ok(inventory));
-        app.key_vault.open_items();
-        app.key_vault.set_items(
-            "atlas-kv",
-            Ok(vec![VaultItem {
-                kind: ItemKind::Secret,
-                name: "db-password".to_owned(),
-                enabled: true,
-                created: Some(ts("2026-08-01T09:00:00Z")),
-                updated: Some(ts("2026-08-20T09:00:00Z")),
-                expires: None,
-                content_type: Some("text/plain".to_owned()),
-                recovery_level: Some("Recoverable+Purgeable".to_owned()),
-            }]),
-        );
-        app.key_vault
-            .set_revealed("atlas-kv", "db-password", Ok(secret));
-
-        let directory = tempdir().unwrap();
-        let path = path_for(&directory.path().join("tickets.sqlite3"));
-        save(&path, &app.agent_context()).unwrap();
-        let written = fs::read_to_string(&path).unwrap();
-        let document: serde_json::Value = serde_json::from_str(&written).unwrap();
-
-        assert_eq!(document["schema_version"], SCHEMA_VERSION);
-        assert_eq!(document["active_tab"], "key_vault");
-        assert_eq!(document["arm"]["subscription"], "sub-1");
-        assert_eq!(document["arm"]["offline"], false);
-        assert!(document["arm"]["last_error"].is_null());
-
-        assert_eq!(document["acr"]["level"], "registries");
-        assert_eq!(document["acr"]["selected_registry"]["name"], "atlas");
-        assert_eq!(
-            document["acr"]["selected_registry"]["login_server"],
-            "atlas.azurecr.io"
-        );
-        assert!(
-            document["acr"]["selected_registry"]["portal_url"]
-                .as_str()
-                .unwrap()
-                .contains("portal.azure.com")
-        );
-
-        assert_eq!(document["key_vault"]["level"], "items");
-        assert_eq!(document["key_vault"]["selected_vault"]["name"], "atlas-kv");
-        assert_eq!(document["key_vault"]["selected_item"]["kind"], "secret");
-        assert_eq!(
-            document["key_vault"]["selected_item"]["name"],
-            "db-password"
-        );
-        assert_eq!(document["key_vault"]["selected_item"]["revealed"], true);
-
-        // The value is on the screen this minute and nowhere in the file.
-        assert!(!written.contains("hunter2"), "{written}");
     }
 
     #[test]

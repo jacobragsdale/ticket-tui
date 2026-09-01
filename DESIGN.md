@@ -99,14 +99,8 @@ An access token expires in about an hour, well within one session, so a request
 Azure DevOps refuses is retried once with a freshly minted token before it is
 reported.
 
-All of that is Azure DevOps. The ACR and Key Vault tabs address a subscription
-instead, which wants tokens for other audiences and has never accepted a
-personal access token: see [Azure Resource Manager](#azure-resource-manager).
-
 ticket-tui stores no secrets. It reads the token from the CLI or the environment
-on each sync and keeps nothing but work-item data in SQLite. A secret's value
-read out of a key vault is held in memory for one minute and written nowhere at
-all — not the database, not the session file, not the agent context.
+on each sync and keeps nothing but work-item data in SQLite.
 
 ## Organization and projects
 
@@ -195,35 +189,24 @@ code_project = "Fiquants"     # repos, pull requests and pipelines; left out = p
 # query = "[System.AreaPath] UNDER 'ISTO\\Team'"   # optional WIQL scope on every pull
 # workspace = "~/Development" # where clones live; a leading ~ is the home directory
 
-[azure]                       # tabs 6 ACR and 7 Key Vault
-subscriptions = ["<dev-guid>", "<qa-guid>"]   # left out: whatever `az account show` says
-registries = ["acrdev", "acrqa"]              # optional: only these, in this order
-vaults = ["kv-dev", "kv-qa"]                  # optional: only these, in this order
-
 [notify]                      # a desktop notification when a watched thing moves
 command = "notify-send {title} {body}"        # left out: nothing is ever run
 ```
 
 `config.example.toml` at the root of the repository is the whole file,
-commented, `[[clusters]]` and `[theme]` included; copying it to
+commented, `[theme]` included; copying it to
 `~/.config/ticket-tui/config.toml` and editing it is the setup.
 
 Every key is optional and every one of them is a default: the flag wins, then
 the `TICKET_TUI_*` variable, then this file, then whatever the Azure CLI is
-set to — `az devops configure` for the organization and the project,
-`az account show` for the subscription. Keys a build does not know are ignored,
-so the file can grow without an older binary refusing it. A blank string is
-refused where a blank cluster name is, because it would otherwise mask the flag
-and the variable behind it: `devops.project is blank; give it a value or leave
+set to — `az devops configure` for the organization and the project. Keys a
+build does not know are ignored, so the file can grow without an older binary
+refusing it. A blank string is refused, because it would otherwise mask the
+flag and the variable behind it: `devops.project is blank; give it a value or leave
 it out`. The file is read once, straight after the command line is parsed, and
 a file that will not parse stops the TUI and every subcommand alike; the
 mid-run reload keeps reporting a broken file in the footer instead, because by
 then there is a footer to report it in.
-
-`[[clusters]]` names the kubeconfig contexts the AKS tab reads — the ones
-`az aks get-credentials --resource-group RG --name CLUSTER` writes, which
-`kubectl config get-contexts` lists. Signing in to a tenant other than the
-login's default wants `az login --tenant <tenant>` first.
 
 ### `[notify]`: a desktop notification when a watched thing changes
 
@@ -239,8 +222,8 @@ The command is run through `sh -c`, detached, with stdin, stdout and stderr on
 `/dev/null` and nothing waited on; the finished ones are reaped the next time
 one fires. A configured command rather than a built-in notifier because the
 right one varies by machine and multiplexer — the same reasoning that made the
-theme a `config.toml` palette. It travels with the theme and the clusters: the
-file is re-read whenever it changes, so writing the table starts notifying a
+theme a `config.toml` palette. It travels with the theme: the file is re-read
+whenever it changes, so writing the table starts notifying a
 running ticket-tui.
 
 **The escaping rule, exactly:** `{title}` and `{body}` are each replaced by the
@@ -258,23 +241,20 @@ source, which is what keeps a title with a `"` in it one string:
 command = "osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' {title} {body}"
 ```
 
-Five things fire it — a fixed list, not a rule engine:
+Four things fire it — a fixed list, not a rule engine:
 
 1. A watched run finishes: `✓ Build 20260829.14 succeeded · 4m 12s`, the
    pipeline and branch under it.
 2. A pull request you wrote gains or changes a vote, or completes or is
    abandoned: `!812 approved by Dana Ali`, its title under it.
 3. One turns up wanting a review you have not given: `!812 wants your review`.
-4. A pod starts crash-looping, or its restart count rises:
-   `orders-api-1 restarted (4 in all)`, its cluster, namespace and status under
-   it.
-5. An approval lands that was not waiting before:
+4. An approval lands that was not waiting before:
    `Build 20260829.14 waits on your approval`.
 
 Every one of them is edge-triggered, once per transition, and **the first read
 of each source is the baseline rather than news**: the first snapshot of the
-pull requests, the first read of each cluster and namespace, the first list of
-approvals. A restart does not replay what happened while ticket-tui was
+pull requests, the first list of approvals. A restart does not replay what
+happened while ticket-tui was
 closed, and a queue that was already waiting when it opened stays quiet.
 
 The same words go to the status line whether or not the table is there — the
@@ -282,34 +262,6 @@ footer is what you see when there is none — so the app and the desktop can
 never disagree. A command that will not start is said in the footer once and
 not again, because a toast a minute about a notifier is worse than no
 notifications. There is no opt-out flag: removing the table is the opt-out.
-
-`[deployment]` and `[[environments]]` say where the kustomize overlays live and
-what each environment is made of:
-
-```toml
-[deployment]
-repo = "deployment"           # the repository, as the Repos tab names it
-# render = "kustomize build"  # left out: `kubectl kustomize`
-
-[[environments]]
-name = "prod"
-overlays = ["services/*/overlays/prod"]   # relative to the clone; globs
-vault = "kv-prod"             # optional: the Key Vault tab's own name for it
-registry = "acrprod"
-cluster = "prod"
-```
-
-`repo` is found among the workspace's clones by the same scan the Repos tab
-runs, so nothing is cloned or fetched to answer. `overlays` are directories
-relative to that clone and `*` matches within one path segment, so
-`services/*/overlays/prod` is every service's overlay and all of them are
-rendered and unioned into one environment. `render` is the command that turns
-one overlay directory into plain YAML — `kubectl kustomize` unless a repository
-wants a newer kustomize than kubectl embeds. `vault`, `registry` and `cluster`
-name what the environment is deployed onto, as `[azure]` and `[[clusters]]`
-spell them. A file with no `[deployment]` table, or a workspace with no clone of
-it, leaves the whole feature off and the `env` commands say where they looked,
-the way the Repos tab does for a workspace that is not there.
 
 ### `--theme`, `TICKET_TUI_THEME` and `config.toml`
 
@@ -1042,9 +994,9 @@ Azure DevOps stored comes back carrying the link.
 
 The form is right for planned work and five fields too many for a thought that
 arrives mid-task — *the retry loop in sync.rs swallows the 412*, while reading a
-pod log. `+` takes that thought without asking anything else. It is global, and
-it is global for that reason: the thoughts arrive on the pipeline run and the
-pod log, not on the work items table.
+pipeline run. `+` takes that thought without asking anything else. It is global,
+and it is global for that reason: the thoughts arrive on the pipeline run and
+the pull request, not on the work items table.
 
 The row opens where the tab already keeps its search row, whichever tab is
 showing:
@@ -1072,8 +1024,8 @@ same `A work item is already being created` while one is out, the same
 `Created Issue #613` when it lands, and the same reopened form carrying
 everything if Azure DevOps refuses it.
 
-What it does not do is go anywhere. The cursor stays on the row, the pod or the
-run it was on, the query on screen is left alone, and `[` has nothing new to
+What it does not do is go anywhere. The cursor stays on the row or the run it
+was on, the query on screen is left alone, and `[` has nothing new to
 come back from — jumping to the work item just captured would defeat the point
 of capturing it. Nor is there a draft: a one-line title that was abandoned was
 not worth keeping, so the next `+` opens on an empty row.
@@ -1197,29 +1149,21 @@ scheduled and no row selected — it says so rather than painting an empty grid.
 
 ## Tabs
 
-A one-row bar across the top names the eight screens:
+A one-row bar across the top names the four screens:
 
-    1 Work items   2 Repos   3 Pull requests   4 Pipelines   5 AKS   6 ACR   7 Key Vault   8 Environments
+    1 Work items   2 Repos   3 Pull requests   4 Pipelines
 
-`1`–`8` switch between them from anywhere a digit is not being typed — an
+`1`–`4` switch between them from anywhere a digit is not being typed — an
 overlay comes down on the way out — and clicking a tab does the same. The names
 shorten, and then go altogether leaving the digits, as the terminal narrows, so
 every tab stays on the bar and stays clickable at any width. Each
 screen keeps its own query, cursor and scroll while another is showing, and a
 tab wears a badge after its name when it has something waiting.
-[`ticket-tui status`](#status-the-tab-badges-outside-the-app) prints the ones
-the database and the context file hold as one line, for a pane that is not
-this one — the board's `✗` is not among them.
+[`ticket-tui status`](#status-the-tab-badges-outside-the-app) prints them as
+one line, for a pane that is not this one.
 
-The first four read the database the sync worker fills; the last four read
-nothing of the sort. AKS reads clusters through `kubectl`, ACR and Key Vault read
-one Azure **subscription** through Resource Manager — a different service from
-Azure DevOps, reached with a different login — and Environments reads the
-deployment repository's own kustomize overlays off this machine. See
-[Azure Resource Manager](#azure-resource-manager) for what that costs and what
-it buys.
-
-All eight are drawn by one pane system: the same two panes, the same three
+All four read the database the sync worker fills, and all four are drawn by one
+pane system: the same two panes, the same three
 arrangements as the terminal narrows, and the same draggable seam between them,
 described under [Controls](#controls). The split, which
 pane is showing below 70 columns, and the focus are the shell's rather than any
@@ -1228,9 +1172,8 @@ screen's, so switching tabs keeps the layout you were working in.
 `g` goes to whatever the row under the cursor points at, one neighbour per
 tab: a work item's pull request — the newest still open, else the newest of
 any status, else the build it went out in — a pull request's work items or the
-run gating it, a run's pull request, a repository's newest open pull request,
-a pod's repository, and a registry tag's pod, matched against the images the
-AKS tab has already read. A row with nowhere to go says what it looked for
+run gating it, a run's pull request, and a repository's newest open pull
+request. A row with nowhere to go says what it looked for
 rather than switching to an empty tab, and the footer only offers `g` when
 there is somewhere to go. Each details pane carries the same jump as a
 `[Go to …]` chip in its header, so the mouse follows what the key would.
@@ -1242,9 +1185,8 @@ than the way a cursor moves — a tab switch, a drill into a level or back out o
 one, a follow, and the way out on `q`. Ten rows walked and left record the row
 you stopped on, not the nine you passed, so `j` and `k` put nothing on it. Every
 tab keeps its place there by level: a repository, a pull request, a pipeline or
-one of its runs, a pod, a registry or one of its repositories, a vault or one of
-its items. Fifty deep, and a target that has since gone — a pod that was
-replaced — falls out rather than landing nowhere. A
+one of its runs. Fifty deep, and a target that has since gone falls out rather
+than landing nowhere. A
 reference in a details pane — the family tree's rows today — is underlined and
 follows on `Enter` or a click; one this database does not hold says so rather
 than opening an empty screen. The walk is remembered in the session file, and a
@@ -1351,47 +1293,6 @@ section lists the first comment of each thread — author, age, status and the
 text — and replies and line comments are `o`. All four are non-optimistic: the
 row changes when Azure DevOps answers.
 
-A pull request against the repository `[deployment]` names carries a
-**Pre-flight**: the cheapest moment to catch a missing key is while the change
-is still a pull request. On selection, and again on `r`, the local thread
-fetches the branch, checks the head the row was read at out into a scratch
-worktree of its own, renders only the overlays the change touches — each
-changed file walks up to its nearest `kustomization.yaml`, and a change under
-`base/` is under every overlay — runs the same check `env check` runs over
-the result, and removes the worktree however it leaves. The *target branch's*
-render of the same overlays goes into a second scratch worktree beside it, so
-the pane can say what the merge would change as well as what it would leave
-missing. It is cached per pull request and head, so a re-selection costs
-nothing until the source branch moves; the target branch advancing under
-it is not watched, which is what `r` is for.
-
-The vault half of the check comes with the request rather than out of it:
-`preflight::run` never reaches a subscription, so what the Key Vault tab has
-already listed travels along as names, kinds and dates, and an environment
-whose vault nobody has read is answered against its own overlays with `prod:
-kv-prod not read, so the overlays answer alone` said once.
-
-The details pane says it under a `── Pre-flight ──` rule:
-one line per thing an environment would be missing, or `✓ qa overlays/qa
-renders clean`; the shared spinner while it is in the air; and then, marked
-`→`, what merging would *change* — `this pull request adds
-RATE_LIMIT_PER_MIN to prod/orders-config`, in the environments board's own
-wording, because both read `kustomize::diff::promotion_lines`. A line naming a
-Secret an overlay never fills points at the vault the environment pulls from,
-one naming a vault object points at the object itself, and both follow on a
-click. The table's `Pre-flight` column carries `✓`,
-`✗N`, the spinner, `!` for a pre-flight that could not look at all, and
-nothing for a pull request on any other repository. `✗N` counts what the merge
-would leave missing; a vault object in use that is about to lapse is a `◇`
-line in the pane and not a count, the board's own rule. The vault half is
-the listing tab 7 held when the flight left: a vault read after that reaches
-the pane on `r`.
-
-**It never blocks.** A pull request can still be approved or completed with
-findings: the pane says what will be missing and the vote is the reviewer's.
-The enforcing gate belongs in the deployment repository's own pipeline, where
-`ticket-tui env check` exits 1.
-
 `a` approves, `A` approves with suggestions, `w` waits for the author and `x`
 rejects; `u` puts the last vote back. The glyph changes at once and a refusal
 reverts it and says why. Voting on a pull request you were not asked to review
@@ -1494,284 +1395,6 @@ leaves it and the title says `scrolled`, and `End` follows again. The pane is a
 selectable surface, so dragging across it copies lines. Twenty thousand lines
 are kept per log, with a line at the top saying how many earlier ones went.
 
-## AKS
-
-Tab `5` lists the pods of every cluster `config.toml` names: `Pod · Cluster ·
-Namespace · Ready · Status · Restarts · Age`, with Node and Repository off the
-table by default and one press of `c` away. A `[[clusters]]` table is a name —
-what the tab calls it — the kubeconfig context `kubectl` reaches it by, and the
-namespaces to read; a cluster that lists none is read `--all-namespaces` in one
-call. The file is re-read whenever it changes, so a cluster added while the TUI
-is running is read at once, and one taken out takes its pods with it.
-
-    [[clusters]]
-    name = "qa"
-    context = "aks-qa"
-    namespaces = ["orders", "billing"]
-
-Nothing here touches SQLite. A pod is read live, the way local git state and
-live runs are: what a cluster holds is not the project's business, and a read is
-cheap. `src/aks.rs` is a third worker on a thread of its own — `PodWatcher`,
-with its own `kubectl` processes and its own channel — so a slow cluster queues
-behind neither a pull nor an edit. While the tab is showing, each cluster is
-read every 15 seconds on a `Cadence` of its own, the same one the pipeline
-watcher stretches to a minute when a cluster will not answer and puts back on
-the next clean read; while the tab is hidden nothing is read at all. One
-`kubectl logs -f` child runs at a time — whichever pod the details pane is on —
-and it is killed when the pane leaves it and when the run ends, so a quit leaves
-no `kubectl` behind. Every one-shot call carries `--request-timeout=10s`; the
-follow is the one call without a bound, because a stream is meant to last.
-
-Each `(cluster, namespace)` is a read of its own, and the pods it answers with
-replace the ones held for that pair and nothing else — so a cluster that cannot
-be reached blanks no other, and the cursor stays on the pod it was on. A read
-that fails leaves one line under the table's status and in the details pane —
-`qa/orders: Unable to connect to the server` — replaced by the next read of the
-same pair and dropped by one that succeeds. A namespace the server refused,
-`Error from server (Forbidden)`, does not stop the cluster's other namespaces;
-anything else does, since a server that could not be reached will not answer the
-next call either. The tab wears a `✗N` badge counting the pods somebody has to
-look at.
-
-Its grammar: `cluster:`, `ns:`, `status:`, `owner:`, `node:`, `app:` — the `app`
-and `app.kubernetes.io/name` labels — and `repo:`; anything left over matches
-the name, the namespace, the owner or the repository. Column headers sort, and a
-list re-read every fifteen seconds orders rows a column cannot tell apart by
-where they live, so nothing shuffles under the cursor.
-
-The details pane heads the pod with its glyph and status, then the cluster and
-namespace, Owner, Node, IP, Created, Ready and Restarts, the buttons
-`[Logs] [Describe] [Shell] [Restart]`, the repository the image or app label
-names when one is on file, and the containers — name, image, whether each is
-ready, its restarts and its state, with a `›` on the one the log is following.
-
-Under that is a text pane showing one of two things. `L` is the pod's log,
-tailed with `kubectl logs -f --timestamps --tail=500`, its title reading `Log ·
-orders-api-7d9f5b-abc12 · api · 1,204 lines · following`. Follow mode keeps the
-tail in view; scrolling up leaves it and the title says `scrolled`, `End`
-follows again, and a stream that stopped — the pod went, or `kubectl` refused —
-says `ended` rather than spinning forever. `P` turns on `-p`, the run before the
-last restart, which is where a crash loop says why; `C` moves to the pod's next
-container and round to the first again. `D` puts what `kubectl describe pod`
-said in the log's place, and `L` brings the log back. `l` gives the text pane
-the whole details pane and gives it back. Twenty thousand lines are kept, as
-everywhere else.
-
-The verbs: `x` deletes the pod and lets its controller put it back, asking once
-more first — the confirmation names the owner, a second `x` sends it, `Esc` does
-not — and it is refused outright on a pod with no controller, which deleting
-would take away for good rather than restart. `s` runs `kubectl exec -it … --
-sh` in this terminal, suspending the TUI and repainting it on the way out. `g`
-goes to the Repos tab, on the repository the pod's image or app label names —
-`repo_candidates` reads `myacr.azurecr.io/team/orders-api:1.2.3` as
-`orders-api` — and `[` comes back the way it does anywhere else; a pod nothing
-on file matches says what it offered. `y` copies `namespace/pod`. `r` re-reads
-the clusters rather than pulling from Azure DevOps: nothing on this tab comes
-from there. `o` has no page to open and says so.
-
-## Azure Resource Manager
-
-Tabs `6` and `7` read a subscription, not the project, so they get a second
-client and a second worker thread. `src/arm.rs` is the client; `src/arm_watch.rs`
-is the thread. Neither touches SQLite: what a subscription holds is not the
-project's business and it changes without anyone editing a work item, so it is
-read live the way a cluster's pods are and the next read replaces it.
-
-The subscriptions are `--subscription <id>`, repeatable, else
-`TICKET_TUI_SUBSCRIPTION` naming one, else `subscriptions` under `[azure]` in
-`config.toml` naming as many as a shop has, else whatever `az account show`
-says the Azure CLI is set to — and that last step happens on the worker thread
-rather than on the startup path, so no run pays for a shell-out it may never
-need. One Resource Graph query covers all of them at once, so dev, qa and prod
-arrive in one listing. With none of the four, both tabs draw empty and say so:
-
-    no Azure subscription: pass --subscription, name one under [azure] in config.toml, set TICKET_TUI_SUBSCRIPTION, or run `az account set`
-
-`registries` and `vaults` under `[azure]` narrow what comes back: an allowlist
-keeps only the resources it names, in the order it names them, matched without
-regard to case, and a name the subscriptions do not hold is simply absent
-rather than an error — `ticket-tui acr list` and `ticket-tui vaults list` show
-what matched. An empty allowlist is no opinion at all and keeps everything,
-which is what fifty subscriptions' worth of registries need narrowing from.
-The status bar names the subscriptions being read, joined with `, `.
-
-`az login` is what all of this borrows. A tenant other than the login's default
-wants `az login --tenant <tenant>` before any of it will answer.
-
-Three token audiences, all borrowed from the Azure CLI's login. `management.azure.com`
-signs the Resource Graph query that lists the subscription's registries and
-vaults. `vault.azure.net` signs every Key Vault data-plane call. A registry's own
-data plane wants a third: the ARM token is exchanged at
-`https://<login server>/oauth2/exchange` for a refresh token and then for an
-access token scoped to what is being read — `registry:catalog:*` for a catalog,
-`repository:<name>:metadata_read` for one repository's tags and manifests. There
-is no personal-access-token path anywhere here: a PAT is an Azure DevOps
-credential and ARM has never accepted one, so a PAT-only run has a working
-work-items tab and two empty ones, and every refusal says `az login`.
-
-The reads are edge-triggered. The Resource Graph inventory — one query for both
-resource types rather than one list call per provider — runs every 60 seconds
-while either ARM tab is showing, and not at all while neither is. Everything
-under it is read once per focus: drilling into a registry reads its catalog and
-then one attributes call per repository, moving the details cursor onto a tag
-reads that manifest, opening a vault reads its secrets, keys and certificates in
-one listing. Drilling in and back out again costs nothing: the screen holds what
-it read and stops asking. `r` clears the worker's memory of what it has
-answered and re-reads the inventory at once — but a registry or vault already
-open and already read is not asked for again, because the screen still holds it
-and so reports no focus. Whether it should is #733's to settle. A `429` or `503`
-honours `Retry-After` in either spelling — seconds or an IMF-fixdate — clamped to
-an hour, the same shape the pipeline watcher uses.
-
-A secret's value is the exception to all of it. It is read when somebody presses
-the key that asks for one and not a moment besides, answered once, and never held
-by the worker. In the app it lives in `Secret`, a newtype whose
-`Debug` and `Display` both print `[redacted]` so it cannot reach a log line, an
-error or a panic message by accident; `Secret::expose` is the one way to read it
-and it is meant to be conspicuous at the call site. There are exactly two callers:
-the line the details pane draws, and `secrets show --value`.
-
-## ACR
-
-Tab `6` lists the container registries the subscription holds: `Registry ·
-Resource group · SKU · Location`, with Login server off the table by default and
-one press of `c` away. `Enter` goes down into one registry's catalog —
-`Repository · Tags · Updated` — and `Backspace` or `h` comes back up. A count
-that has not landed yet is a muted `—` rather than a nought: a catalog listing is
-names and nothing else, and the counts arrive one attributes call at a time, with
-the table's bottom border reading `12 repositories · 5 of 12 read` while they do.
-
-The details pane shows what the cursor is on. A registry: its login server under
-its name, then Group, Location, SKU and Repos, and the portal link, which is a
-click target. A repository: its counts and stamp, the chips
-`[Copy pull] [Copy digest] [Open]`, then its tags newest first — name, short
-digest, age, and the size once the manifest has been read — and under them the
-Manifest section for the tag the pane's own cursor is on: Created, Platform
-(`linux/amd64`), Size. `Tab` moves the focus to the pane so `j`/`k` walk the
-tags; a click picks one directly. Whatever refused last is a `Problem` section at
-the bottom of either pane, in the error colour, cleared by the next read that
-works.
-
-Its two grammars, one per level: `name:`/`registry:`, `rg:`, `sku:`, `location:`
-on registries, with the facet bar offering the last three; `name:`/`repo:` alone
-inside one, where the bar stays empty because the one field there is is the one
-already in the search box. Leftover text matches the registry's name or login
-server, or the repository's name.
-
-The verbs: `y` copies the pull reference — `atlas.azurecr.io/team/api:1.2.3`, the
-thing `docker pull` wants, not a number. `D` copies the tag's full digest. `o`
-opens the registry in the Azure portal from either level — a repository and a
-tag have no page of their own. `r` re-reads the subscription rather than pulling
-from Azure DevOps: nothing on this tab comes from there.
-
-Deliberately out: untag and delete. This tab and `ticket-tui acr` are read-only,
-and the portal link is the way to anything destructive — a mistake here is not
-undoable and not worth a keystroke.
-
-## Key Vault
-
-Tab `7` lists the key vaults the subscription holds: `Vault · Resource group ·
-Location · SKU`. `Enter` goes down into one, and the level under it is **one
-table over all three kinds** — `Kind · Name · Enabled · Updated · Expires` —
-because that is how a person looks for one: by name, not by which listing it came
-out of. A disabled item is faded whole; an expiry reads amber inside the month
-before it and red once the clock has passed it. The table opens soonest-expiry
-first, and an item that never expires sorts last that way round.
-
-The details pane heads the item with its kind, then Enabled, Content type,
-Created, Updated, Expires (coloured the way the table's cell is) and Recovery,
-then the chips — `[Reveal]` only on a secret, since only a secret has a value,
-then `[Copy name] [Open]`. The vault pane above it is the same shape as the
-registry pane: name, URI, Group, Location, SKU, Items, and the portal link.
-
-Its grammars: `name:`/`vault:`, `rg:`, `location:` on vaults; `name:`/`item:`,
-`kind:` (`secret`, `key`, `cert`), `enabled:` (`yes`/`no` and `true`/`false`,
-both, so neither spelling quietly matches nothing) and `expires:` inside one. The
-facet bar offers `kind:` and `enabled:`. `expires:` is a date, and the one in this
-app usually asked about the future, so it takes the `+` form: `expires:<+30d` is
-everything falling due before the instant thirty days from now, which is the
-question this tab exists for. The tab wears a `◇N` badge counting the
-certificates already lapsed or within thirty days of it, across every vault whose
-items have been read.
-
-`R` reveals a secret's value. The worker reads it then and there, hands it back
-once, and keeps nothing; the pane shows it in the accent colour with `clears in
-43s` beside it, and it goes when the minute runs out, when the cursor moves, when
-the level changes, when `r` refreshes, and when the tab is left — `close_overlay`
-is what leaving runs, which is why the value goes with it. `Y` copies it, and
-only while it is showing. `y` copies the name. `o` opens the vault in the portal
-from either level, an item having no page of its own. `r` re-reads the
-subscription.
-
-The value is nowhere else. It is not in the session file, not in the agent
-context — which carries `revealed: true` and no field for a value — not in a
-notification, and not in a `Debug` line: `AppAction::CopySecret` prints
-`[redacted]` like everything else holding a `Secret`. Two tests hold that from
-both ends.
-
-Deliberately out: create, set and delete; access policies and IAM; and a secret's
-version history, which would be one more data-plane read per item for a question
-nobody has asked yet. The portal link is the way to all of it.
-
-## Environments
-
-Tab `8` is the four `env` subcommands as one glance. They answer a question at
-a time; this answers the one asked at a keyboard, mid-task, about one service:
-*is prod ready for this?*
-
-One row per service — the workload's name, deduplicated across namespaces
-with the namespace beside it — and one column per `[[environments]]`, in the
-order `config.toml` lists them. A cell is the image tag the environment runs
-with `✗N` for what it asks for and does not answer — the repository half and
-the vault half both, attributed to the service whose provider pulls the object
-rather than to the provider — and `◇N` for the vault objects it uses that fall
-due inside the Key Vault tab's own thirty days. Clean reads in the completed
-colour, a count in the error colour, and an environment that would not render
-is a `?`, which is not the same thing as an environment that has no such
-service (`—`). `/` narrows by service and namespace, and the filter bar is one
-chip, `Findings`, which is `findings:yes` in the search box.
-
-The board is the one table in the app whose columns are not a fixed set, so it
-lays itself out rather than going through `TableLayout`, which can only name
-columns a build knows. Service and Namespace are ordinary columns and the `c`
-overlay edits them.
-
-`h` and `l` move the column cursor. The environment under it is the one a
-promotion is read **into**; the one to its left is what it comes **from**, and
-the details pane's frame says which: `Promotion · orders-api · qa → prod`. Under
-the frame, what that cell is missing sits above the diff under `── Missing in
-prod ──`, then the promotion itself: `Image`, `Secrets`, `Config`, `Variables`,
-`Expiry`. The wording is `kustomize::diff::promotion_lines`, shared with the
-pull request pre-flight, so `adds RATE_LIMIT_PER_MIN to prod/orders-config`
-reads the same in both places.
-
-Every line that names a thing another tab holds goes there: an image line to
-the run that built the tag arriving, a vault line to `Jump::VaultItem`, and the
-pod the target environment is actually running — matched against the images
-the AKS tab has already read — to `Jump::Pod`. `Tab` moves the focus to the
-pane, `j`/`k` walk those lines, and `g` and `Enter` follow the one the cursor is
-on. The pull requests between two image tags are the CLI's: reading them is a
-`git log` in the service's own clone, which is no business of a render pass, so
-the line says `run \`ticket-tui env diff\` for the pull requests between them`
-and `env diff` prints them in full.
-
-The overlays are rendered when the tab is first opened, when `r` asks, and when
-a `git pull` on the Repos tab moves the deployment clone. Never on a timer: a
-render shells out to `kubectl` per overlay, and a repository only changes when
-somebody pushes. `r` also drops what the environments' vaults hold so the Key
-Vault tab lists them afresh, because a repository half as new as this minute
-deserves a vault half to match. The renders run on the local thread, the one
-that runs git, for the same reason a clone does.
-
-The tab wears a `✗N` badge counting the environments that would be missing
-something, so the bar says "prod is not ready" from any tab. Without a
-`[deployment]` table, without `[[environments]]`, or without a clone of the
-repository on this machine, the tab is the one line saying so and where it
-looked — the Repos tab's rule.
-
-Deliberately out: applying anything. This reads a repository and says what it
-finds; `kubectl apply` is the pipeline's.
-
 ## Controls
 
 Everything above the tabs line is global; the work-item keys under it only do
@@ -1779,7 +1402,7 @@ anything on tab `1`.
 
 | Input | Action |
 |---|---|
-| `1`–`8` | Switch to Work items, Repos, Pull requests, Pipelines, AKS, ACR, Key Vault, or Environments |
+| `1`–`4` | Switch to Work items, Repos, Pull requests, or Pipelines |
 | `↑`/`↓`, `j`/`k` | Move the ticket selection, family row, or focused details pane |
 | `Page Up`/`Page Down` | Move ten tickets or one family page |
 | `Home`/`End` | Select the first/last ticket, family row, or details line |
@@ -1821,27 +1444,7 @@ anything on tab `1`.
 | `Enter` | Select the family cursor ticket; with details focused, edit the field under the pointer, or open the work item |
 | `o` | Open the selected ticket in the system browser |
 | `r` | Sync from Azure DevOps now, without waiting for the timer |
-| `L` / `D` (AKS) | Tail the selected pod's log, or put `kubectl describe` in its place |
-| `P` / `C` (AKS) | Follow the run before the last restart, or the pod's next container |
-| `l` / `End` (AKS) | Give the text pane the whole details pane; follow the tail again |
-| `x` (AKS) | Delete the pod so its controller puts it back; a second `x` confirms |
-| `s` (AKS) | `kubectl exec -it … -- sh` in this terminal |
-| `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a repository's newest open pull request, a pod's repository, a tag's pod |
-| `y` (AKS) | Copy `namespace/pod` |
-| `Enter` (ACR, Key Vault) | Into the registry's repositories, or the vault's items |
-| `Backspace` / `h` (ACR, Key Vault) | Back up to the registries or the vaults |
-| `Tab` (ACR) | Focus the details pane, where `j`/`k` walk the tags and the manifest follows |
-| `y` (ACR) | Copy the pull reference — `atlas.azurecr.io/team/api:1.2.3` |
-| `D` (ACR) | Copy the digest of the tag the details pane is on |
-| `R` (Key Vault) | Reveal the selected secret's value: on this screen, for one minute, nowhere else |
-| `Y` (Key Vault) | Copy the revealed value, and only while it is showing |
-| `y` (Key Vault) | Copy the item's name |
-| `h` / `l` (Environments) | Move the environment cursor: the promotion pane reads from the column to the left into the one under it |
-| `F` (Environments) | Only the services with a finding |
-| `Tab` (Environments) | Focus the promotion pane, where `j`/`k` walk its lines and `g` follows the one under the cursor |
-| `y` (Environments) | Copy the service's name |
-| `o` (ACR, Key Vault, Environments) | Open the registry, the vault or the deployment repository in the portal — the resource is what the portal has a page for, whichever level you are on |
-| `r` (AKS, ACR, Key Vault, Environments) | Re-read that tab's own source rather than pulling from Azure DevOps — on Environments, render the overlays again and ask for the vaults afresh |
+| `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a repository's newest open pull request |
 | `i` | Show database path, row counts, hidden finished rows, and sync freshness |
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
@@ -1855,10 +1458,7 @@ screen has an arm for the command, so the palette never offers an entry that
 would do nothing; two tests hold that in both directions, and a command two
 tabs share is listed under both help headings because it does a different thing
 on each. `Open` is worded for what it opens — a ticket, a repository, a pull
-request, a run, or the Azure portal — and so are the three verbs that mean
-something different on a tab with no Azure DevOps behind it: `Sync` reads
-`Refresh pods`, `Refresh registries` or `Refresh vaults`, and `Copy ID` reads
-`Copy pull reference` on ACR and `Copy name` on Key Vault. `?`, `p`/`:`, `c` and `i` open on every tab: the
+request or a run. `?`, `p`/`:`, `c` and `i` open on every tab: the
 palette lists the commands of the tab that is showing and runs its choice
 there, and the columns editor edits that tab's columns.
 
@@ -2254,8 +1854,8 @@ query the cache while the TUI is running.
 A bare `ticket-tui` opens the TUI. Every subcommand does one thing and exits,
 which is what lets an agent — or a script — read and change work items without
 a terminal to drive. `--database`, `--org`, `--project`, `--code-project`,
-`--workspace` and `--subscription` — the last repeatable — apply to all of them
-and may be written either side of the subcommand. Every one of them falls back
+and `--workspace` apply to all of them and may be written either side of the
+subcommand. Every one of them falls back
 to `config.toml`, so a shop that has edited that file writes none of them.
 
 ```console
@@ -2285,23 +1885,7 @@ ticket-tui runs wait <id>
 ticket-tui approvals list [--json]
 ticket-tui approvals approve <id> [--comment TEXT]
 ticket-tui approvals reject <id> [--comment TEXT]
-ticket-tui pods [--cluster NAME] [--namespace NAME] ['<filter>'] [--json]
-ticket-tui acr list [--json]
-ticket-tui acr show <registry> [--json]
-ticket-tui acr repos list --registry NAME [--json]
-ticket-tui acr tags list --registry NAME --repo NAME [--json]
-ticket-tui acr tags show --registry NAME --repo NAME <tag> [--json]
-ticket-tui vaults list [--json]
-ticket-tui vaults show <vault> [--json]
-ticket-tui secrets list --vault NAME [--json]
-ticket-tui secrets show --vault NAME <name> [--json | --value]
-ticket-tui keys list --vault NAME [--json]
-ticket-tui certs list --vault NAME [--json]
 ticket-tui status [--json]
-ticket-tui env list [--json]
-ticket-tui env show <environment> [--json]
-ticket-tui env check [ENV...] [--json] [--offline]
-ticket-tui env diff <from> <to> [SERVICE] [--json]
 ```
 
 `sync` pulls and exits, printing what moved — `Synced 3 changes from
@@ -2442,80 +2026,17 @@ run 51 succeeded · 20260829.4
 `--parent` links it under an existing one. A refusal prints what Azure DevOps
 said and exits 1.
 
-`pods` is the one read with no database to answer from: it reads the clusters
-`config.toml` names through `kubectl`, every time. It prints `cluster namespace
-pod ready status restarts age`, or `no matching pods`; `--json` adds the node,
-the IP, the owner as `Deployment/orders-api`, every container with its image
-and state, and the labels. The positional argument is the AKS tab's own
-[grammar](#aks), and `--cluster` and `--namespace` narrow what is read rather
-than what is printed. No repository is matched to a pod here — that lookup wants
-the project's repositories, and this command does not open the database. A
-cluster that could not be read is one line on stderr and a non-zero exit after
-the pods that did answer have been printed, because a partial answer is still
-worth having; a `config.toml` with no `[[clusters]]` is an error saying to add
-one.
-
-`acr` and the four vault groups are the [ACR](#acr) and [Key Vault](#key-vault)
-tabs without the tab, and the other reads with no database behind them: the
-subscription is asked for its registries and vaults on every invocation, and a
-registry's or a vault's own data plane answers for what is inside it. They
-resolve the subscription the way the tabs do — `--subscription`, then
-`TICKET_TUI_SUBSCRIPTION`, then the Azure CLI — and an unresolved one or a
-refused token is an error rather than an empty listing, because there is nothing
-stored here to fall back on. A name the subscription does not hold is refused by
-name (`no registry called ghcr in subscription sub-1`, `no vault called
-billing-kv in this subscription`), matched ignoring case like every other name on
-this command line.
-
-```console
-$ ticket-tui acr list
-acr  rg  Premium  westeurope  acr.azurecr.io
-
-$ ticket-tui acr repos list --registry acr
-team/orders-api  7  9  2026-08-29 09:00:00 UTC (1d)
-team/billing     —  —  —
-
-$ ticket-tui certs list --vault atlas-kv
-wildcard  yes  2026-08-01 09:00:00 UTC (29d)  2026-09-29 09:00:00 UTC (0s) expires in 30 days
-```
-
-The tables are the tabs' own with their hidden columns shown: `acr list` prints
-`name resource-group sku location login-server`, `repos list` prints
-`repository tags manifests updated`, `tags list` prints `tag digest created`
-newest first, `vaults list` prints `name resource-group location sku uri`, and
-the three item listings print `name enabled updated expires` with a
-`content-type` column after it for secrets and the expiry in words as well as a
-stamp for certificates. A count nobody could read is a dash rather than a nought,
-the way the tab draws one that has not landed; `acr repos list` puts one line per
-unreadable repository on stderr and exits non-zero after printing the rows that
-did answer. `show` on either resource is the block of text its details pane
-draws, portal link and all. `--json` carries the same fields plus the resource's
-`id` and a `portal_url`, so an agent need not build one; the counts (`repositories`
-on a registry, `items` on a vault) are only on `show`, which is the one form that
-reads them.
-
-Nothing under `acr` or the vault groups writes. Everything is read-only for the
-same reason the tabs are, and a listing never carries a value.
-
-`ticket-tui secrets show --vault V NAME --value` is the one command in this file
-that reads a secret's value. It prints it raw on stdout and prints nothing else,
-so `$(…)` around it is the value and only the value; it conflicts with `--json`
-at the command line rather than resolving into a quiet preference for one of
-them; and it is the only caller of `Secret::expose` outside the details pane. The
-metadata form of the same command reads the listing every other form reads, never
-the value, and ends by saying so — `value: not shown; pass --value to print it`.
-
 ### `status`: the tab badges outside the app
 
 `ticket-tui status` prints the numbers the [tab bar](#tabs) badges as one line,
 with no ANSI in it, for a herdr status bar or a shell prompt that wants the
 same glance without switching panes. It answers from SQLite alone — no network,
-no `az`, no `kubectl` — in a few milliseconds, so a prompt can call it every
-time it draws.
+no `az` — in a few milliseconds, so a prompt can call it every time it
+draws.
 
 ```console
 $ ticket-tui status
-doing 4 · stale 2 · review 3 · rejected 1 · ◐1 · failed 1 · ✗2 pods · ◇2 certs · synced 14m ago
+doing 4 · stale 2 · review 3 · rejected 1 · ◐1 · failed 1 · synced 14m ago
 ```
 
 Segments are left out when they are zero, and the glyphs and the ` · `
@@ -2532,11 +2053,6 @@ rather than two:
   requests you raised that somebody has voted `✗` on.
 - `◐N` — runs going, the Pipelines tab's own badge arithmetic; `failed N` —
   runs that finished failed in the last 24 hours.
-- `✗N pods` and `◇N certs` — pods in trouble and certificates within thirty
-  days of lapsing. These are live reads the database never holds, so they come
-  out of `aks.unhealthy` and `key_vault.expiring_certificates` in the
-  [context file](#live-agent-context) a running TUI publishes. **No running TUI
-  means no such segment:** `status` never shells out to `kubectl` or ARM.
 - `synced Nm ago` — only once the rows are older than twice the refresh
   interval (`--refresh`, then `TICKET_TUI_REFRESH`, then 60), so a stale number
   says that it is stale and a current one says nothing at all.
@@ -2547,16 +2063,13 @@ plus `synced_at` and `context`:
 
 ```console
 $ ticket-tui status --json
-{"certs_expiring":2,"context":"live","doing":4,"failed_runs":1,"live_runs":1,"pods_unhealthy":2,"rejected":1,"review":3,"stale":2,"synced_at":"2026-08-31T11:46:00Z"}
+{"context":"live","doing":4,"failed_runs":1,"live_runs":1,"rejected":1,"review":3,"stale":2,"synced_at":"2026-08-31T11:46:00Z"}
 ```
 
 `context` is `live` when a context file is there and the process that wrote it
 is still up, `stale` when the file was left behind by a run that is gone, and
-`absent` when there is no file. Only `live` fills `pods_unhealthy` and
-`certs_expiring`; the other two leave them `null`, which is why they are `null`
-rather than `0` — a nought there would read as good news. Liveness is
-`/proc/<pid>` on Linux and one `ps -p` on macOS, and only when a context file
-exists at all.
+`absent` when there is no file. Liveness is `/proc/<pid>` on Linux and one
+`ps -p` on macOS, and only when a context file exists at all.
 
 `synced_at` is when the stored rows last moved, read off the database and its
 write-ahead log rather than from a stamp of its own: a pull that finds nothing
@@ -2570,156 +2083,6 @@ too, so the line and the bar cannot drift apart; `rejected_of_mine` and
 `runs_failed_since` sit beside them and are the status line's alone, since no
 tab badges those two.
 
-### `env`: what an environment declares, and what it forgot
-
-`env` is the deployment repository read as an environment rather than as files.
-It is the third read with no database behind it, and the only one that touches
-neither Azure DevOps nor a subscription: `[deployment]` names the repository,
-the workspace scan finds the clone, and `kubectl kustomize <overlay>` renders
-each overlay the environment lists.
-
-The render is read, never the templates. `kubectl kustomize` applies every patch
-and hash-suffixes every generated name exactly as the Deployment refers to it,
-so `orders-runtime` in a `secretGenerator` and `orders-runtime-fd548dtc4m` in
-the Deployment's `secretKeyRef` are the same string by the time this reads
-them — which is what lets the whole feature be plain string matching and lets
-it stay ignorant of kustomize. Every overlay a glob matches is rendered and
-unioned into one environment.
-
-What is kept is names and presence, never values. A workload's containers and
-init containers, their images, and every `configMapKeyRef`, `secretKeyRef`,
-`configMapRef`, `secretRef` and volume they name; each ConfigMap and Secret by
-the keys of its `data`, `binaryData` and `stringData`; each `SecretProviderClass`
-and `ExternalSecret` by the vault it pulls from, the vault objects it asks for
-and the Kubernetes Secret keys those become. A rendered `secretGenerator`
-carries base64 in the file and none of it reaches the model, on the same rule
-`Secret` keeps in the Key Vault tab.
-
-```console
-$ ticket-tui env list
-qa    services/*/overlays/qa    kv-qa    acrqa    qa    12 workloads, 9 configmaps, 3 secrets, 2 providers
-prod  services/*/overlays/prod  kv-prod  acrprod  prod  12 workloads, 8 configmaps, 3 secrets, 2 providers
-```
-
-`env show <environment>` is the same environment written out: each workload with
-its containers, their images and every reference each makes, the ConfigMaps and
-Secrets by key count, and each provider with the vault objects it pulls and the
-Secret keys it produces. `--json` prints the model itself.
-
-`env check` is the pre-deploy gate, and it is the point of all of it. The
-commonest way a deploy to prod fails is a workload reading a ConfigMap key — or
-a Secret key — that its own overlay never defines, because it was added to qa's
-overlay and not prod's; that is knowable from the repository alone, offline,
-before the merge, and today it is discovered by the pod. Every check says a key
-or an object is **absent**, never that a value is wrong:
-
-- `configMapKeyRef` and `secretKeyRef`: the object absent, or present without
-  the key.
-- `envFrom`, and a volume with no `items`: the whole object is the reference,
-  so only its absence is a finding.
-- A volume's `items[].key`: each key.
-- `csi.volumeAttributes.secretProviderClass`: the class absent from the overlay.
-
-A Secret a provider produces counts as existing with the keys its
-`secretObjects` — or an `ExternalSecret`'s `target` and `data` — say it will
-hold; one pulled whole with `dataFrom` has keys nothing in the repository can
-know, so nothing that reads it is ever called missing. `optional: true`
-anywhere is silent, because a workload that starts without a key is not
-waiting on one.
-
-```console
-$ ticket-tui env check prod
-prod shop-prod/billing-api Deployment env SIGNING_KEY ← secret billing-kv key SIGNING_KEY missing
-prod shop-prod/billing-vault SecretProviderClass kv-prod secret billing-legacy-token missing
-prod shop-prod/orders-api Deployment env RATE_LIMIT_PER_MIN ← configmap orders-config key RATE_LIMIT_PER_MIN missing
-$ ticket-tui env check qa
-qa: clean (3 workloads, 1 configmap)
-```
-
-The second line is the other half of a missing secret, and the half the
-repository cannot answer alone: the overlay is right and the vault is not,
-because the object was made in `kv-qa` when the feature was built and nobody
-ever made the prod one. `[[environments]].vault` names the vault, the CLI reads
-it the way `secrets list` does and the TUI uses what the Key Vault tab already
-holds, and either way it is names, kinds and dates — no value is read, on the
-same rule `Secret` keeps everywhere else. Three things come of the join:
-
-- an object a provider pulls that the vault does not hold. An `objectType` says
-  which of the three to look under; an `ExternalSecret`'s `remoteRef` says
-  nothing, so it is looked for as a secret, then a key, then a certificate.
-- a provider whose `keyvaultName` — or whose store's `vaultUrl` — names a vault
-  other than the environment's own: `prod shop-prod/billing-vault
-  SecretProviderClass pulls from kv-qa, not kv-prod`. That is the whole
-  copy-paste in one line, so what it asks the wrong vault for is left alone.
-- an object the overlay pulls that falls due inside the Key Vault tab's own
-  thirty days, by the date: `prod shop-prod/billing-vault SecretProviderClass
-  kv-prod cert billing-wildcard expires 2026-09-10`. One the overlay does not
-  pull is the Key Vault tab's business rather than the gate's.
-
-`--offline` — and a run that cannot get a token, which is the same thing on a
-machine with no `az` — skips the vault half in one line on stderr, `vault check
-skipped: --offline`, rather than reporting every object as missing. The
-findings on stdout stay diffable and the exit code is the overlays' own.
-`--json` carries `vault` on every finding.
-
-The line is the environment, `namespace/workload`, the workload's kind, where
-the reference is written, and what it points at that is not there. Findings are
-sorted by environment, namespace and workload, so two runs diff cleanly. It
-exits **1** when there is any finding, **0** when every environment named is
-clean, and **2** when an overlay would not render — an overlay the renderer
-refused is one line on stderr, and a gate that could not look must not read as
-clean. That is what lets the deployment repository's own pipeline run
-`ticket-tui env check` as a step.
-
-`env diff <from> <to> [service]` is the same two environments read against each
-other, which is what a promotion asks before anything is broken. The service is
-the workload's name, and part of it will do — `orders` is `orders-api`. One block per
-service, empty blocks left out, `identical` when the two agree; direction is
-left to right, and what the target has and the source has not is marked `only
-in prod`. Per workload present in either: the image tag, the keys of the
-ConfigMaps and Secrets it references, the vault objects its providers pull, and
-the variable names its containers set — names, as everywhere here.
-
-```console
-$ ticket-tui env diff qa prod orders
-orders-api Deployment
-  image   api  1.4.0 → 1.3.9  3 PRs behind: !812 !815 !820 — #642 #650 #655
-  key     orders-config RATE_LIMIT_PER_MIN
-  var     api TRACE_SAMPLE_RATE
-```
-
-The image half is the one thing two overlays cannot answer between them, so it
-is read back rather than guessed. A tag is the run that built it — the run
-whose build number it is, else the run whose commit it is the head of, else the
-run the registry's own `org.opencontainers.image.revision` annotation names —
-and two runs are two commits, and the pull requests between them are the ones
-`git log <prod's commit>..<qa's commit>` holds in the service's clone: by the
-commit the pull request was last read at, or by the `Merged PR 812:` subject
-Azure DevOps writes, which is all a squash leaves behind. Their work items are
-the ones the Pull requests tab already carries. The service's clone is the
-repository the workload is named after, else the one the run's pipeline builds.
-
-Every one of those reads is allowed to be missing, and says so on the line
-instead of failing: `no clone of orders-api to read the history from`, `no run
-on file for 1.4.0`, `no pull request between them`. The keys, the vault objects
-and the variables come from the two renders alone, so the diff is answerable
-with no database, no clone and no network — which is the same promise `env
-check` makes.
-
-In `--json` a finding's `missing` is the bare word (`object`, `key`,
-`vaultObject`, `wrongVault`) except for an expiry, which is `{"expiring":
-{"on": "<date>"}}` — the one that carries a fact of its own. A vault object
-that is disabled reads as missing, since the driver cannot read it either.
-
-`fixtures/kustomize` is the worked example the tests read: a base with two
-services, a CronJob, a ConfigMap with a block scalar and a `secretGenerator`,
-and two overlays, one of which is deliberately missing a ConfigMap key, a
-produced Secret key, and a vault object prod's provider pulls, while the other
-sets a variable and moves an image tag the first never got.
-`rendered/{qa,prod}.yaml` beside it is what
-`kubectl kustomize` makes of them, checked in so the parse and the check are
-tested without `kubectl`; one `#[ignore]`d test re-renders and compares.
-
 ## Live agent context
 
 While ticket-tui is running, it atomically publishes a compact JSON snapshot
@@ -2728,14 +2091,13 @@ This is the supported interface for an LLM agent to understand the current view
 without scraping terminal cells or causing SQLite reloads; the
 [subcommands](#subcommands) above are how one acts on what it reads.
 
-Schema 3 describes the whole workspace rather than one tab. At the top level:
+Schema 4 describes the whole workspace rather than one tab. At the top level:
 the cache path, the signed-in display name that marks your own work items, the
 process ID and last-change timestamp, a `sync` block, the `pending_edits` not
-yet answered, and `active_tab` — `work_items`, `repos`, `pull_requests`,
-`pipelines`, `aks`, `acr`, `key_vault` or `environments`. Under those, one block
-per tab, **all
-of them filled whether or not the tab is showing**, so an agent asked about a
-pull request need not ask the user to press `3`:
+yet answered, and `active_tab` — `work_items`, `repos`, `pull_requests` or
+`pipelines`. Under those, one block per tab, **all of them filled whether or not
+the tab is showing**, so an agent asked about a pull request need not ask the
+user to press `3`:
 
 - `work_items` — everything schema 2 kept at the top level, unchanged and one
   level down: selected and checked tickets, the rows in the viewport with the
@@ -2750,58 +2112,20 @@ pull request need not ask the user to press `3`:
 - `pull_requests` — the queue and the selected request with its reviewers and
   their votes, the work items it carries, its build, whether auto-complete is
   set and how many threads are unresolved, plus `to_review_count` and whether
-  closed ones are shown. Every row carries `my_vote`. The selected request also
-  carries `preflight`, added within schema 3: a `state` of `not_applicable` for
-  a pull request on any repository but the deployment one, `running`, `clean`
-  with the `overlays` it rendered, `findings` with one line each, or `failed`
-  with the one line saying why it could not look.
+  closed ones are shown. Every row carries `my_vote`.
 - `pipelines` — the `level` (`pipelines` or `runs`), the selected pipeline and
   run — the run with its stages, each stage's state and result — the log being
   tailed (`run_id`, `log_id`, `node`, `line_count`, `following`), how many runs
   are going, which are watched, and how many approvals are pending.
-- `aks` — the `clusters` `config.toml` names, the pod under the cursor with its
-  containers, how many rows the table is showing and how many of them are
-  unhealthy, the log being tailed (`pod`, `container`, `previous`,
-  `line_count`, `following`), and one `errors` line per `(cluster, namespace)`
-  that could not be read. Pods are read live rather than stored, so the block is
-  only as current as the last read.
-- `acr` — the `level` (`registries` or `repositories`), the registry under the
-  cursor with its group, SKU, location, login server and portal link, the
-  repository under it with its tag count and stamp, the tag the details pane's
-  own cursor is on with its full digest, and how many rows the query leaves on
-  the table.
-- `key_vault` — the `level` (`vaults` or `items`), the vault under the cursor
-  with its group, location, SKU, URI and portal link, the item under it —
-  `kind`, `name`, `enabled`, `updated`, `expires` — the row count, and
-  `expiring_certificates`, the same number the tab's `◇N` badge shows. The item
-  also carries `revealed`, which says whether its value is on the screen this
-  minute. **There is no field for the value and there is not meant to be one:**
-  a value is read for the screen alone and this file is written to disk.
-- `environments` — the board: one entry per `[[environments]]` with its
-  `vault`, its `overlays`, whether it `rendered`, the renderer's `error` where
-  it did not, and how many `findings` and `expiring` objects it holds; then
-  `selected_service`, `selected_environment` — the column the cursor is on,
-  which is what a promotion is read into — that cell's `findings` one line
-  each, and the `diff` the details pane is reading (`from`, `to`, and its lines
-  in the words the pre-flight uses). `reason` is the one line saying why the
-  board is empty when it is: no `[deployment]`, no `[[environments]]`, or no
-  clone of the repository on this machine.
 - Every tab block also carries `follow`: where `g` would go from the row
   under that tab's cursor, written the way a jump is stored — `{"kind":
   "pull-request", "at": {"repo": "ticket-tui", "id": 812}}` — or `null` when
-  the row points nowhere. Added within schema 3, like everything else here.
-- `arm` — whether those two have anything to read at all: `subscription`,
-  `offline`, and `last_error`, the one line that says why an offline run reads
-  nothing. Both tabs are described on every run; `arm.offline` is what tells an
-  agent that an empty `acr` means "no subscription", not "no registries".
-
-The last three blocks, like `aks`, are as current as the last read rather than
-as current as a pull: 60 seconds for the inventory while an ARM tab is showing,
-and once per focus for everything under it.
+  the row points nowhere.
 
 Schema 2 consumers read the work-item fields at the top level and will find them
-under `work_items` instead. A block added within schema 3 — `aks`, `acr`,
-`key_vault`, `arm` and `environments` all were — is additive, and a reader should
+under `work_items` instead. Schema 4 dropped the `aks`, `acr`, `key_vault`,
+`arm` and `environments` blocks schema 3 had carried; adding a block, or a field
+to one, is additive and leaves the version where it is, and a reader should
 ignore fields it does not know rather than refuse them.
 
 The file is replaced after meaningful rendered-state changes and removed on a

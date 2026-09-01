@@ -14,51 +14,6 @@ code_project = "Fiquants"     # where the repos, pull requests and pipelines liv
 # query = "[System.AreaPath] UNDER 'ISTO\\Team'"   # optional WIQL scope on every pull
 # workspace = "~/Development" # where clones live; a leading ~ is the home directory
 
-[azure]                       # tabs 6 ACR and 7 Key Vault
-subscriptions = ["<dev-guid>", "<qa-guid>", "<prod-guid>"]   # left out: whatever `az account show` says
-registries = ["acrdev", "acrqa", "acrprod"]   # optional: only these, in this order
-vaults = ["kv-dev", "kv-qa", "kv-prod"]       # optional: only these, in this order
-
-# Tab 5 AKS, one table per cluster. The contexts are the ones
-# `az aks get-credentials --resource-group RG --name CLUSTER` writes into the
-# kubeconfig; `kubectl config get-contexts` lists what is there.
-[[clusters]]
-name = "qa"                   # what the tab calls it
-context = "aks-qa"            # the kubeconfig context kubectl reaches it by
-namespaces = ["orders", "billing"]   # left out or empty: every namespace at once
-
-[[clusters]]
-name = "prod"
-context = "aks-prod"
-
-# The environments board and `ticket-tui env`. `repo` is the deployment
-# repository, as the Repos tab names it; its clone is found by the same
-# workspace scan, and without one the board and the `env` commands say where
-# they looked. `render` is what turns one overlay into plain YAML — left out,
-# `kubectl kustomize`, which needs nothing installed beyond kubectl.
-[deployment]
-repo = "deployment"
-# render = "kustomize build"  # for a repository that wants a newer kustomize
-
-# One table per environment the repository declares. `overlays` are directories
-# relative to the clone; `*` matches within one path segment, so
-# "services/*/overlays/prod" is every service's and all of them are rendered and
-# unioned into one environment. `vault`, `registry` and `cluster` are what the
-# environment is deployed onto, as [azure] and [[clusters]] name them.
-[[environments]]
-name = "qa"
-overlays = ["services/*/overlays/qa"]
-vault = "kv-qa"
-registry = "acrqa"
-cluster = "qa"
-
-[[environments]]
-name = "prod"
-overlays = ["services/*/overlays/prod"]
-vault = "kv-prod"
-registry = "acrprod"
-cluster = "prod"
-
 # The colour theme. `preset` is terminal, terminal-light, mono or custom;
 # left out, a [theme.custom] palette is painted if there is one and the
 # terminal's own sixteen colours if there is not. The `theme` tool writes both
@@ -87,8 +42,7 @@ teal = "#29e0c8"
 
 # A desktop notification when something worth interrupting for happens: a run
 # you pressed `w` on finishes, a vote lands on a pull request you wrote, one
-# turns up wanting your review, a pod starts crash-looping, an approval lands
-# on a run. The command is run through `sh -c`, detached, with its output
+# turns up wanting your review, an approval lands on a run. The command is run through `sh -c`, detached, with its output
 # thrown away, and the status line says the same words either way.
 #
 # {title} and {body} are replaced by the text as one complete single-quoted

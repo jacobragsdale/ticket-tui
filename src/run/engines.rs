@@ -21,36 +21,6 @@ pub(super) struct LocalRuntime {
     pub(super) showing: bool,
 }
 
-/// The AKS tab's side of the run: the worker thread, the clusters it has been
-/// told about, and whether it knows the tab is showing.
-#[derive(Default)]
-pub(super) struct AksRuntime {
-    pub(super) worker: Option<AksHandle>,
-    pub(super) clusters: Vec<Cluster>,
-    pub(super) showing: bool,
-    /// The log the worker was last told to follow, so the message is sent when
-    /// it changes rather than every turn.
-    pub(super) following: Option<LogFollow>,
-    /// What each cluster and namespace held on the read before this one, so a
-    /// pod that has started crash-looping or restarted again can be told from
-    /// one that was already doing it. A read this map has never held is the
-    /// baseline for that cluster and namespace.
-    pub(super) pods_seen: HashMap<(String, Option<String>), PodMarks>,
-}
-
-/// The two subscription tabs' side of the run: the worker thread, which of
-/// them it has been told is showing, and what the ACR tab is looking at.
-#[derive(Default)]
-pub(super) struct ArmRuntime {
-    pub(super) worker: Option<ArmHandle>,
-    pub(super) showing: Option<TabId>,
-    pub(super) focus: Option<ArmFocus>,
-    /// Whether the thread refused to start, or started and has since gone.
-    /// Without one there is nothing to try again with, and a thread that dies
-    /// under us would be started again every turn, so it is asked for once.
-    pub(super) failed_to_start: bool,
-}
-
 /// Everything the event loop needs to keep the database in step with Azure
 /// DevOps: the worker thread, the timer that feeds it, and why there is no
 /// worker when there is none.
@@ -75,16 +45,8 @@ pub(super) struct SyncRuntime {
     /// Clones on this machine: their own thread, so a clone that takes a
     /// minute never holds up an edit.
     pub(super) local: LocalRuntime,
-    /// Pods, on a thread of their own with its own `kubectl` processes.
-    pub(super) aks: AksRuntime,
-    /// Registries and vaults, on a thread of their own with its own client.
-    pub(super) arm: ArmRuntime,
     pub(super) scheduler: SyncScheduler,
     pub(super) config: Option<AzureConfig>,
-    /// What the ACR and Key Vault tabs read: the subscriptions the flags, the
-    /// variable and the file settled on, and the registries and vaults worth
-    /// listing out of them. No subscription named is the worker's to settle.
-    pub(super) arm_config: ArmConfig,
     /// Why Azure DevOps could not be resolved, reported when the user asks for
     /// a sync anyway.
     pub(super) offline_reason: Option<String>,

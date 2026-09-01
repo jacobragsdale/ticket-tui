@@ -939,21 +939,11 @@ impl WorkItemsScreen {
             | CommandId::AutoCompletePr
             | CommandId::CommentPr
             | CommandId::ToggleClosedPrs
-            | CommandId::ToggleFindings
             | CommandId::RunPipeline
             | CommandId::CancelRun
             | CommandId::RetryRun
             | CommandId::WatchRun
-            | CommandId::Approvals
-            | CommandId::ShowLogs
-            | CommandId::DescribePod
-            | CommandId::PreviousLogs
-            | CommandId::NextContainer
-            | CommandId::RestartPod
-            | CommandId::ExecShell
-            | CommandId::CopyDigest
-            | CommandId::RevealSecret
-            | CommandId::CopyValue => AppAction::None,
+            | CommandId::Approvals => AppAction::None,
             CommandId::SprintSummary => {
                 self.open_sprint_summary();
                 AppAction::None

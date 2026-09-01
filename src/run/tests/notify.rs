@@ -110,48 +110,6 @@ fn without_a_notify_table_the_footer_is_all_there_is() {
     );
 }
 
-#[test]
-fn the_first_read_of_a_clusters_pods_is_the_baseline_and_a_restart_after_it_is_news() {
-    let mut app = App::new(Vec::new());
-    let (notifier, said) = Notifier::recording();
-    app.shell.set_notifier(notifier);
-    let mut seen = HashMap::new();
-    let namespace = Some("orders");
-    let pod = |restarts| ticket_tui::aks::Pod {
-        key: PodKey {
-            cluster: "qa".to_owned(),
-            namespace: "orders".to_owned(),
-            name: "orders-api-1".to_owned(),
-        },
-        status: "Running".to_owned(),
-        ready: (1, 1),
-        restarts,
-        created: None,
-        node: String::new(),
-        ip: String::new(),
-        owner: None,
-        containers: Vec::new(),
-        labels: Vec::new(),
-    };
-
-    announce_pods(&mut app, &mut seen, "qa", namespace, &[pod(3)]);
-    assert!(
-        said.lock().unwrap().is_empty(),
-        "what was there is not news"
-    );
-
-    announce_pods(&mut app, &mut seen, "qa", namespace, &[pod(4)]);
-    assert_eq!(
-        said.lock().unwrap().first().map(|(title, _)| title.clone()),
-        Some("orders-api-1 restarted (4 in all)".to_owned())
-    );
-    assert_eq!(said.lock().unwrap().len(), 1);
-
-    // The same read again: the pod is no worse than it was.
-    announce_pods(&mut app, &mut seen, "qa", namespace, &[pod(4)]);
-    assert_eq!(said.lock().unwrap().len(), 1);
-}
-
 fn authored_by_me_with(vote: i8) -> ticket_tui::model::PullRequest {
     ticket_tui::model::PullRequest {
         repo_id: "repo".to_owned(),

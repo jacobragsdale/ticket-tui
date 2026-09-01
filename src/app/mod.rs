@@ -10,9 +10,9 @@ use ratatui::widgets::TableState;
 use serde_json::Value;
 
 use crate::agent_context::{
-    AcrContext, AgentContext, AksContext, ArmContext, EnvironmentsContext, KeyVaultContext,
-    PendingEditContext, PipelinesContext, PullRequestsContext, ReposContext, SearchContext,
-    SortContext, SyncContext, TicketContext, TicketReference, TicketsContext, WorkItemsContext,
+    AgentContext, PendingEditContext, PipelinesContext, PullRequestsContext, ReposContext,
+    SearchContext, SortContext, SyncContext, TicketContext, TicketReference, TicketsContext,
+    WorkItemsContext,
 };
 use crate::classification::{self, ClassificationNode, NodeKind};
 use crate::columns::{ColumnLayout, TableLayout};
@@ -50,11 +50,7 @@ use crate::sync::{ReparentApplied, ReparentRejection};
 use crate::text_input::TextInput;
 use crate::timestamp::Timestamp;
 
-pub mod acr;
-pub mod aks;
 pub mod cursor;
-pub mod environments;
-pub mod key_vault;
 pub mod pipelines;
 pub mod pull_requests;
 pub mod repos;
@@ -62,11 +58,7 @@ mod screen;
 pub mod shell;
 pub mod work_items;
 
-pub use acr::AcrScreen;
-pub use aks::AksScreen;
 pub use cursor::ListCursor;
-pub use environments::EnvironmentsScreen;
-pub use key_vault::KeyVaultScreen;
 pub use pipelines::PipelinesScreen;
 pub use pull_requests::PullRequestsScreen;
 pub use repos::ReposScreen;
@@ -128,24 +120,6 @@ pub enum AppAction {
     /// Clone one repository into the workspace, or fetch or pull the one
     /// already there. The local thread runs git; nothing here waits on it.
     LocalGit(crate::local::LocalRequest),
-    /// Something for the cluster worker: read the pods again, follow a log,
-    /// restart a pod. Nothing here waits on it either.
-    Aks(crate::aks::AksRequest),
-    /// Hand the terminal to `kubectl exec -it` on one pod, and take it back
-    /// when the shell in there exits. `container` is the one the log follows;
-    /// with none, kubectl picks the pod's default.
-    ExecShell {
-        context: String,
-        key: crate::aks::PodKey,
-        container: Option<String>,
-    },
-    /// Something for the subscription worker behind the ACR and Key Vault
-    /// tabs. Nothing here waits on it either.
-    Arm(crate::arm_watch::ArmRequest),
-    /// Put the secret on screen on the clipboard. It travels as the newtype
-    /// rather than as a `String` so that a `{:?}` of an action — in a log, a
-    /// panic, a test failure — cannot print it.
-    CopySecret(crate::arm::Secret),
     /// Read the pending approvals now rather than at the next poll.
     RefreshApprovals,
     /// Approve or reject one approval, with an optional word about why.
@@ -271,10 +245,6 @@ pub struct App {
     pub repos: ReposScreen,
     pub pull_requests: PullRequestsScreen,
     pub pipelines: PipelinesScreen,
-    pub aks: AksScreen,
-    pub acr: AcrScreen,
-    pub key_vault: KeyVaultScreen,
-    pub environments: EnvironmentsScreen,
     /// The pull requests as the last snapshot left them, for telling a vote
     /// that has landed from a pull that changed nothing. `None` until the
     /// first snapshot of the run, which is the baseline rather than news.
@@ -303,10 +273,6 @@ impl App {
             repos: ReposScreen::default(),
             pull_requests: PullRequestsScreen::default(),
             pipelines: PipelinesScreen::default(),
-            aks: AksScreen::default(),
-            acr: AcrScreen::default(),
-            key_vault: KeyVaultScreen::default(),
-            environments: EnvironmentsScreen::default(),
             pull_request_marks: None,
         }
     }
@@ -328,10 +294,6 @@ impl App {
             TabId::Repos => &self.repos,
             TabId::PullRequests => &self.pull_requests,
             TabId::Pipelines => &self.pipelines,
-            TabId::Aks => &self.aks,
-            TabId::Acr => &self.acr,
-            TabId::KeyVault => &self.key_vault,
-            TabId::Environments => &self.environments,
         }
     }
 
@@ -388,10 +350,6 @@ impl App {
             TabId::Repos => self.repos.run_command(&mut self.shell, id),
             TabId::PullRequests => self.pull_requests.run_command(&mut self.shell, id),
             TabId::Pipelines => self.pipelines.run_command(&mut self.shell, id),
-            TabId::Aks => self.aks.run_command(&mut self.shell, id),
-            TabId::Acr => self.acr.run_command(&mut self.shell, id),
-            TabId::KeyVault => self.key_vault.run_command(&mut self.shell, id),
-            TabId::Environments => self.environments.run_command(&mut self.shell, id),
         };
         self.apply(action)
     }
@@ -407,10 +365,6 @@ impl App {
                 repos,
                 pull_requests,
                 pipelines,
-                aks,
-                acr,
-                key_vault,
-                environments,
                 tab,
                 ..
             } = self;
@@ -420,10 +374,6 @@ impl App {
                 TabId::WorkItems | TabId::Repos => &mut repos.layout,
                 TabId::PullRequests => &mut pull_requests.layout,
                 TabId::Pipelines => pipelines.columns_mut(),
-                TabId::Aks => aks.columns_mut(),
-                TabId::Acr => acr.columns_mut(),
-                TabId::KeyVault => key_vault.columns_mut(),
-                TabId::Environments => environments.columns_mut(),
             };
             work_items.handle_columns_key_on(shell, key, layout);
             AppAction::None
@@ -466,10 +416,6 @@ impl App {
                     repos,
                     pull_requests,
                     pipelines,
-                    aks,
-                    acr,
-                    key_vault,
-                    environments,
                     tab,
                     ..
                 } = self;
@@ -477,10 +423,6 @@ impl App {
                     TabId::WorkItems | TabId::Repos => &mut repos.layout,
                     TabId::PullRequests => &mut pull_requests.layout,
                     TabId::Pipelines => pipelines.columns_mut(),
-                    TabId::Aks => aks.columns_mut(),
-                    TabId::Acr => acr.columns_mut(),
-                    TabId::KeyVault => key_vault.columns_mut(),
-                    TabId::Environments => environments.columns_mut(),
                 };
                 if work_items.apply_column_target(shell, &target, layout) {
                     shell.pointer.clear_press();
@@ -515,10 +457,6 @@ impl App {
             Jump::Repo(_) => TabId::Repos,
             Jump::PullRequest { .. } => TabId::PullRequests,
             Jump::Pipeline(_) | Jump::Run(_) => TabId::Pipelines,
-            Jump::Pod(_) => TabId::Aks,
-            Jump::Registry(_) | Jump::Repository { .. } => TabId::Acr,
-            Jump::Vault(_) | Jump::VaultItem { .. } => TabId::KeyVault,
-            Jump::Service { .. } => TabId::Environments,
         };
         let previous = self.tab;
         self.select_tab(tab);
@@ -716,9 +654,6 @@ impl App {
         );
         self.work_items
             .replace_prepared_tickets(&mut self.shell, snapshot);
-        // The board reads an image tag back to the build that made it, which
-        // is the one half two overlays cannot answer between them.
-        self.environments.set_runs(runs.clone());
         self.pipelines.set_pipelines(pipelines, runs, &self.shell);
         self.pull_requests
             .set_pull_requests(pull_requests.clone(), &self.shell);
@@ -785,10 +720,6 @@ impl App {
                 TabId::Repos => "repos",
                 TabId::PullRequests => "pull_requests",
                 TabId::Pipelines => "pipelines",
-                TabId::Aks => "aks",
-                TabId::Acr => "acr",
-                TabId::KeyVault => "key_vault",
-                TabId::Environments => "environments",
             }
             .to_owned(),
             work_items: WorkItemsContext {
@@ -806,27 +737,6 @@ impl App {
             pipelines: PipelinesContext {
                 follow: self.follow_of(TabId::Pipelines),
                 ..self.pipelines.agent_context(&self.shell)
-            },
-            aks: AksContext {
-                follow: self.follow_of(TabId::Aks),
-                ..self.aks.agent_context(&self.shell)
-            },
-            acr: AcrContext {
-                follow: self.follow_of(TabId::Acr),
-                ..self.acr.agent_context()
-            },
-            key_vault: KeyVaultContext {
-                follow: self.follow_of(TabId::KeyVault),
-                ..self.key_vault.agent_context()
-            },
-            environments: EnvironmentsContext {
-                follow: self.follow_of(TabId::Environments),
-                ..self.environments.agent_context(&self.shell)
-            },
-            arm: ArmContext {
-                subscription: self.shell.arm_subscription().map(str::to_owned),
-                offline: self.shell.arm_state().is_some(),
-                last_error: self.shell.arm_state().map(str::to_owned),
             },
         }
     }
@@ -878,10 +788,6 @@ impl App {
             repos,
             pull_requests,
             pipelines,
-            aks,
-            acr,
-            key_vault,
-            environments,
             ..
         } = session;
         self.work_items
@@ -889,10 +795,6 @@ impl App {
         Screen::restore(&mut self.repos, &mut self.shell, repos);
         Screen::restore(&mut self.pull_requests, &mut self.shell, pull_requests);
         Screen::restore(&mut self.pipelines, &mut self.shell, pipelines);
-        Screen::restore(&mut self.aks, &mut self.shell, aks);
-        Screen::restore(&mut self.acr, &mut self.shell, acr);
-        Screen::restore(&mut self.key_vault, &mut self.shell, key_vault);
-        Screen::restore(&mut self.environments, &mut self.shell, environments);
         self.shell.session_dirty = false;
     }
 
@@ -904,10 +806,6 @@ impl App {
             TabId::Repos => &mut self.repos,
             TabId::PullRequests => &mut self.pull_requests,
             TabId::Pipelines => &mut self.pipelines,
-            TabId::Aks => &mut self.aks,
-            TabId::Acr => &mut self.acr,
-            TabId::KeyVault => &mut self.key_vault,
-            TabId::Environments => &mut self.environments,
         };
         (&mut self.shell, screen)
     }
@@ -941,8 +839,8 @@ impl App {
             return AppAction::None;
         }
         // `g` goes where the row under the cursor points, which only `App`
-        // can work out: the target may be on another tab, and the ACR tab's
-        // is on a screen that tab cannot see.
+        // can work out: the target may be on a tab the current screen cannot
+        // see.
         if screen_is_free && command_for_key(key, self.tab) == Some(CommandId::Follow) {
             return self.follow_here();
         }

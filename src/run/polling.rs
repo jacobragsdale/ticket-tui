@@ -73,22 +73,11 @@ impl ConfigWatch {
             }
             Err(error) => app.shell.set_error(format!("Theme: {error:#}")),
         }
-        // The clusters travel with the theme: one file, one read, and a run
-        // started before `[[clusters]]` existed picks them up as soon as they
-        // are written. So does the notification command, which is the same
-        // bargain: write `[notify]` and the next thing worth interrupting for
-        // interrupts you.
-        app.aks
-            .set_clusters(config.clusters.clone(), &mut app.shell);
+        // The notification command travels with the theme: one file, one
+        // read, and a run started before `[notify]` existed picks it up as
+        // soon as it is written.
         app.shell
             .set_notifier(Notifier::new(config.notify.command.clone()));
-        // And so does the deployment repository: `[deployment]` written into
-        // the file is a pre-flight on the next pull request selected against
-        // it, and a board on tab `8`, without a restart.
-        let deployment = Deployment::resolve(&config, app.shell.workspace());
-        app.pull_requests.set_deployment(deployment.clone());
-        app.environments
-            .set_deployment(deployment, no_environments(&config, app.shell.workspace()));
         true
     }
 
@@ -97,24 +86,6 @@ impl ConfigWatch {
             .and_then(|metadata| metadata.modified())
             .ok()
     }
-}
-
-/// Why the environments board has nothing to draw, in the one line that says
-/// where it looked — the Repos tab's rule. Nothing at all when the file names
-/// a repository, the environments it declares, and a clone of it is here.
-fn no_environments(
-    config: &ticket_tui::config::Config,
-    workspace: Option<&Path>,
-) -> Option<String> {
-    if config.environments.is_empty() {
-        return Some(
-            "no [[environments]] in config.toml; add one per environment the deployment repository declares"
-                .to_owned(),
-        );
-    }
-    ticket_tui::kustomize::deployment_clone(config, workspace)
-        .err()
-        .map(|error| format!("{error:#}"))
 }
 
 /// What a finished watch says: the glyph, the build number, how it went, and
@@ -176,24 +147,6 @@ fn run_source(app: &App, run: &Run) -> String {
         )
 }
 
-/// Says what one read of a cluster found that the read before it did not: a
-/// pod that has started crash-looping, or one that has restarted again. The
-/// first read of each cluster and namespace is the baseline and says nothing.
-pub(super) fn announce_pods(
-    app: &mut App,
-    seen: &mut HashMap<(String, Option<String>), PodMarks>,
-    cluster: &str,
-    namespace: Option<&str>,
-    pods: &[Pod],
-) {
-    let scope = (cluster.to_owned(), namespace.map(str::to_owned));
-    let (marks, news) = notify::pod_news(seen.get(&scope), pods);
-    seen.insert(scope, marks);
-    for (title, body) in news {
-        app.shell.notify(NotificationLevel::Info, &title, &body);
-    }
-}
-
 /// Reads the workspace while the Repos tab is showing, and folds in whatever
 /// the local thread has found or done. Nothing here is written to SQLite: what
 /// is on this machine is not the project's business, and a rescan is cheap.
@@ -225,38 +178,11 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
             .collect();
         let _ = worker.send(LocalRequest::Scan { workspace, repos });
     }
-    // The pull request under the cursor, pre-flown against the deployment
-    // repository: what prod would be missing if it merged, while it is still
-    // a pull request. The vault half of that check travels with the request:
-    // the local thread cannot reach a subscription.
-    if app.tab == TabId::PullRequests
-        && app.pull_requests.preflight_wanted(&app.shell)
-        && let Some(request) = app
-            .pull_requests
-            .preflight_due(&app.shell, read_vaults(app))
-    {
-        let _ = worker.send(request);
-    }
-    // The environments board renders on focus and on `r`, never on a timer:
-    // the repository only changes when somebody pushes.
-    if app.tab == TabId::Environments {
-        // `r` asks for the vaults again as well as the overlays, and the
-        // listing belongs to the tab that reads vaults.
-        let stale = app.environments.take_stale_vaults();
-        app.key_vault.forget_items(&stale);
-        app.environments.set_vaults(read_vaults(app));
-        for request in app.environments.renders_due() {
-            let _ = worker.send(request);
-        }
-    }
     // Drained first, so the events can be answered without holding a borrow of
     // the thread that sent them.
     let events: Vec<LocalEvent> = std::iter::from_fn(|| worker.try_event()).collect();
     // A running job redraws on its own, so its glyph turns.
-    let redraw = !events.is_empty()
-        || app.repos.busy()
-        || app.pull_requests.preflight_running()
-        || app.environments.busy();
+    let redraw = !events.is_empty() || app.repos.busy();
     for event in events {
         match event {
             LocalEvent::Scanned(local) => app.repos.set_local(local),
@@ -278,276 +204,10 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 } else {
                     app.shell.set_news(message);
                 }
-                // Whatever git did, the workspace is not what it was — and a
-                // pull of the deployment clone is a repository the board has
-                // to read again.
+                // Whatever git did, the workspace is not what it was.
                 runtime.local.scanned = None;
-                if job == GitJob::Pulling && !error {
-                    let repo = app.shell.repo_name(&repo_id);
-                    app.environments.repo_pulled(&repo);
-                }
-            }
-            LocalEvent::Rendered {
-                environment,
-                overlay,
-                rendered,
-            } => app
-                .environments
-                .set_rendered(&environment, &overlay, rendered),
-            LocalEvent::Preflighted { id, commit, found } => {
-                app.pull_requests
-                    .set_preflight(id, commit, found.map(|report| *report));
             }
             LocalEvent::Stopped => runtime.local.worker = None,
-        }
-    }
-    redraw
-}
-
-/// What every vault the Key Vault tab has listed holds, by name, kind and
-/// date. The one shape both the pre-flight and the environments board answer
-/// their vault half against, and no value is among it.
-fn read_vaults(app: &App) -> Vec<ticket_tui::kustomize::VaultNames> {
-    let now = Timestamp::now();
-    app.key_vault
-        .listed_vaults()
-        .into_iter()
-        .filter_map(|vault| {
-            let items = app.key_vault.items_of(vault)?;
-            Some(ticket_tui::kustomize::VaultNames::from_items(
-                vault, items, now,
-            ))
-        })
-        .collect()
-}
-
-/// Tells the cluster worker what is worth reading and folds in what it has
-/// read. Pods live in the screen only: nothing here touches SQLite.
-pub(super) fn poll_aks(app: &mut App, runtime: &mut SyncRuntime) -> bool {
-    // The thread is started by the first cluster the file names, and never
-    // started again once it has stopped.
-    if runtime.aks.worker.is_none()
-        && runtime.aks.clusters.is_empty()
-        && !app.aks.clusters().is_empty()
-    {
-        match AksHandle::spawn(Box::new(Kubectl)) {
-            Ok(handle) => runtime.aks.worker = Some(handle),
-            Err(error) => {
-                // Said once: without a thread there is nothing to try again
-                // with, and the clusters recorded here are what stops it.
-                runtime.aks.clusters = app.aks.clusters().to_vec();
-                app.shell
-                    .set_error(format!("Could not start the cluster worker: {error:#}"));
-            }
-        }
-    }
-    let Some(worker) = runtime.aks.worker.as_ref() else {
-        return false;
-    };
-    if app.aks.clusters() != runtime.aks.clusters {
-        runtime.aks.clusters = app.aks.clusters().to_vec();
-        let _ = worker.send(AksRequest::Clusters(runtime.aks.clusters.clone()));
-    }
-    let showing = app.tab == TabId::Aks;
-    if showing != runtime.aks.showing {
-        runtime.aks.showing = showing;
-        let _ = worker.send(AksRequest::TabShowing(showing));
-    }
-    // Which pod the text pane is on decides whose log is worth streaming. It
-    // is settled here rather than only on the way to drawing, so the screen and
-    // the worker are on the same stream whatever was last painted, and it is
-    // not gated on the tab showing: re-tailing on the way back would replay the
-    // last five hundred lines.
-    app.aks.sync_focus(&app.shell);
-    let target = app.aks.following().cloned();
-    if target != runtime.aks.following {
-        runtime.aks.following = target.clone();
-        let _ = worker.send(target.map_or(AksRequest::Unfollow, AksRequest::Follow));
-    }
-    // Drained first, so an event can be answered without holding a borrow of
-    // the thread that sent it.
-    let events: Vec<AksEvent> = std::iter::from_fn(|| worker.try_event()).collect();
-    let redraw = !events.is_empty();
-    for event in events {
-        match event {
-            AksEvent::Pods {
-                cluster,
-                namespace,
-                pods,
-            } => {
-                if let Ok(read) = &pods {
-                    announce_pods(
-                        app,
-                        &mut runtime.aks.pods_seen,
-                        &cluster,
-                        namespace.as_deref(),
-                        read,
-                    );
-                }
-                if let Some(toast) =
-                    app.aks
-                        .set_pods(&mut app.shell, &cluster, namespace.as_deref(), pods)
-                {
-                    app.shell.set_error(toast);
-                }
-            }
-            AksEvent::LogLines {
-                target,
-                lines,
-                finished,
-            } => app.aks.append_log(&target, lines, finished),
-            AksEvent::Described { key, text } => {
-                if let Err(message) = &text {
-                    app.shell.set_error(message.clone());
-                }
-                app.aks.set_description(&key, text);
-            }
-            AksEvent::Stopped => {
-                runtime.aks.worker = None;
-                app.aks.request_refused();
-            }
-            AksEvent::Deleted { key, error } => {
-                app.aks.delete_answered(&mut app.shell, &key, error);
-            }
-        }
-    }
-    redraw
-}
-
-/// Tells the subscription worker what is worth reading and folds in what it
-/// has read. Registries, repositories and tags live in the screen only:
-/// nothing here touches SQLite.
-pub(super) fn poll_arm(app: &mut App, runtime: &mut SyncRuntime) -> bool {
-    // The board reads vaults too: what an overlay pulls is only half the
-    // question, and the other half is what the vault actually holds.
-    let showing = match app.tab {
-        TabId::Acr | TabId::KeyVault | TabId::Environments => Some(app.tab),
-        _ => None,
-    };
-    // Started by the first of the two tabs to be opened, and never started
-    // again once it has refused or stopped.
-    if runtime.arm.worker.is_none() && showing.is_some() && !runtime.arm.failed_to_start {
-        runtime.arm.failed_to_start = true;
-        match ArmHandle::spawn(runtime.arm_config.clone()) {
-            Ok(handle) => {
-                runtime.arm.failed_to_start = false;
-                runtime.arm.worker = Some(handle);
-            }
-            Err(error) => {
-                let refusal = format!("Could not start the subscription worker: {error:#}");
-                app.acr.set_arm_error(refusal.clone());
-                app.key_vault.set_arm_error(refusal.clone());
-                app.shell.set_error(refusal);
-            }
-        }
-    }
-    let Some(worker) = runtime.arm.worker.as_ref() else {
-        return false;
-    };
-    if showing != runtime.arm.showing {
-        runtime.arm.showing = showing;
-        let _ = worker.send(ArmRequest::TabShowing(showing));
-    }
-    // What the tab on screen is looking at, and only while it is the one
-    // showing: a hidden tab is nothing to read for.
-    let focus = match showing {
-        Some(TabId::Acr) => app.acr.focus(),
-        Some(TabId::KeyVault) => app.key_vault.focus(),
-        // One vault at a time, the environments' own, and only the ones
-        // nobody has listed yet.
-        Some(TabId::Environments) => app
-            .environments
-            .vault_names()
-            .into_iter()
-            .find(|vault| app.key_vault.items_of(vault).is_none())
-            .map(ArmFocus::Vault),
-        _ => None,
-    };
-    if focus != runtime.arm.focus {
-        runtime.arm.focus = focus.clone();
-        let _ = worker.send(focus.clone().map_or(ArmRequest::Blur, ArmRequest::Focus));
-    }
-    // Drained first, so an event can be answered without holding a borrow of
-    // the thread that sent it.
-    let events: Vec<ArmEvent> = std::iter::from_fn(|| worker.try_event()).collect();
-    // A read in flight redraws on its own, so its spinner turns.
-    let tab_busy = match showing {
-        Some(TabId::Acr) => app.acr.busy(),
-        Some(TabId::KeyVault) => app.key_vault.busy(),
-        Some(TabId::Environments) => focus.is_some(),
-        _ => false,
-    };
-    let redraw = !events.is_empty() || tab_busy;
-    for event in events {
-        let toast = match event {
-            ArmEvent::Subscription(Ok(subscription)) => {
-                app.shell.set_arm_subscription(Some(subscription));
-                app.shell.set_arm_state(None);
-                None
-            }
-            ArmEvent::Subscription(Err(reason)) => {
-                app.shell.set_arm_state(Some(reason.clone()));
-                Some(reason)
-            }
-            // One query answers for both tabs: each keeps the half it draws,
-            // and a refusal is said once rather than twice.
-            ArmEvent::Inventory(inventory) => {
-                let said = app.key_vault.set_inventory(inventory.clone());
-                app.acr.set_inventory(inventory).or(said)
-            }
-            ArmEvent::Repositories {
-                registry,
-                repositories,
-            } => app.acr.set_repositories(&registry, repositories),
-            ArmEvent::Repository {
-                registry,
-                repository,
-            } => app.acr.set_repository(&registry, repository),
-            ArmEvent::Tags {
-                registry,
-                repo,
-                tags,
-            } => app.acr.set_tags(&registry, &repo, tags),
-            ArmEvent::Manifest {
-                registry,
-                repo,
-                digest,
-                manifest,
-            } => app.acr.set_manifest(&registry, &repo, &digest, manifest),
-            ArmEvent::Items { vault, items } => app.key_vault.set_items(&vault, items),
-            // The one event carrying something worth hiding. It goes to the
-            // screen and no further: nothing here logs it, stores it, or puts
-            // it in a notification.
-            ArmEvent::Revealed { vault, name, value } => {
-                app.key_vault.set_revealed(&vault, &name, value)
-            }
-            // Throttling is Azure working as designed and passes on its own,
-            // so it is said once rather than calling the tab offline.
-            ArmEvent::Throttled(wait) => {
-                app.shell.set_status(format!(
-                    "Holding off {}s \u{2014} Azure asked",
-                    wait.as_secs()
-                ));
-                None
-            }
-            ArmEvent::Failed(reason) => {
-                let said = app.key_vault.set_arm_error(reason.clone());
-                app.acr.set_arm_error(reason).or(said)
-            }
-            ArmEvent::Stopped => {
-                runtime.arm.worker = None;
-                runtime.arm.failed_to_start = true;
-                // Said on both tabs, so a read that will never come back is
-                // not waited on and `r` is refused for the right reason.
-                let gone = "The Azure subscription worker stopped".to_owned();
-                app.acr.set_arm_error(gone.clone());
-                app.key_vault.set_arm_error(gone.clone());
-                app.shell.set_arm_state(Some(gone));
-                break;
-            }
-        };
-        if let Some(toast) = toast {
-            app.shell.set_error(toast);
         }
     }
     redraw

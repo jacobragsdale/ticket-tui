@@ -12,11 +12,6 @@
 //! query = "[System.AreaPath] UNDER 'ISTO\\Team'"   # optional WIQL scope on every pull
 //! workspace = "~/Development"                      # where clones live
 //!
-//! [azure]                    # tabs 6 ACR and 7 Key Vault
-//! subscriptions = ["dev-guid", "qa-guid"]   # left out: whatever `az account show` says
-//! registries = ["acrdev", "acrqa"]          # optional: only these, in this order
-//! vaults = ["kv-dev", "kv-qa"]              # optional: only these, in this order
-//!
 //! [theme]
 //! preset = "custom"          # terminal · terminal-light · mono · custom
 //!
@@ -39,24 +34,8 @@
 //! orange = "#ff9e5e"
 //! teal = "#29e0c8"
 //!
-//! [[clusters]]               # the AKS tab, one table per cluster
-//! name = "qa"                # what the tab calls it
-//! context = "aks-qa"         # the kubeconfig context kubectl uses
-//! namespaces = ["orders"]    # left out or empty: --all-namespaces
-//!
 //! [notify]                   # a desktop notification when a watched thing moves
 //! command = "notify-send {title} {body}"   # left out: nothing is ever run
-//!
-//! [deployment]               # the board, `ticket-tui env`, and the pre-flight
-//! repo = "deployment"        # the repository, as the Repos tab names it
-//! # render = "kustomize build"    # left out: `kubectl kustomize`
-//!
-//! [[environments]]           # one per environment the repository declares
-//! name = "prod"
-//! overlays = ["services/*/overlays/prod"]   # relative to the clone; globs
-//! vault = "kv-prod"          # optional, for the checks that join a vault
-//! registry = "acrprod"
-//! cluster = "prod"
 //! ```
 //!
 //! Every value here is a default: a flag or a `TICKET_TUI_*` variable still
@@ -77,24 +56,9 @@ pub struct Config {
     /// Where the work items and the code live, when the file says.
     #[serde(default)]
     pub devops: DevOps,
-    /// What the ACR and Key Vault tabs read, when the file says.
-    #[serde(default)]
-    pub azure: Azure,
-    /// The clusters the AKS tab reads, in the order the file lists them.
-    #[serde(default)]
-    pub clusters: Vec<Cluster>,
     /// What says a watched thing has moved, when the file says anything.
     #[serde(default)]
     pub notify: Notify,
-    /// The repository the environments are rendered from. Left out, the
-    /// environments board, the `env` subcommands and the pull request
-    /// pre-flight are off.
-    #[serde(default)]
-    pub deployment: Option<Deployment>,
-    /// The environments that repository declares, in the order the file lists
-    /// them.
-    #[serde(default)]
-    pub environments: Vec<Environment>,
 }
 
 /// The desktop-notification side of the file. `{title}` and `{body}` are
@@ -104,45 +68,6 @@ pub struct Config {
 pub struct Notify {
     #[serde(default)]
     pub command: Option<String>,
-}
-
-/// Where the kustomize overlays live: the repository, as the Repos tab names
-/// it, and what renders one.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
-pub struct Deployment {
-    /// The repository the overlays are in, found among the workspace's clones
-    /// the way the Repos tab finds any other.
-    pub repo: String,
-    /// The command that renders one overlay directory. Left out,
-    /// `kubectl kustomize`, which needs nothing installed beyond `kubectl`;
-    /// `kustomize build` for a repository that wants a newer kustomize than
-    /// kubectl embeds.
-    #[serde(default)]
-    pub render: Option<String>,
-}
-
-/// One environment the deployment repository declares: what to call it, the
-/// overlays that make it up, and the Azure resources it is deployed onto,
-/// which is how what an overlay declares joins the vault, the registry and the
-/// cluster the other tabs read.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
-pub struct Environment {
-    pub name: String,
-    /// Overlay directories relative to the clone. `*` matches within one path
-    /// segment, so `services/*/overlays/prod` is every service's, and every
-    /// match is rendered and unioned.
-    #[serde(default)]
-    pub overlays: Vec<String>,
-    /// The key vault this environment's secrets come from, as `[azure]` names
-    /// it.
-    #[serde(default)]
-    pub vault: Option<String>,
-    /// The container registry its images come from.
-    #[serde(default)]
-    pub registry: Option<String>,
-    /// The cluster it runs on, as `[[clusters]]` names it.
-    #[serde(default)]
-    pub cluster: Option<String>,
 }
 
 /// The Azure DevOps side of the file. Everything is optional: what is left out
@@ -166,51 +91,6 @@ pub struct DevOps {
     /// `~/` is the home directory.
     #[serde(default)]
     pub workspace: Option<PathBuf>,
-}
-
-/// The subscription side of the file: which subscriptions the ACR and Key
-/// Vault tabs read, and which of the resources in them are worth listing. An
-/// empty list is no opinion at all rather than an empty tab.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
-pub struct Azure {
-    /// The subscription ids to read. Left out: whichever one the Azure CLI is
-    /// set to.
-    #[serde(default)]
-    pub subscriptions: Vec<String>,
-    /// Only these registries, in this order. Left out: every one the
-    /// subscriptions hold.
-    #[serde(default)]
-    pub registries: Vec<String>,
-    /// Only these vaults, in this order. Left out: every one the
-    /// subscriptions hold.
-    #[serde(default)]
-    pub vaults: Vec<String>,
-}
-
-/// One cluster the AKS tab reads: what to call it, the kubeconfig context
-/// `kubectl` reaches it by, and which namespaces to read.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-pub struct Cluster {
-    pub name: String,
-    pub context: String,
-    /// Left out or empty, every namespace is read at once.
-    #[serde(default)]
-    pub namespaces: Vec<String>,
-}
-
-impl Cluster {
-    /// The namespaces to read, one call each; `None` is all of them in one.
-    #[must_use]
-    pub fn targets(&self) -> Vec<Option<&str>> {
-        if self.namespaces.is_empty() {
-            vec![None]
-        } else {
-            self.namespaces
-                .iter()
-                .map(|held| Some(held.as_str()))
-                .collect()
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -376,57 +256,11 @@ pub fn parse(source: &str) -> Result<Config> {
             bail!("{key} is blank; give it a value or leave it out");
         }
     }
-    for (key, names) in [
-        ("azure.subscriptions", &config.azure.subscriptions),
-        ("azure.registries", &config.azure.registries),
-        ("azure.vaults", &config.azure.vaults),
-    ] {
-        if names.iter().any(|name| name.trim().is_empty()) {
-            bail!("{key} holds a blank name; give it a value or leave it out");
-        }
-    }
     config.devops.workspace = config
         .devops
         .workspace
         .take()
         .map(|path| expand_home(&path, std::env::var_os("HOME").map(PathBuf::from)));
-    for (index, cluster) in config.clusters.iter().enumerate() {
-        if cluster.name.trim().is_empty() || cluster.context.trim().is_empty() {
-            bail!("clusters[{index}] needs a name and a context");
-        }
-        if config.clusters[..index]
-            .iter()
-            .any(|held| held.name == cluster.name)
-        {
-            bail!("two clusters are called {:?}", cluster.name);
-        }
-    }
-    if config
-        .deployment
-        .as_ref()
-        .is_some_and(|deployment| deployment.repo.trim().is_empty())
-    {
-        bail!("deployment.repo is blank; give it a value or leave the table out");
-    }
-    for (index, environment) in config.environments.iter().enumerate() {
-        if environment.name.trim().is_empty() {
-            bail!("environments[{index}] needs a name");
-        }
-        if environment.overlays.is_empty()
-            || environment
-                .overlays
-                .iter()
-                .any(|overlay| overlay.trim().is_empty())
-        {
-            bail!("environments[{index}] needs at least one overlay");
-        }
-        if config.environments[..index]
-            .iter()
-            .any(|held| held.name == environment.name)
-        {
-            bail!("two environments are called {:?}", environment.name);
-        }
-    }
     Ok(config)
 }
 
@@ -489,64 +323,24 @@ ansi = ["#0b0d14"]
     }
 
     #[test]
-    fn clusters_parse_from_the_file_and_no_namespaces_means_all_of_them() {
+    fn the_devops_table_parses_and_a_blank_value_is_refused() {
         let config = parse(
-            "[[clusters]]\nname = \"qa\"\ncontext = \"aks-qa\"\nnamespaces = [\"orders\", \"billing\"]\n\n[[clusters]]\nname = \"prod\"\ncontext = \"aks-prod\"\n",
-        )
-        .unwrap();
-        assert_eq!(config.clusters.len(), 2);
-        assert_eq!(
-            config.clusters[0].targets(),
-            vec![Some("orders"), Some("billing")]
-        );
-        assert_eq!(config.clusters[1].targets(), vec![None]);
-        assert_eq!(parse("").unwrap().clusters, Vec::new());
-    }
-
-    #[test]
-    fn a_cluster_without_a_context_or_a_name_used_twice_names_itself() {
-        let error = parse("[[clusters]]\nname = \"qa\"\ncontext = \"\"\n").unwrap_err();
-        assert_eq!(
-            format!("{error:#}"),
-            "clusters[0] needs a name and a context"
-        );
-        let error = parse(
-            "[[clusters]]\nname = \"qa\"\ncontext = \"a\"\n[[clusters]]\nname = \"qa\"\ncontext = \"b\"\n",
-        )
-        .unwrap_err();
-        assert_eq!(format!("{error:#}"), "two clusters are called \"qa\"");
-    }
-
-    #[test]
-    fn the_devops_and_azure_tables_parse_and_a_blank_value_is_refused() {
-        let config = parse(
-            "[devops]\norg = \"myorg\"\nproject = \"ISTO\"\ncode_project = \"Fiquants\"\nquery = \"[System.Id] > 1\"\n\n[azure]\nsubscriptions = [\"dev\", \"qa\"]\nregistries = [\"acrdev\"]\nvaults = [\"kv-dev\"]\n",
+            "[devops]\norg = \"myorg\"\nproject = \"ISTO\"\ncode_project = \"Fiquants\"\nquery = \"[System.Id] > 1\"\n",
         )
         .unwrap();
         assert_eq!(config.devops.org.as_deref(), Some("myorg"));
         assert_eq!(config.devops.project.as_deref(), Some("ISTO"));
         assert_eq!(config.devops.code_project.as_deref(), Some("Fiquants"));
         assert_eq!(config.devops.query.as_deref(), Some("[System.Id] > 1"));
-        assert_eq!(config.azure.subscriptions, ["dev", "qa"]);
-        assert_eq!(config.azure.registries, ["acrdev"]);
-        assert_eq!(config.azure.vaults, ["kv-dev"]);
 
         // Left out is the whole point: an older file, or one that only paints,
-        // says nothing about either.
+        // says nothing about it.
         let empty = parse("[theme]\n").unwrap();
         assert_eq!(empty.devops, DevOps::default());
-        assert_eq!(empty.azure, Azure::default());
 
         assert_eq!(
             format!("{:#}", parse("[devops]\nproject = \"  \"\n").unwrap_err()),
             "devops.project is blank; give it a value or leave it out"
-        );
-        assert_eq!(
-            format!(
-                "{:#}",
-                parse("[azure]\nvaults = [\"kv\", \"\"]\n").unwrap_err()
-            ),
-            "azure.vaults holds a blank name; give it a value or leave it out"
         );
     }
 

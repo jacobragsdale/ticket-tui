@@ -2,7 +2,7 @@
 //!
 //! ticket-tui is one pane among several, and the numbers on its tab bar are
 //! wanted in the status bar or the shell prompt without switching to it. Every
-//! figure here comes from SQLite alone — no network, no `az`, no `kubectl` —
+//! figure here comes from SQLite alone — no network, no `az` —
 //! except the two the database never holds, which are read out of the context
 //! file a running TUI publishes. Nothing to say prints nothing, so a prompt
 //! that calls this on every line stays clean.
@@ -59,11 +59,6 @@ pub struct Status {
     rejected: usize,
     live_runs: usize,
     failed_runs: usize,
-    /// Pods in trouble and certificates about to lapse are live reads the
-    /// database never holds, so they are `None` unless a running TUI has read
-    /// them into its context file.
-    pods_unhealthy: Option<usize>,
-    certs_expiring: Option<usize>,
     synced_at: Option<Timestamp>,
     /// How old the rows are, but only once that is past two refresh intervals
     /// and so worth saying out loud.
@@ -94,12 +89,6 @@ impl Status {
         if self.failed_runs > 0 {
             segments.push(format!("failed {}", self.failed_runs));
         }
-        if let Some(unhealthy) = self.pods_unhealthy.filter(|count| *count > 0) {
-            segments.push(format!("\u{2717}{unhealthy} pods"));
-        }
-        if let Some(expiring) = self.certs_expiring.filter(|count| *count > 0) {
-            segments.push(format!("\u{25c7}{expiring} certs"));
-        }
         if let Some(ago) = &self.synced_ago {
             segments.push(format!("synced {ago} ago"));
         }
@@ -107,9 +96,7 @@ impl Status {
     }
 
     /// The same reading as one object, with every figure named and the zeros
-    /// left in, so a script does not have to parse the line. `pods_unhealthy`
-    /// and `certs_expiring` are `null` rather than `0` when no TUI has read
-    /// them: `context` says which.
+    /// left in, so a script does not have to parse the line.
     #[must_use]
     pub fn json(&self) -> Value {
         json!({
@@ -119,8 +106,6 @@ impl Status {
             "rejected": self.rejected,
             "live_runs": self.live_runs,
             "failed_runs": self.failed_runs,
-            "pods_unhealthy": self.pods_unhealthy,
-            "certs_expiring": self.certs_expiring,
             "synced_at": self.synced_at.map(Timestamp::to_rfc3339),
             "context": self.context.as_str(),
         })
@@ -143,8 +128,7 @@ pub fn collect(
     let tickets = repository.load_all()?;
     let requests = repository.load_pull_requests()?;
     let runs = repository.load_runs()?;
-    let (context, pods_unhealthy, certs_expiring) =
-        read_context(&agent_context::path_for(repository.path()));
+    let context = read_context(&agent_context::path_for(repository.path()));
     let synced_at = db::data_modified(repository.path())
         .map(|modified| Timestamp::from_offset_date_time(OffsetDateTime::from(modified)));
     Ok(Status {
@@ -158,8 +142,6 @@ pub fn collect(
         rejected: model::rejected_of_mine(&requests, me),
         live_runs: model::live_runs(&runs),
         failed_runs: model::runs_failed_since(&runs, now.plus_seconds(-RECENT_FAILURE_SECONDS)),
-        pods_unhealthy,
-        certs_expiring,
         synced_at,
         synced_ago: late_sync(synced_at, refresh_seconds, now),
         context,
@@ -190,37 +172,26 @@ fn late_sync(synced_at: Option<Timestamp>, refresh_seconds: u64, now: Timestamp)
     (limit > 0 && synced_at.seconds_until(now) > limit).then(|| relative_age(synced_at, now))
 }
 
-/// The two live figures out of the context file: pods in trouble and
-/// certificates about to lapse, which no pull ever brings down. A file whose
-/// process is gone says what that run last saw rather than what is true now,
-/// so its figures are dropped and only `context` reports it.
-fn read_context(path: &Path) -> (ContextState, Option<usize>, Option<usize>) {
+/// Whether a running TUI is publishing a context file beside the database. A
+/// file whose process is gone says what that run last saw rather than what is
+/// true now, so it counts as stale.
+fn read_context(path: &Path) -> ContextState {
     let Ok(raw) = std::fs::read_to_string(path) else {
-        return (ContextState::Absent, None, None);
+        return ContextState::Absent;
     };
     let Ok(document) = serde_json::from_str::<Value>(&raw) else {
-        return (ContextState::Stale, None, None);
+        return ContextState::Stale;
     };
     let alive = document
         .get("process_id")
         .and_then(Value::as_u64)
         .and_then(|pid| u32::try_from(pid).ok())
         .is_some_and(process_is_alive);
-    if !alive {
-        return (ContextState::Stale, None, None);
+    if alive {
+        ContextState::Live
+    } else {
+        ContextState::Stale
     }
-    let count = |block: &str, field: &str| {
-        document
-            .get(block)
-            .and_then(|block| block.get(field))
-            .and_then(Value::as_u64)
-            .and_then(|count| usize::try_from(count).ok())
-    };
-    (
-        ContextState::Live,
-        count("aks", "unhealthy"),
-        count("key_vault", "expiring_certificates"),
-    )
 }
 
 /// Whether the process that wrote a context file is still up. Linux answers
@@ -398,11 +369,9 @@ mod tests {
 
     fn write_context(repository: &SqliteTicketRepository, pid: u32) {
         let document = json!({
-            "schema_version": 3,
+            "schema_version": 4,
             "process_id": pid,
             "updated_at": NOW,
-            "aks": { "unhealthy": 2 },
-            "key_vault": { "expiring_certificates": 3 },
         });
         std::fs::write(
             agent_context::path_for(repository.path()),
@@ -421,7 +390,7 @@ mod tests {
         assert_eq!(
             status.line(),
             "doing 2 \u{00b7} stale 1 \u{00b7} review 2 \u{00b7} rejected 1 \u{00b7} \u{25d0}1 \
-             \u{00b7} failed 1 \u{00b7} \u{2717}2 pods \u{00b7} \u{25c7}3 certs",
+             \u{00b7} failed 1",
             "the counts are the ones the tab bar badges, in tab order"
         );
         assert_eq!(status.context, ContextState::Live);
@@ -453,8 +422,6 @@ mod tests {
         assert_eq!(reading["rejected"], json!(1));
         assert_eq!(reading["live_runs"], json!(1));
         assert_eq!(reading["failed_runs"], json!(1));
-        assert_eq!(reading["pods_unhealthy"], json!(2));
-        assert_eq!(reading["certs_expiring"], json!(3));
         assert_eq!(reading["context"], json!("live"));
         assert!(reading["synced_at"].is_string(), "{reading}");
 
@@ -462,11 +429,6 @@ mod tests {
         let nothing = collect(&empty, None, 14, 60, now()).unwrap();
         let reading = nothing.json();
         assert_eq!(reading["doing"], json!(0), "the zeros stay in the object");
-        assert_eq!(
-            reading["pods_unhealthy"],
-            Value::Null,
-            "a figure nobody read is null rather than a zero that would read as good news"
-        );
         assert_eq!(reading["context"], json!("absent"));
     }
 
@@ -480,13 +442,6 @@ mod tests {
         let status = collect(&repository, Some("Jacob Ragsdale"), 14, 60, now()).unwrap();
 
         assert_eq!(status.context, ContextState::Stale);
-        assert_eq!(status.pods_unhealthy, None);
-        assert_eq!(status.certs_expiring, None);
-        assert!(
-            !status.line().contains("pods") && !status.line().contains("certs"),
-            "{}",
-            status.line()
-        );
     }
 
     #[test]

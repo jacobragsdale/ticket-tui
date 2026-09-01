@@ -30,36 +30,32 @@ rendered viewport and the current selection of each tab. For the data itself use
 
 ## Top-level fields
 
-Current contract: **schema version 3**. A reader that finds another version
+Current contract: **schema version 4**. A reader that finds another version
 should refuse rather than guess. A field may be added to a block within a
 version — `tickets.finished_hidden` was — so a reader should ignore fields it
 does not know rather than refuse them; only removing or reshaping a field
-already documented here bumps the version.
+already documented here bumps the version. Version 4 dropped the `aks`, `acr`,
+`key_vault`, `arm` and `environments` blocks version 3 had carried.
 
-Version 3 describes **every tab**, whether or not the user is looking at them:
+Version 4 describes **every tab**, whether or not the user is looking at them:
 `active_tab` says where they are, and the blocks under it say what each tab
 holds. Everything version 2 kept at the top level moved under `work_items`
 unchanged.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `schema_version` | integer | Context contract version; currently `3` |
+| `schema_version` | integer | Context contract version; currently `4` |
 | `process_id` | integer | PID of the ticket-tui process that wrote the file |
 | `updated_at` | string | UTC RFC 3339 time of the published state change |
 | `database_path` | string | SQLite database backing the view |
 | `me` | string or null | Signed-in display name recorded by sync, including the background refresh, overridden by `TICKET_TUI_ME`; null when neither is set |
 | `sync` | object | Where the rows are pulled from and how the last pull went |
 | `pending_edits` | pending edit array | Edits sent to Azure DevOps and not answered yet |
-| `active_tab` | string | `work_items`, `repos`, `pull_requests`, `pipelines`, `aks`, `acr`, `key_vault`, or `environments` |
+| `active_tab` | string | `work_items`, `repos`, `pull_requests`, or `pipelines` |
 | `work_items` | object | The Work items tab |
 | `repos` | object | The Repos tab |
 | `pull_requests` | object | The Pull requests tab |
 | `pipelines` | object | The Pipelines tab |
-| `aks` | object | The AKS tab |
-| `acr` | object | The ACR tab |
-| `key_vault` | object | The Key Vault tab |
-| `environments` | object | The Environments board |
-| `arm` | object | What the ACR and Key Vault tabs can reach at all |
 
 ### `work_items`
 
@@ -128,140 +124,6 @@ The whole tree would be longer than the rest of the document; read it with
 Runs, timelines and logs are live rather than stored, so this block is only as
 current as the watcher's last poll, and it is empty on a run that has never
 opened the tab.
-
-### `aks`
-
-| Field | Type | Meaning |
-|---|---|---|
-| `clusters` | string array | The clusters `config.toml` names, in file order; left out when there are none |
-| `selected` | pod or null | The pod the cursor is on |
-| `visible_rows` | integer | How many rows the query leaves on the table |
-| `unhealthy` | integer | How many of those pods somebody has to look at |
-| `following_log` | object or null | The log the text pane is tailing |
-| `errors` | string array | One line per `(cluster, namespace)` that could not be read; left out when every read succeeded |
-
-A pod carries `cluster` (the name `config.toml` gives it, not the kubeconfig
-context), `namespace`, `name`, `status` (the STATUS word — `Running`,
-`CrashLoopBackOff`, `Init:1/2`), `ready` (`1/2`, containers ready over
-containers in the spec), `restarts`, `node`, `owner` (`Deployment/orders-api`,
-or null for a bare pod — a pod with no owner is not restartable), `created_at`
-(UTC RFC 3339), `containers`, and `repo` — the repository on file its image or
-app label names, null when nothing matches.
-
-A container carries `name`, `image`, `state` (`Running`, or the reason it is
-waiting or has stopped: `CrashLoopBackOff`, `Completed`, `ExitCode:137`) and
-`restarts`.
-
-`following_log` carries `pod`, `container` (null while the pane follows the
-first), `previous` (whether it is the run before the last restart), `line_count`
-and `following` (whether the pane is pinned to the tail rather than scrolled
-back).
-
-Pods are read live through `kubectl` and never stored, so this block is only as
-current as the last read — 15 seconds at most while the tab is showing, and
-however long ago it was left when it is not. `errors` is the one place a cluster
-that cannot be reached shows up: its pods are simply missing from
-`visible_rows`, not zeroed. `ticket-tui pods` is the same read without the TUI.
-
-### `arm`
-
-Whether the two subscription tabs have anything to read. Both are on the bar on
-every run; a run with no subscription draws them empty and says why here.
-
-| Field | Type | Meaning |
-|---|---|---|
-| `subscription` | string or null | The subscription id the two tabs read; null when none was resolved |
-| `offline` | boolean | Nothing can be read — no subscription, or the Azure CLI refused |
-| `last_error` | string or null | The one line that says why, such as `run \`az login\`` |
-
-The subscription is `--subscription`, else `TICKET_TUI_SUBSCRIPTION`, else
-whichever one `az account set` left the CLI on. A personal access token opens
-Azure DevOps and nothing else, so a PAT-only run is ARM-offline with the work
-items tab working normally.
-
-### `acr`
-
-The ACR tab: the subscription's container registries, and the repositories of
-whichever one is open.
-
-| Field | Type | Meaning |
-|---|---|---|
-| `level` | string | `registries` or `repositories` — which list the tab is showing |
-| `selected_registry` | registry or null | The registry the cursor is on, or the one that was drilled into |
-| `selected_repository` | repository or null | The repository the cursor is on; null at the registries level |
-| `selected_tag` | tag or null | The tag the details pane's own cursor is on |
-| `visible_rows` | integer | How many rows the query leaves on the table |
-
-A registry carries `name`, `resource_group`, `sku`, `location`, `login_server`
-(the host a pull reference starts with) and `portal_url`.
-
-A repository carries `name`, `tags` and `updated` — the last two null until the
-attributes call has landed, because a catalog listing is names and nothing else.
-
-A tag carries `name`, `digest` (the full `sha256:…`) and `created`.
-
-Registries are read from Resource Graph every 60 seconds while either ARM tab is
-showing, and a registry's own catalog, tags and manifest are read once per
-focus, so this block is only as current as the last read. Nothing here is
-stored: `ticket-tui acr list` is the same read without the TUI.
-
-### `key_vault`
-
-The Key Vault tab, the same way round: the subscription's vaults, and what one
-of them holds.
-
-| Field | Type | Meaning |
-|---|---|---|
-| `level` | string | `vaults` or `items` — which list the tab is showing |
-| `selected_vault` | vault or null | The vault the cursor is on, or the one that was drilled into |
-| `selected_item` | item or null | The secret, key or certificate the cursor is on |
-| `visible_rows` | integer | How many rows the query leaves on the table |
-| `expiring_certificates` | integer | Certificates already lapsed or within 30 days of it, across every vault whose items have been read — the same count the tab bar badges `◇N` |
-
-A vault carries `name`, `resource_group`, `location`, `sku`, `uri` (the
-data-plane host its items are read from) and `portal_url`.
-
-An item carries `kind` (`secret`, `key`, or `cert`), `name`, `enabled`,
-`updated`, `expires` (null for one that never lapses), and `revealed`.
-
-**`revealed` is the only thing this file says about a value.** It is true while
-the user has pressed `R` on that secret and the minute has not run out; the
-value itself is nowhere in the document, and there is no field for it. A value
-is read out of the vault for the screen alone, once, and this file is written to
-disk. `ticket-tui secrets show --vault V NAME --value` is the one way to read
-one from outside the TUI, and it is an audited read — see
-[cli.md](cli.md#secrets-keys-certs).
-
-### `environments`
-
-The Environments board: every service the deployment repository declares,
-across every environment it declares them for. Nothing here comes from Azure
-DevOps or from a subscription — it is `kubectl kustomize` over a clone on the
-user's machine, rendered when the tab is first opened, when `r` asks, and when a
-`git pull` moves that clone. It is therefore as current as the last render and
-no fresher.
-
-| Field | Type | Meaning |
-|---|---|---|
-| `reason` | string or null | Why the board is empty: no `[deployment]` in `config.toml`, no `[[environments]]`, or no clone of the repository on this machine, in the line that says where it looked |
-| `environments` | environment array | One per `[[environments]]`, in file order, which is the order of the columns |
-| `selected_service` | string or null | The workload the row cursor is on |
-| `selected_environment` | string or null | The environment the column cursor is on, which is the one a promotion is read *into* |
-| `findings` | string array | What that cell is missing, one line each, as `env check` writes it |
-| `diff` | object or null | The promotion the details pane is reading, when there is an environment to the left of the cursor to promote from |
-| `visible_rows` | integer | How many services the query leaves on the board |
-| `follow` | jump or null | Where `g` would go from the line the details pane's cursor is on |
-
-An environment carries `name`, `vault` (the key vault it pulls its secrets
-from, or null), `overlays` (the patterns it is made of, relative to the clone),
-`rendered`, `error` (the renderer's own line for one that would not render),
-`findings` and `expiring`.
-
-`diff` carries `from`, `to` and `lines` — one line each, in the same wording
-the pull request pre-flight uses: `adds RATE_LIMIT_PER_MIN to
-prod/orders-config`, `pulls billing-legacy-token from kv-prod`, `moves api from
-1.3.9 to 1.4.0`. The pull requests between two image tags are not here: reading
-them is a `git log`, and `ticket-tui env diff qa prod orders` prints them.
 
 ## Sync fields
 

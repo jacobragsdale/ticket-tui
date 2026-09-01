@@ -24,16 +24,11 @@ pub(super) fn run_terminal(
         redraw |= poll_watch(app, repository, &mut reloader);
         redraw |= poll_pipelines(app, runtime);
         redraw |= poll_local(app, runtime);
-        redraw |= poll_aks(app, runtime);
-        redraw |= poll_arm(app, runtime);
         redraw |= dispatch_due_pull(app, runtime);
         redraw |= dispatch_due_details(app, runtime);
         redraw |= persist_session(app, repository);
         redraw |= config_watch.poll(app);
         redraw |= app.shell.tick();
-        // A revealed secret takes itself off the screen after a minute, which
-        // is a repaint like an expiring notification is.
-        redraw |= app.key_vault.tick();
         // A spinner has to be repainted to turn. Nothing in flight and
         // nothing is repainted: an idle app draws no frames at all.
         redraw |= spinning(app);
@@ -59,7 +54,6 @@ pub(super) fn run_terminal(
             // an expiring notification.
             [
                 app.shell.next_wakeup(),
-                app.key_vault.next_wakeup(),
                 runtime.scheduler.time_until_due(Instant::now()),
                 runtime.details.time_until_due(Instant::now()),
             ]
@@ -182,44 +176,6 @@ pub(super) fn handle_action(
         }
         // git runs on the local thread; the screen hears back through its
         // events, so nothing waits here.
-        // The worker is only there once `config.toml` names a cluster, so a
-        // run with none says what to write rather than doing nothing.
-        AppAction::Aks(request) => match runtime.aks.worker.as_ref() {
-            Some(worker) => drop(worker.send(request)),
-            None => {
-                // Nothing is coming back for it, so nothing waits on it.
-                app.aks.request_refused();
-                app.shell
-                    .set_error("No clusters are configured; add [[clusters]] to config.toml");
-            }
-        },
-        // The shell out is the editor's round trip again: the terminal goes
-        // back, kubectl runs in it, and the screen is repainted from scratch.
-        AppAction::ExecShell {
-            context,
-            key,
-            container,
-        } => {
-            exec_shell(app, &context, &key, container.as_deref());
-            return true;
-        }
-        // The subscription thread starts with the first ARM tab opened, so a
-        // request before that says why rather than doing nothing.
-        AppAction::Arm(request) => match runtime.arm.worker.as_ref() {
-            Some(worker) => drop(worker.send(request)),
-            None => {
-                let refusal = app
-                    .shell
-                    .arm_state()
-                    .map_or_else(|| "Azure is not configured".to_owned(), str::to_owned);
-                // A reveal is waited on by name, so it is answered here.
-                if let ArmRequest::Reveal { vault, name } = &request {
-                    app.key_vault
-                        .set_revealed(vault, name, Err(refusal.clone()));
-                }
-                app.shell.set_error(refusal);
-            }
-        },
         AppAction::LocalGit(request) => match runtime.local.worker.as_ref() {
             Some(worker) => {
                 let _ = worker.send(request);
@@ -272,12 +228,6 @@ pub(super) fn handle_action(
             Ok(()) => app.shell.set_status(copied_status(content)),
             Err(error) => app.shell.set_error(format!("Could not copy: {error:#}")),
         },
-        // The second of the two places a secret is ever read out of, and the
-        // status says what was copied without saying what it was.
-        AppAction::CopySecret(secret) => match copy_to_clipboard(secret.expose()) {
-            Ok(()) => app.shell.set_status("Copied secret value"),
-            Err(error) => app.shell.set_error(format!("Could not copy: {error:#}")),
-        },
         AppAction::WriteFile { path, contents } => match fs::write(&path, contents) {
             Ok(()) => app.shell.set_status(format!("Exported {}", path.display())),
             Err(error) => app
@@ -292,20 +242,8 @@ pub(super) fn handle_action(
 /// a git job, the details fetch, or a row waiting on an edit. Nothing running
 /// and the loop goes back to waking a second at a time.
 fn spinning(app: &App) -> bool {
-    // A tab's own reads spin only while it is showing: a hidden tab is told
-    // nothing is worth reading, so what it waits on is not coming until it
-    // is back.
-    let tab_busy = match app.tab {
-        TabId::Aks => app.aks.busy(),
-        TabId::Acr => app.acr.busy(),
-        TabId::KeyVault => app.key_vault.busy(),
-        TabId::Environments => app.environments.busy(),
-        TabId::PullRequests => app.pull_requests.preflight_running(),
-        _ => false,
-    };
     app.shell.sync_pending
         || app.repos.busy()
-        || tab_busy
         || app.work_items.details_pending.is_some()
         || app.shell.flashing()
 }

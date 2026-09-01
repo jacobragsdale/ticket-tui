@@ -39,12 +39,6 @@ pub enum CommandId {
     ToggleFinished,
     ToggleBookmark,
     CopyId,
-    /// The ACR tab's own copy: the digest of the tag the details pane is on.
-    CopyDigest,
-    /// The Key Vault tab's two: read one secret's value onto the screen, and
-    /// copy the one that is showing.
-    RevealSecret,
-    CopyValue,
     CopyUrl,
     CopyTitle,
     CopyMarkdown,
@@ -70,16 +64,6 @@ pub enum CommandId {
     AutoCompletePr,
     CommentPr,
     ToggleClosedPrs,
-    /// The environments board's one filter: the services something is missing
-    /// from, and everything again.
-    ToggleFindings,
-    /// The AKS tab's verbs.
-    ShowLogs,
-    DescribePod,
-    PreviousLogs,
-    NextContainer,
-    RestartPod,
-    ExecShell,
     /// `g`: whatever the row under the cursor points at, worked out per tab.
     Follow,
     /// The Pipelines tab's verbs.
@@ -333,55 +317,6 @@ pub const COMMANDS: &[Command] = &[
         scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
-        id: CommandId::ToggleFindings,
-        title: "Only services with findings",
-        keys: &[key('F')],
-        help: "The rows a \u{2717} is on, and back",
-        scope: Scope::Tabs(&[TabId::Environments]),
-    },
-    Command {
-        id: CommandId::ShowLogs,
-        title: "Logs",
-        keys: &[key('L')],
-        help: "The selected pod's log, following",
-        scope: Scope::Tabs(&[TabId::Aks]),
-    },
-    Command {
-        id: CommandId::DescribePod,
-        title: "Describe pod",
-        keys: &[key('D')],
-        help: "kubectl describe, in the log's place",
-        scope: Scope::Tabs(&[TabId::Aks]),
-    },
-    Command {
-        id: CommandId::PreviousLogs,
-        title: "Previous container log",
-        keys: &[key('P')],
-        help: "The run before the last restart",
-        scope: Scope::Tabs(&[TabId::Aks]),
-    },
-    Command {
-        id: CommandId::NextContainer,
-        title: "Next container",
-        keys: &[key('C')],
-        help: "Follow another of the pod's containers",
-        scope: Scope::Tabs(&[TabId::Aks]),
-    },
-    Command {
-        id: CommandId::RestartPod,
-        title: "Restart pod",
-        keys: &[key('x')],
-        help: "Deletes it; its controller puts it back. Asks once more",
-        scope: Scope::Tabs(&[TabId::Aks]),
-    },
-    Command {
-        id: CommandId::ExecShell,
-        title: "Shell in pod",
-        keys: &[key('s')],
-        help: "kubectl exec -it \u{2026} -- sh, in this terminal",
-        scope: Scope::Tabs(&[TabId::Aks]),
-    },
-    Command {
         id: CommandId::RunPipeline,
         title: "Run pipeline",
         keys: &[key('t')],
@@ -608,35 +543,7 @@ pub const COMMANDS: &[Command] = &[
         title: "Copy ID",
         keys: &[key('y')],
         help: "Selected or current tickets",
-        scope: Scope::Tabs(&[
-            TabId::WorkItems,
-            TabId::Repos,
-            TabId::Environments,
-            TabId::Aks,
-            TabId::Acr,
-            TabId::KeyVault,
-        ]),
-    },
-    Command {
-        id: CommandId::CopyDigest,
-        title: "Copy digest",
-        keys: &[key('D')],
-        help: "The tag the details pane is on",
-        scope: Scope::Tabs(&[TabId::Acr]),
-    },
-    Command {
-        id: CommandId::RevealSecret,
-        title: "Reveal secret",
-        keys: &[key('R')],
-        help: "Shows the value here for a minute; nowhere else",
-        scope: Scope::Tabs(&[TabId::KeyVault]),
-    },
-    Command {
-        id: CommandId::CopyValue,
-        title: "Copy secret value",
-        keys: &[key('Y')],
-        help: "Only while it is shown",
-        scope: Scope::Tabs(&[TabId::KeyVault]),
+        scope: Scope::Tabs(&[TabId::WorkItems, TabId::Repos]),
     },
     Command {
         id: CommandId::CopyUrl,
@@ -878,43 +785,20 @@ pub const fn finished_title(finished_hidden: bool) -> &'static str {
 fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
     let title = match command.id {
         CommandId::ToggleFinished => finished_title(finished_hidden),
-        // Four screens share one verb; each opens a different thing, and the
+        // Every screen shares one verb; each opens a different thing, and the
         // palette should say which.
         CommandId::Open => match tab {
             TabId::WorkItems => "Open ticket in browser",
             TabId::Repos => "Open repository in browser",
             TabId::PullRequests => "Open pull request in browser",
             TabId::Pipelines => "Open run in browser",
-            TabId::Aks => "Open in browser",
-            TabId::Acr | TabId::KeyVault => "Open in the Azure portal",
-            TabId::Environments => "Open the deployment repository",
         },
         // One key, a different neighbour on each tab, so the palette says
         // which one it would go to from here.
         CommandId::Follow => match tab {
             TabId::WorkItems | TabId::Repos | TabId::Pipelines => "Go to pull request",
             TabId::PullRequests => "Go to work items",
-            TabId::Aks => "Go to repository",
-            TabId::Acr => "Go to pod",
-            // Neither of these two has one neighbour to name: the vault tab
-            // has none, and the board's details pane points at a run, a vault
-            // object or a pod depending on the line the cursor is on.
-            TabId::KeyVault | TabId::Environments => return command,
         },
-        // A registry tag is copied as the reference `docker pull` wants, not
-        // as a number.
-        CommandId::CopyId if tab == TabId::Acr => "Copy pull reference",
-        // And a vault holds names rather than numbers.
-        CommandId::CopyId if tab == TabId::KeyVault => "Copy name",
-        // A pod is read live, so the sync key reads the clusters again rather
-        // than pulling from Azure DevOps.
-        CommandId::Sync if tab == TabId::Aks => "Refresh pods",
-        // The same for the two ARM tabs: neither pulls from Azure DevOps.
-        CommandId::Sync if tab == TabId::Acr => "Refresh registries",
-        CommandId::Sync if tab == TabId::KeyVault => "Refresh vaults",
-        // And the board renders the overlays again rather than pulling
-        // anything at all.
-        CommandId::Sync if tab == TabId::Environments => "Render the overlays again",
         _ => return command,
     };
     Command { title, ..command }
@@ -1148,31 +1032,6 @@ mod tests {
     /// each of those over whichever tab is showing, so every tab answers them.
     fn answered_by(tab: TabId) -> &'static [CommandId] {
         match tab {
-            TabId::Acr => &[
-                CommandId::Search,
-                CommandId::Open,
-                CommandId::Sync,
-                CommandId::CopyId,
-                CommandId::CopyDigest,
-                CommandId::HistoryBack,
-                CommandId::HistoryForward,
-                CommandId::Quit,
-                CommandId::ToggleDetails,
-                CommandId::ResetPaneSplit,
-            ],
-            TabId::KeyVault => &[
-                CommandId::Search,
-                CommandId::Open,
-                CommandId::Sync,
-                CommandId::CopyId,
-                CommandId::RevealSecret,
-                CommandId::CopyValue,
-                CommandId::HistoryBack,
-                CommandId::HistoryForward,
-                CommandId::Quit,
-                CommandId::ToggleDetails,
-                CommandId::ResetPaneSplit,
-            ],
             TabId::Repos => &[
                 CommandId::Search,
                 CommandId::Open,
@@ -1223,35 +1082,6 @@ mod tests {
                 CommandId::ToggleDetails,
                 CommandId::ResetPaneSplit,
             ],
-            TabId::Aks => &[
-                CommandId::Search,
-                CommandId::Open,
-                CommandId::Sync,
-                CommandId::ShowLogs,
-                CommandId::DescribePod,
-                CommandId::PreviousLogs,
-                CommandId::NextContainer,
-                CommandId::RestartPod,
-                CommandId::ExecShell,
-                CommandId::CopyId,
-                CommandId::HistoryBack,
-                CommandId::HistoryForward,
-                CommandId::Quit,
-                CommandId::ToggleDetails,
-                CommandId::ResetPaneSplit,
-            ],
-            TabId::Environments => &[
-                CommandId::Search,
-                CommandId::Open,
-                CommandId::CopyId,
-                CommandId::Sync,
-                CommandId::ToggleFindings,
-                CommandId::HistoryBack,
-                CommandId::HistoryForward,
-                CommandId::Quit,
-                CommandId::ToggleDetails,
-                CommandId::ResetPaneSplit,
-            ],
             // The work items screen matches exhaustively and answers
             // everything except the other tabs' verbs, which are exactly the
             // commands no other tab shares with it.
@@ -1261,7 +1091,7 @@ mod tests {
 
     /// What `App` answers over any tab before the screen sees it: the five
     /// overlays it opens, and `g`, whose target only `App` can work out —
-    /// the ACR tab's pod lives on another screen.
+    /// it may be on a tab the current screen cannot see.
     const SHARED: [CommandId; 6] = [
         CommandId::Help,
         CommandId::Palette,
@@ -1283,15 +1113,6 @@ mod tests {
         assert_eq!(title(TabId::Repos), Some("Go to pull request"));
         assert_eq!(title(TabId::PullRequests), Some("Go to work items"));
         assert_eq!(title(TabId::Pipelines), Some("Go to pull request"));
-        assert_eq!(title(TabId::Aks), Some("Go to repository"));
-        assert_eq!(title(TabId::Acr), Some("Go to pod"));
-        for tab in [TabId::KeyVault, TabId::Environments] {
-            assert_eq!(
-                title(tab),
-                Some("Go to what this row points at"),
-                "a tab with no one neighbour keeps the plain wording"
-            );
-        }
     }
 
     #[test]
