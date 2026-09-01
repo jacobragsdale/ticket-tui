@@ -257,6 +257,7 @@ fn the_pre_flight_section_says_what_would_be_missing_and_its_lines_are_a_click_a
         Ok(crate::preflight::Report {
             rendered: vec![("qa".into(), "overlays/qa".into())],
             findings: vec![missing(crate::kustomize::ObjectKind::Secret, "SIGNING_KEY")],
+            ..crate::preflight::Report::default()
         }),
     );
     let text = render_text(220, 50, &mut app);
@@ -298,6 +299,7 @@ fn an_overlay_that_renders_clean_says_so_and_points_nowhere() {
         Ok(crate::preflight::Report {
             rendered: vec![("qa".into(), "overlays/qa".into())],
             findings: Vec::new(),
+            ..crate::preflight::Report::default()
         }),
     );
     let text = render_text(160, 50, &mut app);

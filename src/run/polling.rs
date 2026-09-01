@@ -226,9 +226,12 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     }
     // The pull request under the cursor, pre-flown against the deployment
     // repository: what prod would be missing if it merged, while it is still
-    // a pull request.
+    // a pull request. The vault half of that check travels with the request:
+    // the local thread cannot reach a subscription.
     if app.tab == TabId::PullRequests
-        && let Some(request) = app.pull_requests.preflight_due(&app.shell)
+        && let Some(request) = app
+            .pull_requests
+            .preflight_due(&app.shell, read_vaults(app))
     {
         let _ = worker.send(request);
     }
@@ -290,7 +293,8 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 .environments
                 .set_rendered(&environment, &overlay, rendered),
             LocalEvent::Preflighted { id, commit, found } => {
-                app.pull_requests.set_preflight(id, commit, found);
+                app.pull_requests
+                    .set_preflight(id, commit, found.map(|report| *report));
             }
             LocalEvent::Stopped => runtime.local.worker = None,
         }
@@ -299,8 +303,8 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
 }
 
 /// What every vault the Key Vault tab has listed holds, by name, kind and
-/// date. What the environments board answers its vault half against, and no
-/// value is among it.
+/// date. The one shape both the pre-flight and the environments board answer
+/// their vault half against, and no value is among it.
 fn read_vaults(app: &App) -> Vec<ticket_tui::kustomize::VaultNames> {
     let now = Timestamp::now();
     app.key_vault

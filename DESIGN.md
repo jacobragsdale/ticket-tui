@@ -1357,14 +1357,27 @@ fetches the branch, checks the head the row was read at out into a scratch
 worktree of its own, renders only the overlays the change touches — each
 changed file walks up to its nearest `kustomization.yaml`, and a change under
 `base/` is under every overlay — runs the same check `env check` runs over
-the result, and removes the worktree however it leaves. It is cached per pull
-request and head, so a re-selection costs nothing until the branch moves.
+the result, and removes the worktree however it leaves. The *target branch's*
+render of the same overlays goes into a second scratch worktree beside it, so
+the pane can say what the merge would change as well as what it would leave
+missing. It is cached per pull request and head, so a re-selection costs
+nothing until the branch moves.
+
+The vault half of the check comes with the request rather than out of it:
+`preflight::run` never reaches a subscription, so what the Key Vault tab has
+already listed travels along as names, kinds and dates, and an environment
+whose vault nobody has read is answered against its own overlays with `prod:
+kv-prod not read, so the overlays answer alone` said once.
 
 The details pane says it under a `── Pre-flight ──` rule:
 one line per thing an environment would be missing, or `✓ qa overlays/qa
-renders clean`; the shared spinner while it is in the air. A line naming a
+renders clean`; the shared spinner while it is in the air; and then, marked
+`→`, what merging would *change* — `this pull request adds
+RATE_LIMIT_PER_MIN to prod/orders-config`, in the environments board's own
+wording, because both read `kustomize::diff::promotion_lines`. A line naming a
 Secret an overlay never fills points at the vault the environment pulls from,
-and follows on a click. The table's `Pre-flight` column carries `✓`,
+one naming a vault object points at the object itself, and both follow on a
+click. The table's `Pre-flight` column carries `✓`,
 `✗N`, the spinner, `!` for a pre-flight that could not look at all, and
 nothing for a pull request on any other repository.
 

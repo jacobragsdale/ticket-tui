@@ -564,7 +564,7 @@ fn a_pull_request_against_the_deployment_repository_is_flown_once_per_head() {
 
     let request = app
         .pull_requests
-        .preflight_due(&app.shell)
+        .preflight_due(&app.shell, Vec::new())
         .expect("the selected pull request is flown");
     let crate::local::LocalRequest::Preflight {
         id,
@@ -581,14 +581,18 @@ fn a_pull_request_against_the_deployment_repository_is_flown_once_per_head() {
         ("abc1234", "feature/tabs", "main")
     );
     assert!(
-        app.pull_requests.preflight_due(&app.shell).is_none(),
+        app.pull_requests
+            .preflight_due(&app.shell, Vec::new())
+            .is_none(),
         "one is in the air, so holding j down the table queues no more"
     );
 
     app.pull_requests
         .set_preflight(id, commit, Ok(crate::preflight::Report::default()));
     assert!(
-        app.pull_requests.preflight_due(&app.shell).is_none(),
+        app.pull_requests
+            .preflight_due(&app.shell, Vec::new())
+            .is_none(),
         "a re-selection costs nothing until the branch moves"
     );
 
@@ -601,7 +605,9 @@ fn a_pull_request_against_the_deployment_repository_is_flown_once_per_head() {
     moved.last_merge_source_commit = "def5678".to_owned();
     app.pull_requests.apply_pull_request(&mut app.shell, moved);
     assert!(
-        app.pull_requests.preflight_due(&app.shell).is_some(),
+        app.pull_requests
+            .preflight_due(&app.shell, Vec::new())
+            .is_some(),
         "a head nothing was flown at is flown"
     );
 }
@@ -611,20 +617,29 @@ fn r_flies_the_selected_pull_request_again() {
     let mut app = pull_requests_app();
     app.pull_requests
         .set_deployment(Some(deployment("ticket-tui")));
-    let request = app.pull_requests.preflight_due(&app.shell).expect("flown");
+    let request = app
+        .pull_requests
+        .preflight_due(&app.shell, Vec::new())
+        .expect("flown");
     let crate::local::LocalRequest::Preflight { id, commit, .. } = request else {
         panic!("a pre-flight");
     };
     app.pull_requests
         .set_preflight(id, commit, Ok(crate::preflight::Report::default()));
-    assert!(app.pull_requests.preflight_due(&app.shell).is_none());
+    assert!(
+        app.pull_requests
+            .preflight_due(&app.shell, Vec::new())
+            .is_none()
+    );
 
     let action = app
         .pull_requests
         .run_command(&mut app.shell, crate::command::CommandId::Sync);
     assert!(matches!(action, AppAction::Sync), "r still syncs");
     assert!(
-        app.pull_requests.preflight_due(&app.shell).is_some(),
+        app.pull_requests
+            .preflight_due(&app.shell, Vec::new())
+            .is_some(),
         "and flies the selected pull request again"
     );
 }
@@ -635,7 +650,11 @@ fn a_pull_request_on_any_other_repository_carries_no_pre_flight_at_all() {
     app.pull_requests
         .set_deployment(Some(deployment("somewhere-else")));
 
-    assert!(app.pull_requests.preflight_due(&app.shell).is_none());
+    assert!(
+        app.pull_requests
+            .preflight_due(&app.shell, Vec::new())
+            .is_none()
+    );
     let row = app.pull_requests.selected(&app.shell).expect("a row");
     assert!(app.pull_requests.preflight(&row).is_none());
     assert!(

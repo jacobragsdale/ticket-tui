@@ -167,7 +167,7 @@ fn the_branch_would_leave_a_key_missing_and_the_same_overlay_on_main_would_not()
     let deployment = fixture.deployment();
 
     let flown =
-        run(&deployment, "drop-the-key", "main", &fixture.branch).expect("the branch flies");
+        run(&deployment, "drop-the-key", "main", &fixture.branch, &[]).expect("the branch flies");
     assert_eq!(
         flown.rendered,
         vec![("qa".to_owned(), "overlays/qa".to_owned())],
@@ -181,7 +181,7 @@ fn the_branch_would_leave_a_key_missing_and_the_same_overlay_on_main_would_not()
     );
 
     // The same overlay as main has it renders with nothing missing.
-    let held = run(&deployment, "main", &fixture.root, &fixture.main).expect("main flies");
+    let held = run(&deployment, "main", &fixture.root, &fixture.main, &[]).expect("main flies");
     assert_eq!(held.rendered.len(), 1, "the same overlay was rendered");
     assert!(held.findings.is_empty(), "{:?}", held.findings);
 }
@@ -192,7 +192,7 @@ fn the_scratch_worktree_goes_even_when_the_render_fails() {
     let mut deployment = fixture.deployment();
     deployment.render = "false".to_owned();
 
-    let refused = run(&deployment, "drop-the-key", "main", &fixture.branch)
+    let refused = run(&deployment, "drop-the-key", "main", &fixture.branch, &[])
         .expect_err("a renderer that refuses is an error");
     assert!(
         format!("{refused:#}").contains("overlays/qa"),
@@ -232,12 +232,35 @@ fn a_missing_key_points_at_the_vault_the_environment_pulls_from() {
     let mut configmap = secret.clone();
     configmap.reference.object = ObjectKind::ConfigMap;
 
+    // The vault half: an object the environment's own vault does not hold,
+    // which names a row on the Key Vault tab rather than the vault as a whole.
+    let object = Finding {
+        environment: "qa".to_owned(),
+        namespace: "shop-qa".to_owned(),
+        workload: "billing-vault".to_owned(),
+        kind: "SecretProviderClass".to_owned(),
+        container: None,
+        reference: Reference {
+            source: Source::Vault {
+                kind: Some("secret".to_owned()),
+            },
+            object: ObjectKind::Vault,
+            name: "billing-legacy-token".to_owned(),
+            key: None,
+            optional: false,
+        },
+        missing: Missing::VaultObject,
+        vault: Some("kv-qa".to_owned()),
+    };
+
     let report = Report {
         rendered: vec![("qa".to_owned(), "overlays/qa".to_owned())],
-        findings: vec![secret, configmap],
+        findings: vec![secret, configmap, object],
+        vaults: vec!["kv-qa".to_owned()],
+        ..Report::default()
     };
     let notes = report.notes(&deployment);
-    assert_eq!(notes.len(), 2);
+    assert_eq!(notes.len(), 3);
     assert_eq!(
         notes[0].jump,
         Some(Jump::Vault("kv-qa".to_owned())),
@@ -247,14 +270,143 @@ fn a_missing_key_points_at_the_vault_the_environment_pulls_from() {
         notes[1].jump, None,
         "a ConfigMap has no tab to jump to, so it is a plain line"
     );
+    assert_eq!(
+        notes[2].jump,
+        Some(Jump::VaultItem {
+            vault: "kv-qa".to_owned(),
+            kind: "secret".to_owned(),
+            name: "billing-legacy-token".to_owned(),
+        }),
+        "and the vault half names the object itself"
+    );
     assert!(notes.iter().all(|note| note.mark == Mark::Missing));
 
     let clean = Report {
         rendered: vec![("qa".to_owned(), "overlays/qa".to_owned())],
         findings: Vec::new(),
+        vaults: vec!["kv-qa".to_owned()],
+        ..Report::default()
     };
     let notes = clean.notes(&deployment);
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0].mark, Mark::Clean);
     assert!(notes[0].text.contains("renders clean"), "{}", notes[0].text);
+}
+
+#[test]
+fn the_vault_half_is_answered_against_what_the_key_vault_tab_holds() {
+    let fixture = fixture();
+    let deployment = fixture.deployment();
+    let now = crate::timestamp::Timestamp::now();
+    let held = |name: &str| crate::arm::VaultItem {
+        kind: crate::arm::ItemKind::Secret,
+        name: name.to_owned(),
+        enabled: true,
+        created: None,
+        updated: None,
+        expires: None,
+        content_type: None,
+        recovery_level: None,
+    };
+    // kv-qa holds one of the two objects qa's provider pulls.
+    let vault = VaultNames::from_items("kv-qa", &[held("billing-signing-key")], now);
+
+    let flown = run(
+        &deployment,
+        "main",
+        &fixture.root,
+        &fixture.main,
+        std::slice::from_ref(&vault),
+    )
+    .expect("main flies");
+    let missing: Vec<&str> = flown
+        .findings
+        .iter()
+        .filter(|finding| finding.missing == Missing::VaultObject)
+        .map(|finding| finding.reference.name.as_str())
+        .collect();
+    assert!(
+        missing.contains(&"billing-db-password"),
+        "the object the vault does not hold: {missing:?}"
+    );
+    assert!(
+        !missing.contains(&"billing-signing-key"),
+        "and not the one it does: {missing:?}"
+    );
+    let object = flown
+        .findings
+        .iter()
+        .find(|finding| finding.reference.name == "billing-db-password")
+        .expect("the finding");
+    assert_eq!(
+        finding_jump(&deployment.environments, object),
+        Some(Jump::VaultItem {
+            vault: "kv-qa".to_owned(),
+            kind: "secret".to_owned(),
+            name: "billing-db-password".to_owned(),
+        })
+    );
+    assert_eq!(flown.vaults, vec!["kv-qa".to_owned()]);
+    assert!(
+        !flown
+            .notes(&deployment)
+            .iter()
+            .any(|note| note.text.contains("not read")),
+        "the vault was read, so nothing says it was not"
+    );
+
+    // With no vault read, the overlays answer alone and the pane says so.
+    let alone = run(&deployment, "main", &fixture.root, &fixture.main, &[]).expect("main flies");
+    assert!(
+        alone
+            .findings
+            .iter()
+            .all(|finding| finding.missing != Missing::VaultObject),
+        "{:?}",
+        alone.findings
+    );
+    let notes = alone.notes(&deployment);
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.text == "qa: kv-qa not read, so the overlays answer alone"),
+        "{notes:?}"
+    );
+}
+
+#[test]
+fn the_pane_says_what_the_merge_would_add_and_what_it_would_take_away() {
+    let fixture = fixture();
+    let deployment = fixture.deployment();
+
+    // The branch takes a key out of qa's render, so merging it removes one.
+    let flown =
+        run(&deployment, "drop-the-key", "main", &fixture.branch, &[]).expect("the branch flies");
+    let notes = flown.notes(&deployment);
+    assert!(
+        notes.iter().any(|note| {
+            note.mark == Mark::Change
+                && note.text == "this pull request removes RATE_LIMIT_PER_MIN from qa/orders-config"
+        }),
+        "{notes:?}"
+    );
+
+    // And read the other way round, the same two renders add it.
+    let adding = Report {
+        rendered: flown.rendered.clone(),
+        before: flown.after.clone(),
+        after: flown.before.clone(),
+        ..Report::default()
+    };
+    let notes = adding.notes(&deployment);
+    assert!(
+        notes.iter().any(|note| {
+            note.text == "this pull request adds RATE_LIMIT_PER_MIN to qa/orders-config"
+        }),
+        "{notes:?}"
+    );
+    assert!(
+        !flown.before.is_empty(),
+        "the target branch's own render is what the comparison is against"
+    );
 }
