@@ -428,6 +428,98 @@ fn the_environments_of_the_file_parse_and_a_nameless_one_is_refused() {
     }
 }
 
+#[test]
+fn prods_two_planted_findings_are_found_and_named_and_qa_is_clean() {
+    let findings = check(&fixture("prod"));
+    assert_eq!(
+        findings.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        [
+            "prod shop-prod/billing-api Deployment env SIGNING_KEY \u{2190} secret billing-kv key SIGNING_KEY missing",
+            "prod shop-prod/orders-api Deployment env RATE_LIMIT_PER_MIN \u{2190} configmap orders-config key RATE_LIMIT_PER_MIN missing",
+        ]
+    );
+    assert_eq!(findings[0].missing, Missing::Key);
+    assert_eq!(findings[0].container.as_deref(), Some("api"));
+    assert_eq!(findings[1].workload, "orders-api");
+
+    assert!(
+        check(&fixture("qa")).is_empty(),
+        "{:?}",
+        check(&fixture("qa"))
+    );
+}
+
+#[test]
+fn what_a_provider_produces_counts_as_present_and_the_vault_object_it_lacks_is_not_this_check() {
+    let prod = fixture("prod");
+    // billing-kv is nowhere in prod's rendered Secrets; the SecretProviderClass
+    // is the only thing that says it will exist.
+    assert!(!prod.secrets.iter().any(|held| held.name == "billing-kv"));
+    let findings = check(&prod);
+    assert!(
+        !findings
+            .iter()
+            .any(|held| held.reference.key.as_deref() == Some("DB_PASSWORD")),
+        "a key the class produces is not a finding"
+    );
+    // billing-legacy-token is asked of a vault that does not hold it, which is
+    // #746's to find against the Key Vault tab and not this check's.
+    assert!(
+        prod.providers.iter().any(|provider| provider
+            .objects
+            .iter()
+            .any(|object| object.name == "billing-legacy-token")),
+        "it is in the render"
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|held| held.to_string().contains("legacy")),
+        "and `env check` stays quiet about it"
+    );
+    // dataFrom means the ExternalSecret's keys are unknowable, so nothing that
+    // reads one is called missing.
+    let reaper = check(&prod)
+        .into_iter()
+        .find(|held| held.workload == "reaper");
+    assert!(reaper.is_none(), "{reaper:?}");
+}
+
+#[test]
+fn an_absent_object_a_missing_class_and_an_optional_reference_read_as_they_should() {
+    let manifest = parse(
+        "qa",
+        concat!(
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: n\n",
+            "spec:\n  template:\n    spec:\n      containers:\n      - name: web\n",
+            "        image: web:1\n",
+            "        envFrom:\n        - configMapRef:\n            name: nowhere\n",
+            "        - secretRef:\n            name: also-nowhere\n            optional: true\n",
+            "        env:\n        - name: A\n          valueFrom:\n",
+            "            secretKeyRef:\n              name: gone\n              key: A\n",
+            "      volumes:\n      - name: whole\n        configMap:\n          name: nothing\n",
+            "      - name: vault\n        csi:\n          volumeAttributes:\n",
+            "            secretProviderClass: not-here\n",
+        ),
+    );
+    let lines: Vec<String> = check(&manifest).iter().map(ToString::to_string).collect();
+    assert_eq!(
+        lines,
+        [
+            "qa n/web Deployment env A \u{2190} secret gone missing",
+            "qa n/web Deployment envFrom \u{2190} configmap nowhere missing",
+            "qa n/web Deployment volume whole \u{2190} configmap nothing missing",
+            "qa n/web Deployment volume vault \u{2190} secretproviderclass not-here missing",
+        ],
+        "the optional envFrom is silent, and everything else names itself"
+    );
+    assert!(
+        check(&manifest)
+            .iter()
+            .all(|held| held.missing == Missing::Object)
+    );
+}
+
 /// The one test that runs the real renderer: it re-renders the fixture and
 /// compares it to the YAML checked in beside it, so a kustomize that changes
 /// its output is caught rather than quietly parsed. `cargo test -- --ignored

@@ -193,6 +193,62 @@ impl std::fmt::Display for Reference {
     }
 }
 
+/// What a reference points at that the overlay does not define.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Missing {
+    /// The object itself is nowhere in the overlay.
+    Object,
+    /// The object is there without the key.
+    Key,
+}
+
+/// One reference the overlay does not answer. Everything about it comes from
+/// the repository, so it is knowable offline and before the merge.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct Finding {
+    pub environment: String,
+    pub namespace: String,
+    pub workload: String,
+    /// The workload's kind, so the line says what to go and look at.
+    pub kind: String,
+    /// The container it is written on; a volume belongs to the pod and has
+    /// none.
+    pub container: Option<String>,
+    pub reference: Reference,
+    pub missing: Missing,
+}
+
+impl std::fmt::Display for Finding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let place = if self.namespace.is_empty() {
+            self.workload.clone()
+        } else {
+            format!("{}/{}", self.namespace, self.workload)
+        };
+        write!(
+            formatter,
+            "{} {place} {} {} \u{2190} {} {}",
+            self.environment,
+            self.kind,
+            self.reference.source,
+            self.reference.object,
+            self.name(),
+        )
+    }
+}
+
+impl Finding {
+    /// The object and what is missing from it: `orders-config key
+    /// RATE_LIMIT_PER_MIN missing`, or `orders-config missing`.
+    fn name(&self) -> String {
+        match (self.missing, self.reference.key.as_deref()) {
+            (Missing::Key, Some(key)) => format!("{} key {key} missing", self.reference.name),
+            _ => format!("{} missing", self.reference.name),
+        }
+    }
+}
+
 impl EnvManifest {
     /// An environment with nothing in it yet.
     #[must_use]
@@ -234,6 +290,110 @@ impl EnvManifest {
         self.providers.sort();
         self.providers.dedup();
     }
+
+    /// Every key the overlay gives one Secret: what the render holds, plus
+    /// what any provider says it will put there. The flag is whether a
+    /// provider pulls it whole, which makes the key list incomplete by nature.
+    fn secret_keys(&self, namespace: &str, name: &str) -> Option<(Vec<&str>, bool)> {
+        let mut found = false;
+        let mut keys: Vec<&str> = Vec::new();
+        let mut whole = false;
+        for object in &self.secrets {
+            if object.is(namespace, name) {
+                found = true;
+                keys.extend(object.keys.iter().map(String::as_str));
+            }
+        }
+        for provider in &self.providers {
+            for produced in &provider.produces {
+                if produced.is(namespace, name) {
+                    found = true;
+                    whole |= provider.whole;
+                    keys.extend(produced.keys.iter().map(String::as_str));
+                }
+            }
+        }
+        found.then_some((keys, whole))
+    }
+
+    /// What one reference from `namespace` asks for that is not here.
+    fn missing(&self, namespace: &str, reference: &Reference) -> Option<Missing> {
+        if reference.optional {
+            return None;
+        }
+        match reference.object {
+            ObjectKind::ConfigMap => {
+                let mut keys: Vec<&str> = Vec::new();
+                let mut found = false;
+                for object in &self.config_maps {
+                    if object.is(namespace, &reference.name) {
+                        found = true;
+                        keys.extend(object.keys.iter().map(String::as_str));
+                    }
+                }
+                if !found {
+                    return Some(Missing::Object);
+                }
+                let key = reference.key.as_deref()?;
+                (!keys.contains(&key)).then_some(Missing::Key)
+            }
+            ObjectKind::Secret => {
+                let Some((keys, whole)) = self.secret_keys(namespace, &reference.name) else {
+                    return Some(Missing::Object);
+                };
+                let key = reference.key.as_deref()?;
+                (!whole && !keys.contains(&key)).then_some(Missing::Key)
+            }
+            ObjectKind::SecretProviderClass => {
+                let held = self.providers.iter().any(|provider| {
+                    provider.kind == "SecretProviderClass"
+                        && provider.name == reference.name
+                        && same_namespace(&provider.namespace, namespace)
+                });
+                (!held).then_some(Missing::Object)
+            }
+        }
+    }
+}
+
+/// Every ConfigMap and Secret reference one environment makes that its own
+/// overlay does not answer. Pure over the manifest: no cluster, no vault, no
+/// network. Sorted by environment, namespace and workload, so a diff of two
+/// runs is readable.
+#[must_use]
+pub fn check(manifest: &EnvManifest) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for workload in &manifest.workloads {
+        let mut record = |container: Option<&Container>, reference: &Reference| {
+            if let Some(missing) = manifest.missing(&workload.namespace, reference) {
+                findings.push(Finding {
+                    environment: manifest.environment.clone(),
+                    namespace: workload.namespace.clone(),
+                    workload: workload.name.clone(),
+                    kind: workload.kind.clone(),
+                    container: container.map(|held| held.name.clone()),
+                    reference: reference.clone(),
+                    missing,
+                });
+            }
+        };
+        for container in &workload.containers {
+            for reference in &container.references {
+                record(Some(container), reference);
+            }
+        }
+        for reference in &workload.volumes {
+            record(None, reference);
+        }
+    }
+    findings.sort_by(|left, right| {
+        (&left.environment, &left.namespace, &left.workload).cmp(&(
+            &right.environment,
+            &right.namespace,
+            &right.workload,
+        ))
+    });
+    findings
 }
 
 /// One rendered overlay, read into the model. Pure, and infallible: a document

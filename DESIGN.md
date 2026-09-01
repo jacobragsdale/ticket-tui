@@ -2067,6 +2067,7 @@ ticket-tui keys list --vault NAME [--json]
 ticket-tui certs list --vault NAME [--json]
 ticket-tui env list [--json]
 ticket-tui env show <environment> [--json]
+ticket-tui env check [ENV...] [--json]
 ```
 
 `sync` pulls and exits, printing what moved — `Synced 3 changes from
@@ -2286,11 +2287,49 @@ its containers, their images and every reference each makes, the ConfigMaps and
 Secrets by key count, and each provider with the vault objects it pulls and the
 Secret keys it produces. `--json` prints the model itself.
 
+`env check` is the pre-deploy gate, and it is the point of all of it. The
+commonest way a deploy to prod fails is a workload reading a ConfigMap key — or
+a Secret key — that its own overlay never defines, because it was added to qa's
+overlay and not prod's; that is knowable from the repository alone, offline,
+before the merge, and today it is discovered by the pod. Every check says a key
+or an object is **absent**, never that a value is wrong:
+
+- `configMapKeyRef` and `secretKeyRef`: the object absent, or present without
+  the key.
+- `envFrom`, and a volume with no `items`: the whole object is the reference,
+  so only its absence is a finding.
+- A volume's `items[].key`: each key.
+- `csi.volumeAttributes.secretProviderClass`: the class absent from the overlay.
+
+A Secret a provider produces counts as existing with the keys its
+`secretObjects` — or an `ExternalSecret`'s `target` and `data` — say it will
+hold; one pulled whole with `dataFrom` has keys nothing in the repository can
+know, so nothing that reads it is ever called missing. `optional: true`
+anywhere is silent, because a workload that starts without a key is not
+waiting on one.
+
+```console
+$ ticket-tui env check prod
+prod shop-prod/billing-api Deployment env SIGNING_KEY ← secret billing-kv key SIGNING_KEY missing
+prod shop-prod/orders-api Deployment env RATE_LIMIT_PER_MIN ← configmap orders-config key RATE_LIMIT_PER_MIN missing
+$ ticket-tui env check qa
+qa: clean (3 workloads, 1 configmap)
+```
+
+The line is the environment, `namespace/workload`, the workload's kind, where
+the reference is written, and what it points at that is not there. Findings are
+sorted by environment, namespace and workload, so two runs diff cleanly. It
+exits **1** when there is any finding, **0** when every environment named is
+clean, and **2** when an overlay would not render — an overlay the renderer
+refused is one line on stderr, and a gate that could not look must not read as
+clean. That is what lets the deployment repository's own pipeline run
+`ticket-tui env check` as a step.
+
 `fixtures/kustomize` is the worked example the tests read: a base with two
 services, a CronJob, a ConfigMap with a block scalar and a `secretGenerator`,
-and two overlays, one of which is deliberately missing a ConfigMap key, a
-produced Secret key and a vault object, for the checks built on this to find. `rendered/{qa,prod}.yaml` beside it is what
-`kubectl kustomize` makes of them, checked in so the parse is
+and two overlays, one of which is deliberately missing a ConfigMap key and a
+produced Secret key. `rendered/{qa,prod}.yaml` beside it is what
+`kubectl kustomize` makes of them, checked in so the parse and the check are
 tested without `kubectl`; one `#[ignore]`d test re-renders and compares.
 
 ## Live agent context

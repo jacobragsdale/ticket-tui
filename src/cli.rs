@@ -275,6 +275,15 @@ pub enum EnvCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Report every ConfigMap and Secret reference an environment's own
+    /// overlays do not define. Exits 1 when there is any finding, 0 when every
+    /// environment is clean, and 2 when an overlay would not render
+    Check {
+        /// The environments to check; none named is all of them
+        environments: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The ACR tab, without the tab. There is no database behind this one either:
@@ -3457,6 +3466,18 @@ fn run_env_with(config: &Config, workspace: Option<&Path>, command: &EnvCommand)
             });
             Ok(())
         }
+        // The exit code is the point of this one — the deployment repository's
+        // own pipeline runs it as a gate — so it ends the process itself
+        // rather than leaving 1 to stand for everything.
+        EnvCommand::Check { environments, json } => {
+            match run_env_check(config, workspace, environments, *json) {
+                Ok(code) => std::process::exit(code),
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    std::process::exit(2)
+                }
+            }
+        }
     }
 }
 
@@ -3550,6 +3571,62 @@ fn list_table(rendered: &[Rendered<'_>], json: bool) -> Result<String> {
             })
             .collect::<Vec<_>>(),
     ))
+}
+
+/// Every finding of every environment named, one line each, and the exit code
+/// the gate reads: 1 for any finding, 0 for clean, 2 for an overlay that would
+/// not render.
+fn run_env_check(
+    config: &Config,
+    workspace: Option<&Path>,
+    names: &[String],
+    json: bool,
+) -> Result<i32> {
+    let (report, code) = check_report(&render_all(config, workspace, names)?, json)?;
+    if !report.is_empty() {
+        emit(&report);
+    }
+    Ok(code)
+}
+
+/// What the check prints and the code it exits with, pure over what the
+/// renders answered with. An overlay that would not render is one line on
+/// stderr, the way an unreadable cluster is under `pods`, and it takes the
+/// exit code with it: a gate that could not look must not read as clean.
+fn check_report(rendered: &[Rendered<'_>], json: bool) -> Result<(String, i32)> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut reports: Vec<EnvCheckJson> = Vec::new();
+    let (mut found, mut unrenderable) = (false, false);
+    for (environment, manifest) in rendered {
+        let manifest = match manifest {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                eprintln!("{}: {error:#}", environment.name);
+                unrenderable = true;
+                continue;
+            }
+        };
+        let findings = kustomize::check(manifest);
+        found |= !findings.is_empty();
+        if json {
+            reports.push(EnvCheckJson::new(manifest, findings));
+        } else if findings.is_empty() {
+            lines.push(format!(
+                "{}: clean ({}, {})",
+                environment.name,
+                plural(manifest.workloads.len(), "workload"),
+                plural(manifest.config_maps.len(), "configmap")
+            ));
+        } else {
+            lines.extend(findings.iter().map(ToString::to_string));
+        }
+    }
+    let text = if json {
+        to_json(&reports)?
+    } else {
+        lines.join("\n")
+    };
+    Ok((text, if unrenderable { 2 } else { i32::from(found) }))
 }
 
 /// One environment as a block of text: what it holds, then its workloads with
@@ -3703,6 +3780,29 @@ impl<'a> EnvListJson<'a> {
             secrets: manifest.map_or(0, |held| held.secrets.len()),
             providers: manifest.map_or(0, |held| held.providers.len()),
             error: manifest.err().map(|error| format!("{error:#}")),
+        }
+    }
+}
+
+/// One environment as `env check --json` prints it: the counts a clean run
+/// reports, and every finding.
+#[derive(Serialize)]
+struct EnvCheckJson<'a> {
+    environment: &'a str,
+    workloads: usize,
+    config_maps: usize,
+    clean: bool,
+    findings: Vec<kustomize::Finding>,
+}
+
+impl<'a> EnvCheckJson<'a> {
+    fn new(manifest: &'a kustomize::EnvManifest, findings: Vec<kustomize::Finding>) -> Self {
+        Self {
+            environment: &manifest.environment,
+            workloads: manifest.workloads.len(),
+            config_maps: manifest.config_maps.len(),
+            clean: findings.is_empty(),
+            findings,
         }
     }
 }
@@ -6438,6 +6538,69 @@ mod tests {
         };
         assert_eq!(environment, "prod");
         assert!(!json);
+
+        let Some(Command::Env(EnvCommand::Check { environments, .. })) =
+            Cli::parse_from(["ticket-tui", "env", "check", "qa", "prod"]).command
+        else {
+            panic!("env check")
+        };
+        assert_eq!(environments, ["qa", "prod"]);
+
+        let Some(Command::Env(EnvCommand::Check { environments, json })) =
+            Cli::parse_from(["ticket-tui", "env", "check", "--json"]).command
+        else {
+            panic!("env check --json")
+        };
+        assert!(environments.is_empty(), "none named is every environment");
+        assert!(json);
+    }
+
+    #[test]
+    fn env_check_prints_a_line_per_finding_and_exits_one_clean_zero_unreadable_two() {
+        let (qa, prod) = (
+            env_table("qa", &["overlays/qa"]),
+            env_table("prod", &["overlays/prod"]),
+        );
+        let rendered = vec![
+            (&qa, Ok(env_fixture("qa"))),
+            (&prod, Ok(env_fixture("prod"))),
+        ];
+        let (report, code) = check_report(&rendered, false).unwrap();
+        assert_eq!(
+            report,
+            concat!(
+                "qa: clean (3 workloads, 1 configmap)\n",
+                "prod shop-prod/billing-api Deployment env SIGNING_KEY \u{2190} secret billing-kv key SIGNING_KEY missing\n",
+                "prod shop-prod/orders-api Deployment env RATE_LIMIT_PER_MIN \u{2190} configmap orders-config key RATE_LIMIT_PER_MIN missing",
+            )
+        );
+        assert_eq!(code, 1, "any finding at all is a failed gate");
+
+        let clean = vec![(&qa, Ok(env_fixture("qa")))];
+        let (report, code) = check_report(&clean, false).unwrap();
+        assert_eq!(report, "qa: clean (3 workloads, 1 configmap)");
+        assert_eq!(code, 0);
+
+        // An overlay that would not render is 2: a gate that could not look
+        // must not read as clean.
+        let broken: Vec<Rendered<'_>> = vec![(&prod, Err(anyhow::anyhow!("no such overlay")))];
+        let (report, code) = check_report(&broken, false).unwrap();
+        assert!(report.is_empty(), "{report}");
+        assert_eq!(code, 2);
+        let mixed = vec![
+            (&qa, Ok(env_fixture("qa"))),
+            (&prod, Err(anyhow::anyhow!("boom"))),
+        ];
+        assert_eq!(check_report(&mixed, false).unwrap().1, 2);
+
+        // `--json` carries the counts a clean run reports as well as the
+        // findings, so a pipeline reads one shape either way.
+        let (report, code) = check_report(&clean, true).unwrap();
+        let parsed: Value = serde_json::from_str(&report).unwrap();
+        assert_eq!(parsed[0]["environment"], "qa");
+        assert_eq!(parsed[0]["clean"], true);
+        assert_eq!(parsed[0]["workloads"], 3);
+        assert_eq!(code, 0);
     }
 
     #[test]
