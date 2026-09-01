@@ -193,7 +193,11 @@ the TUI can. `ticket-tui env check prod` is the pre-deploy gate: it renders the
 environment's own overlays and reports every ConfigMap and Secret key a
 workload reads that the overlay never defines, offline and before the merge —
 exit 1 for any finding, 0 for clean, 2 when an overlay would not render, so the
-deployment repository's pipeline can run it as a step. The vault commands print names, dates and whether a thing is enabled;
+deployment repository's pipeline can run it as a step. `ticket-tui env diff qa
+prod orders` is the promotion read before it is made: every ConfigMap and
+Secret key, vault object and variable qa has that prod has not, and the image
+gap read back through the runs to the pull requests and work items between
+them. The vault commands print names, dates and whether a thing is enabled;
 `ticket-tui secrets show --vault V NAME --value` is the only one that prints a
 secret's value, raw, to stdout — so run it deliberately and keep what it prints
 out of anything you save.

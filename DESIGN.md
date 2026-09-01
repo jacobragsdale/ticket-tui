@@ -2174,6 +2174,7 @@ ticket-tui status [--json]
 ticket-tui env list [--json]
 ticket-tui env show <environment> [--json]
 ticket-tui env check [ENV...] [--json]
+ticket-tui env diff <from> <to> [SERVICE] [--json]
 ```
 
 `sync` pulls and exits, printing what moved — `Synced 3 changes from
@@ -2514,10 +2515,46 @@ refused is one line on stderr, and a gate that could not look must not read as
 clean. That is what lets the deployment repository's own pipeline run
 `ticket-tui env check` as a step.
 
+`env diff <from> <to> [service]` is the same two environments read against each
+other, which is what a promotion asks before anything is broken. The service is
+the workload's name, and part of it will do — `orders` is `orders-api`. One block per
+service, empty blocks left out, `identical` when the two agree; direction is
+left to right, and what the target has and the source has not is marked `only
+in prod`. Per workload present in either: the image tag, the keys of the
+ConfigMaps and Secrets it references, the vault objects its providers pull, and
+the variable names its containers set — names, as everywhere here.
+
+```console
+$ ticket-tui env diff qa prod orders
+orders-api Deployment
+  image   api  1.4.0 → 1.3.9  3 PRs behind: !812 !815 !820 — #642 #650 #655
+  key     orders-config RATE_LIMIT_PER_MIN
+  var     api TRACE_SAMPLE_RATE
+```
+
+The image half is the one thing two overlays cannot answer between them, so it
+is read back rather than guessed. A tag is the run that built it — the run
+whose build number it is, else the run whose commit it is the head of, else the
+run the registry's own `org.opencontainers.image.revision` annotation names —
+and two runs are two commits, and the pull requests between them are the ones
+`git log <prod's commit>..<qa's commit>` holds in the service's clone: by the
+commit the pull request was last read at, or by the `Merged PR 812:` subject
+Azure DevOps writes, which is all a squash leaves behind. Their work items are
+the ones the Pull requests tab already carries. The service's clone is the
+repository the workload is named after, else the one the run's pipeline builds.
+
+Every one of those reads is allowed to be missing, and says so on the line
+instead of failing: `no clone of orders-api to read the history from`, `no run
+on file for 1.4.0`, `no pull request between them`. The keys, the vault objects
+and the variables come from the two renders alone, so the diff is answerable
+with no database, no clone and no network — which is the same promise `env
+check` makes.
+
 `fixtures/kustomize` is the worked example the tests read: a base with two
 services, a CronJob, a ConfigMap with a block scalar and a `secretGenerator`,
 and two overlays, one of which is deliberately missing a ConfigMap key and a
-produced Secret key. `rendered/{qa,prod}.yaml` beside it is what
+produced Secret key, while the other sets a variable and moves an image tag the
+first never got. `rendered/{qa,prod}.yaml` beside it is what
 `kubectl kustomize` makes of them, checked in so the parse and the check are
 tested without `kubectl`; one `#[ignore]`d test re-renders and compares.
 

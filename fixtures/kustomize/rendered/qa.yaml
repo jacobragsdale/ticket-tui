@@ -89,6 +89,8 @@ spec:
     spec:
       containers:
       - env:
+        - name: TRACE_SAMPLE_RATE
+          value: "0.25"
         - name: RATE_LIMIT_PER_MIN
           valueFrom:
             configMapKeyRef:

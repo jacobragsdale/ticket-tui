@@ -1,0 +1,15 @@
+# One variable qa's overlay sets and prod's does not, which is what the
+# promotion diff reads as a variable rather than as a key: it is written with
+# a literal value, so only its name is ever read.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-api
+spec:
+  template:
+    spec:
+      containers:
+        - name: api
+          env:
+            - name: TRACE_SAMPLE_RATE
+              value: "0.25"
