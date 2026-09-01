@@ -931,7 +931,11 @@ impl PullRequestsScreen {
                 // answering from what was found before.
                 if let Some(row) = self.selected(shell) {
                     let key = self.preflight_key(&row);
-                    self.preflight.remove(&key);
+                    // One already in the air is left to land: taking its
+                    // marker away would only queue the same flight twice.
+                    if self.preflight.get(&key) != Some(&Preflight::Running) {
+                        self.preflight.remove(&key);
+                    }
                 }
                 return AppAction::Sync;
             }

@@ -1361,7 +1361,8 @@ the result, and removes the worktree however it leaves. The *target branch's*
 render of the same overlays goes into a second scratch worktree beside it, so
 the pane can say what the merge would change as well as what it would leave
 missing. It is cached per pull request and head, so a re-selection costs
-nothing until the branch moves.
+nothing until the source branch moves; the target branch advancing under
+it is not watched, which is what `r` is for.
 
 The vault half of the check comes with the request rather than out of it:
 `preflight::run` never reaches a subscription, so what the Key Vault tab has

@@ -510,14 +510,22 @@ impl<'a> Scratch<'a> {
             .filter(char::is_ascii_alphanumeric)
             .take(12)
             .collect();
-        let path = std::env::temp_dir().join(format!(
-            "ticket-tui-preflight-{}-{name}",
-            std::process::id()
-        ));
-        // Whatever a run that was killed left behind is git's to forget before
-        // the path can be used again.
-        let _ = local::git(clone, &["worktree", "prune"]);
+        let mine = format!("ticket-tui-preflight-{}-", std::process::id());
+        let path = std::env::temp_dir().join(format!("{mine}{name}"));
+        // Whatever a run that was killed left behind — under any pid but this
+        // one's, whose flights are live — goes first, and then git forgets the
+        // registrations whose directories are gone.
+        if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+            for entry in entries.flatten() {
+                let held = entry.file_name();
+                let held = held.to_string_lossy();
+                if held.starts_with("ticket-tui-preflight-") && !held.starts_with(&mine) {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
         let _ = std::fs::remove_dir_all(&path);
+        let _ = local::git(clone, &["worktree", "prune"]);
         local::git(
             clone,
             &[
