@@ -40,6 +40,7 @@ use crate::db::{self, SqliteTicketRepository, default_database_path};
 use crate::edit::{FieldEdit, normalize_tags, revision_test};
 use crate::filter::{FilterField, MatchContext, ParsedQuery, WorkItemSchema, parse_query};
 use crate::kustomize;
+use crate::kustomize::diff::{Entry, PromotionDiff, Side};
 use crate::local;
 use crate::markdown;
 use crate::model::{
@@ -300,6 +301,19 @@ pub enum EnvCommand {
         /// without reading any key vault
         #[arg(long)]
         offline: bool,
+    },
+    /// Report what one environment has that another has not, read left to
+    /// right: the image tag and the pull requests and work items behind it,
+    /// the ConfigMap and Secret keys, the vault objects and the variables
+    Diff {
+        /// The environment promoted from, as config.toml names it
+        from: String,
+        /// The environment promoted into
+        to: String,
+        /// One service, by the workload's name; none named is every one of them
+        service: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -713,7 +727,7 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Keys(command) => run_vaults(cli, &VaultCliCommand::Keys(command.clone())),
         Command::Certs(command) => run_vaults(cli, &VaultCliCommand::Certs(command.clone())),
         Command::Status { json } => run_status(cli, &database, *json),
-        Command::Env(command) => run_env(cli, command),
+        Command::Env(command) => run_env(cli, &database, command),
     }
 }
 
@@ -3625,16 +3639,17 @@ impl<'a> From<&'a Approval> for ApprovalJson<'a> {
 /// The render runs here in this process rather than on the local thread: this
 /// is a command that does one thing and exits, and there is no edit for it to
 /// hold up.
-fn run_env(cli: &Cli, command: &EnvCommand) -> Result<()> {
+fn run_env(cli: &Cli, database: &Path, command: &EnvCommand) -> Result<()> {
     let config = config::load(&config::default_path())?;
     let workspace = local::workspace_root(cli.workspace.clone());
-    run_env_with(cli, &config, workspace.as_deref(), command)
+    run_env_with(cli, &config, workspace.as_deref(), database, command)
 }
 
 fn run_env_with(
     cli: &Cli,
     config: &Config,
     workspace: Option<&Path>,
+    database: &Path,
     command: &EnvCommand,
 ) -> Result<()> {
     match command {
@@ -3664,6 +3679,20 @@ fn run_env_with(
                 std::process::exit(2)
             }
         },
+        EnvCommand::Diff {
+            from,
+            to,
+            service,
+            json,
+        } => run_env_diff(
+            config,
+            workspace,
+            database,
+            from,
+            to,
+            service.as_deref(),
+            *json,
+        ),
     }
 }
 
@@ -4060,6 +4089,202 @@ impl<'a> EnvCheckJson<'a> {
             findings,
         }
     }
+}
+
+/// The promotion diff: what one environment has that another has not, read
+/// left to right. The two rendered manifests answer for the keys, the vault
+/// objects and the variables; the image gap is read back through the runs and
+/// pull requests SQLite holds and the service's own clone, and each of those
+/// three that is not there is a line rather than a failure — a diff of two
+/// overlays is worth having offline.
+fn run_env_diff(
+    config: &Config,
+    workspace: Option<&Path>,
+    database: &Path,
+    from: &str,
+    to: &str,
+    service: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    let (clone, render) = deployment_render(config, workspace)?;
+    let from = named_environment(config, from)?;
+    let to = named_environment(config, to)?;
+    let mut diff = kustomize::diff::diff(
+        &kustomize::manifest(&clone, from, &render)?,
+        &kustomize::manifest(&clone, to, &render)?,
+        service,
+    );
+    read_history(&mut diff, database, workspace);
+    emit(&if json {
+        to_json(&diff)?
+    } else {
+        describe_diff(&diff)
+    });
+    Ok(())
+}
+
+/// Every image gap read back to the two runs that built it, the pull requests
+/// merged between their commits and the work items those close. A database
+/// that is not there leaves every gap unread, which is the tags on their own.
+fn read_history(diff: &mut PromotionDiff, database: &Path, workspace: Option<&Path>) {
+    let Ok(stored) = open_database(database) else {
+        return;
+    };
+    let (Ok(runs), Ok(requests), Ok(repos), Ok(pipelines)) = (
+        stored.load_runs(),
+        stored.load_pull_requests(),
+        stored.load_repos(),
+        stored.load_pipelines(),
+    ) else {
+        return;
+    };
+    for service in &mut diff.services {
+        let workload = service.workload.clone();
+        for change in &mut service.images {
+            if change.from.is_none() || change.to.is_none() {
+                continue;
+            }
+            // The repository is wanted before the history is, to find the
+            // clone with, so the `from` tag is read back here as well.
+            let built = change
+                .from
+                .as_ref()
+                .and_then(|tag| kustomize::diff::read_back(tag, &runs, None));
+            let repo = service_repo(&repos, &pipelines, &workload, built.as_ref());
+            let clone = service_clone(workspace, repo, &workload);
+            let log = |older: &str, newer: &str| -> Result<Vec<String>, String> {
+                git_log(clone.as_ref().map_err(String::clone)?, older, newer)
+            };
+            let history = kustomize::diff::history(
+                change,
+                &runs,
+                &requests,
+                repo.map(|repo| repo.id.as_str()),
+                // Rule three wants the registry's own
+                // `org.opencontainers.image.revision`, which is an ACR read
+                // this offline command does not make.
+                &|_| None,
+                &log,
+            );
+            change.history = Some(history);
+        }
+    }
+}
+
+/// The repository one service's history is in: the one the workload is named
+/// after, else the one the run's pipeline builds.
+fn service_repo<'a>(
+    repos: &'a [crate::model::Repo],
+    pipelines: &[Pipeline],
+    workload: &str,
+    built: Option<&kustomize::diff::ImageRun>,
+) -> Option<&'a crate::model::Repo> {
+    repos
+        .iter()
+        .find(|repo| same_text(&repo.name, workload))
+        .or_else(|| {
+            let built = built?;
+            let pipeline = pipelines.iter().find(|held| held.id == built.pipeline_id)?;
+            let id = pipeline.repo_id.as_deref()?;
+            repos.iter().find(|repo| repo.id == id)
+        })
+}
+
+/// Where that repository is cloned, or the line the block prints instead of a
+/// list of pull requests.
+fn service_clone(
+    workspace: Option<&Path>,
+    repo: Option<&crate::model::Repo>,
+    workload: &str,
+) -> Result<PathBuf, String> {
+    let missing = |name: &str| format!("no clone of {name} to read the history from");
+    let repo = repo.ok_or_else(|| missing(workload))?;
+    let workspace = workspace.ok_or_else(|| missing(&repo.name))?;
+    local::scan(
+        workspace,
+        &[local::RepoKey {
+            id: repo.id.clone(),
+            remote: local::normalise_remote(&repo.remote_url),
+            name: repo.name.clone(),
+        }],
+    )
+    .into_iter()
+    .next()
+    .map(|(_, local)| local.path)
+    .ok_or_else(|| missing(&repo.name))
+}
+
+/// `git log <older>..<newer>` in one clone, a line each of commit and subject.
+/// Whatever git would not do comes back as its own first word on the matter,
+/// the way every other shelled-out command here does.
+fn git_log(clone: &Path, older: &str, newer: &str) -> Result<Vec<String>, String> {
+    local::git(
+        clone,
+        &["log", "--format=%H %s", &format!("{older}..{newer}")],
+    )
+    .map(|output| output.lines().map(str::to_owned).collect())
+    .map_err(|error| {
+        let error = format!("{error:#}");
+        error
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("git would not read the history")
+            .trim()
+            .to_owned()
+    })
+}
+
+/// One block per service, and `identical` when the two environments say the
+/// same thing about every one of them. Direction is left to right: what the
+/// target has and the source has not is marked `only in <environment>`.
+fn describe_diff(diff: &PromotionDiff) -> String {
+    if diff.services.is_empty() {
+        return format!("{} \u{2192} {}: identical", diff.from, diff.to);
+    }
+    let mark = |entry: &Entry| match entry.side {
+        Side::From => String::new(),
+        side => format!("  only in {}", diff.environment(side)),
+    };
+    let mut lines: Vec<String> = Vec::new();
+    for service in &diff.services {
+        lines.push(match service.only_in {
+            Some(side) => format!(
+                "{} {}  only in {}",
+                service.workload,
+                service.kind,
+                diff.environment(side)
+            ),
+            None => format!("{} {}", service.workload, service.kind),
+        });
+        for image in &service.images {
+            lines.push(format!(
+                "  image   {}  {} \u{2192} {}{}",
+                image.container,
+                image.from.as_deref().unwrap_or("\u{2014}"),
+                image.to.as_deref().unwrap_or("\u{2014}"),
+                image
+                    .history
+                    .as_ref()
+                    .map(|history| format!("  {history}"))
+                    .unwrap_or_default()
+            ));
+        }
+        for (label, entries) in [
+            ("key", &service.keys),
+            ("secret", &service.vault_objects),
+            ("var", &service.variables),
+        ] {
+            lines.extend(entries.iter().map(|entry| {
+                format!(
+                    "  {label:<6}  {} {}{}",
+                    entry.object,
+                    entry.name,
+                    mark(entry)
+                )
+            }));
+        }
+    }
+    lines.join("\n")
 }
 
 /// Pads every column but the last, which is the title.
@@ -7096,5 +7321,265 @@ mod tests {
         for value in ["placeholder", "cGxhY2Vob2xkZXI=", "two lines of it"] {
             assert!(!text.contains(value) && !json.contains(value), "{value}");
         }
+    }
+
+    #[test]
+    fn env_diff_takes_two_environments_and_one_optional_service() {
+        let Some(Command::Env(EnvCommand::Diff {
+            from,
+            to,
+            service,
+            json,
+        })) = Cli::parse_from([
+            "ticket-tui",
+            "env",
+            "diff",
+            "qa",
+            "prod",
+            "orders",
+            "--json",
+        ])
+        .command
+        else {
+            panic!("env diff qa prod orders --json")
+        };
+        assert_eq!((from.as_str(), to.as_str()), ("qa", "prod"));
+        assert_eq!(service.as_deref(), Some("orders"));
+        assert!(json);
+
+        let Some(Command::Env(EnvCommand::Diff { service, json, .. })) =
+            Cli::parse_from(["ticket-tui", "env", "diff", "qa", "prod"]).command
+        else {
+            panic!("env diff qa prod")
+        };
+        assert_eq!(service, None, "none named is every service");
+        assert!(!json);
+    }
+
+    #[test]
+    fn env_diff_prints_a_block_a_service_with_the_image_gap_read_as_pull_requests() {
+        let mut diff =
+            kustomize::diff::diff(&env_fixture("qa"), &env_fixture("prod"), Some("orders"));
+        // What the runs, the pull requests and the clone answer with, which
+        // `read_history` fills in from SQLite and git.
+        diff.services[0].images[0].history = Some(kustomize::diff::ImageHistory {
+            pull_requests: vec![812, 815, 820],
+            work_items: vec![642, 650, 655],
+            ..kustomize::diff::ImageHistory::default()
+        });
+        diff.services[0].images[1].history = Some(kustomize::diff::ImageHistory {
+            note: Some("no clone of orders-api to read the history from".to_owned()),
+            ..kustomize::diff::ImageHistory::default()
+        });
+        assert_eq!(
+            describe_diff(&diff),
+            concat!(
+                "orders-api Deployment\n",
+                "  image   api  1.4.0 \u{2192} 1.3.9  3 PRs behind: !812 !815 !820 \u{2014} #642 #650 #655\n",
+                "  image   migrate  1.4.0 \u{2192} 1.3.9  no clone of orders-api to read the history from\n",
+                "  key     orders-config RATE_LIMIT_PER_MIN\n",
+                "  var     api TRACE_SAMPLE_RATE",
+            )
+        );
+
+        // The reverse entry says which environment has it, and an environment
+        // against itself has nothing to say at all.
+        let billing = describe_diff(&kustomize::diff::diff(
+            &env_fixture("qa"),
+            &env_fixture("prod"),
+            Some("billing"),
+        ));
+        assert!(
+            billing.contains("  secret  kv-prod billing-legacy-token  only in prod"),
+            "{billing}"
+        );
+        assert_eq!(
+            describe_diff(&kustomize::diff::diff(
+                &env_fixture("qa"),
+                &env_fixture("qa"),
+                None
+            )),
+            "qa \u{2192} qa: identical"
+        );
+
+        // `--json` is the model itself, and carries no value from either
+        // render any more than the text does.
+        let printed = to_json(&diff).unwrap();
+        let parsed: Value = serde_json::from_str(&printed).unwrap();
+        assert_eq!(parsed["services"][0]["workload"], "orders-api");
+        assert_eq!(parsed["services"][0]["images"][0]["from"], "1.4.0");
+        assert_eq!(
+            parsed["services"][0]["images"][0]["history"]["pull_requests"][0],
+            812
+        );
+        assert_eq!(parsed["services"][0]["variables"][0]["side"], "from");
+        assert!(!printed.contains("0.25"), "{printed}");
+    }
+
+    #[test]
+    fn the_pull_requests_between_two_commits_are_read_out_of_the_clone_and_named_when_there_is_none()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let clone = directory.path().join("orders-api");
+        fs::create_dir_all(&clone).unwrap();
+        for arguments in [
+            &["init", "--initial-branch=main"][..],
+            &["config", "user.email", "test@example.com"],
+            &["config", "user.name", "Test"],
+        ] {
+            local::git(&clone, arguments).unwrap();
+        }
+        let commit = |subject: &str| {
+            fs::write(clone.join("file"), subject).unwrap();
+            local::git(&clone, &["add", "."]).unwrap();
+            local::git(&clone, &["commit", "-m", subject]).unwrap();
+            local::git(&clone, &["rev-parse", "HEAD"])
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        let first = commit("what prod is running");
+        commit("Merged PR 815: Squash the second");
+        let last = commit("Merge the third one");
+
+        let lines = git_log(&clone, &first, &last).unwrap();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].starts_with(&last) && lines[0].ends_with(" Merge the third one"));
+
+        // The squash left its own commit behind in the branch and nowhere in
+        // the history, so the subject Azure DevOps wrote is what names it; the
+        // other is found by the commit it was read at.
+        let mut squashed = stored_pull_request();
+        squashed.id = 815;
+        let mut merged = stored_pull_request();
+        merged.id = 820;
+        merged.last_merge_source_commit = last.clone();
+        let requests = vec![squashed, merged];
+        assert_eq!(
+            kustomize::diff::between(&lines, &requests, Some("aaa-111"))
+                .iter()
+                .map(|request| request.id)
+                .collect::<Vec<_>>(),
+            [815, 820]
+        );
+        assert!(
+            kustomize::diff::between(&lines, &requests, Some("another-repo")).is_empty(),
+            "another repository's pull requests are not this service's"
+        );
+
+        // A range git will not walk is git's own first word on it, and no
+        // clone at all is the line the block prints in place of a list.
+        assert!(
+            git_log(&clone, "nowhere", &last)
+                .unwrap_err()
+                .contains("nowhere")
+        );
+        assert_eq!(
+            service_clone(None, None, "orders-api").unwrap_err(),
+            "no clone of orders-api to read the history from"
+        );
+    }
+
+    #[test]
+    fn the_image_gap_is_read_back_through_the_stored_runs_and_the_services_own_clone() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let clone = workspace.join("orders-api");
+        fs::create_dir_all(&clone).unwrap();
+        for arguments in [
+            &["init", "--initial-branch=main"][..],
+            &["config", "user.email", "test@example.com"],
+            &["config", "user.name", "Test"],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://dev.azure.com/demo/atlas/_git/orders-api",
+            ],
+        ] {
+            local::git(&clone, arguments).unwrap();
+        }
+        let commit = |subject: &str| {
+            fs::write(clone.join("file"), subject).unwrap();
+            local::git(&clone, &["add", "."]).unwrap();
+            local::git(&clone, &["commit", "-m", subject]).unwrap();
+            local::git(&clone, &["rev-parse", "HEAD"])
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        let (behind, ahead) = (
+            commit("what prod runs"),
+            commit("Merged PR 11: Split the files"),
+        );
+
+        // The two tags the fixture's overlays carry, as the runs that built
+        // them, and the one pull request the range between them holds.
+        let database = directory.path().join("tickets.sqlite3");
+        let mut stored = SqliteTicketRepository::open(&database).unwrap();
+        let run = |id: i64, build_number: &str, commit: &str| Run {
+            id,
+            build_number: build_number.into(),
+            source_version: commit.into(),
+            ..scripted_run(
+                crate::model::RunStatus::Completed,
+                Some(RunResult::Succeeded),
+            )
+        };
+        stored
+            .replace_runs(&[run(40, "1.4.0", &ahead), run(39, "1.3.9", &behind)])
+            .unwrap();
+        stored
+            .replace_pull_requests(&[stored_pull_request()])
+            .unwrap();
+        let repo = crate::model::Repo {
+            id: "aaa-111".into(),
+            name: "orders-api".into(),
+            project: "atlas".into(),
+            default_branch: Some("refs/heads/main".into()),
+            remote_url: "https://dev.azure.com/demo/atlas/_git/orders-api".into(),
+            ssh_url: String::new(),
+            web_url: String::new(),
+            is_disabled: false,
+            size: None,
+        };
+        stored.replace_repos(std::slice::from_ref(&repo)).unwrap();
+
+        let mut diff =
+            kustomize::diff::diff(&env_fixture("qa"), &env_fixture("prod"), Some("orders"));
+        read_history(&mut diff, &database, Some(&workspace));
+        let history = diff.services[0].images[0]
+            .history
+            .as_ref()
+            .expect("the gap between two tags on file");
+        assert_eq!(history.from.as_ref().map(|run| run.id), Some(40));
+        assert_eq!(
+            history.from.as_ref().map(|run| run.matched),
+            Some(kustomize::diff::Match::BuildNumber)
+        );
+        assert_eq!(history.pull_requests, [11], "the one the range holds");
+        assert_eq!(history.work_items, [690]);
+        assert_eq!(history.to_string(), "1 PR behind: !11 \u{2014} #690");
+
+        // Without the repository there is no clone to read it in, and the line
+        // says so rather than the diff failing.
+        stored.replace_repos(&[]).unwrap();
+        let mut diff =
+            kustomize::diff::diff(&env_fixture("qa"), &env_fixture("prod"), Some("orders"));
+        read_history(&mut diff, &database, Some(&workspace));
+        assert_eq!(
+            diff.services[0].images[0]
+                .history
+                .as_ref()
+                .unwrap()
+                .to_string(),
+            "no clone of orders-api to read the history from"
+        );
+
+        // And with no database at all the two tags stand on their own.
+        let mut diff =
+            kustomize::diff::diff(&env_fixture("qa"), &env_fixture("prod"), Some("orders"));
+        read_history(&mut diff, &directory.path().join("nothing.sqlite3"), None);
+        assert!(diff.services[0].images[0].history.is_none());
     }
 }

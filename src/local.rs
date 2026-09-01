@@ -444,7 +444,7 @@ pub fn azure_https_host(remote: &str) -> Option<String> {
 }
 
 /// One git command inside one repository that stays on this machine.
-fn git(path: &Path, arguments: &[&str]) -> Result<String> {
+pub fn git(path: &Path, arguments: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(path)

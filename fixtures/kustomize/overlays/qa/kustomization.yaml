@@ -10,3 +10,4 @@ resources:
 
 patches:
   - path: orders-config-patch.yaml
+  - path: orders-env-patch.yaml

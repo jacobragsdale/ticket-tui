@@ -18,6 +18,8 @@
 //! `EnvManifest`, which is what the tests drive and what the diff and the
 //! board are built on.
 
+pub mod diff;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -73,6 +75,10 @@ pub struct Container {
     /// Whether it is an init container, which runs before the rest.
     pub init: bool,
     pub image: String,
+    /// Every variable `env` sets, by name, whether it is written as a literal
+    /// or as a `valueFrom` — which is what a diff of two environments compares.
+    /// Names only: a literal's value is no more read than a Secret's is.
+    pub env_names: Vec<String>,
     pub references: Vec<Reference>,
 }
 
@@ -659,6 +665,11 @@ fn workload(kind: &str, namespace: String, name: String, document: &Value) -> Wo
                 name: text(held, &["name"]).to_owned(),
                 init,
                 image: text(held, &["image"]).to_owned(),
+                env_names: array(held, &["env"])
+                    .iter()
+                    .map(|entry| text(entry, &["name"]).to_owned())
+                    .filter(|name| !name.is_empty())
+                    .collect(),
                 references: container_references(held),
             });
         }

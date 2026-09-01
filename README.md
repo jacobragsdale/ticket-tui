@@ -199,7 +199,11 @@ environment's own key vault and reports every object the overlay pulls that the
 vault does not hold, every provider pulling from another environment's vault,
 and every object in use inside thirty days of its expiry; `--offline`, or no
 `az` to get a token with, skips that half in one line on stderr and leaves the
-exit code to the overlays alone. The vault commands print names, dates and whether a thing is enabled;
+exit code to the overlays alone. `ticket-tui env diff qa
+prod orders` is the promotion read before it is made: every ConfigMap and
+Secret key, vault object and variable qa has that prod has not, and the image
+gap read back through the runs to the pull requests and work items between
+them. The vault commands print names, dates and whether a thing is enabled;
 `ticket-tui secrets show --vault V NAME --value` is the only one that prints a
 secret's value, raw, to stdout — so run it deliberately and keep what it prints
 out of anything you save.
