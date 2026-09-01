@@ -1,7 +1,7 @@
 //! Everything the interactive run does, from claiming the terminal to
 //! putting it back. `main` opens the database and hands over to `run`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -21,9 +21,10 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use serde_json::Value;
 use ticket_tui::agent_context::{self, AgentContext};
-use ticket_tui::aks::{AksEvent, AksHandle, AksRequest, Cluster, Kubectl, LogFollow, PodKey};
+use ticket_tui::aks::{AksEvent, AksHandle, AksRequest, Cluster, Kubectl, LogFollow, Pod, PodKey};
 use ticket_tui::app::{
-    App, AppAction, CopiedContent, DividerOrientation, PointerTarget, Snapshot, SyncTarget, TabId,
+    App, AppAction, CopiedContent, DividerOrientation, NotificationLevel, PointerTarget, Snapshot,
+    SyncTarget, TabId,
 };
 use ticket_tui::arm::ArmConfig;
 use ticket_tui::arm_watch::{ArmEvent, ArmFocus, ArmHandle, ArmRequest};
@@ -34,6 +35,7 @@ use ticket_tui::edit::{EditRejection, EditRequest, FieldEdit};
 use ticket_tui::local::{self, LocalEvent, LocalHandle, LocalRequest};
 use ticket_tui::markdown;
 use ticket_tui::model::{GitJob, Run, RunResult, Ticket, TicketKey};
+use ticket_tui::notify::{self, Notifier, PodMarks};
 use ticket_tui::session;
 use ticket_tui::sync::{
     self, AzureConnector, DetailsOutcome, PullOrigin, PulledExtras, ReparentRejection, SyncEvent,
@@ -182,6 +184,7 @@ pub(super) fn run() -> Result<()> {
         watching_tab: false,
         watching_run: (None, None),
         watched_runs: Vec::new(),
+        approvals_seen: None,
         local: LocalRuntime {
             worker: LocalHandle::spawn().ok(),
             ..LocalRuntime::default()

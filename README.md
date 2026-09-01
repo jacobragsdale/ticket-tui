@@ -142,6 +142,24 @@ context = "aks-qa"
 namespaces = ["orders", "billing"]
 ```
 
+`[notify]` is one command, run through `sh -c` when something worth
+interrupting for happens: a run you pressed `w` on finishes, a vote lands on a
+pull request you wrote, one turns up wanting your review, a pod starts
+crash-looping, an approval lands on a run. The status line says the same words
+whether or not the table is there, so this is the copy you get when ticket-tui
+is in a pane you are not looking at:
+
+```toml
+[notify]
+command = "notify-send {title} {body}"
+```
+
+`{title}` and `{body}` are replaced by the text as one complete single-quoted
+shell word, so write them where an argument goes and quote nothing around them;
+[config.example.toml](config.example.toml) carries the macOS spelling, which
+hands both to `osascript` through `argv`. Nothing is announced for what was
+already there when the run started.
+
 And it holds the colour theme: a `[theme.custom]` palette in the vocabulary of
 the `theme` tool, which applies one palette to every program on the machine,
 writes this file for you, and repaints a running ticket-tui when it changes.

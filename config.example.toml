@@ -56,3 +56,21 @@ blue = "#61a8ff"
 cyan = "#4fe8ff"
 orange = "#ff9e5e"
 teal = "#29e0c8"
+
+# A desktop notification when something worth interrupting for happens: a run
+# you pressed `w` on finishes, a vote lands on a pull request you wrote, one
+# turns up wanting your review, a pod starts crash-looping, an approval lands
+# on a run. The command is run through `sh -c`, detached, with its output
+# thrown away, and the status line says the same words either way.
+#
+# {title} and {body} are replaced by the text as one complete single-quoted
+# shell word — `it's` goes in as `'it'\''s'` — so write them where an argument
+# goes and put no quotes of your own around them. Left out, there is no
+# [notify] table and nothing is ever run.
+[notify]
+# macOS. The two values go through argv rather than into the AppleScript
+# source, so a title holding a quote is still one string when it gets there.
+command = "osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' {title} {body}"
+
+# Linux:
+# command = "notify-send {title} {body}"

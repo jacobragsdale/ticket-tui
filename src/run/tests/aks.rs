@@ -67,6 +67,7 @@ fn aks_runtime(source: FakeKube) -> SyncRuntime {
         watching_tab: false,
         watching_run: (None, None),
         watched_runs: Vec::new(),
+        approvals_seen: None,
         local: LocalRuntime::default(),
         aks: AksRuntime {
             worker: Some(AksHandle::spawn(Box::new(source)).unwrap()),

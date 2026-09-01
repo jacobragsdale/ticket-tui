@@ -199,6 +199,9 @@ code_project = "Fiquants"     # repos, pull requests and pipelines; left out = p
 subscriptions = ["<dev-guid>", "<qa-guid>"]   # left out: whatever `az account show` says
 registries = ["acrdev", "acrqa"]              # optional: only these, in this order
 vaults = ["kv-dev", "kv-qa"]                  # optional: only these, in this order
+
+[notify]                      # a desktop notification when a watched thing moves
+command = "notify-send {title} {body}"        # left out: nothing is ever run
 ```
 
 `config.example.toml` at the root of the repository is the whole file,
@@ -221,6 +224,64 @@ then there is a footer to report it in.
 `az aks get-credentials --resource-group RG --name CLUSTER` writes, which
 `kubectl config get-contexts` lists. Signing in to a tenant other than the
 login's default wants `az login --tenant <tenant>` first.
+
+### `[notify]`: a desktop notification when a watched thing changes
+
+The workers know the second something moves, and repaint a screen you may not
+be looking at. `[notify]` is the one line that reaches you anyway:
+
+```toml
+[notify]
+command = "notify-send {title} {body}"
+```
+
+The command is run through `sh -c`, detached, with stdin, stdout and stderr on
+`/dev/null` and nothing waited on; the finished ones are reaped the next time
+one fires. A configured command rather than a built-in notifier because the
+right one varies by machine and multiplexer — the same reasoning that made the
+theme a `config.toml` palette. It travels with the theme and the clusters: the
+file is re-read whenever it changes, so writing the table starts notifying a
+running ticket-tui.
+
+**The escaping rule, exactly:** `{title}` and `{body}` are each replaced by the
+text as one complete single-quoted shell word — wrapped in `'…'`, with every
+`'` inside written `'\''`. `he said "hi"` becomes `'he said "hi"'` and `it's`
+becomes `'it'\''s'`. So **write the placeholders where an argument goes and put
+no quotes of your own around them**: `notify-send {title} {body}`, never
+`notify-send "{title}"`. Whatever the text holds — a quote, a space, `$HOME`, a
+`;` — the command receives it verbatim as one argument. The macOS spelling in
+`config.example.toml` follows the same rule by handing both values to
+`osascript` through `argv` rather than pasting them into the AppleScript
+source, which is what keeps a title with a `"` in it one string:
+
+```toml
+command = "osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' {title} {body}"
+```
+
+Five things fire it — a fixed list, not a rule engine:
+
+1. A watched run finishes: `✓ Build 20260829.14 succeeded · 4m 12s`, the
+   pipeline and branch under it.
+2. A pull request you wrote gains or changes a vote, or completes or is
+   abandoned: `!812 approved by Dana Ali`, its title under it.
+3. One turns up wanting a review you have not given: `!812 wants your review`.
+4. A pod starts crash-looping, or its restart count rises:
+   `orders-api-1 restarted (4 in all)`, its cluster, namespace and status under
+   it.
+5. An approval lands that was not waiting before:
+   `Build 20260829.14 waits on your approval`.
+
+Every one of them is edge-triggered, once per transition, and **the first read
+of each source is the baseline rather than news**: the first snapshot of the
+pull requests, the first read of each cluster and namespace, the first list of
+approvals. A restart does not replay what happened while ticket-tui was
+closed, and a queue that was already waiting when it opened stays quiet.
+
+The same words go to the status line whether or not the table is there — the
+footer is what you see when there is none — so the app and the desktop can
+never disagree. A command that will not start is said in the footer once and
+not again, because a toast a minute about a notifier is worse than no
+notifications. There is no opt-out flag: removing the table is the opt-out.
 
 ### `--theme`, `TICKET_TUI_THEME` and `config.toml`
 
@@ -1251,8 +1312,9 @@ opens, and the tab badge adds `◇1` beside the `◐2` of anything running.
 `W` on a run — or on a pipeline, meaning the run it is having now — follows it:
 the row wears a `◉` in its gutter, the watcher keeps polling it whatever tab is
 showing, and when it stops the footer says so for eight seconds, `✓ Build
-20260829.4 succeeded · 4m 12s` or `✗ Build 20260829.4 failed`. Clicking the
-marker does the same. A run that has already finished is refused rather than
+20260829.4 succeeded · 4m 12s` or `✗ Build 20260829.4 failed`, with a desktop
+notification saying the same when [`[notify]`](#notify-a-desktop-notification-when-a-watched-thing-changes)
+names a command. Clicking the marker does the same. A run that has already finished is refused rather than
 announced. Watches live for the session only.
 
 Each level has its own search box and its own grammar. Pipelines filter on
