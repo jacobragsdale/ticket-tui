@@ -321,14 +321,15 @@ impl App {
         self.tab = tab;
     }
 
-    /// The overlays every tab shares. On the work items they are the screen's
-    /// own; on any other tab the work items screen opens them on that tab's
-    /// behalf.
-    const SHELL_OVERLAYS: [CommandId; 4] = [
+    /// The overlays every tab shares, the quick capture row among them. On the
+    /// work items they are the screen's own; on any other tab the work items
+    /// screen opens them on that tab's behalf.
+    const SHELL_OVERLAYS: [CommandId; 5] = [
         CommandId::Help,
         CommandId::Palette,
         CommandId::Columns,
         CommandId::DatabaseInfo,
+        CommandId::QuickCapture,
     ];
 
     /// Whether one of the shared overlays is open over a tab other than the

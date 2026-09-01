@@ -777,3 +777,150 @@ fn a_refused_create_reopens_the_form_with_everything_still_in_it() {
         "and no row was ever shown for it"
     );
 }
+
+/// The whole point of `+`: a thought that arrives while reading a pod log goes
+/// down as a work item without leaving the pod log.
+#[test]
+fn a_capture_files_an_issue_on_me_in_the_current_sprint_and_moves_no_cursor() {
+    let mut app = crate::app::aks::tests::aks_app();
+    app.shell.enable_sync();
+    app.shell.set_me(Some("Avery Chen".into()));
+    app.work_items.set_identities(vec![Identity::new(
+        "Avery Chen",
+        Some("avery@example.com".into()),
+    )]);
+    app.work_items
+        .merge_classification_nodes(classification_trees());
+    press(&mut app, KeyCode::Down);
+    let pod = Screen::here(&app.aks, &app.shell);
+    assert!(pod.is_some(), "the AKS cursor is on a pod");
+
+    press(&mut app, KeyCode::Char('+'));
+    assert_eq!(
+        app.work_items.mode,
+        WorkItemMode::Capture,
+        "`+` opens the capture row over the pods"
+    );
+    type_text(&mut app, "the retry loop in sync.rs swallows the 412");
+    let action = press(&mut app, KeyCode::Enter);
+
+    let AppAction::Create {
+        work_item_type,
+        patch,
+        parent,
+    } = action
+    else {
+        panic!("Enter files the capture");
+    };
+    assert_eq!(work_item_type, DEFAULT_WORK_ITEM_TYPE);
+    assert_eq!(parent, None);
+    assert_eq!(
+        patch,
+        vec![
+            crate::edit::set_field(
+                crate::edit::TITLE_FIELD,
+                "the retry loop in sync.rs swallows the 412"
+            ),
+            crate::edit::set_field(crate::edit::ASSIGNED_TO_FIELD, "avery@example.com"),
+            crate::edit::set_field(crate::edit::ITERATION_PATH_FIELD, "development\\Sprint 1"),
+            crate::edit::set_field(crate::edit::TAGS_FIELD, "inbox"),
+        ],
+        "every other field is defaulted rather than asked"
+    );
+
+    app.work_items.apply_created(
+        &mut app.shell,
+        created(812, "Issue", "the retry loop in sync.rs swallows the 412"),
+        Vec::new(),
+    );
+    assert_eq!(
+        app.tab,
+        TabId::Aks,
+        "the tab it was captured from is showing"
+    );
+    assert_eq!(
+        Screen::here(&app.aks, &app.shell),
+        pod,
+        "and the AKS cursor has not moved"
+    );
+    assert_eq!(
+        app.shell.notification().map(|(message, _)| message),
+        Some("Created Issue #812"),
+        "the notice carries the id"
+    );
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+}
+
+/// The work items tab is no different: a capture files a work item, it does not
+/// go and look at it, and the table it was typed over stays where it was.
+#[test]
+fn a_capture_leaves_the_table_where_it_was() {
+    let mut app = creating_app();
+    let selected = app
+        .work_items
+        .selected_ticket()
+        .map(|ticket| ticket.key.clone());
+    assert!(
+        selected.is_some(),
+        "a row is under the cursor to begin with"
+    );
+
+    press(&mut app, KeyCode::Char('+'));
+    type_text(&mut app, "Log the 412 body");
+    press(&mut app, KeyCode::Enter);
+    app.work_items.apply_created(
+        &mut app.shell,
+        created(812, "Issue", "Log the 412 body"),
+        Vec::new(),
+    );
+
+    assert_eq!(
+        app.work_items
+            .selected_ticket()
+            .map(|ticket| ticket.key.clone()),
+        selected,
+        "the cursor is where it was, not on the new work item"
+    );
+    assert_eq!(
+        app.work_items.visible_tickets().len(),
+        2,
+        "and the new row is on the table all the same"
+    );
+}
+
+#[test]
+fn a_capture_with_no_title_is_refused_in_place() {
+    let mut app = creating_app();
+    press(&mut app, KeyCode::Char('+'));
+    type_text(&mut app, "   ");
+    let action = press(&mut app, KeyCode::Enter);
+
+    assert_eq!(action, AppAction::None, "nothing goes out");
+    assert_eq!(
+        app.work_items.mode,
+        WorkItemMode::Capture,
+        "and the row stays open"
+    );
+    assert_eq!(
+        app.shell.notification().map(|(message, _)| message),
+        Some("A work item needs a title")
+    );
+}
+
+#[test]
+fn esc_leaves_nothing_behind_a_capture() {
+    let mut app = creating_app();
+    press(&mut app, KeyCode::Char('+'));
+    type_text(&mut app, "Not worth keeping");
+    press(&mut app, KeyCode::Esc);
+
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(app.work_items.capture.is_empty(), "the row is empty again");
+    assert!(!app.work_items.creates_pending(), "and nothing went out");
+
+    press(&mut app, KeyCode::Char('+'));
+    assert!(
+        app.work_items.capture.is_empty(),
+        "the next `+` opens on nothing: a one-line title abandoned is not a draft"
+    );
+}

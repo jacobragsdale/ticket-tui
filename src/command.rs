@@ -24,6 +24,9 @@ pub enum CommandId {
     AddComment,
     NewWorkItem,
     NewChild,
+    /// The one-row capture: a title, `Enter`, and back to whatever tab the
+    /// thought arrived on.
+    QuickCapture,
     DeleteWorkItem,
     UndoEdit,
     Sort,
@@ -492,6 +495,13 @@ pub const COMMANDS: &[Command] = &[
         keys: &[key('N')],
         help: "Under the selected one",
         scope: Scope::Tabs(&[TabId::WorkItems]),
+    },
+    Command {
+        id: CommandId::QuickCapture,
+        title: "Quick capture",
+        keys: &[key('+')],
+        help: "A title, Enter, back to work",
+        scope: Scope::Global,
     },
     // Deliberately unbound. Every other editor is a keypress away because the
     // worst it can do is a wrong value somebody types over; this one takes the
@@ -1039,6 +1049,34 @@ mod tests {
         );
     }
 
+    /// The capture is global on purpose: the thought arrives while reading a
+    /// pod log or a pipeline run, which is where the key has to work.
+    #[test]
+    fn quick_capture_is_one_global_command_every_tab_offers() {
+        let entries: Vec<&Command> = COMMANDS
+            .iter()
+            .filter(|command| command.id == CommandId::QuickCapture)
+            .collect();
+        assert_eq!(entries.len(), 1, "the help lists it once, under Everywhere");
+        assert_eq!(entries[0].scope, Scope::Global);
+
+        for tab in TabId::ALL {
+            assert_eq!(
+                command_for_key(press(KeyCode::Char('+'), KeyModifiers::NONE), tab),
+                Some(CommandId::QuickCapture),
+                "+ captures from {}",
+                tab.label()
+            );
+            assert!(
+                matching_commands("quick capture", true, tab)
+                    .iter()
+                    .any(|command| command.id == CommandId::QuickCapture),
+                "and the {} palette offers it by name",
+                tab.label()
+            );
+        }
+    }
+
     #[test]
     fn bound_commands_have_labels_and_unique_keys() {
         // A key may mean one thing on one tab and another on the next; it
@@ -1183,11 +1221,12 @@ mod tests {
     }
 
     /// The overlays `App` opens over any tab before the screen sees them.
-    const SHARED: [CommandId; 4] = [
+    const SHARED: [CommandId; 5] = [
         CommandId::Help,
         CommandId::Palette,
         CommandId::Columns,
         CommandId::DatabaseInfo,
+        CommandId::QuickCapture,
     ];
 
     #[test]

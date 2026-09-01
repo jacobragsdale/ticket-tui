@@ -480,3 +480,43 @@ fn the_tab_bar_carries_the_two_controls_that_open_over_every_tab() {
         "the help opens over another tab too"
     );
 }
+
+/// The capture row is one row where the tab already keeps its search row, on
+/// whatever tab the thought arrived on.
+#[test]
+fn the_capture_row_takes_the_search_rows_place_on_every_tab() {
+    let row = |text: &str| {
+        text.lines()
+            .nth(1)
+            .expect("the row under the tab bar")
+            .trim_end()
+            .to_owned()
+    };
+
+    let mut app = App::new(vec![ticket()]);
+    app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
+    let captured = render_text(120, 20, &mut app);
+    assert!(
+        row(&captured).starts_with("+ Title"),
+        "the glyph and what the row wants:\n{captured}"
+    );
+    app.handle_paste("swallowed 412");
+    let typed = render_text(120, 20, &mut app);
+    assert!(
+        row(&typed).starts_with("+ swallowed 412"),
+        "and the title as it is typed:\n{typed}"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        row(&render_text(120, 20, &mut app)).starts_with('/'),
+        "Esc gives the search row its place back"
+    );
+
+    let mut app = crate::app::aks::tests::aks_app();
+    app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
+    let over_pods = render_text(120, 20, &mut app);
+    assert!(
+        row(&over_pods).starts_with("+ Title"),
+        "and it draws over the pods the same way:\n{over_pods}"
+    );
+}

@@ -1,6 +1,12 @@
-//! The form overlay that files a new work item.
+//! The form overlay that files a new work item, and the one-row capture that
+//! fills one in without asking.
 
 use super::*;
+
+/// What every work item captured with `+` is tagged. It is the triage hook and
+/// it is not configurable: a `tags:inbox` view finds everything captured and
+/// not yet filed, and the point of the row is that there is nothing to decide.
+const CAPTURE_TAG: &str = "inbox";
 
 /// Which form is open. A form Esc closed is kept under this, so `n` brings back
 /// what was typed and a form opened over a different work item never inherits
@@ -13,6 +19,10 @@ pub enum FormKind {
     /// work item the new one hangs under. That id is part of the kind, so a
     /// draft left under one parent never reopens under another.
     NewChild(i64),
+    /// The form `+` fills in and submits without ever showing it. It is the
+    /// same create as any other; the kind is what keeps the cursor where it
+    /// was when the work item lands.
+    QuickCapture,
 }
 
 /// Which value one field of a form holds. A form is read back by these rather
@@ -643,7 +653,10 @@ impl WorkItemsScreen {
         ticket: Ticket,
         relations: Vec<RelationRecord>,
     ) {
-        self.pending_create = None;
+        let captured = self
+            .pending_create
+            .take()
+            .is_some_and(|form| form.kind == FormKind::QuickCapture);
         let key = ticket.key.clone();
         let headline = format!("Created {} #{}", ticket.work_item_type, key.id);
         let hidden = self.query_would_hide(&ticket);
@@ -652,6 +665,14 @@ impl WorkItemsScreen {
         self.search.push_document(index, &self.tickets[index]);
         self.graph.replace_relations_from(&key, relations);
         self.refresh_child_progress();
+        // A capture goes nowhere: the point of `+` is to leave the cursor, the
+        // query and the tab exactly as they were. The row joins the table if
+        // the query has room for it, and the notice carries the id.
+        if captured {
+            self.resubmit_query(shell);
+            shell.set_status(headline);
+            return;
+        }
         if hidden {
             self.set_query(shell, String::new());
         }
@@ -687,5 +708,74 @@ impl WorkItemsScreen {
             shell.overlay_anchor = OverlayAnchor::Centered;
         }
         shell.set_error(format!("Work item not created: {message}"));
+    }
+
+    /// Opens the quick capture row: `+`, from any tab, because that is where
+    /// the thoughts arrive. One create is out at a time, the same as the form.
+    pub(super) fn open_capture(&mut self, shell: &mut Shell) -> AppAction {
+        if self.pending_create.is_some() {
+            shell.set_error("A work item is already being created");
+            return AppAction::None;
+        }
+        self.capture.clear();
+        self.mode = WorkItemMode::Capture;
+        AppAction::None
+    }
+
+    pub(super) fn handle_capture_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => self.cancel_capture(),
+            KeyCode::Enter => return self.submit_capture(shell),
+            _ => {
+                self.capture.handle_key(key);
+            }
+        }
+        AppAction::None
+    }
+
+    /// `Esc`: nothing is kept. A one-line title that was abandoned was not
+    /// worth keeping, so there is no draft here as there is on the form.
+    pub(super) fn cancel_capture(&mut self) {
+        self.capture.clear();
+        self.mode = WorkItemMode::Browse;
+    }
+
+    /// `Enter`: the title, and every other field defaulted rather than asked —
+    /// the type `n` defaults to, `@me`, the sprint the project is in, and the
+    /// one constant tag that is the triage hook. It goes out as a form filled
+    /// in and submitted, so a capture is the same create as `n`: the same
+    /// write-through, the same refusal, the same notice.
+    fn submit_capture(&mut self, shell: &mut Shell) -> AppAction {
+        let title = self.capture.text().trim().to_owned();
+        if title.is_empty() {
+            shell.set_error("A work item needs a title");
+            return AppAction::None;
+        }
+        // Refused here rather than by the submit below, so the row stays open
+        // with the thought still in it.
+        if let Some(reason) = shell.write_refusal() {
+            shell.set_error(format!("Work item not created: {reason}"));
+            return AppAction::None;
+        }
+        let fields = vec![
+            FormField::picker(FormFieldId::Type, "Type", FormPicker::WorkItemType)
+                .required()
+                .with_value(DEFAULT_WORK_ITEM_TYPE),
+            FormField::text(FormFieldId::Title, "Title")
+                .required()
+                .with_value(title),
+            FormField::picker(FormFieldId::Iteration, "Iteration", FormPicker::Iteration)
+                .with_value(self.current_iteration().unwrap_or_default()),
+            FormField::picker(FormFieldId::Assignee, "Assignee", FormPicker::Assignee)
+                .with_value(shell.me().unwrap_or_default()),
+            FormField::text(FormFieldId::Tags, "Tags").with_value(CAPTURE_TAG),
+        ];
+        self.capture.clear();
+        self.form = Some(FormOverlay::new(
+            FormKind::QuickCapture,
+            "Quick capture",
+            fields,
+        ));
+        self.submit_form(shell)
     }
 }

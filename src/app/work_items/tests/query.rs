@@ -243,11 +243,16 @@ fn a_key_belonging_to_another_tab_does_nothing_on_this_one() {
             let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
             app.select_tab(TabId::Repos);
             app.handle_key(KeyEvent::new(key.code, key.modifiers));
-            // The four overlays every tab shares are drawn by the work items
-            // screen on the other tab's behalf; nothing else of its reaches it.
+            // The overlays every tab shares, the capture row among them, are
+            // drawn by the work items screen on the other tab's behalf;
+            // nothing else of its reaches it.
             let shared = matches!(
                 command.id,
-                CommandId::Help | CommandId::Palette | CommandId::Columns | CommandId::DatabaseInfo
+                CommandId::Help
+                    | CommandId::Palette
+                    | CommandId::Columns
+                    | CommandId::DatabaseInfo
+                    | CommandId::QuickCapture
             );
             if shared {
                 assert!(

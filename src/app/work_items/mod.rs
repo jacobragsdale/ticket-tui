@@ -50,6 +50,9 @@ pub enum WorkItemMode {
     NodePicker,
     /// A multi-field form, such as the one `n` opens to file a new work item.
     Form,
+    /// The one-row quick capture `+` opens over any tab: a title, and every
+    /// other field defaulted rather than asked.
+    Capture,
     /// The work item types a form's Type field can name.
     TypePicker,
     /// The work items the selected one can be filed under, filtered by typing.
@@ -205,6 +208,10 @@ pub struct WorkItemsScreen {
     pub parent_picker: ParentPicker,
     pub node_picker: NodePicker,
     pub type_picker: TypePicker,
+    /// The title being typed into the quick capture row, empty while it is
+    /// closed. There is no draft beside it: a one-line title that was
+    /// abandoned was not worth keeping.
+    pub capture: TextInput,
     /// The open multi-field form, if there is one.
     pub form: Option<FormOverlay>,
     /// How far the open form's field list is scrolled, kept beside every other
@@ -370,6 +377,7 @@ impl WorkItemsScreen {
             pending_deletes: HashSet::new(),
             delete_confirm: None,
             type_picker: TypePicker::default(),
+            capture: TextInput::default(),
             form: None,
             form_scroll: ScrollState::default(),
             form_draft: None,
@@ -468,6 +476,7 @@ impl WorkItemsScreen {
             WorkItemMode::Form => {
                 "\u{2191}\u{2193}/Tab fields  Enter picker  Ctrl-S create  Esc cancel"
             }
+            WorkItemMode::Capture => "Type a title  Enter create  Esc cancel",
             WorkItemMode::ConfirmDelete => "d delete  Esc cancel",
             WorkItemMode::Browse if shell.focus == Focus::Family => {
                 "↑↓ move  Enter select  Tab details"
@@ -535,6 +544,7 @@ impl WorkItemsScreen {
             WorkItemMode::ParentPicker => self.handle_parent_picker_key(shell, key),
             WorkItemMode::NodePicker => self.handle_node_picker_key(shell, key),
             WorkItemMode::Form => self.handle_form_key(shell, key),
+            WorkItemMode::Capture => self.handle_capture_key(shell, key),
             WorkItemMode::TypePicker => self.handle_type_picker_key(key),
             WorkItemMode::ConfirmDelete => self.handle_delete_confirm_key(shell, key),
         }
@@ -669,6 +679,7 @@ impl WorkItemsScreen {
             }
             WorkItemMode::Prompt => self.close_prompt(),
             WorkItemMode::Form => self.cancel_form(),
+            WorkItemMode::Capture => self.cancel_capture(),
             WorkItemMode::ConfirmDelete => self.cancel_delete(),
             WorkItemMode::AssigneePicker => self.close_picker(self.assignee_picker.scope),
             WorkItemMode::NodePicker => self.close_picker(self.node_picker.scope),
@@ -787,6 +798,7 @@ const fn mode_name(mode: WorkItemMode) -> &'static str {
         WorkItemMode::AssigneePicker => "assignee-picker",
         WorkItemMode::NodePicker => "node-picker",
         WorkItemMode::Form => "form",
+        WorkItemMode::Capture => "capture",
         WorkItemMode::TypePicker => "type-picker",
         WorkItemMode::ParentPicker => "parent-picker",
         WorkItemMode::ConfirmDelete => "confirm-delete",

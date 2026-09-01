@@ -67,9 +67,9 @@ use table::{
 pub use theme::{Theme, ThemeChoice, chosen_theme, set_theme, theme};
 use widgets::{
     CLOSE_LABEL, Control, ControlKind, SearchRow, button_row, capture_selectable, dim_behind,
-    paint_hover, paint_selection, register_buttons, register_close_button, render_control,
-    render_modal_frame, render_query_field, render_scrollbar, render_search_row, render_status_bar,
-    row_on_screen, spinner_frame, wrapped_rows,
+    paint_hover, paint_selection, register_buttons, register_close_button, render_capture_row,
+    render_control, render_modal_frame, render_query_field, render_scrollbar, render_search_row,
+    render_status_bar, row_on_screen, spinner_frame, wrapped_rows,
 };
 
 const WIDE_BREAKPOINT: u16 = 110;
@@ -125,14 +125,15 @@ fn paint(frame: &mut Frame<'_>, app: &mut App) {
     let (shell, screen) = app.screen();
     screen.render(frame, shell, sections[1]);
     if app.shell_overlay_open() {
-        render_shell_overlay(frame, app);
+        render_shell_overlay(frame, app, sections[1]);
     }
 }
 
 /// One of the shared overlays, drawn over a tab other than the work items by
 /// the work items screen that drives it. The columns editor shows the columns
-/// of the tab it was opened for.
-fn render_shell_overlay(frame: &mut Frame<'_>, app: &mut App) {
+/// of the tab it was opened for, and the capture row takes the first row of
+/// `body`, which is where that tab draws its own search row.
+fn render_shell_overlay(frame: &mut Frame<'_>, app: &mut App, body: Rect) {
     let columns = match app.tab {
         TabId::WorkItems => Vec::new(),
         TabId::Repos => column_rows(&app.repos.layout),
@@ -150,6 +151,12 @@ fn render_shell_overlay(frame: &mut Frame<'_>, app: &mut App) {
         WorkItemMode::Palette => render_palette(frame, work_items, shell),
         WorkItemMode::Info => render_info_overlay(frame, work_items, shell),
         WorkItemMode::Columns => render_column_overlay(frame, work_items, shell, &columns),
+        WorkItemMode::Capture => render_capture_row(
+            frame,
+            Rect::new(body.x, body.y, body.width, 1),
+            work_items.capture.text(),
+            work_items.capture.cursor(),
+        ),
         _ => {}
     }
 }
@@ -353,7 +360,7 @@ fn render_pass(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, shell: &mut 
         WorkItemMode::Form => render_form(frame, screen, shell),
         WorkItemMode::TypePicker => render_type_picker(frame, screen, shell),
         WorkItemMode::ConfirmDelete => render_delete_confirm(frame, screen, shell),
-        WorkItemMode::Browse | WorkItemMode::Search => {}
+        WorkItemMode::Browse | WorkItemMode::Search | WorkItemMode::Capture => {}
     }
 }
 
@@ -363,6 +370,12 @@ fn render_search(
     shell: &mut Shell,
     area: Rect,
 ) {
+    // The capture row takes the search row's place while it is open: one row,
+    // wherever the tab keeps it.
+    if screen.mode == WorkItemMode::Capture {
+        render_capture_row(frame, area, screen.capture.text(), screen.capture.cursor());
+        return;
+    }
     render_search_row(
         frame,
         shell,
@@ -427,7 +440,7 @@ fn modal_layer(screen: &WorkItemsScreen) -> PointerLayer {
 fn current_layer(screen: &WorkItemsScreen) -> PointerLayer {
     match screen.mode {
         WorkItemMode::Facets => PointerLayer::Popup,
-        WorkItemMode::Browse | WorkItemMode::Search => PointerLayer::Base,
+        WorkItemMode::Browse | WorkItemMode::Search | WorkItemMode::Capture => PointerLayer::Base,
         _ => PointerLayer::Modal,
     }
 }

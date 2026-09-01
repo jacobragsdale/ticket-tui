@@ -949,6 +949,46 @@ child half typed under one work item is never offered under another, and neither
 the child appears under its parent in the family tree at once, because the copy
 Azure DevOps stored comes back carrying the link.
 
+### `+`: quick capture
+
+The form is right for planned work and five fields too many for a thought that
+arrives mid-task — *the retry loop in sync.rs swallows the 412*, while reading a
+pod log. `+` takes that thought without asking anything else. It is global, and
+it is global for that reason: the thoughts arrive on the pipeline run and the
+pod log, not on the work items table.
+
+The row opens where the tab already keeps its search row, whichever tab is
+showing:
+
+```
++ the retry loop in sync.rs swallows the 412
+```
+
+`Enter` files it, `Esc` leaves nothing behind, and an empty title is refused in
+place — `A work item needs a title` — with the row still open and the thought
+still in it.
+
+Every other field is defaulted rather than asked, which is the whole point:
+**Type** is the one `n` starts at, `Issue` under Basic; **Assignee** is you;
+**Iteration** is the sprint the project is in, or the project root when no
+iteration is scheduled around today; the priority is left off the document for
+the process to default; and **Tags** is `inbox`. That tag is the triage hook and
+it is not configurable: a `tags:inbox` view finds everything captured and not yet
+filed, and `e` files it properly. Configuring the tag or the type would put back
+the decisions the row exists to avoid.
+
+Submitting is the form's own submit, over a form filled in and never shown, so a
+capture is an ordinary create: the same document, the same write-through, the
+same `A work item is already being created` while one is out, the same
+`Created Issue #613` when it lands, and the same reopened form carrying
+everything if Azure DevOps refuses it.
+
+What it does not do is go anywhere. The cursor stays on the row, the pod or the
+run it was on, the query on screen is left alone, and `[` has nothing new to
+come back from — jumping to the work item just captured would defeat the point
+of capturing it. Nor is there a draft: a one-line title that was abandoned was
+not worth keeping, so the next `+` opens on an empty row.
+
 ## Deleting work items
 
 Occasionally a ticket is filed by mistake. The Actions menu's **Delete work item…**
@@ -1556,6 +1596,7 @@ anything on tab `1`.
 | `e` → Add comment | Leave a one-line comment on the selected work item; also `Add comment` in the palette |
 | `n` | Open the new work item form; `↑`/`↓` or `Tab` moves between fields, `Enter` opens a field's picker, `Ctrl-S` creates, `Esc` keeps the draft |
 | `N` | Open the same form as a child of the selected work item: the type it breaks down into, the parent fixed, the area and iteration inherited; also `New child` in the Actions menu and the palette |
+| `+` | Quick capture, on every tab: one row, a title, `Enter`. Everything else is defaulted rather than asked — `Issue`, you, the current sprint, tagged `inbox` — and nothing moves; `Esc` leaves nothing behind |
 | `e` → Delete work item… | Send the selected work item, or every checked one, to the Azure DevOps recycle bin; `d` confirms, `Esc` cancels. No key of its own; also `Delete work item…` in the palette |
 | `u` | Undo the last edit, putting the value back; a bulk change goes back under one press |
 | `m` | Bookmark or unbookmark the selected ticket |

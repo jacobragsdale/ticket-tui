@@ -361,6 +361,7 @@ impl WorkItemsScreen {
                 | TextEditor::Assignee
                 | TextEditor::Node
                 | TextEditor::Parent
+                | TextEditor::Capture
                 | TextEditor::Form => SelectableSurface::Overlay,
             })
             .and_then(|snapshot| snapshot.pos_at(column, row))
@@ -398,6 +399,7 @@ impl WorkItemsScreen {
                     field.input.set_cursor(index);
                 }
             }
+            TextEditor::Capture => self.capture.set_cursor(index),
         }
     }
 }

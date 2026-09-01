@@ -144,9 +144,10 @@ impl WorkItemsScreen {
     }
 
     /// Opens one of the overlays every tab shares — the help, the palette,
-    /// the columns editor, the database overlay — on behalf of `tab`, which
-    /// is the one showing. The palette lists that tab's commands, and what it
-    /// chooses goes back to that tab as [`AppAction::RunCommand`].
+    /// the columns editor, the database overlay, the capture row — on behalf
+    /// of `tab`, which is the one showing. The palette lists that tab's
+    /// commands, and what it chooses goes back to that tab as
+    /// [`AppAction::RunCommand`].
     pub fn open_shell_overlay(&mut self, shell: &mut Shell, id: CommandId, tab: TabId) {
         self.run_command(shell, id);
         self.palette_tab = tab;
@@ -157,7 +158,11 @@ impl WorkItemsScreen {
     pub fn shell_overlay_open(&self) -> bool {
         matches!(
             self.mode,
-            WorkItemMode::Help | WorkItemMode::Palette | WorkItemMode::Columns | WorkItemMode::Info
+            WorkItemMode::Help
+                | WorkItemMode::Palette
+                | WorkItemMode::Columns
+                | WorkItemMode::Info
+                | WorkItemMode::Capture
         )
     }
 
@@ -231,6 +236,7 @@ impl WorkItemsScreen {
                     field.input.paste(pasted, false);
                 }
             }
+            Some(TextEditor::Capture) => self.capture.paste(pasted, false),
             Some(TextEditor::Assignee) => self.assignee_picker.query.paste(pasted, false),
             Some(TextEditor::Parent) => self.parent_picker.query.paste(pasted, false),
             Some(TextEditor::Node) => self.node_picker.query.paste(pasted, false),
@@ -293,6 +299,7 @@ impl WorkItemsScreen {
             WorkItemMode::ParentPicker => Some(TextEditor::Parent),
             WorkItemMode::NodePicker => Some(TextEditor::Node),
             WorkItemMode::Form => Some(TextEditor::Form),
+            WorkItemMode::Capture => Some(TextEditor::Capture),
             _ => None,
         }
     }
@@ -830,6 +837,7 @@ impl WorkItemsScreen {
                 AppAction::None
             }
             CommandId::NewWorkItem => self.open_create_form(shell),
+            CommandId::QuickCapture => self.open_capture(shell),
             CommandId::NewChild => self.open_child_form(shell),
             CommandId::DeleteWorkItem => {
                 self.open_delete_confirm(shell);

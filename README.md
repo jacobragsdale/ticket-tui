@@ -71,6 +71,7 @@ offline, browsing whatever the database already holds.
 | `p` / `:` | The command palette: every action the tab can take |
 | `e` | The Actions menu — edit title, state, assignee, tags, description |
 | `n` / `N` | New work item, or a new child of the selected one |
+| `+` | Quick capture, on every tab: one row, a title, `Enter` — an Issue on you, in the current sprint, tagged `inbox` |
 | `r` | Sync now, without waiting for the timer — on AKS, ACR and Key Vault it re-reads that tab's own source |
 | `o` | Open the selected row in the system browser; the Azure portal on ACR and Key Vault |
 | `?` | The in-app help, generated from the same table the keys are bound in |

@@ -345,6 +345,56 @@ pub(super) fn render_search_row(frame: &mut Frame<'_>, shell: &mut Shell, row: S
     }
 }
 
+/// The one-row quick capture `+` opens, drawn where the tab's search row sits
+/// so a capture reads as the row it replaces: the glyph, the title as it is
+/// typed, and the caret in it. There is nothing else on it — every other field
+/// is defaulted rather than asked.
+pub(super) fn render_capture_row(frame: &mut Frame<'_>, area: Rect, text: &str, cursor: usize) {
+    if area.width < 4 || area.height == 0 {
+        return;
+    }
+    let area = Rect::new(area.x, area.y, area.width, 1);
+    // The row has the keyboard, so it takes the ground the active search row
+    // takes, and reverses instead where the palette has no surface colour.
+    let style = if theme().surface == Color::Reset {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default().bg(theme().surface)
+    };
+    frame.render_widget(Block::default().style(style), area);
+    frame.render_widget(
+        Line::styled(
+            "+",
+            Style::default()
+                .fg(theme().accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Rect::new(area.x, area.y, 1, 1),
+    );
+    let field = Rect::new(
+        area.x.saturating_add(2),
+        area.y,
+        area.width.saturating_sub(2),
+        1,
+    );
+    let line = if text.is_empty() {
+        Line::styled("Title", Style::default().fg(theme().muted))
+    } else {
+        Line::styled(text.to_owned(), Style::default().fg(theme().text))
+    };
+    // The caret stays on screen in a title longer than the row.
+    let cursor_offset = u16::try_from(cursor).unwrap_or(u16::MAX);
+    let scroll = cursor_offset.saturating_sub(field.width.saturating_sub(1));
+    frame.render_widget(Paragraph::new(line).scroll((0, scroll)), field);
+    frame.set_cursor_position((
+        field
+            .x
+            .saturating_add(cursor_offset.saturating_sub(scroll))
+            .min(field.right().saturating_sub(1)),
+        field.y,
+    ));
+}
+
 /// The frame a braille spinner is on this instant. Nothing schedules a
 /// repaint for it: it turns on the wake-ups the work itself causes, so an
 /// idle screen still paints nothing.

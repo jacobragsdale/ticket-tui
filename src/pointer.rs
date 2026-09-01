@@ -59,6 +59,8 @@ pub enum TextEditor {
     Node,
     /// The focused text field of an open form.
     Form,
+    /// The one-row quick capture, which holds a title and nothing else.
+    Capture,
 }
 
 /// One value on the details pane that can be edited by clicking it. Each names
