@@ -758,7 +758,7 @@ fn a_runs_details_follow_its_repository_its_pull_request_and_the_work_items_it_b
     app.pull_requests.set_pull_requests(vec![raised], shell);
     app.shell.set_artifact_labels(
         vec![(
-            11,
+            42,
             "Split the files".to_owned(),
             crate::model::PrStatus::Active,
         )],
@@ -771,6 +771,9 @@ fn a_runs_details_follow_its_repository_its_pull_request_and_the_work_items_it_b
     app.pipelines.run_cursor.focus(0);
     render_text(140, 60, &mut app);
     app.pipelines.set_run_work_items(15, vec![10_001, 10_002]);
+    // The work items are on file, which is what makes them somewhere to go.
+    app.shell
+        .set_work_item_titles(vec![(10_001, "One".to_owned()), (10_002, "Two".to_owned())]);
     let text = render_text(140, 60, &mut app);
 
     assert!(text.contains("Related"), "{text}");
