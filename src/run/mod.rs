@@ -36,6 +36,7 @@ use ticket_tui::local::{self, LocalEvent, LocalHandle, LocalRequest};
 use ticket_tui::markdown;
 use ticket_tui::model::{GitJob, Run, RunResult, Ticket, TicketKey};
 use ticket_tui::notify::{self, Notifier, PodMarks};
+use ticket_tui::preflight::Deployment;
 use ticket_tui::session;
 use ticket_tui::sync::{
     self, AzureConnector, DetailsOutcome, PullOrigin, PulledExtras, ReparentRejection, SyncEvent,

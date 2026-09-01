@@ -81,6 +81,11 @@ impl ConfigWatch {
         app.aks.set_clusters(config.clusters.clone());
         app.shell
             .set_notifier(Notifier::new(config.notify.command.clone()));
+        // And so does the deployment repository: `[deployment]` written into
+        // the file is a pre-flight on the next pull request selected against
+        // it, without a restart.
+        app.pull_requests
+            .set_deployment(Deployment::resolve(&config, app.shell.workspace()));
         true
     }
 
@@ -199,11 +204,19 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
             .collect();
         let _ = worker.send(LocalRequest::Scan { workspace, repos });
     }
+    // The pull request under the cursor, pre-flown against the deployment
+    // repository: what prod would be missing if it merged, while it is still
+    // a pull request.
+    if app.tab == TabId::PullRequests
+        && let Some(request) = app.pull_requests.preflight_due(&app.shell)
+    {
+        let _ = worker.send(request);
+    }
     // Drained first, so the events can be answered without holding a borrow of
     // the thread that sent them.
     let events: Vec<LocalEvent> = std::iter::from_fn(|| worker.try_event()).collect();
     // A running job redraws on its own, so its glyph turns.
-    let redraw = !events.is_empty() || app.repos.busy();
+    let redraw = !events.is_empty() || app.repos.busy() || app.pull_requests.preflight_running();
     for event in events {
         match event {
             LocalEvent::Scanned(local) => app.repos.set_local(local),
@@ -231,6 +244,9 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
             // Nothing in the TUI asks for a render yet; the environments board
             // is what reads these.
             LocalEvent::Rendered { .. } => {}
+            LocalEvent::Preflighted { id, commit, found } => {
+                app.pull_requests.set_preflight(id, commit, found);
+            }
             LocalEvent::Stopped => runtime.local.worker = None,
         }
     }

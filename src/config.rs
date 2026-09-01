@@ -47,7 +47,7 @@
 //! [notify]                   # a desktop notification when a watched thing moves
 //! command = "notify-send {title} {body}"   # left out: nothing is ever run
 //!
-//! [deployment]               # the environments board and `ticket-tui env`
+//! [deployment]               # the board, `ticket-tui env`, and the pre-flight
 //! repo = "deployment"        # the repository, as the Repos tab names it
 //! # render = "kustomize build"    # left out: `kubectl kustomize`
 //!
@@ -87,7 +87,8 @@ pub struct Config {
     #[serde(default)]
     pub notify: Notify,
     /// The repository the environments are rendered from. Left out, the
-    /// environments board and the `env` subcommands are off.
+    /// environments board, the `env` subcommands and the pull request
+    /// pre-flight are off.
     #[serde(default)]
     pub deployment: Option<Deployment>,
     /// The environments that repository declares, in the order the file lists

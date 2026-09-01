@@ -72,7 +72,7 @@ offline, browsing whatever the database already holds.
 | `e` | The Actions menu — edit title, state, assignee, tags, description |
 | `n` / `N` | New work item, or a new child of the selected one |
 | `+` | Quick capture, on every tab: one row, a title, `Enter` — an Issue on you, in the current sprint, tagged `inbox` |
-| `r` | Sync now, without waiting for the timer — on AKS, ACR and Key Vault it re-reads that tab's own source |
+| `r` | Sync now, without waiting for the timer — on AKS, ACR and Key Vault it re-reads that tab's own source, and on Pull requests it flies the pre-flight again |
 | `o` | Open the selected row in the system browser; the Azure portal on ACR and Key Vault |
 | `?` | The in-app help, generated from the same table the keys are bound in |
 | `L` / `D` | On AKS: tail the selected pod's log, or `kubectl describe` it |

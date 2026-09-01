@@ -1349,6 +1349,29 @@ section lists the first comment of each thread — author, age, status and the
 text — and replies and line comments are `o`. All four are non-optimistic: the
 row changes when Azure DevOps answers.
 
+A pull request against the repository `[deployment]` names carries a
+**Pre-flight**: the cheapest moment to catch a missing key is while the change
+is still a pull request. On selection, and again on `r`, the local thread
+fetches the branch, checks the head the row was read at out into a scratch
+worktree of its own, renders only the overlays the change touches — each
+changed file walks up to its nearest `kustomization.yaml`, and a change under
+`base/` is under every overlay — runs the same check `env check` runs over
+the result, and removes the worktree however it leaves. It is cached per pull
+request and head, so a re-selection costs nothing until the branch moves.
+
+The details pane says it under a `── Pre-flight ──` rule:
+one line per thing an environment would be missing, or `✓ qa overlays/qa
+renders clean`; the shared spinner while it is in the air. A line naming a
+Secret an overlay never fills points at the vault the environment pulls from,
+and follows on a click. The table's `Pre-flight` column carries `✓`,
+`✗N`, the spinner, `!` for a pre-flight that could not look at all, and
+nothing for a pull request on any other repository.
+
+**It never blocks.** A pull request can still be approved or completed with
+findings: the pane says what will be missing and the vote is the reviewer's.
+The enforcing gate belongs in the deployment repository's own pipeline, where
+`ticket-tui env check` exits 1.
+
 `a` approves, `A` approves with suggestions, `w` waits for the author and `x`
 rejects; `u` puts the last vote back. The glyph changes at once and a refusal
 reverts it and says why. Voting on a pull request you were not asked to review
@@ -2633,7 +2656,11 @@ pull request need not ask the user to press `3`:
 - `pull_requests` — the queue and the selected request with its reviewers and
   their votes, the work items it carries, its build, whether auto-complete is
   set and how many threads are unresolved, plus `to_review_count` and whether
-  closed ones are shown. Every row carries `my_vote`.
+  closed ones are shown. Every row carries `my_vote`. The selected request also
+  carries `preflight`, added within schema 3: a `state` of `not_applicable` for
+  a pull request on any repository but the deployment one, `running`, `clean`
+  with the `overlays` it rendered, `findings` with one line each, or `failed`
+  with the one line saying why it could not look.
 - `pipelines` — the `level` (`pipelines` or `runs`), the selected pipeline and
   run — the run with its stages, each stage's state and result — the log being
   tailed (`run_id`, `log_id`, `node`, `line_count`, `following`), how many runs
