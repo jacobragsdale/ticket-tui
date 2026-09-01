@@ -298,21 +298,11 @@ impl PullRequestsScreen {
     }
 
     /// How many pull requests are waiting on the signed-in user's vote, which
-    /// is what the tab badge counts.
+    /// is what the tab badge counts — and, through the same function,
+    /// `ticket-tui status`.
     #[must_use]
     pub fn to_review(&self, shell: &Shell) -> usize {
-        let Some(me) = shell.me() else {
-            return 0;
-        };
-        self.requests
-            .iter()
-            .filter(|request| !request.status.is_closed())
-            .filter(|request| {
-                request.reviewers.iter().any(|reviewer| {
-                    crate::model::same_text(&reviewer.display_name, me) && reviewer.vote == 0
-                })
-            })
-            .count()
+        crate::model::awaiting_review(&self.requests, shell.me())
     }
 
     /// Loads one of the built-in views, which are queries and nothing more.

@@ -151,11 +151,30 @@ terminal-light` suits a white ground, and `NO_COLOR` turns colour off.
 
 `ticket-tui` is also a CLI — `list`, `show`, `edit`, `comment`, `create`,
 `repos`, `prs`, `pipelines`, `runs`, `approvals`, `pods`, `acr`, `vaults`,
-`secrets`, `keys`, `certs` — so a script or an agent can do anything the TUI
-can. The vault commands print names, dates and whether a thing is enabled;
+`secrets`, `keys`, `certs`, `status` — so a script or an agent can do anything
+the TUI can. The vault commands print names, dates and whether a thing is enabled;
 `ticket-tui secrets show --vault V NAME --value` is the only one that prints a
 secret's value, raw, to stdout — so run it deliberately and keep what it prints
 out of anything you save.
+
+`comment` takes its body down a pipe, so the tail of a test run reaches a work
+item — or a pull request — without going through the clipboard:
+
+```console
+cargo test 2>&1 | tail -30 | ticket-tui comment 642 -
+```
+
+A piped body is posted as a code block, so its columns line up in the portal
+and in the TUI.
+
+`status` prints the numbers the tab bar badges as one line, for a status bar or
+a shell prompt in a pane that is not this one — from SQLite alone, in a few
+milliseconds, and nothing at all when there is nothing to say:
+
+```console
+$ ticket-tui status
+doing 4 · stale 2 · review 3 · rejected 1 · ◐1 · failed 1 · ✗2 pods · ◇2 certs
+```
 
 ## More
 

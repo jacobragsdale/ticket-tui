@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -45,6 +46,7 @@ use crate::model::{
     Run, RunResult, Ticket, TicketKey, TimelineKind, TimelineRecord, same_text,
 };
 use crate::search;
+use crate::status;
 use crate::sync::{self, AzureConnector, PrAction, SyncMode, SyncOutcome, WorkItemSource};
 use crate::timestamp::Timestamp;
 use crate::ui::acr::{count_label, platform_label};
@@ -208,8 +210,12 @@ pub enum Command {
     Comment {
         /// The work item to comment on
         id: i64,
-        /// What the comment says, as plain text
-        text: String,
+        /// What the comment says, as plain text. `-` reads the body from
+        /// standard input instead — `cargo test | tail -30 | ticket-tui
+        /// comment 642 -` — which is also what leaving it out does when
+        /// something is piped in. A piped body is posted as a code block, so
+        /// its columns stay lined up.
+        text: Option<String>,
     },
     /// Add a work item to the project
     Create(CreateArgs),
@@ -248,6 +254,13 @@ pub enum Command {
     /// Read one vault's certificates
     #[command(subcommand)]
     Certs(CertsCommand),
+    /// Print the tab badges as one line, for a status bar or a shell prompt
+    Status {
+        /// Print every figure as a JSON object, zeros and all, rather than as
+        /// the line
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The ACR tab, without the tab. There is no database behind this one either:
@@ -573,8 +586,10 @@ pub enum PrsCommand {
     /// Leave one comment, as a thread of its own
     Comment {
         id: i64,
-        /// What the comment says, as plain text
-        text: String,
+        /// What the comment says, as plain text. `-` reads the body from
+        /// standard input instead, as does leaving it out when something is
+        /// piped in; a piped body is posted as a code block.
+        text: Option<String>,
     },
 }
 
@@ -644,7 +659,7 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Show { id, json } => run_show(&database, *id, *json),
         Command::List { query, json } => run_list(&database, query.as_deref(), *json),
         Command::Edit(args) => run_edit(cli, &database, args),
-        Command::Comment { id, text } => run_comment(cli, &database, *id, text),
+        Command::Comment { id, text } => run_comment(cli, &database, *id, text.as_deref()),
         Command::Create(args) => run_create(cli, &database, args),
         Command::Repos(command) => run_repos(cli, &database, command),
         Command::Prs(command) => run_prs(cli, &database, command),
@@ -657,7 +672,31 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Secrets(command) => run_vaults(cli, &VaultCliCommand::Secrets(command.clone())),
         Command::Keys(command) => run_vaults(cli, &VaultCliCommand::Keys(command.clone())),
         Command::Certs(command) => run_vaults(cli, &VaultCliCommand::Certs(command.clone())),
+        Command::Status { json } => run_status(cli, &database, *json),
     }
+}
+
+/// The tab badges on one line, from SQLite and the context file beside it and
+/// nothing else. It prints nothing when there is nothing to say, so a shell
+/// prompt can call it every time it draws.
+fn run_status(cli: &Cli, database: &Path, json: bool) -> Result<()> {
+    let repository = open_database(database)?;
+    let me = resolve_me(
+        repository.meta(db::ME_DISPLAY_NAME_KEY)?,
+        std::env::var("TICKET_TUI_ME").ok(),
+    );
+    let asked = resolve_stale_days(cli.stale_days, std::env::var("TICKET_TUI_STALE_DAYS").ok())?;
+    let status = status::collect(
+        &repository,
+        me.as_deref(),
+        status::stale_days(asked, database),
+        resolve_refresh(cli.refresh, std::env::var("TICKET_TUI_REFRESH").ok())?,
+        Timestamp::now(),
+    )?;
+    if let Some(line) = status::report(&status, json)? {
+        emit(&line);
+    }
+    Ok(())
 }
 
 /// Who `@me` is: the display name the last sync recorded, overridden by
@@ -670,6 +709,54 @@ pub fn resolve_me(stored: Option<String>, env: Option<String>) -> Option<String>
         .flatten()
         .map(|name| name.trim().to_owned())
         .find(|name| !name.is_empty())
+}
+
+/// How often the background pull runs when nothing says otherwise.
+pub const DEFAULT_REFRESH_SECONDS: u64 = 60;
+
+/// How often the background pull runs: `--refresh`, then `TICKET_TUI_REFRESH`,
+/// then a minute. A variable that is not a number of seconds is a startup
+/// error rather than a silent fall back to the default, because a typo there
+/// would otherwise change how often the TUI reaches Azure DevOps and say
+/// nothing about it. `status` reads it the same way, so the age it calls stale
+/// is the age this run calls stale.
+pub fn resolve_refresh(flag: Option<u64>, env: Option<String>) -> Result<u64> {
+    if let Some(seconds) = flag {
+        return Ok(seconds);
+    }
+    let Some(raw) = env else {
+        return Ok(DEFAULT_REFRESH_SECONDS);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_REFRESH_SECONDS);
+    }
+    trimmed
+        .parse()
+        .with_context(|| format!("TICKET_TUI_REFRESH is not a number of seconds: {trimmed}"))
+}
+
+/// How long a work item may sit untouched before the Changed column flags it:
+/// `--stale-days`, then `TICKET_TUI_STALE_DAYS`, and `None` when neither was
+/// given, which leaves whatever the session remembers standing. A variable
+/// that is not a number of days is a startup error naming it, the way
+/// `TICKET_TUI_REFRESH` is: a typo there would otherwise change which rows are
+/// flagged and say nothing about it.
+pub fn resolve_stale_days(flag: Option<u16>, env: Option<String>) -> Result<Option<u16>> {
+    if let Some(days) = flag {
+        return Ok(Some(days));
+    }
+    let Some(raw) = env else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse()
+        .map(Some)
+        .with_context(|| format!("TICKET_TUI_STALE_DAYS is not a number of days: {trimmed}"))
 }
 
 /// One pull, run to completion, reporting what moved. The database is opened
@@ -1083,14 +1170,103 @@ fn description_html(path: &Path) -> Result<String> {
     Ok(markdown::markdown_to_html(&markdown::saved_markdown(&raw)))
 }
 
-fn run_comment(cli: &Cli, database: &Path, id: i64, text: &str) -> Result<()> {
+/// The most one comment may carry. Past this it is a log, and the part worth
+/// reading is at one end of it rather than spread over the whole.
+const COMMENT_LIMIT: i64 = 64 * 1024;
+
+/// The body one comment carries, and where it came from.
+///
+/// A body piped in is program output — a test tail, a log — so it is posted as
+/// a fenced code block, which is what keeps its columns lined up in the portal
+/// and in the TUI's own comment view. A body typed as an argument is a
+/// sentence and stays plain text, as it always has.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommentBody {
+    text: String,
+    fenced: bool,
+}
+
+impl CommentBody {
+    /// The rich text a work-item comment is stored as: a `<pre>` block for
+    /// piped output, the paragraph the browser writes for anything typed.
+    fn html(&self) -> String {
+        if self.fenced {
+            markdown::markdown_to_html(&self.markdown())
+        } else {
+            azure::comment_html(&self.text)
+        }
+    }
+
+    /// The Markdown a pull-request thread takes — that API stores Markdown
+    /// rather than HTML, so the fence goes out as a fence.
+    fn markdown(&self) -> String {
+        if self.fenced {
+            format!("{FENCE}\n{}\n{FENCE}", self.text)
+        } else {
+            self.text.clone()
+        }
+    }
+}
+
+const FENCE: &str = "```";
+
+/// What one `comment` posts. The argument as typed, or standard input when the
+/// argument is `-` — and when there is no argument at all but something is
+/// piped in, which is the same thing said shorter. A terminal on the other end
+/// of standard input means nobody piped anything, so that is a usage error
+/// naming both forms rather than a wait for input nobody will type.
+fn comment_body(
+    argument: Option<&str>,
+    stdin: &mut impl Read,
+    stdin_is_tty: bool,
+) -> Result<CommentBody> {
+    match argument {
+        Some("-") => piped_comment(stdin),
+        Some(text) => {
+            if text.trim().is_empty() {
+                bail!("a comment cannot be empty");
+            }
+            Ok(CommentBody {
+                text: text.to_owned(),
+                fenced: false,
+            })
+        }
+        None if stdin_is_tty => bail!(
+            "a comment needs a body: `comment ID \"text\"`, or `... | comment ID -` to read it from standard input"
+        ),
+        None => piped_comment(stdin),
+    }
+}
+
+/// Standard input, read to end of file. The trailing newline a pipe always
+/// carries is taken off; the tabs a test runner lines its output up with are
+/// left exactly as they came.
+fn piped_comment(stdin: &mut impl Read) -> Result<CommentBody> {
+    let mut raw = String::new();
+    stdin
+        .read_to_string(&mut raw)
+        .context("failed to read the comment from standard input")?;
+    let size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
+    if size > COMMENT_LIMIT {
+        bail!(
+            "that is a log, not a comment: {}. Pipe it through tail",
+            size_label(size)
+        );
+    }
+    let text = raw.trim_end().to_owned();
     if text.trim().is_empty() {
         bail!("a comment cannot be empty");
     }
+    Ok(CommentBody { text, fenced: true })
+}
+
+fn run_comment(cli: &Cli, database: &Path, id: i64, text: Option<&str>) -> Result<()> {
+    let stdin = std::io::stdin();
+    let body = comment_body(text, &mut stdin.lock(), stdin.is_terminal())?;
     let mut repository = open_database(database)?;
     let client = connect(cli)?;
     let key = key_for(&client, id);
-    let comment = post_comment(&client, &mut repository, &key, text)?;
+    let comment = post_comment(&client, &mut repository, &key, &body)?;
     emit(&format!(
         "#{} comment {} posted",
         comment.ticket.id, comment.comment_id
@@ -1105,9 +1281,9 @@ fn post_comment(
     source: &dyn WorkItemSource,
     repository: &mut SqliteTicketRepository,
     key: &TicketKey,
-    text: &str,
+    body: &CommentBody,
 ) -> Result<CommentRecord> {
-    let posted = source.post_comment(key.id, &azure::comment_html(text))?;
+    let posted = source.post_comment(key.id, &body.html())?;
     let comment = CommentRecord {
         ticket: key.clone(),
         ..posted
@@ -1700,7 +1876,7 @@ fn run_prs(cli: &Cli, database: &Path, command: &PrsCommand) -> Result<()> {
                 },
             )
         }
-        PrsCommand::Comment { id, text } => run_pr_comment(cli, database, *id, text),
+        PrsCommand::Comment { id, text } => run_pr_comment(cli, database, *id, text.as_deref()),
     }
 }
 
@@ -1945,14 +2121,13 @@ fn run_pr_action(cli: &Cli, database: &Path, id: i64, action: PrAction, said: &s
 
 /// One comment, as a thread of its own. It is stored with the pull request,
 /// so the TUI's discussion shows it without waiting for a pull.
-fn run_pr_comment(cli: &Cli, database: &Path, id: i64, text: &str) -> Result<()> {
-    if text.trim().is_empty() {
-        bail!("a comment cannot be empty");
-    }
+fn run_pr_comment(cli: &Cli, database: &Path, id: i64, text: Option<&str>) -> Result<()> {
+    let stdin = std::io::stdin();
+    let body = comment_body(text, &mut stdin.lock(), stdin.is_terminal())?;
     let mut repository = open_database(database)?;
     let row = find_pull_request(&repository, id)?;
     let client = connect(cli)?;
-    let thread = client.comment_on_pull_request(&row.request.repo_id, id, text)?;
+    let thread = client.comment_on_pull_request(&row.request.repo_id, id, &body.markdown())?;
     let mut request = row.request;
     request.threads.push(thread);
     store_pull_request(&mut repository, request)?;
@@ -3445,6 +3620,7 @@ mod tests {
     use crate::model::{StateOption, StoredWorkItem};
     use crate::timestamp::ts;
     use serde_json::json;
+    use std::io::Cursor;
     use std::sync::{Arc, Mutex};
     use tempfile::{TempDir, tempdir};
 
@@ -3801,7 +3977,7 @@ mod tests {
         else {
             panic!("comment did not parse");
         };
-        assert_eq!((id, text.as_str()), (613, "on its way"));
+        assert_eq!((id, text.as_deref()), (613, Some("on its way")));
 
         let Some(Command::Edit(args)) = Cli::parse_from([
             "ticket-tui",
@@ -4303,8 +4479,8 @@ mod tests {
         repository.upsert(&stored, &[], &[]).unwrap();
         let source = FakeSource::default();
 
-        let comment =
-            post_comment(&source, &mut repository, &stored.key, "on its way <now>").unwrap();
+        let typed = comment_body(Some("on its way <now>"), &mut empty(), true).unwrap();
+        let comment = post_comment(&source, &mut repository, &stored.key, &typed).unwrap();
 
         assert_eq!(
             source.posted.lock().unwrap().clone(),
@@ -4316,6 +4492,103 @@ mod tests {
             "the row lands on the work item the request named, whatever the answer is about"
         );
         assert_eq!(comment.comment_id, 77);
+    }
+
+    fn empty() -> Cursor<Vec<u8>> {
+        Cursor::new(Vec::new())
+    }
+
+    #[test]
+    fn a_piped_comment_body_is_posted_as_a_code_block_and_a_typed_one_as_a_line() {
+        let piped = comment_body(
+            Some("-"),
+            &mut Cursor::new(b"test result: FAILED\n  left  <1>\n".to_vec()),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            piped,
+            CommentBody {
+                text: "test result: FAILED\n  left  <1>".into(),
+                fenced: true,
+            },
+            "the trailing newline a pipe carries comes off; the indent does not"
+        );
+        assert_eq!(
+            piped.html(),
+            "<pre>test result: FAILED\n  left  &lt;1&gt;</pre>",
+            "program output is posted as a block, so its columns stay lined up"
+        );
+        assert_eq!(
+            piped.markdown(),
+            "```\ntest result: FAILED\n  left  <1>\n```",
+            "a pull-request thread stores Markdown, so the fence goes out as a fence"
+        );
+
+        let typed = comment_body(Some("on its way"), &mut empty(), true).unwrap();
+        assert_eq!(
+            typed,
+            CommentBody {
+                text: "on its way".into(),
+                fenced: false,
+            }
+        );
+        assert_eq!(typed.html(), "<p>on its way</p>");
+        assert_eq!(typed.markdown(), "on its way");
+    }
+
+    #[test]
+    fn an_absent_body_reads_the_pipe_and_is_a_usage_error_at_a_terminal() {
+        let piped = comment_body(
+            None,
+            &mut Cursor::new(b"tail -30 said this\n".to_vec()),
+            false,
+        )
+        .expect("a non-tty standard input is the same as `-`");
+        assert!(piped.fenced);
+        assert_eq!(piped.text, "tail -30 said this");
+
+        let usage = comment_body(None, &mut empty(), true).unwrap_err();
+        let usage = format!("{usage:#}");
+        assert!(usage.contains("comment ID \"text\""), "{usage}");
+        assert!(usage.contains("comment ID -"), "{usage}");
+    }
+
+    #[test]
+    fn a_comment_with_nothing_in_it_is_refused_however_it_arrived() {
+        for empty_body in [
+            comment_body(Some("-"), &mut empty(), false),
+            comment_body(Some("-"), &mut Cursor::new(b"\n \n".to_vec()), false),
+            comment_body(Some("   "), &mut empty(), true),
+        ] {
+            let refusal = format!("{:#}", empty_body.unwrap_err());
+            assert!(refusal.contains("a comment cannot be empty"), "{refusal}");
+        }
+    }
+
+    #[test]
+    fn a_body_over_the_limit_is_refused_with_its_size_rather_than_truncated() {
+        let over = vec![b'x'; usize::try_from(COMMENT_LIMIT).unwrap() + 1];
+        let refusal = format!(
+            "{:#}",
+            comment_body(Some("-"), &mut Cursor::new(over), false).unwrap_err()
+        );
+
+        assert!(
+            refusal.contains("that is a log, not a comment: 64 kB"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("Pipe it through tail"), "{refusal}");
+        assert!(
+            comment_body(
+                Some("-"),
+                &mut Cursor::new(vec![b'x'; usize::try_from(COMMENT_LIMIT).unwrap()]),
+                false,
+            )
+            .is_ok(),
+            "the limit itself still posts"
+        );
     }
 
     #[test]
@@ -4528,7 +4801,7 @@ mod tests {
         ));
         assert!(matches!(
             Cli::parse_from(["ticket-tui", "prs", "comment", "11", "looks good"]).command,
-            Some(Command::Prs(PrsCommand::Comment { id: 11, ref text })) if text == "looks good"
+            Some(Command::Prs(PrsCommand::Comment { id: 11, ref text })) if text.as_deref() == Some("looks good")
         ));
     }
 

@@ -689,6 +689,66 @@ impl PullRequest {
     }
 }
 
+/// The vote a rejection carries, as Azure DevOps numbers votes.
+const REJECTED_VOTE: i8 = -10;
+
+/// How many open pull requests are waiting on one person's vote — the number
+/// the Pull requests tab badges and `ticket-tui status` calls `review`. Both
+/// read it here so the two cannot drift.
+#[must_use]
+pub fn awaiting_review(requests: &[PullRequest], me: Option<&str>) -> usize {
+    let Some(me) = me else {
+        return 0;
+    };
+    requests
+        .iter()
+        .filter(|request| !request.status.is_closed())
+        .filter(|request| {
+            request
+                .reviewers
+                .iter()
+                .any(|reviewer| same_text(&reviewer.display_name, me) && reviewer.vote == 0)
+        })
+        .count()
+}
+
+/// How many open pull requests one person raised have been rejected by
+/// somebody — work that is waiting on the author rather than on a reviewer.
+#[must_use]
+pub fn rejected_of_mine(requests: &[PullRequest], me: Option<&str>) -> usize {
+    let Some(me) = me else {
+        return 0;
+    };
+    requests
+        .iter()
+        .filter(|request| !request.status.is_closed())
+        .filter(|request| same_text(&request.created_by.display_name, me))
+        .filter(|request| {
+            request
+                .reviewers
+                .iter()
+                .any(|reviewer| reviewer.vote == REJECTED_VOTE)
+        })
+        .count()
+}
+
+/// How many runs are going, which is what the Pipelines tab badges `◐N` and
+/// `ticket-tui status` prints as `◐N`.
+#[must_use]
+pub fn live_runs(runs: &[Run]) -> usize {
+    runs.iter().filter(|run| run.status.is_live()).count()
+}
+
+/// How many runs finished failed on or after `since` — the recent breakage a
+/// status line is worth interrupting a prompt for.
+#[must_use]
+pub fn runs_failed_since(runs: &[Run], since: Timestamp) -> usize {
+    runs.iter()
+        .filter(|run| run.result == Some(RunResult::Failed))
+        .filter(|run| run.finish_time.is_some_and(|finished| finished >= since))
+        .count()
+}
+
 /// What one repository looks like on this machine.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalRepo {

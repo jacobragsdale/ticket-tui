@@ -1134,7 +1134,7 @@ impl Screen for PipelinesScreen {
     /// `◐2` while runs are going, `◇1` while an approval waits, both when
     /// both.
     fn badge(&self) -> Option<String> {
-        let live = self.runs.iter().filter(|run| run.status.is_live()).count();
+        let live = crate::model::live_runs(&self.runs);
         let waiting = self.approvals.len();
         let mut badge = String::new();
         if live > 0 {
