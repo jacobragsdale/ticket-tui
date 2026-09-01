@@ -54,6 +54,16 @@ pub enum LocalRequest {
         repo_id: String,
         path: PathBuf,
     },
+    /// Render one kustomize overlay of the deployment clone. It sits here
+    /// rather than on the sync worker for the same reason a clone does: a
+    /// render shells out to `kubectl` and takes as long as it takes, and an
+    /// edit may not wait on it.
+    Render {
+        environment: String,
+        clone: PathBuf,
+        overlay: String,
+        command: String,
+    },
     Stop,
 }
 
@@ -73,6 +83,13 @@ pub enum LocalEvent {
         job: GitJob,
         message: String,
         error: bool,
+    },
+    /// One overlay, rendered: the YAML, or the one line of the renderer's
+    /// complaint that says what to fix.
+    Rendered {
+        environment: String,
+        overlay: String,
+        rendered: Result<String, String>,
     },
     Stopped,
 }
@@ -137,6 +154,17 @@ fn work(requests: &Receiver<LocalRequest>, events: &Sender<LocalEvent>) {
                     remote_git(&path, &["pull", "--ff-only"]).map(|_| "Pulled".to_owned())
                 })
             }
+            LocalRequest::Render {
+                environment,
+                clone,
+                overlay,
+                command,
+            } => events.send(LocalEvent::Rendered {
+                rendered: crate::kustomize::render(&clone, &overlay, &command)
+                    .map_err(|error| last_line(&format!("{error:#}"))),
+                environment,
+                overlay,
+            }),
         };
         if sent.is_err() {
             return;

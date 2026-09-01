@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - orders-config.yaml
+  - orders-deployment.yaml
+  - orders-service.yaml
+  - billing-deployment.yaml
+  - reaper-cronjob.yaml
+  - reaper-externalsecret.yaml
+
+# Generated, so its name is hash-suffixed and every reference to it is
+# rewritten to match. Reading the render rather than the templates is what
+# makes that a plain string match.
+secretGenerator:
+  - name: orders-runtime
+    literals:
+      - SESSION_KEY=placeholder

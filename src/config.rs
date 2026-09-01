@@ -43,6 +43,17 @@
 //! name = "qa"                # what the tab calls it
 //! context = "aks-qa"         # the kubeconfig context kubectl uses
 //! namespaces = ["orders"]    # left out or empty: --all-namespaces
+//!
+//! [deployment]               # the environments board and `ticket-tui env`
+//! repo = "deployment"        # the repository, as the Repos tab names it
+//! # render = "kustomize build"    # left out: `kubectl kustomize`
+//!
+//! [[environments]]           # one per environment the repository declares
+//! name = "prod"
+//! overlays = ["services/*/overlays/prod"]   # relative to the clone; globs
+//! vault = "kv-prod"          # optional, for the checks that join a vault
+//! registry = "acrprod"
+//! cluster = "prod"
 //! ```
 //!
 //! Every value here is a default: a flag or a `TICKET_TUI_*` variable still
@@ -69,6 +80,53 @@ pub struct Config {
     /// The clusters the AKS tab reads, in the order the file lists them.
     #[serde(default)]
     pub clusters: Vec<Cluster>,
+    /// The repository the environments are rendered from. Left out, the
+    /// environments board and the `env` subcommands are off.
+    #[serde(default)]
+    pub deployment: Option<Deployment>,
+    /// The environments that repository declares, in the order the file lists
+    /// them.
+    #[serde(default)]
+    pub environments: Vec<Environment>,
+}
+
+/// Where the kustomize overlays live: the repository, as the Repos tab names
+/// it, and what renders one.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+pub struct Deployment {
+    /// The repository the overlays are in, found among the workspace's clones
+    /// the way the Repos tab finds any other.
+    pub repo: String,
+    /// The command that renders one overlay directory. Left out,
+    /// `kubectl kustomize`, which needs nothing installed beyond `kubectl`;
+    /// `kustomize build` for a repository that wants a newer kustomize than
+    /// kubectl embeds.
+    #[serde(default)]
+    pub render: Option<String>,
+}
+
+/// One environment the deployment repository declares: what to call it, the
+/// overlays that make it up, and the Azure resources it is deployed onto,
+/// which is how what an overlay declares joins the vault, the registry and the
+/// cluster the other tabs read.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+pub struct Environment {
+    pub name: String,
+    /// Overlay directories relative to the clone. `*` matches within one path
+    /// segment, so `services/*/overlays/prod` is every service's, and every
+    /// match is rendered and unioned.
+    #[serde(default)]
+    pub overlays: Vec<String>,
+    /// The key vault this environment's secrets come from, as `[azure]` names
+    /// it.
+    #[serde(default)]
+    pub vault: Option<String>,
+    /// The container registry its images come from.
+    #[serde(default)]
+    pub registry: Option<String>,
+    /// The cluster it runs on, as `[[clusters]]` names it.
+    #[serde(default)]
+    pub cluster: Option<String>,
 }
 
 /// The Azure DevOps side of the file. Everything is optional: what is left out
@@ -324,6 +382,32 @@ pub fn parse(source: &str) -> Result<Config> {
             .any(|held| held.name == cluster.name)
         {
             bail!("two clusters are called {:?}", cluster.name);
+        }
+    }
+    if config
+        .deployment
+        .as_ref()
+        .is_some_and(|deployment| deployment.repo.trim().is_empty())
+    {
+        bail!("deployment.repo is blank; give it a value or leave the table out");
+    }
+    for (index, environment) in config.environments.iter().enumerate() {
+        if environment.name.trim().is_empty() {
+            bail!("environments[{index}] needs a name");
+        }
+        if environment.overlays.is_empty()
+            || environment
+                .overlays
+                .iter()
+                .any(|overlay| overlay.trim().is_empty())
+        {
+            bail!("environments[{index}] needs at least one overlay");
+        }
+        if config.environments[..index]
+            .iter()
+            .any(|held| held.name == environment.name)
+        {
+            bail!("two environments are called {:?}", environment.name);
         }
     }
     Ok(config)

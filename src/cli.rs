@@ -38,6 +38,7 @@ use crate::config::{self, Config};
 use crate::db::{self, SqliteTicketRepository, default_database_path};
 use crate::edit::{FieldEdit, normalize_tags, revision_test};
 use crate::filter::{FilterField, MatchContext, ParsedQuery, WorkItemSchema, parse_query};
+use crate::kustomize;
 use crate::local;
 use crate::markdown;
 use crate::model::{
@@ -248,6 +249,32 @@ pub enum Command {
     /// Read one vault's certificates
     #[command(subcommand)]
     Certs(CertsCommand),
+    /// Read what the deployment repository's kustomize overlays declare, and
+    /// check an environment against itself
+    #[command(subcommand)]
+    Env(EnvCommand),
+}
+
+/// The environments board, without the board. Nothing here opens the database
+/// or touches the network: the deployment clone the Repos tab already knows
+/// about is rendered with `kubectl kustomize` and read for names, so a check
+/// answers offline and before the merge.
+#[derive(Clone, Debug, Subcommand)]
+pub enum EnvCommand {
+    /// Print the environments config.toml names, and whether each rendered
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print what one environment declares: its workloads with their images and
+    /// references, its ConfigMaps and Secrets by key count, and the vault
+    /// objects its providers pull
+    Show {
+        /// The environment, as config.toml names it
+        environment: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The ACR tab, without the tab. There is no database behind this one either:
@@ -657,6 +684,7 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Secrets(command) => run_vaults(cli, &VaultCliCommand::Secrets(command.clone())),
         Command::Keys(command) => run_vaults(cli, &VaultCliCommand::Keys(command.clone())),
         Command::Certs(command) => run_vaults(cli, &VaultCliCommand::Certs(command.clone())),
+        Command::Env(command) => run_env(cli, command),
     }
 }
 
@@ -3402,6 +3430,283 @@ impl<'a> From<&'a Approval> for ApprovalJson<'a> {
     }
 }
 
+/// The environments board's reads, without the board. `config.toml` says which
+/// repository holds the overlays and what each environment is made of; the
+/// clone is the one the Repos tab found in the workspace.
+///
+/// The render runs here in this process rather than on the local thread: this
+/// is a command that does one thing and exits, and there is no edit for it to
+/// hold up.
+fn run_env(cli: &Cli, command: &EnvCommand) -> Result<()> {
+    let config = config::load(&config::default_path())?;
+    let workspace = local::workspace_root(cli.workspace.clone());
+    run_env_with(&config, workspace.as_deref(), command)
+}
+
+fn run_env_with(config: &Config, workspace: Option<&Path>, command: &EnvCommand) -> Result<()> {
+    match command {
+        EnvCommand::List { json } => run_env_list(config, workspace, *json),
+        EnvCommand::Show { environment, json } => {
+            let (clone, render) = deployment_render(config, workspace)?;
+            let environment = named_environment(config, environment)?;
+            let manifest = kustomize::manifest(&clone, environment, &render)?;
+            emit(&if *json {
+                to_json(&manifest)?
+            } else {
+                describe_environment(&manifest)
+            });
+            Ok(())
+        }
+    }
+}
+
+/// Where the overlays are and what renders them, or why the feature is off.
+/// The message says where it looked, the way the Repos tab does for a
+/// workspace that is not there.
+fn deployment_render(config: &Config, workspace: Option<&Path>) -> Result<(PathBuf, String)> {
+    if config.environments.is_empty() {
+        bail!("no environments in config.toml; add an [[environments]] table");
+    }
+    let clone = kustomize::deployment_clone(config, workspace)?;
+    let render = config
+        .deployment
+        .as_ref()
+        .and_then(|deployment| deployment.render.clone())
+        .unwrap_or_else(|| kustomize::DEFAULT_RENDER.to_owned());
+    Ok((clone, render))
+}
+
+/// One environment by name, matched ignoring case like every other name on this
+/// command line.
+fn named_environment<'a>(config: &'a Config, name: &str) -> Result<&'a config::Environment> {
+    config
+        .environments
+        .iter()
+        .find(|held| same_text(&held.name, name))
+        .with_context(|| format!("no environment called {name} in config.toml"))
+}
+
+/// One environment and what its overlays declare, or why they would not
+/// render.
+type Rendered<'a> = (&'a config::Environment, Result<kustomize::EnvManifest>);
+
+/// The environments named, rendered, each with what it declares or why it would
+/// not render.
+fn render_all<'a>(
+    config: &'a Config,
+    workspace: Option<&Path>,
+    names: &[String],
+) -> Result<Vec<Rendered<'a>>> {
+    let (clone, render) = deployment_render(config, workspace)?;
+    let chosen: Vec<&config::Environment> = if names.is_empty() {
+        config.environments.iter().collect()
+    } else {
+        names
+            .iter()
+            .map(|name| named_environment(config, name))
+            .collect::<Result<_>>()?
+    };
+    Ok(chosen
+        .into_iter()
+        .map(|environment| {
+            let manifest = kustomize::manifest(&clone, environment, &render);
+            (environment, manifest)
+        })
+        .collect())
+}
+
+/// `name overlays vault registry cluster rendered`, with the last column
+/// saying what each environment holds or why it would not render.
+fn run_env_list(config: &Config, workspace: Option<&Path>, json: bool) -> Result<()> {
+    emit(&list_table(&render_all(config, workspace, &[])?, json)?);
+    Ok(())
+}
+
+/// The table, pure over what the renders answered with.
+fn list_table(rendered: &[Rendered<'_>], json: bool) -> Result<String> {
+    if json {
+        return to_json(
+            &rendered
+                .iter()
+                .map(|(environment, manifest)| EnvListJson::new(environment, manifest.as_ref()))
+                .collect::<Vec<_>>(),
+        );
+    }
+    Ok(columns(
+        &rendered
+            .iter()
+            .map(|(environment, manifest)| {
+                vec![
+                    environment.name.clone(),
+                    environment.overlays.join(","),
+                    or_dash(environment.vault.as_deref()),
+                    or_dash(environment.registry.as_deref()),
+                    or_dash(environment.cluster.as_deref()),
+                    match manifest {
+                        Ok(manifest) => counts(manifest),
+                        Err(error) => format!("{error:#}"),
+                    },
+                ]
+            })
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// One environment as a block of text: what it holds, then its workloads with
+/// every reference each makes, its ConfigMaps and Secrets by key count, and the
+/// vault objects its providers pull. Names throughout; no value is in the model
+/// to print.
+fn describe_environment(manifest: &kustomize::EnvManifest) -> String {
+    let mut lines = vec![
+        format!("{} \u{b7} {}", manifest.environment, counts(manifest)),
+        manifest.overlays.join(" "),
+    ];
+    if !manifest.workloads.is_empty() {
+        lines.push(String::new());
+        lines.push("Workloads".to_owned());
+    }
+    for workload in &manifest.workloads {
+        lines.push(format!(
+            "  {} {}",
+            workload.kind,
+            place(&workload.namespace, &workload.name)
+        ));
+        for container in &workload.containers {
+            lines.push(format!(
+                "    {}{}  {}",
+                container.name,
+                if container.init { " (init)" } else { "" },
+                container.image
+            ));
+            lines.extend(
+                container
+                    .references
+                    .iter()
+                    .map(|reference| format!("      {reference}")),
+            );
+        }
+        lines.extend(
+            workload
+                .volumes
+                .iter()
+                .map(|reference| format!("    {reference}")),
+        );
+    }
+    for (heading, objects) in [
+        ("ConfigMaps", &manifest.config_maps),
+        ("Secrets", &manifest.secrets),
+    ] {
+        if objects.is_empty() {
+            continue;
+        }
+        lines.push(String::new());
+        lines.push(heading.to_owned());
+        lines.extend(objects.iter().map(|object| {
+            format!(
+                "  {}  {}",
+                place(&object.namespace, &object.name),
+                plural(object.keys.len(), "key")
+            )
+        }));
+    }
+    if !manifest.providers.is_empty() {
+        lines.push(String::new());
+        lines.push("Providers".to_owned());
+    }
+    for provider in &manifest.providers {
+        lines.push(format!(
+            "  {} {} \u{b7} {}",
+            provider.kind,
+            place(&provider.namespace, &provider.name),
+            provider.vault.as_deref().unwrap_or("\u{2014}")
+        ));
+        lines.push(format!(
+            "    objects   {}",
+            provider
+                .objects
+                .iter()
+                .map(|object| object.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        for produced in &provider.produces {
+            lines.push(format!(
+                "    produces  secret {}  {}",
+                produced.name,
+                if provider.whole {
+                    "whole (dataFrom)".to_owned()
+                } else {
+                    produced.keys.join(", ")
+                }
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// `12 workloads, 9 configmaps, 2 secrets, 1 provider`.
+fn counts(manifest: &kustomize::EnvManifest) -> String {
+    [
+        plural(manifest.workloads.len(), "workload"),
+        plural(manifest.config_maps.len(), "configmap"),
+        plural(manifest.secrets.len(), "secret"),
+        plural(manifest.providers.len(), "provider"),
+    ]
+    .join(", ")
+}
+
+/// `1 workload`, `12 workloads`.
+fn plural(count: usize, thing: &str) -> String {
+    format!("{count} {thing}{}", if count == 1 { "" } else { "s" })
+}
+
+/// `namespace/name`, or just the name where the render gave it no namespace.
+fn place(namespace: &str, name: &str) -> String {
+    if namespace.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{namespace}/{name}")
+    }
+}
+
+/// One environment as `env list --json` prints it.
+#[derive(Serialize)]
+struct EnvListJson<'a> {
+    name: &'a str,
+    overlays: &'a [String],
+    vault: Option<&'a str>,
+    registry: Option<&'a str>,
+    cluster: Option<&'a str>,
+    rendered: bool,
+    workloads: usize,
+    config_maps: usize,
+    secrets: usize,
+    providers: usize,
+    /// Why it would not render, when it would not.
+    error: Option<String>,
+}
+
+impl<'a> EnvListJson<'a> {
+    fn new(
+        environment: &'a config::Environment,
+        manifest: Result<&kustomize::EnvManifest, &anyhow::Error>,
+    ) -> Self {
+        Self {
+            name: &environment.name,
+            overlays: &environment.overlays,
+            vault: environment.vault.as_deref(),
+            registry: environment.registry.as_deref(),
+            cluster: environment.cluster.as_deref(),
+            rendered: manifest.is_ok(),
+            workloads: manifest.map_or(0, |held| held.workloads.len()),
+            config_maps: manifest.map_or(0, |held| held.config_maps.len()),
+            secrets: manifest.map_or(0, |held| held.secrets.len()),
+            providers: manifest.map_or(0, |held| held.providers.len()),
+            error: manifest.err().map(|error| format!("{error:#}")),
+        }
+    }
+}
+
 /// Pads every column but the last, which is the title.
 fn columns(cells: &[Vec<String>]) -> String {
     let width = cells.first().map_or(0, Vec::len);
@@ -6097,5 +6402,106 @@ mod tests {
             .to_string(),
             "no vault called atlas-kv in this subscription"
         );
+    }
+
+    /// One environment of the fixture under `fixtures/kustomize`, from the
+    /// rendered YAML checked in beside it, so no `kubectl` is wanted here.
+    fn env_fixture(name: &str) -> kustomize::EnvManifest {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("fixtures/kustomize/rendered/{name}.yaml"));
+        kustomize::parse(name, &fs::read_to_string(path).unwrap())
+    }
+
+    fn env_table(name: &str, overlays: &[&str]) -> config::Environment {
+        config::Environment {
+            name: name.to_owned(),
+            overlays: overlays.iter().map(|held| (*held).to_owned()).collect(),
+            vault: Some(format!("kv-{name}")),
+            registry: None,
+            cluster: None,
+        }
+    }
+
+    #[test]
+    fn the_env_subcommands_parse() {
+        let Some(Command::Env(EnvCommand::List { json })) =
+            Cli::parse_from(["ticket-tui", "env", "list", "--json"]).command
+        else {
+            panic!("env list --json")
+        };
+        assert!(json);
+
+        let Some(Command::Env(EnvCommand::Show { environment, json })) =
+            Cli::parse_from(["ticket-tui", "env", "show", "prod"]).command
+        else {
+            panic!("env show")
+        };
+        assert_eq!(environment, "prod");
+        assert!(!json);
+    }
+
+    #[test]
+    fn env_list_says_what_each_environment_holds_or_why_it_would_not_render() {
+        let (qa, prod) = (
+            env_table("qa", &["overlays/qa"]),
+            env_table("prod", &["overlays/prod"]),
+        );
+        let rendered = vec![
+            (&qa, Ok(env_fixture("qa"))),
+            (
+                &prod,
+                Err(anyhow::anyhow!("no overlay matches overlays/prod")),
+            ),
+        ];
+        let table = list_table(&rendered, false).unwrap();
+        let lines: Vec<&str> = table.lines().collect();
+        assert!(
+            lines[0].starts_with("qa ")
+                && lines[0].contains("overlays/qa")
+                && lines[0].contains("kv-qa"),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].ends_with("3 workloads, 1 configmap, 1 secret, 2 providers"));
+        assert!(
+            lines[1].ends_with("no overlay matches overlays/prod"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains('\u{2014}'),
+            "what it does not name is a dash"
+        );
+
+        let parsed: Value = serde_json::from_str(&list_table(&rendered, true).unwrap()).unwrap();
+        assert_eq!(parsed[0]["rendered"], true);
+        assert_eq!(parsed[0]["config_maps"], 1);
+        assert_eq!(parsed[1]["rendered"], false);
+        assert_eq!(parsed[1]["error"], "no overlay matches overlays/prod");
+    }
+
+    #[test]
+    fn env_show_names_every_reference_and_carries_no_value_at_all() {
+        let text = describe_environment(&env_fixture("prod"));
+        assert!(text.starts_with("prod \u{b7} 3 workloads, 1 configmap, 1 secret, 2 providers"));
+        for line in [
+            "  Deployment shop-prod/orders-api",
+            "    migrate (init)  acrprod.azurecr.io/team/orders-migrate:1.3.9",
+            "      env RATE_LIMIT_PER_MIN \u{2190} configmap orders-config key RATE_LIMIT_PER_MIN",
+            "      env FEATURE_FLAGS \u{2190} configmap orders-flags key FLAGS (optional)",
+            "    volume banner \u{2190} configmap orders-config key BANNER",
+            "  shop-prod/orders-config  2 keys",
+            "  SecretProviderClass shop-prod/billing-vault \u{b7} kv-prod",
+            "    produces  secret billing-kv  DB_PASSWORD",
+            "    produces  secret reaper-external  whole (dataFrom)",
+        ] {
+            assert!(text.contains(line), "{line:?} is not in\n{text}");
+        }
+        // Names and presence, never values: nothing the render holds a value
+        // for is printed, here or as JSON.
+        let json = to_json(&env_fixture("prod")).unwrap();
+        for value in ["placeholder", "cGxhY2Vob2xkZXI=", "two lines of it"] {
+            assert!(!text.contains(value) && !json.contains(value), "{value}");
+        }
     }
 }

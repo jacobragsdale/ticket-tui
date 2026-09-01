@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: shop-prod
+
+resources:
+  - ../../base
+  - billing-secretproviderclass.yaml
+  - vault-secretstore.yaml
+
+images:
+  - name: acrqa.azurecr.io/team/orders-api
+    newName: acrprod.azurecr.io/team/orders-api
+    newTag: 1.3.9
+  - name: acrqa.azurecr.io/team/orders-migrate
+    newName: acrprod.azurecr.io/team/orders-migrate
+    newTag: 1.3.9
+  - name: acrqa.azurecr.io/team/billing-api
+    newName: acrprod.azurecr.io/team/billing-api
+  - name: acrqa.azurecr.io/team/reaper
+    newName: acrprod.azurecr.io/team/reaper

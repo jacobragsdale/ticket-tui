@@ -172,6 +172,9 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 // Whatever git did, the workspace is not what it was.
                 runtime.local.scanned = None;
             }
+            // Nothing in the TUI asks for a render yet; the environments board
+            // is what reads these.
+            LocalEvent::Rendered { .. } => {}
             LocalEvent::Stopped => runtime.local.worker = None,
         }
     }
