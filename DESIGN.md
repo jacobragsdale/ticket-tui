@@ -2618,6 +2618,11 @@ and the variables come from the two renders alone, so the diff is answerable
 with no database, no clone and no network — which is the same promise `env
 check` makes.
 
+In `--json` a finding's `missing` is the bare word (`object`, `key`,
+`vaultObject`, `wrongVault`) except for an expiry, which is `{"expiring":
+{"on": "<date>"}}` — the one that carries a fact of its own. A vault object
+that is disabled reads as missing, since the driver cannot read it either.
+
 `fixtures/kustomize` is the worked example the tests read: a base with two
 services, a CronJob, a ConfigMap with a block scalar and a `secretGenerator`,
 and two overlays, one of which is deliberately missing a ConfigMap key, a

@@ -352,3 +352,39 @@ fn one_pull_request_reads_as_one_and_a_tag_is_whatever_the_registry_versions() {
     );
     assert_eq!(tag("orders-api"), "orders-api");
 }
+
+/// Two services that happen to share a name in two namespaces are two rows;
+/// and qa and prod keeping namespaces of their own — which the fixture does —
+/// still pair up by name and kind.
+#[test]
+fn a_name_shared_across_namespaces_is_two_services_and_differing_namespaces_still_pair() {
+    const ORDERS: &str = "\
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: orders, namespace: alpha}
+spec: {template: {spec: {containers: [{name: api, image: r/orders:1}]}}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: orders, namespace: beta}
+spec: {template: {spec: {containers: [{name: api, image: r/orders:BETA}]}}}
+";
+    let from = super::super::parse("qa", &ORDERS.replace("BETA", "2"));
+    let to = super::super::parse("prod", &ORDERS.replace("BETA", "9"));
+    let read = diff(&from, &to, None);
+    assert_eq!(read.services.len(), 1, "{read:?}");
+    assert_eq!(read.services[0].namespace, "beta");
+    assert_eq!(
+        (
+            read.services[0].images[0].from.as_deref(),
+            read.services[0].images[0].to.as_deref()
+        ),
+        (Some("2"), Some("9"))
+    );
+
+    let read = diff(&fixture("qa"), &fixture("prod"), Some("orders-api"));
+    assert!(
+        read.services.iter().all(|held| held.only_in.is_none()),
+        "shop-qa and shop-prod are the same service: {read:?}"
+    );
+}

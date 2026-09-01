@@ -656,8 +656,8 @@ fn a_kind_the_provider_gives_is_looked_up_under_it_and_one_it_does_not_is_looked
     );
     assert_eq!(vault.expires("billing-signing-key"), None);
 
-    // A disabled object is listed but is nobody's renewal, the way the tab
-    // fades its row whole rather than colouring the date.
+    // A disabled object is one the driver cannot read, so a provider asking
+    // for it is asking for nothing: it is neither held nor anybody's renewal.
     let mut disabled = item(
         ItemKind::Certificate,
         "retired-tls",
@@ -665,8 +665,131 @@ fn a_kind_the_provider_gives_is_looked_up_under_it_and_one_it_does_not_is_looked
     );
     disabled.enabled = false;
     let held = VaultNames::from_items("kv-prod", &[disabled], today());
-    assert_eq!(held.certs, ["retired-tls"]);
+    assert!(held.certs.is_empty());
     assert!(held.expiring.is_empty());
+}
+
+const PROVIDER: &str = "\
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata: {name: p, namespace: prod}
+spec:
+  provider: azure
+  parameters:
+    keyvaultName: kv-prod
+    objects: |
+      array:
+        - objectName: old-secret
+          objectType: Secret
+";
+
+#[test]
+fn a_disabled_object_reads_as_missing_a_mis_cased_type_is_its_type_and_the_past_reads_expired() {
+    let manifest = parse("prod", PROVIDER);
+    let mut disabled = item(ItemKind::Secret, "old-secret", None);
+    disabled.enabled = false;
+    let names = VaultNames::from_items("kv-prod", &[disabled], today());
+    let findings = check_with(&manifest, Some(&names));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0].missing, Missing::VaultObject);
+
+    // `Secret` is `secret`: a key of that name does not answer for it.
+    let names = VaultNames::from_items(
+        "kv-prod",
+        &[item(ItemKind::Key, "old-secret", None)],
+        today(),
+    );
+    let findings = check_with(&manifest, Some(&names));
+    assert_eq!(findings.len(), 1, "a key is not a secret: {findings:?}");
+
+    let names = VaultNames::from_items(
+        "kv-prod",
+        &[item(
+            ItemKind::Secret,
+            "old-secret",
+            Some("2020-01-01T00:00:00Z"),
+        )],
+        today(),
+    );
+    let findings = check_with(&manifest, Some(&names));
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(
+        findings[0]
+            .to_string()
+            .contains("old-secret expired 2020-01-01"),
+        "{}",
+        findings[0]
+    );
+}
+
+#[test]
+fn an_external_secret_finds_its_own_namespaces_store_before_a_cluster_wide_one_of_the_same_name() {
+    const STORES: &str = "\
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata: {name: vault}
+spec: {provider: {azurekv: {vaultUrl: https://kv-wrong.vault.azure.net/}}}
+---
+apiVersion: external-secrets.io/v1beta1
+kind: SecretStore
+metadata: {name: vault, namespace: prod}
+spec: {provider: {azurekv: {vaultUrl: https://kv-prod.vault.azure.net/}}}
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata: {name: es, namespace: prod}
+spec:
+  secretStoreRef: {name: vault, kind: KIND}
+  target: {name: es-secret}
+  data: [{secretKey: K, remoteRef: {key: k}}]
+";
+    let vault_for = |kind: &str| {
+        parse("prod", &STORES.replace("KIND", kind)).providers[0]
+            .vault
+            .clone()
+    };
+    assert_eq!(vault_for("SecretStore").as_deref(), Some("kv-prod"));
+    assert_eq!(vault_for("ClusterSecretStore").as_deref(), Some("kv-wrong"));
+    // No kind given: the store in the same namespace is the one meant.
+    let unkinded = STORES.replace(", kind: KIND", "");
+    assert_eq!(
+        parse("prod", &unkinded).providers[0].vault.as_deref(),
+        Some("kv-prod")
+    );
+}
+
+#[test]
+fn a_projected_volumes_sources_are_references_like_any_other_volumes() {
+    const PROJECTED: &str = "\
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web, namespace: prod}
+spec:
+  template:
+    spec:
+      containers: [{name: web, image: x:1}]
+      volumes:
+        - name: bundle
+          projected:
+            sources:
+              - configMap: {name: nowhere-cm}
+              - secret: {name: nowhere-secret, items: [{key: token}]}
+";
+    let findings = check(&parse("prod", PROJECTED));
+    let named: Vec<(&str, Option<&str>)> = findings
+        .iter()
+        .map(|finding| {
+            (
+                finding.reference.name.as_str(),
+                finding.reference.key.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        named,
+        [("nowhere-cm", None), ("nowhere-secret", Some("token"))],
+        "{findings:?}"
+    );
 }
 
 /// The one test that runs the real renderer: it re-renders the fixture and

@@ -59,6 +59,11 @@ pub struct ServiceDiff {
     /// The workload's name, which is what the service is called on both sides.
     pub workload: String,
     pub kind: String,
+    /// The namespace on the `from` side, or the `to` side's when only it has
+    /// the workload. Two environments usually keep their own, which is why a
+    /// workload is paired by name and kind and the namespace only settles a
+    /// tie between two of the same name.
+    pub namespace: String,
     /// Set when the workload is in one environment only, which is the whole of
     /// what there is to say about it.
     pub only_in: Option<Side>,
@@ -216,18 +221,21 @@ fn join(ids: &[i64], sigil: char) -> String {
 #[must_use]
 pub fn diff(from: &EnvManifest, to: &EnvManifest, service: Option<&str>) -> PromotionDiff {
     let mut services: Vec<ServiceDiff> = Vec::new();
-    let mut seen: Vec<&str> = Vec::new();
+    let mut seen: Vec<(&str, &str, &str)> = Vec::new();
     for workload in from.workloads.iter().chain(&to.workloads) {
-        if !names(service, &workload.name) || seen.contains(&workload.name.as_str()) {
+        if !names(service, &workload.name) || seen.contains(&key_of(workload)) {
             continue;
         }
-        seen.push(&workload.name);
-        let here = workload_named(from, &workload.name);
-        let there = workload_named(to, &workload.name);
+        let here = workload_like(from, workload);
+        let there = workload_like(to, workload);
+        // Both halves of a pair are spoken for: the other side's workload must
+        // not come round again as one only it has.
+        seen.extend(here.into_iter().chain(there).map(key_of));
         let service = match (here, there) {
             (Some(here), Some(there)) => ServiceDiff {
                 workload: here.name.clone(),
                 kind: here.kind.clone(),
+                namespace: here.namespace.clone(),
                 only_in: None,
                 images: images(here, there),
                 keys: keys(from, here, to, there),
@@ -239,6 +247,7 @@ pub fn diff(from: &EnvManifest, to: &EnvManifest, service: Option<&str>) -> Prom
             (here, _) => ServiceDiff {
                 workload: workload.name.clone(),
                 kind: workload.kind.clone(),
+                namespace: workload.namespace.clone(),
                 only_in: Some(if here.is_some() { Side::From } else { Side::To }),
                 images: Vec::new(),
                 keys: Vec::new(),
@@ -269,8 +278,20 @@ fn names(service: Option<&str>, workload: &str) -> bool {
     })
 }
 
-fn workload_named<'a>(manifest: &'a EnvManifest, name: &str) -> Option<&'a Workload> {
-    manifest.workloads.iter().find(|held| held.name == name)
+fn key_of(workload: &Workload) -> (&str, &str, &str) {
+    (&workload.namespace, &workload.name, &workload.kind)
+}
+
+/// The workload of the same name and kind on one side — the one in the same
+/// namespace when there are two, since a `Deployment orders` in `alpha` and
+/// another in `beta` are two services, and otherwise whichever there is,
+/// since qa and prod usually keep namespaces of their own.
+fn workload_like<'a>(manifest: &'a EnvManifest, like: &Workload) -> Option<&'a Workload> {
+    manifest
+        .workloads
+        .iter()
+        .filter(|held| held.name == like.name && held.kind == like.kind)
+        .min_by_key(|held| held.namespace != like.namespace)
 }
 
 /// One container's image tag on each side, for every container whose tag

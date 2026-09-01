@@ -305,7 +305,12 @@ impl Finding {
         match (self.missing, self.reference.key.as_deref()) {
             (Missing::Key, Some(key)) => format!("{} key {key} missing", self.reference.name),
             (Missing::Expiring { on }, _) => {
-                format!("{} expires {}", self.reference.name, on.calendar_date())
+                let word = if on <= Timestamp::now() {
+                    "expired"
+                } else {
+                    "expires"
+                };
+                format!("{} {word} {}", self.reference.name, on.calendar_date())
             }
             _ => format!("{} missing", self.reference.name),
         }
@@ -448,15 +453,18 @@ impl VaultNames {
             ..Self::default()
         };
         for item in items {
+            // A disabled object is one the CSI driver cannot read, so to a
+            // provider it is as good as absent; and one that is not in use is
+            // nobody's renewal, which is why its rows are faded whole.
+            if !item.enabled {
+                continue;
+            }
             match item.kind {
                 ItemKind::Secret => names.secrets.push(item.name.clone()),
                 ItemKind::Key => names.keys.push(item.name.clone()),
                 ItemKind::Certificate => names.certs.push(item.name.clone()),
             }
-            // The tab's own rule, disabled items included: one that is not in
-            // use is nobody's renewal, which is why its rows are faded whole.
-            if item.enabled
-                && let Some(on) = item.expires
+            if let Some(on) = item.expires
                 && Expiry::of(Some(on), now).is_some()
             {
                 names.expiring.push((item.name.clone(), on));
@@ -474,7 +482,12 @@ impl VaultNames {
             list.iter()
                 .any(|held| held.eq_ignore_ascii_case(&object.name))
         };
-        match object.kind.as_deref() {
+        match object
+            .kind
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
             Some("secret") => has(&self.secrets),
             Some("key") => has(&self.keys),
             Some("cert" | "certificate") => has(&self.certs),
@@ -599,7 +612,7 @@ pub fn check_with(manifest: &EnvManifest, vault: Option<&VaultNames>) -> Vec<Fin
 pub fn parse(environment: &str, yaml: &str) -> EnvManifest {
     let documents = documents(yaml);
     // The stores first: an ExternalSecret names one rather than naming a vault.
-    let stores: Vec<(String, String, String)> = documents
+    let stores: Vec<(String, String, String, String)> = documents
         .iter()
         .filter(|document| {
             matches!(
@@ -610,6 +623,7 @@ pub fn parse(environment: &str, yaml: &str) -> EnvManifest {
         .filter_map(|document| {
             let vault = vault_name(text(document, &["spec", "provider", "azurekv", "vaultUrl"]))?;
             Some((
+                text(document, &["kind"]).to_owned(),
                 text(document, &["metadata", "namespace"]).to_owned(),
                 text(document, &["metadata", "name"]).to_owned(),
                 vault,
@@ -744,36 +758,46 @@ fn volume_references(spec: &Value) -> Vec<Reference> {
         let source = Source::Volume {
             volume: text(entry, &["name"]).to_owned(),
         };
-        for (field, name_field, object) in [
-            ("configMap", "name", ObjectKind::ConfigMap),
-            ("secret", "secretName", ObjectKind::Secret),
-        ] {
-            let target = &entry[field];
-            let Some(name) = target[name_field].as_str() else {
-                continue;
-            };
-            let optional = flag(target, &["optional"]);
-            let items: Vec<&str> = array(target, &["items"])
+        // A `projected` volume is the same two kinds of source, several at a
+        // time, and its secret names the object with `name` rather than
+        // `secretName`.
+        let sources = [(entry, "secretName")].into_iter().chain(
+            array(entry, &["projected", "sources"])
                 .iter()
-                .filter_map(|item| item["key"].as_str())
-                .collect();
-            if items.is_empty() {
-                references.push(Reference {
-                    source: source.clone(),
-                    object,
-                    name: name.to_owned(),
-                    key: None,
-                    optional,
-                });
-            }
-            for key in items {
-                references.push(Reference {
-                    source: source.clone(),
-                    object,
-                    name: name.to_owned(),
-                    key: Some(key.to_owned()),
-                    optional,
-                });
+                .map(|held| (held, "name")),
+        );
+        for (holder, secret_name_field) in sources {
+            for (field, name_field, object) in [
+                ("configMap", "name", ObjectKind::ConfigMap),
+                ("secret", secret_name_field, ObjectKind::Secret),
+            ] {
+                let target = &holder[field];
+                let Some(name) = target[name_field].as_str() else {
+                    continue;
+                };
+                let optional = flag(target, &["optional"]);
+                let items: Vec<&str> = array(target, &["items"])
+                    .iter()
+                    .filter_map(|item| item["key"].as_str())
+                    .collect();
+                if items.is_empty() {
+                    references.push(Reference {
+                        source: source.clone(),
+                        object,
+                        name: name.to_owned(),
+                        key: None,
+                        optional,
+                    });
+                }
+                for key in items {
+                    references.push(Reference {
+                        source: source.clone(),
+                        object,
+                        name: name.to_owned(),
+                        key: Some(key.to_owned()),
+                        optional,
+                    });
+                }
             }
         }
         if let Some(class) = entry["csi"]["volumeAttributes"]["secretProviderClass"].as_str() {
@@ -824,13 +848,22 @@ fn external_secret(
     namespace: String,
     name: String,
     document: &Value,
-    stores: &[(String, String, String)],
+    stores: &[(String, String, String, String)],
 ) -> Provider {
     let store = text(document, &["spec", "secretStoreRef", "name"]);
+    // The store's kind when the reference gives one, and the store in the
+    // ExternalSecret's own namespace ahead of a cluster-wide one of the same
+    // name, so a `ClusterSecretStore` never answers for a `SecretStore`.
+    let store_kind = text(document, &["spec", "secretStoreRef", "kind"]);
     let vault = stores
         .iter()
-        .find(|(held, called, _)| called == store && same_namespace(held, &namespace))
-        .map(|(_, _, vault)| vault.clone());
+        .filter(|(kind, held, called, _)| {
+            called == store
+                && (store_kind.is_empty() || kind == store_kind)
+                && same_namespace(held, &namespace)
+        })
+        .min_by_key(|(_, held, _, _)| *held != namespace)
+        .map(|(_, _, _, vault)| vault.clone());
     let data = array(document, &["spec", "data"]);
     let mut objects: Vec<VaultObject> = data
         .iter()
@@ -960,8 +993,9 @@ fn field_keys(document: &Value, fields: &[&str]) -> Vec<String> {
 }
 
 /// The clone of the deployment repository, found the way the Repos tab finds
-/// any other: the workspace scan, matching by remote and then by name. The
-/// error says where it looked, because that is the thing to fix.
+/// a repository no remote claims: the workspace scan, matching the directory
+/// by name — the repository's remote is not known here. The error says where
+/// it looked, because that is the thing to fix.
 pub fn deployment_clone(config: &Config, workspace: Option<&Path>) -> Result<PathBuf> {
     let deployment = config
         .deployment
@@ -987,7 +1021,8 @@ pub fn deployment_clone(config: &Config, workspace: Option<&Path>) -> Result<Pat
 
 /// The overlay directories one pattern names, relative to the clone. `*`
 /// matches within one path segment, so `services/*/overlays/prod` is every
-/// service's; a pattern with no `*` is the one path it spells.
+/// service's; a pattern with no `*` is the one path it spells. There is no
+/// `**`: a segment of stars is one segment's worth of anything.
 #[must_use]
 pub fn expand(clone: &Path, pattern: &str) -> Vec<String> {
     let mut matched = vec![String::new()];
@@ -1057,28 +1092,61 @@ fn segment_matches(pattern: &str, name: &str) -> bool {
 /// renderer's complaint that says what to fix, the way every `kubectl` call
 /// here does.
 pub fn render(clone: &Path, overlay: &str, command: &str) -> Result<String> {
+    use std::io::{Read, Seek};
     let mut words = command.split_whitespace();
     let program = words.next().unwrap_or("kubectl");
-    let output = Command::new(program)
+    // Into files rather than pipes, so the wait below never deadlocks on a
+    // full pipe and the renderer can be given a deadline: a kustomization
+    // with a remote `resources:` URL would otherwise hold the local thread —
+    // and every clone, fetch and pull behind it — for as long as the network
+    // does.
+    let mut stdout = tempfile::tempfile().context("could not open a file for the render")?;
+    let mut stderr = tempfile::tempfile().context("could not open a file for the render")?;
+    let child = Command::new(program)
         .args(words)
         .arg(clone.join(overlay))
         .stdin(Stdio::null())
-        .output();
-    let output = match output {
-        Ok(output) => output,
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?)
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             bail!("{program} is not installed or not on PATH")
         }
         Err(error) => return Err(error).with_context(|| format!("{program} could not be run")),
     };
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() > RENDER_TIMEOUT {
+            drop(child.kill());
+            drop(child.wait());
+            bail!(
+                "{overlay}: {program} gave no answer in {}s; a remote resource the renderer is fetching?",
+                RENDER_TIMEOUT.as_secs()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    let read = |file: &mut std::fs::File| -> Result<String> {
+        let mut text = String::new();
+        file.seek(std::io::SeekFrom::Start(0))?;
+        file.read_to_string(&mut text)?;
+        Ok(text)
+    };
+    if status.success() {
+        return read(&mut stdout);
     }
-    bail!(
-        "{overlay}: {}",
-        kubectl_error(&String::from_utf8_lossy(&output.stderr))
-    )
+    bail!("{overlay}: {}", kubectl_error(&read(&mut stderr)?))
 }
+
+/// How long one render may take before it is killed and said to have hung.
+/// A local overlay renders in well under a second; only a remote resource
+/// gets anywhere near this.
+const RENDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Every overlay one environment names, rendered and unioned into one model.
 pub fn manifest(clone: &Path, environment: &Environment, command: &str) -> Result<EnvManifest> {
