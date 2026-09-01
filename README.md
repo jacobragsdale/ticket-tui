@@ -161,6 +161,25 @@ shell word, so write them where an argument goes and quote nothing around them;
 hands both to `osascript` through `argv`. Nothing is announced for what was
 already there when the run started.
 
+`[deployment]` and `[[environments]]` say where the kustomize overlays live and
+what each environment is made of. `repo` is the deployment repository as the
+Repos tab names it — its clone is found by the same workspace scan — and
+`overlays` are directories relative to that clone, with `*` matching within one
+path segment so one line covers every service:
+
+```toml
+[deployment]
+repo = "deployment"
+
+[[environments]]
+name = "prod"
+overlays = ["services/*/overlays/prod"]
+vault = "kv-prod"
+```
+
+Without a `[deployment]` table, or without a clone, the `env` commands say
+where they looked and do nothing else.
+
 And it holds the colour theme: a `[theme.custom]` palette in the vocabulary of
 the `theme` tool, which applies one palette to every program on the machine,
 writes this file for you, and repaints a running ticket-tui when it changes.
@@ -169,8 +188,12 @@ terminal-light` suits a white ground, and `NO_COLOR` turns colour off.
 
 `ticket-tui` is also a CLI — `list`, `show`, `edit`, `comment`, `create`,
 `repos`, `prs`, `pipelines`, `runs`, `approvals`, `pods`, `acr`, `vaults`,
-`secrets`, `keys`, `certs`, `status` — so a script or an agent can do anything
-the TUI can. The vault commands print names, dates and whether a thing is enabled;
+`secrets`, `keys`, `certs`, `status`, `env` — so a script or an agent can do anything
+the TUI can. `ticket-tui env check prod` is the pre-deploy gate: it renders the
+environment's own overlays and reports every ConfigMap and Secret key a
+workload reads that the overlay never defines, offline and before the merge —
+exit 1 for any finding, 0 for clean, 2 when an overlay would not render, so the
+deployment repository's pipeline can run it as a step. The vault commands print names, dates and whether a thing is enabled;
 `ticket-tui secrets show --vault V NAME --value` is the only one that prints a
 secret's value, raw, to stdout — so run it deliberately and keep what it prints
 out of anything you save.

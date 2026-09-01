@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: reaper
+spec:
+  schedule: "0 3 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: reaper
+              image: acrqa.azurecr.io/team/reaper:0.9.0
+              envFrom:
+                - secretRef:
+                    name: reaper-external
+              env:
+                - name: LOG_LEVEL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: orders-config
+                      key: LOG_LEVEL

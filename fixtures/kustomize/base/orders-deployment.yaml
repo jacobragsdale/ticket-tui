@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orders-api
+  template:
+    metadata:
+      labels:
+        app: orders-api
+    spec:
+      initContainers:
+        - name: migrate
+          image: acrqa.azurecr.io/team/orders-migrate:1.4.0
+          env:
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: orders-config
+                  key: LOG_LEVEL
+      containers:
+        - name: api
+          image: acrqa.azurecr.io/team/orders-api:1.4.0
+          envFrom:
+            - configMapRef:
+                name: orders-config
+          env:
+            - name: RATE_LIMIT_PER_MIN
+              valueFrom:
+                configMapKeyRef:
+                  name: orders-config
+                  key: RATE_LIMIT_PER_MIN
+            - name: SESSION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: orders-runtime
+                  key: SESSION_KEY
+            - name: FEATURE_FLAGS
+              valueFrom:
+                configMapKeyRef:
+                  name: orders-flags
+                  key: FLAGS
+                  optional: true
+          volumeMounts:
+            - name: banner
+              mountPath: /etc/banner
+      volumes:
+        - name: banner
+          configMap:
+            name: orders-config
+            items:
+              - key: BANNER
+                path: banner.txt

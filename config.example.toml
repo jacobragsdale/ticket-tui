@@ -31,6 +31,34 @@ namespaces = ["orders", "billing"]   # left out or empty: every namespace at onc
 name = "prod"
 context = "aks-prod"
 
+# The environments board and `ticket-tui env`. `repo` is the deployment
+# repository, as the Repos tab names it; its clone is found by the same
+# workspace scan, and without one the board and the `env` commands say where
+# they looked. `render` is what turns one overlay into plain YAML — left out,
+# `kubectl kustomize`, which needs nothing installed beyond kubectl.
+[deployment]
+repo = "deployment"
+# render = "kustomize build"  # for a repository that wants a newer kustomize
+
+# One table per environment the repository declares. `overlays` are directories
+# relative to the clone; `*` matches within one path segment, so
+# "services/*/overlays/prod" is every service's and all of them are rendered and
+# unioned into one environment. `vault`, `registry` and `cluster` are what the
+# environment is deployed onto, as [azure] and [[clusters]] name them.
+[[environments]]
+name = "qa"
+overlays = ["services/*/overlays/qa"]
+vault = "kv-qa"
+registry = "acrqa"
+cluster = "qa"
+
+[[environments]]
+name = "prod"
+overlays = ["services/*/overlays/prod"]
+vault = "kv-prod"
+registry = "acrprod"
+cluster = "prod"
+
 # The colour theme. `preset` is terminal, terminal-light, mono or custom;
 # left out, a [theme.custom] palette is painted if there is one and the
 # terminal's own sixteen colours if there is not. The `theme` tool writes both

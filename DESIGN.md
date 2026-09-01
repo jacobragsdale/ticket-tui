@@ -283,6 +283,34 @@ never disagree. A command that will not start is said in the footer once and
 not again, because a toast a minute about a notifier is worse than no
 notifications. There is no opt-out flag: removing the table is the opt-out.
 
+`[deployment]` and `[[environments]]` say where the kustomize overlays live and
+what each environment is made of:
+
+```toml
+[deployment]
+repo = "deployment"           # the repository, as the Repos tab names it
+# render = "kustomize build"  # left out: `kubectl kustomize`
+
+[[environments]]
+name = "prod"
+overlays = ["services/*/overlays/prod"]   # relative to the clone; globs
+vault = "kv-prod"             # optional: the Key Vault tab's own name for it
+registry = "acrprod"
+cluster = "prod"
+```
+
+`repo` is found among the workspace's clones by the same scan the Repos tab
+runs, so nothing is cloned or fetched to answer. `overlays` are directories
+relative to that clone and `*` matches within one path segment, so
+`services/*/overlays/prod` is every service's overlay and all of them are
+rendered and unioned into one environment. `render` is the command that turns
+one overlay directory into plain YAML — `kubectl kustomize` unless a repository
+wants a newer kustomize than kubectl embeds. `vault`, `registry` and `cluster`
+name what the environment is deployed onto, as `[azure]` and `[[clusters]]`
+spell them. A file with no `[deployment]` table, or a workspace with no clone of
+it, leaves the whole feature off and the `env` commands say where they looked,
+the way the Repos tab does for a workspace that is not there.
+
 ### `--theme`, `TICKET_TUI_THEME` and `config.toml`
 
 Which palette the TUI paints with:
@@ -2143,6 +2171,9 @@ ticket-tui secrets show --vault NAME <name> [--json | --value]
 ticket-tui keys list --vault NAME [--json]
 ticket-tui certs list --vault NAME [--json]
 ticket-tui status [--json]
+ticket-tui env list [--json]
+ticket-tui env show <environment> [--json]
+ticket-tui env check [ENV...] [--json]
 ```
 
 `sync` pulls and exits, printing what moved — `Synced 3 changes from
@@ -2408,6 +2439,87 @@ the last attempt.
 The counts the tab bar also shows are computed in one place — `awaiting_review`,
 `rejected_of_mine`, `live_runs` and `runs_failed_since` in `model.rs` — which
 each `Screen::badge` calls too, so the line and the bar cannot drift apart.
+
+### `env`: what an environment declares, and what it forgot
+
+`env` is the deployment repository read as an environment rather than as files.
+It is the third read with no database behind it, and the only one that touches
+neither Azure DevOps nor a subscription: `[deployment]` names the repository,
+the workspace scan finds the clone, and `kubectl kustomize <overlay>` renders
+each overlay the environment lists.
+
+The render is read, never the templates. `kubectl kustomize` applies every patch
+and hash-suffixes every generated name exactly as the Deployment refers to it,
+so `orders-runtime` in a `secretGenerator` and `orders-runtime-fd548dtc4m` in
+the Deployment's `secretKeyRef` are the same string by the time this reads
+them — which is what lets the whole feature be plain string matching and lets
+it stay ignorant of kustomize. Every overlay a glob matches is rendered and
+unioned into one environment.
+
+What is kept is names and presence, never values. A workload's containers and
+init containers, their images, and every `configMapKeyRef`, `secretKeyRef`,
+`configMapRef`, `secretRef` and volume they name; each ConfigMap and Secret by
+the keys of its `data`, `binaryData` and `stringData`; each `SecretProviderClass`
+and `ExternalSecret` by the vault it pulls from, the vault objects it asks for
+and the Kubernetes Secret keys those become. A rendered `secretGenerator`
+carries base64 in the file and none of it reaches the model, on the same rule
+`Secret` keeps in the Key Vault tab.
+
+```console
+$ ticket-tui env list
+qa    services/*/overlays/qa    kv-qa    acrqa    qa    12 workloads, 9 configmaps, 3 secrets, 2 providers
+prod  services/*/overlays/prod  kv-prod  acrprod  prod  12 workloads, 8 configmaps, 3 secrets, 2 providers
+```
+
+`env show <environment>` is the same environment written out: each workload with
+its containers, their images and every reference each makes, the ConfigMaps and
+Secrets by key count, and each provider with the vault objects it pulls and the
+Secret keys it produces. `--json` prints the model itself.
+
+`env check` is the pre-deploy gate, and it is the point of all of it. The
+commonest way a deploy to prod fails is a workload reading a ConfigMap key — or
+a Secret key — that its own overlay never defines, because it was added to qa's
+overlay and not prod's; that is knowable from the repository alone, offline,
+before the merge, and today it is discovered by the pod. Every check says a key
+or an object is **absent**, never that a value is wrong:
+
+- `configMapKeyRef` and `secretKeyRef`: the object absent, or present without
+  the key.
+- `envFrom`, and a volume with no `items`: the whole object is the reference,
+  so only its absence is a finding.
+- A volume's `items[].key`: each key.
+- `csi.volumeAttributes.secretProviderClass`: the class absent from the overlay.
+
+A Secret a provider produces counts as existing with the keys its
+`secretObjects` — or an `ExternalSecret`'s `target` and `data` — say it will
+hold; one pulled whole with `dataFrom` has keys nothing in the repository can
+know, so nothing that reads it is ever called missing. `optional: true`
+anywhere is silent, because a workload that starts without a key is not
+waiting on one.
+
+```console
+$ ticket-tui env check prod
+prod shop-prod/billing-api Deployment env SIGNING_KEY ← secret billing-kv key SIGNING_KEY missing
+prod shop-prod/orders-api Deployment env RATE_LIMIT_PER_MIN ← configmap orders-config key RATE_LIMIT_PER_MIN missing
+$ ticket-tui env check qa
+qa: clean (3 workloads, 1 configmap)
+```
+
+The line is the environment, `namespace/workload`, the workload's kind, where
+the reference is written, and what it points at that is not there. Findings are
+sorted by environment, namespace and workload, so two runs diff cleanly. It
+exits **1** when there is any finding, **0** when every environment named is
+clean, and **2** when an overlay would not render — an overlay the renderer
+refused is one line on stderr, and a gate that could not look must not read as
+clean. That is what lets the deployment repository's own pipeline run
+`ticket-tui env check` as a step.
+
+`fixtures/kustomize` is the worked example the tests read: a base with two
+services, a CronJob, a ConfigMap with a block scalar and a `secretGenerator`,
+and two overlays, one of which is deliberately missing a ConfigMap key and a
+produced Secret key. `rendered/{qa,prod}.yaml` beside it is what
+`kubectl kustomize` makes of them, checked in so the parse and the check are
+tested without `kubectl`; one `#[ignore]`d test re-renders and compares.
 
 ## Live agent context
 
