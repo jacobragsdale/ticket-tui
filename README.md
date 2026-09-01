@@ -193,7 +193,12 @@ the TUI can. `ticket-tui env check prod` is the pre-deploy gate: it renders the
 environment's own overlays and reports every ConfigMap and Secret key a
 workload reads that the overlay never defines, offline and before the merge —
 exit 1 for any finding, 0 for clean, 2 when an overlay would not render, so the
-deployment repository's pipeline can run it as a step. The vault commands print names, dates and whether a thing is enabled;
+deployment repository's pipeline can run it as a step. It also reads the
+environment's own key vault and reports every object the overlay pulls that the
+vault does not hold, every provider pulling from another environment's vault,
+and every object in use inside thirty days of its expiry; `--offline`, or no
+`az` to get a token with, skips that half in one line on stderr and leaves the
+exit code to the overlays alone. The vault commands print names, dates and whether a thing is enabled;
 `ticket-tui secrets show --vault V NAME --value` is the only one that prints a
 secret's value, raw, to stdout — so run it deliberately and keep what it prints
 out of anything you save.

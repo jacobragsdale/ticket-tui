@@ -8,12 +8,15 @@
 //!
 //! Names and presence, never values. A rendered `secretGenerator` carries
 //! base64 in the file; only its keys are read into the model, on the same rule
-//! `Secret` keeps in `src/arm.rs`. Nothing here applies anything, reaches a
-//! cluster, or reaches a vault: this is the repository's own account of itself,
-//! which is what makes it answerable offline and before a merge.
+//! `Secret` keeps in `src/arm.rs`. Nothing here applies anything or reaches a
+//! cluster, and nothing here reaches a vault either: [`check_with`] is handed
+//! the names one holds by whoever had already read them, and no value is among
+//! them. What is left is the repository's own account of itself, which is what
+//! makes the half that matters answerable offline and before a merge.
 //!
-//! `render` shells out; `parse` and `check` are pure over one `EnvManifest`,
-//! which is what the tests drive and what the diff and the board are built on.
+//! `render` shells out; `parse`, `check` and `check_with` are pure over one
+//! `EnvManifest`, which is what the tests drive and what the diff and the
+//! board are built on.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -23,8 +26,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::aks::kubectl_error;
+use crate::app::key_vault::Expiry;
+use crate::arm::{ItemKind, VaultItem};
 use crate::config::{Config, Environment};
 use crate::local::{self, RepoKey};
+use crate::timestamp::Timestamp;
 
 /// What renders an overlay when `config.toml` does not say. `kubectl` embeds
 /// kustomize, so a machine with `kubectl` needs nothing else installed; a
@@ -131,6 +137,10 @@ pub enum Source {
     EnvFrom,
     /// A volume, by its name.
     Volume { volume: String },
+    /// A provider's own request of a vault, which belongs to the provider
+    /// rather than to any container. The kind is what `objectType` says; an
+    /// `ExternalSecret`'s `remoteRef` says nothing.
+    Vault { kind: Option<String> },
 }
 
 impl std::fmt::Display for Source {
@@ -139,6 +149,7 @@ impl std::fmt::Display for Source {
             Self::Env { var } => write!(formatter, "env {var}"),
             Self::EnvFrom => formatter.write_str("envFrom"),
             Self::Volume { volume } => write!(formatter, "volume {volume}"),
+            Self::Vault { kind } => formatter.write_str(kind.as_deref().unwrap_or("object")),
         }
     }
 }
@@ -150,6 +161,8 @@ pub enum ObjectKind {
     ConfigMap,
     Secret,
     SecretProviderClass,
+    /// A vault object, which only a provider names.
+    Vault,
 }
 
 impl std::fmt::Display for ObjectKind {
@@ -158,6 +171,7 @@ impl std::fmt::Display for ObjectKind {
             Self::ConfigMap => "configmap",
             Self::Secret => "secret",
             Self::SecretProviderClass => "secretproviderclass",
+            Self::Vault => "vault",
         })
     }
 }
@@ -201,6 +215,26 @@ pub enum Missing {
     Object,
     /// The object is there without the key.
     Key,
+    /// The environment's vault does not hold a vault object a provider pulls.
+    VaultObject,
+    /// The provider pulls from a vault other than the environment's own, which
+    /// is what copying qa's overlay into prod leaves behind.
+    WrongVault,
+    /// The vault holds it, and it falls due inside the Key Vault tab's own
+    /// thirty days.
+    Expiring {
+        #[serde(serialize_with = "as_rfc3339")]
+        on: Timestamp,
+    },
+}
+
+/// A date in a finding, written the way every other stamp in this CLI's JSON
+/// is. `Timestamp` is not `Serialize`, and is not made so for one field.
+fn as_rfc3339<S>(at: &Timestamp, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&at.to_rfc3339())
 }
 
 /// One reference the overlay does not answer. Everything about it comes from
@@ -217,6 +251,8 @@ pub struct Finding {
     pub container: Option<String>,
     pub reference: Reference,
     pub missing: Missing,
+    /// The environment's vault, on the findings that were answered against it.
+    pub vault: Option<String>,
 }
 
 impl std::fmt::Display for Finding {
@@ -226,15 +262,33 @@ impl std::fmt::Display for Finding {
         } else {
             format!("{}/{}", self.namespace, self.workload)
         };
-        write!(
-            formatter,
-            "{} {place} {} {} \u{2190} {} {}",
-            self.environment,
-            self.kind,
-            self.reference.source,
-            self.reference.object,
-            self.name(),
-        )
+        write!(formatter, "{} {place} {}", self.environment, self.kind)?;
+        match self.missing {
+            // A provider pulling from another environment's vault is the whole
+            // mistake in one clause, so the line names both vaults.
+            Missing::WrongVault => write!(
+                formatter,
+                " pulls from {}, not {}",
+                self.reference.name,
+                self.vault.as_deref().unwrap_or("its own vault")
+            ),
+            // The vault half reads as the vault, the kind and the object,
+            // because there is no workload in it to point at.
+            Missing::VaultObject | Missing::Expiring { .. } => write!(
+                formatter,
+                " {} {} {}",
+                self.vault.as_deref().unwrap_or("\u{2014}"),
+                self.reference.source,
+                self.name()
+            ),
+            Missing::Object | Missing::Key => write!(
+                formatter,
+                " {} \u{2190} {} {}",
+                self.reference.source,
+                self.reference.object,
+                self.name()
+            ),
+        }
     }
 }
 
@@ -244,6 +298,9 @@ impl Finding {
     fn name(&self) -> String {
         match (self.missing, self.reference.key.as_deref()) {
             (Missing::Key, Some(key)) => format!("{} key {key} missing", self.reference.name),
+            (Missing::Expiring { on }, _) => {
+                format!("{} expires {}", self.reference.name, on.calendar_date())
+            }
             _ => format!("{} missing", self.reference.name),
         }
     }
@@ -352,8 +409,128 @@ impl EnvManifest {
                 });
                 (!held).then_some(Missing::Object)
             }
+            // Only a provider names one, and a provider is answered against
+            // the vault rather than against the overlay.
+            ObjectKind::Vault => None,
         }
     }
+}
+
+/// What one environment's vault holds, by name. The Key Vault tab keeps this
+/// already and the CLI reads it the way `secrets list` does; either way it is
+/// names, kinds and dates, never a value, on the same rule `Secret` keeps in
+/// `src/arm.rs`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VaultNames {
+    /// The vault `[[environments]].vault` names.
+    pub vault: String,
+    pub secrets: Vec<String>,
+    pub keys: Vec<String>,
+    pub certs: Vec<String>,
+    /// The objects near enough their expiry for the Key Vault tab to have
+    /// coloured them, by the date each falls on.
+    pub expiring: Vec<(String, Timestamp)>,
+}
+
+impl VaultNames {
+    /// What one vault holds, out of the listing the Key Vault tab keeps and
+    /// the CLI gets with one read.
+    #[must_use]
+    pub fn from_items(vault: &str, items: &[VaultItem], now: Timestamp) -> Self {
+        let mut names = Self {
+            vault: vault.to_owned(),
+            ..Self::default()
+        };
+        for item in items {
+            match item.kind {
+                ItemKind::Secret => names.secrets.push(item.name.clone()),
+                ItemKind::Key => names.keys.push(item.name.clone()),
+                ItemKind::Certificate => names.certs.push(item.name.clone()),
+            }
+            // The tab's own rule, disabled items included: one that is not in
+            // use is nobody's renewal, which is why its rows are faded whole.
+            if item.enabled
+                && let Some(on) = item.expires
+                && Expiry::of(Some(on), now).is_some()
+            {
+                names.expiring.push((item.name.clone(), on));
+            }
+        }
+        names
+    }
+
+    /// Whether the vault holds one object a provider asks it for: under the
+    /// `objectType` where the provider gives one, and otherwise — an
+    /// `ExternalSecret`'s `remoteRef` never does — as a secret, then a key,
+    /// then a certificate.
+    fn holds(&self, object: &VaultObject) -> bool {
+        let has = |list: &[String]| {
+            list.iter()
+                .any(|held| held.eq_ignore_ascii_case(&object.name))
+        };
+        match object.kind.as_deref() {
+            Some("secret") => has(&self.secrets),
+            Some("key") => has(&self.keys),
+            Some("cert" | "certificate") => has(&self.certs),
+            _ => has(&self.secrets) || has(&self.keys) || has(&self.certs),
+        }
+    }
+
+    /// When one object falls due, where that is soon enough to be worth
+    /// saying.
+    fn expires(&self, name: &str) -> Option<Timestamp> {
+        self.expiring
+            .iter()
+            .find(|(held, _)| held.eq_ignore_ascii_case(name))
+            .map(|(_, on)| *on)
+    }
+}
+
+/// What the environment's own vault does not answer for: the other half of a
+/// missing secret, where the overlay is right and the vault is not, because
+/// the object was made in qa when the feature was built and never in prod.
+///
+/// A provider that names no vault at all is answered against the environment's
+/// own, which is the only vault there is to answer it against.
+fn vault_findings(manifest: &EnvManifest, vault: &VaultNames) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for provider in &manifest.providers {
+        let finding = |reference, missing| Finding {
+            environment: manifest.environment.clone(),
+            namespace: provider.namespace.clone(),
+            workload: provider.name.clone(),
+            kind: provider.kind.clone(),
+            container: None,
+            reference,
+            missing,
+            vault: Some(vault.vault.clone()),
+        };
+        let reference = |name: &str, kind: Option<String>| Reference {
+            source: Source::Vault { kind },
+            object: ObjectKind::Vault,
+            name: name.to_owned(),
+            key: None,
+            optional: false,
+        };
+        // A provider naming another environment's vault is the whole
+        // copy-paste in one line, and everything it asks for would be looked
+        // for in the wrong place, so the objects are left alone.
+        if let Some(named) = &provider.vault
+            && !named.eq_ignore_ascii_case(&vault.vault)
+        {
+            findings.push(finding(reference(named, None), Missing::WrongVault));
+            continue;
+        }
+        for object in &provider.objects {
+            let reference = reference(&object.name, object.kind.clone());
+            if !vault.holds(object) {
+                findings.push(finding(reference, Missing::VaultObject));
+            } else if let Some(on) = vault.expires(&object.name) {
+                findings.push(finding(reference, Missing::Expiring { on }));
+            }
+        }
+    }
+    findings
 }
 
 /// Every ConfigMap and Secret reference one environment makes that its own
@@ -362,7 +539,19 @@ impl EnvManifest {
 /// runs is readable.
 #[must_use]
 pub fn check(manifest: &EnvManifest) -> Vec<Finding> {
-    let mut findings = Vec::new();
+    check_with(manifest, None)
+}
+
+/// [`check`], and — where the environment's vault has been read — every vault
+/// object its providers pull that the vault does not hold, every provider
+/// pulling from the wrong vault, and every object in use that is about to
+/// expire. The vault half is optional because it is the one half that needs a
+/// token: without one the repository still answers for itself.
+#[must_use]
+pub fn check_with(manifest: &EnvManifest, vault: Option<&VaultNames>) -> Vec<Finding> {
+    let mut findings = vault
+        .map(|held| vault_findings(manifest, held))
+        .unwrap_or_default();
     for workload in &manifest.workloads {
         let mut record = |container: Option<&Container>, reference: &Reference| {
             if let Some(missing) = manifest.missing(&workload.namespace, reference) {
@@ -374,6 +563,7 @@ pub fn check(manifest: &EnvManifest) -> Vec<Finding> {
                     container: container.map(|held| held.name.clone()),
                     reference: reference.clone(),
                     missing,
+                    vault: None,
                 });
             }
         };
