@@ -77,7 +77,8 @@ pub enum CommandId {
     NextContainer,
     RestartPod,
     ExecShell,
-    OpenRepo,
+    /// `g`: whatever the row under the cursor points at, worked out per tab.
+    Follow,
     /// The Pipelines tab's verbs.
     RunPipeline,
     CancelRun,
@@ -371,13 +372,6 @@ pub const COMMANDS: &[Command] = &[
         scope: Scope::Tabs(&[TabId::Aks]),
     },
     Command {
-        id: CommandId::OpenRepo,
-        title: "Go to repository",
-        keys: &[key('g')],
-        help: "The Repos tab, on the repository the image or app label names",
-        scope: Scope::Tabs(&[TabId::Aks]),
-    },
-    Command {
         id: CommandId::RunPipeline,
         title: "Run pipeline",
         keys: &[key('t')],
@@ -577,6 +571,13 @@ pub const COMMANDS: &[Command] = &[
         keys: &[key('m')],
         help: "",
         scope: Scope::Tabs(&[TabId::WorkItems]),
+    },
+    Command {
+        id: CommandId::Follow,
+        title: "Go to what this row points at",
+        keys: &[key('g')],
+        help: "Its pull request, run, repository or pod",
+        scope: Scope::Global,
     },
     Command {
         id: CommandId::HistoryBack,
@@ -875,6 +876,15 @@ fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
             TabId::Pipelines => "Open run in browser",
             TabId::Aks => "Open in browser",
             TabId::Acr | TabId::KeyVault => "Open in the Azure portal",
+        },
+        // One key, a different neighbour on each tab, so the palette says
+        // which one it would go to from here.
+        CommandId::Follow => match tab {
+            TabId::WorkItems | TabId::Repos | TabId::Pipelines => "Go to pull request",
+            TabId::PullRequests => "Go to work items",
+            TabId::Aks => "Go to repository",
+            TabId::Acr => "Go to pod",
+            TabId::KeyVault => return command,
         },
         // A registry tag is copied as the reference `docker pull` wants, not
         // as a number.
@@ -1205,7 +1215,6 @@ mod tests {
                 CommandId::NextContainer,
                 CommandId::RestartPod,
                 CommandId::ExecShell,
-                CommandId::OpenRepo,
                 CommandId::CopyId,
                 CommandId::HistoryBack,
                 CommandId::HistoryForward,
@@ -1220,14 +1229,38 @@ mod tests {
         }
     }
 
-    /// The overlays `App` opens over any tab before the screen sees them.
-    const SHARED: [CommandId; 5] = [
+    /// What `App` answers over any tab before the screen sees it: the five
+    /// overlays it opens, and `g`, whose target only `App` can work out —
+    /// the ACR tab's pod lives on another screen.
+    const SHARED: [CommandId; 6] = [
         CommandId::Help,
         CommandId::Palette,
         CommandId::Columns,
         CommandId::DatabaseInfo,
         CommandId::QuickCapture,
+        CommandId::Follow,
     ];
+
+    #[test]
+    fn the_go_to_key_is_worded_for_what_each_tab_would_follow() {
+        let title = |tab| {
+            matching_commands("", true, tab)
+                .into_iter()
+                .find(|command| command.id == CommandId::Follow)
+                .map(|command| command.title)
+        };
+        assert_eq!(title(TabId::WorkItems), Some("Go to pull request"));
+        assert_eq!(title(TabId::Repos), Some("Go to pull request"));
+        assert_eq!(title(TabId::PullRequests), Some("Go to work items"));
+        assert_eq!(title(TabId::Pipelines), Some("Go to pull request"));
+        assert_eq!(title(TabId::Aks), Some("Go to repository"));
+        assert_eq!(title(TabId::Acr), Some("Go to pod"));
+        assert_eq!(
+            title(TabId::KeyVault),
+            Some("Go to what this row points at"),
+            "the one tab with no neighbour keeps the plain wording"
+        );
+    }
 
     #[test]
     fn no_tab_offers_a_command_its_screen_does_not_answer() {

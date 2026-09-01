@@ -163,7 +163,7 @@ impl AksScreen {
     /// told about yet, or any refusal at all after the user asked for a read.
     pub fn set_pods(
         &mut self,
-        shell: &Shell,
+        shell: &mut Shell,
         cluster: &str,
         namespace: Option<&str>,
         pods: Result<Vec<Pod>, String>,
@@ -204,6 +204,9 @@ impl AksScreen {
                 (!repeated).then(|| format!("{cluster}: {message}"))
             }
         };
+        // What the ACR tab matches a tag against, published from the one
+        // place the pods change so the two tabs cannot drift apart.
+        shell.set_pod_images(self.pod_images());
         // The rows the cursor is counted over have moved: it stays on its own
         // pod wherever that now sorts.
         let rows = self.visible_pods(shell);
@@ -212,6 +215,19 @@ impl AksScreen {
             None => self.cursor.clamp(rows.len()),
         }
         toast
+    }
+
+    /// Every container image on the pods read so far, with the pod running
+    /// it, in the order the pods are held.
+    fn pod_images(&self) -> Vec<(String, PodKey)> {
+        self.pods
+            .iter()
+            .flat_map(|pod| {
+                pod.containers
+                    .iter()
+                    .map(|container| (container.image.clone(), pod.key.clone()))
+            })
+            .collect()
     }
 
     /// The pod the cursor is on, by key, so a re-read can find it again
@@ -566,6 +582,8 @@ impl AksScreen {
     pub fn agent_context(&self, shell: &Shell) -> crate::agent_context::AksContext {
         let rows = self.visible_pods(shell);
         crate::agent_context::AksContext {
+            // Where `g` goes from here is `App`'s to work out.
+            follow: None,
             clusters: self
                 .clusters
                 .iter()
@@ -656,7 +674,6 @@ impl AksScreen {
                 self.confirm_restart_prompt(shell);
             }
             CommandId::ExecShell => return self.exec_shell(shell),
-            CommandId::OpenRepo => return self.open_repo(shell),
             CommandId::CopyId => {
                 let Some(row) = self.selected_pod(shell) else {
                     shell.set_error("No pod is selected");
@@ -747,25 +764,6 @@ impl AksScreen {
                 .as_ref()
                 .and_then(|target| target.container.clone()),
         }
-    }
-
-    /// `g`: the Repos tab, on the repository the pod's image or app label
-    /// names. A pod nothing on file matches says what it did offer.
-    fn open_repo(&mut self, shell: &mut Shell) -> AppAction {
-        let Some(row) = self.selected_pod(shell) else {
-            shell.set_error("No pod is selected");
-            return AppAction::None;
-        };
-        if let Some(repo) = row.repo.clone() {
-            return AppAction::Follow(Jump::Repo(repo));
-        }
-        let candidates = row.pod.repo_candidates();
-        shell.set_error(if candidates.is_empty() {
-            format!("{} names no repository", row.pod.key.name)
-        } else {
-            format!("No repository on file is called {}", candidates.join(", "))
-        });
-        AppAction::None
     }
 }
 
@@ -967,6 +965,23 @@ impl Screen for AksScreen {
         self.mode == AksMode::ConfirmRestart
     }
 
+    /// The repository the pod's image or app label names, when one on file
+    /// does.
+    fn follow_target(&self, shell: &Shell) -> Result<(Jump, &'static str), String> {
+        let row = self
+            .selected_pod(shell)
+            .ok_or_else(|| "No pod is selected".to_owned())?;
+        if let Some(repo) = row.repo {
+            return Ok((Jump::Repo(repo), "repository"));
+        }
+        let candidates = row.pod.repo_candidates();
+        Err(if candidates.is_empty() {
+            format!("{} names no repository", row.pod.key.name)
+        } else {
+            format!("No repository on file is called {}", candidates.join(", "))
+        })
+    }
+
     /// The pod under the cursor, which is what `[` comes back to after `g`.
     fn here(&self, shell: &Shell) -> Option<Jump> {
         self.selected_pod(shell).map(|row| Jump::Pod(row.pod.key))
@@ -1060,7 +1075,7 @@ impl Screen for AksScreen {
             AksMode::Search => "←→ cursor  Ctrl-W delete word  Ctrl-U clear  Enter/Esc finish",
             AksMode::ConfirmRestart => "x restart it  Esc leave it",
             AksMode::Browse => {
-                "↑↓/jk move  L logs  D describe  x restart  s shell  g repo  / search  ? help"
+                "↑↓/jk move  L logs  D describe  x restart  s shell  / search  ? help"
             }
         }
     }

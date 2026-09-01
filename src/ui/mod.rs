@@ -67,9 +67,10 @@ use table::{
 pub use theme::{Theme, ThemeChoice, chosen_theme, set_theme, theme};
 use widgets::{
     CLOSE_LABEL, Control, ControlKind, SearchRow, button_row, capture_selectable, dim_behind,
-    paint_hover, paint_selection, register_buttons, register_close_button, render_capture_row,
-    render_control, render_modal_frame, render_query_field, render_scrollbar, render_search_row,
-    render_status_bar, row_on_screen, spinner_frame, wrapped_rows,
+    follow_chip, paint_hover, paint_selection, register_buttons, register_close_button,
+    render_capture_row, render_control, render_modal_frame, render_query_field,
+    render_screen_status_bar, render_scrollbar, render_search_row, row_on_screen, spinner_frame,
+    wrapped_rows,
 };
 
 const WIDE_BREAKPOINT: u16 = 110;
@@ -425,7 +426,7 @@ fn render_content(
 }
 
 fn render_footer(frame: &mut Frame<'_>, screen: &WorkItemsScreen, shell: &Shell, area: Rect) {
-    render_status_bar(frame, shell, area, screen.footer_hint(shell));
+    render_screen_status_bar(frame, screen, shell, area);
 }
 
 /// The layer a modal on the work items screen sits on: the facet menu is a

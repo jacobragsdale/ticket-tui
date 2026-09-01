@@ -452,3 +452,183 @@ fn help_palette_columns_and_database_open_over_every_tab() {
     assert_eq!(app.tab, TabId::PullRequests);
     press(&mut app, KeyCode::Esc);
 }
+
+#[test]
+fn g_goes_from_a_work_item_to_the_pull_request_that_carried_it() {
+    use crate::app::pull_requests::tests::pull_request;
+    use crate::model::{ArtifactKind, ArtifactLink, PrStatus, TicketGraph};
+
+    let mut app = App::new(vec![ticket()]);
+    let key = app.work_items.tickets()[0].key.clone();
+    let link = |kind| ArtifactLink {
+        work_item: key.clone(),
+        kind,
+        name: "Pull Request".to_owned(),
+    };
+    app.shell.set_repos(vec![crate::app::repos::tests::repo(
+        "aaa-111",
+        "ticket-tui",
+        false,
+    )]);
+    app.repos.set_repos(&app.shell);
+    app.shell.set_artifact_labels(
+        vec![
+            (41, "Earlier work".to_owned(), PrStatus::Completed),
+            (42, "Split the files".to_owned(), PrStatus::Active),
+        ],
+        Vec::new(),
+    );
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            artifacts: vec![
+                // The completed one is the newer number, and still loses to
+                // the one that is open.
+                link(ArtifactKind::PullRequest {
+                    repo_id: "aaa-111".into(),
+                    id: 43,
+                }),
+                link(ArtifactKind::PullRequest {
+                    repo_id: "aaa-111".into(),
+                    id: 42,
+                }),
+            ],
+            ..TicketGraph::default()
+        },
+    );
+    let requests = vec![
+        pull_request(42, "Split the files", "Avery", PrStatus::Active),
+        pull_request(43, "Earlier work", "Avery", PrStatus::Completed),
+    ];
+    let shell = &app.shell;
+    app.pull_requests.set_pull_requests(requests, shell);
+    app.shell.set_artifact_labels(
+        vec![
+            (43, "Earlier work".to_owned(), PrStatus::Completed),
+            (42, "Split the files".to_owned(), PrStatus::Active),
+        ],
+        Vec::new(),
+    );
+    render_text(120, 40, &mut app);
+
+    press(&mut app, KeyCode::Char('g'));
+    assert_eq!(app.tab, TabId::PullRequests);
+    assert_eq!(
+        app.pull_requests
+            .selected(&app.shell)
+            .map(|row| row.request.id),
+        Some(42),
+        "the one still open, not the newer one that closed"
+    );
+
+    // `[` comes back to the work item, which is where the walk started.
+    press(&mut app, KeyCode::Char('['));
+    assert_eq!(app.tab, TabId::WorkItems);
+    assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_001);
+}
+
+#[test]
+fn a_work_item_with_nothing_linked_says_so_rather_than_going_nowhere() {
+    let mut app = App::new(vec![ticket()]);
+    render_text(120, 40, &mut app);
+
+    press(&mut app, KeyCode::Char('g'));
+    assert_eq!(app.tab, TabId::WorkItems);
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some("#10001 has no linked pull request or build")
+    );
+}
+
+#[test]
+fn the_history_records_every_tab_it_is_left_from_rather_than_the_cursor_moving() {
+    let mut app = crate::app::pull_requests::tests::pull_requests_app();
+    app.repos.set_repos(&app.shell);
+    app.select_tab(TabId::PullRequests);
+    render_text(160, 40, &mut app);
+
+    for _ in 0..5 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert!(
+        app.shell.history().is_empty(),
+        "walking the rows is not going anywhere"
+    );
+    let settled = app
+        .pull_requests
+        .selected(&app.shell)
+        .expect("a row under the cursor")
+        .request
+        .id;
+
+    press(&mut app, KeyCode::Char('2'));
+    assert_eq!(app.tab, TabId::Repos);
+    assert_eq!(
+        app.shell.history().len(),
+        2,
+        "the row it stopped on, then the row it arrived at"
+    );
+
+    press(&mut app, KeyCode::Char('['));
+    assert_eq!(app.tab, TabId::PullRequests);
+    assert_eq!(
+        app.pull_requests
+            .selected(&app.shell)
+            .map(|row| row.request.id),
+        Some(settled),
+        "back on the pull request the cursor was left on"
+    );
+
+    press(&mut app, KeyCode::Char(']'));
+    assert_eq!(app.tab, TabId::Repos, "and forward again");
+}
+
+#[test]
+fn a_reloaded_session_still_walks_back_through_a_pull_request_and_a_pod() {
+    use crate::aks::tests::{cluster, pod};
+
+    let build = || {
+        let mut app = crate::app::pull_requests::tests::pull_requests_app();
+        app.repos.set_repos(&app.shell);
+        app.aks.set_clusters(vec![cluster("qa", &["orders"])]);
+        app.aks.set_pods(
+            &mut app.shell,
+            "qa",
+            Some("orders"),
+            Ok(vec![pod(
+                "qa",
+                "orders",
+                "orders-api-7d9f5b-abc12",
+                "Running",
+            )]),
+        );
+        app
+    };
+
+    let mut app = build();
+    app.select_tab(TabId::PullRequests);
+    render_text(160, 40, &mut app);
+    press(&mut app, KeyCode::Char('5'));
+    assert_eq!(app.tab, TabId::Aks);
+    let session = app.snapshot_session();
+
+    let mut reopened = build();
+    reopened.restore_session(session);
+    assert_eq!(reopened.tab, TabId::Aks);
+
+    press(&mut reopened, KeyCode::Char('['));
+    assert_eq!(
+        reopened.tab,
+        TabId::PullRequests,
+        "the walk is on file, so the next run can take it"
+    );
+    press(&mut reopened, KeyCode::Char(']'));
+    assert_eq!(reopened.tab, TabId::Aks);
+    assert_eq!(
+        reopened
+            .aks
+            .selected_pod(&reopened.shell)
+            .map(|row| row.pod.key.name),
+        Some("orders-api-7d9f5b-abc12".to_owned())
+    );
+}

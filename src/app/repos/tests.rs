@@ -133,6 +133,14 @@ fn press(app: &mut App, code: crossterm::event::KeyCode) -> crate::app::AppActio
     ))
 }
 
+/// `g`, which unlike this tab's own keys carries no modifier.
+fn go(app: &mut App) -> crate::app::AppAction {
+    app.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('g'),
+        crossterm::event::KeyModifiers::NONE,
+    ))
+}
+
 /// The row order is by name: archived, home-server, skillbook, ticket-tui.
 fn focus(app: &mut App, name: &str) {
     let index = app
@@ -407,5 +415,48 @@ fn the_count_columns_add_up_what_the_other_tabs_hold() {
             .filter(|row| row.repo.name != "ticket-tui")
             .all(|row| row.pull_requests == 0 && row.pipelines == 0),
         "and nothing is credited to the others"
+    );
+}
+
+#[test]
+fn g_goes_to_the_newest_pull_request_open_on_the_repository() {
+    use crate::app::pull_requests::tests::pull_request;
+    use crate::app::{Jump, Screen};
+    use crate::model::PrStatus;
+
+    let mut app = repos_app();
+    focus(&mut app, "ticket-tui");
+    assert_eq!(
+        Screen::follow_target(&app.repos, &app.shell),
+        Ok((
+            Jump::PullRequest {
+                repo: "ticket-tui".to_owned(),
+                id: 12,
+            },
+            "pull request"
+        )),
+        "two are open on it; the newer one is where g goes"
+    );
+
+    let requests = vec![pull_request(12, "Tab bar", "Avery", PrStatus::Active)];
+    let shell = &app.shell;
+    app.pull_requests.set_pull_requests(requests, shell);
+    go(&mut app);
+    assert_eq!(app.tab, TabId::PullRequests);
+    assert_eq!(
+        app.pull_requests
+            .selected(&app.shell)
+            .map(|row| row.request.id),
+        Some(12)
+    );
+
+    // Nothing is open on this one, so the key says so and stays put.
+    app.select_tab(TabId::Repos);
+    focus(&mut app, "skillbook");
+    assert_eq!(go(&mut app), crate::app::AppAction::None);
+    assert_eq!(app.tab, TabId::Repos);
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some("No open pull request on skillbook")
     );
 }

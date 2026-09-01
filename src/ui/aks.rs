@@ -23,7 +23,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, screen: &mut AksScreen, shell: &mut 
     .split(area);
     render_search(frame, screen, shell, sections[0]);
     render_content(frame, screen, shell, sections[1]);
-    render_status_bar(frame, shell, sections[2], screen.footer_hint(shell));
+    render_screen_status_bar(frame, screen, shell, sections[2]);
     if screen.mode == AksMode::ConfirmRestart {
         // The modal takes the whole pointer: a click anywhere but on it
         // closes it, and nothing underneath — least of all the details
@@ -452,6 +452,12 @@ fn render_pod_details(
         field_line("Restarts", row.pod.restarts.to_string()),
         Line::from(""),
     ];
+    // The chip that stands for `g`, in the header, where the pane names what
+    // this row goes to.
+    let follow = follow_chip(screen, shell);
+    if let Some((line, _)) = follow.clone() {
+        lines.insert(2, line);
+    }
     // The buttons stand for the keys they name, so clicking one is the key.
     let buttons: [(&str, PointerTarget); 4] = [
         (" Logs ", PointerTarget::RunCommand(CommandId::ShowLogs)),
@@ -548,6 +554,17 @@ fn render_pod_details(
     let (rows, _) = wrapped_rows(&lines, inner.width);
     let containers = row.pod.containers.len();
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    if let Some((_, jump)) = follow
+        && let Some(y) = row_on_screen(inner, &rows, 2, 0)
+    {
+        shell.hit_regions.push(region(
+            Rect::new(inner.x, y, inner.width, 1),
+            PointerTarget::Follow(jump),
+            PointerLayer::Base,
+            None,
+            None,
+        ));
+    }
     if let Some(y) = row_on_screen(inner, &rows, buttons_index, 0) {
         register_buttons(shell, inner, y, PointerLayer::Base, &buttons);
     }

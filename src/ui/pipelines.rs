@@ -636,7 +636,7 @@ fn render_run_details(
 }
 
 fn render_footer(frame: &mut Frame<'_>, screen: &PipelinesScreen, shell: &Shell, area: Rect) {
-    render_status_bar(frame, shell, area, screen.footer_hint(shell));
+    render_screen_status_bar(frame, screen, shell, area);
 }
 
 /// The timeline as a tree: stages, the jobs under them, the tasks under those,

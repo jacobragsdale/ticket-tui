@@ -695,3 +695,16 @@ fn items_with_no_date_sort_last_whichever_way_the_column_is_turned() {
     assert_eq!(one_way[0], other_way[1], "{one_way:?} vs {other_way:?}");
     assert_eq!(one_way[1], other_way[0]);
 }
+
+#[test]
+fn g_has_nowhere_to_go_from_a_vault_and_says_so() {
+    let mut app = key_vault_app();
+    app.select_tab(TabId::KeyVault);
+
+    assert_eq!(press(&mut app, KeyCode::Char('g')), AppAction::None);
+    assert_eq!(app.tab, TabId::KeyVault);
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some("Nothing to go to from here")
+    );
+}

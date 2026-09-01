@@ -401,6 +401,12 @@ fn render_details(
         }
         lines.push(Line::from(""));
     }
+    // The chip that stands for `g`, in the header, where the pane names what
+    // this row goes to.
+    let follow = follow_chip(screen, shell);
+    if let Some((line, _)) = follow.clone() {
+        lines.insert(2, line);
+    }
     lines.push(section_line("Reviewers", inner.width));
     if row.request.reviewers.is_empty() {
         lines.push(Line::styled(
@@ -543,13 +549,24 @@ fn render_details(
         }
     }
     // The buttons stand for the keys they name, so clicking one is the key.
+    if let Some((_, jump)) = follow
+        && let Some(y) = row_on_screen(inner, &rows, 2, offset)
+    {
+        shell.hit_regions.push(region(
+            Rect::new(inner.x, y, inner.width, 1),
+            PointerTarget::Follow(jump),
+            PointerLayer::Base,
+            None,
+            None,
+        ));
+    }
     if let Some(y) = row_on_screen(inner, &rows, buttons_index, offset) {
         register_buttons(shell, inner, y, PointerLayer::Base, &buttons);
     }
 }
 
 fn render_footer(frame: &mut Frame<'_>, screen: &PullRequestsScreen, shell: &Shell, area: Rect) {
-    render_status_bar(frame, shell, area, screen.footer_hint(shell));
+    render_screen_status_bar(frame, screen, shell, area);
 }
 
 const fn status_word(status: PrStatus) -> &'static str {

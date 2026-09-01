@@ -666,6 +666,8 @@ impl AcrScreen {
     pub fn agent_context(&self) -> crate::agent_context::AcrContext {
         let visible_rows = self.row_count();
         crate::agent_context::AcrContext {
+            // Where `g` goes from here is `App`'s to work out.
+            follow: None,
             level: match self.level {
                 Level::Registries => "registries",
                 Level::Repositories(_) => "repositories",
@@ -916,6 +918,31 @@ impl Screen for AcrScreen {
             ScrollSurface::Details => &mut self.details,
             _ => &mut self.cursor_mut().scroll,
         }
+    }
+
+    /// The pod running the tag the details pane is on, out of the clusters
+    /// the AKS tab has already read. Nothing here asks a cluster for more:
+    /// the tag is one `y` away, and a read nobody asked for is a read.
+    fn follow_target(&self, shell: &Shell) -> Result<(Jump, &'static str), String> {
+        let registry = self
+            .selected_registry()
+            .ok_or_else(|| "No registry is selected".to_owned())?;
+        let repository = self
+            .selected_repository()
+            .ok_or_else(|| "Open a registry first".to_owned())?;
+        let tag = self
+            .selected_tag()
+            .ok_or_else(|| format!("No tag is selected in {}", repository.repository.name))?;
+        let server = registry.registry.login_server;
+        let name = repository.repository.name;
+        let references = [
+            format!("{server}/{name}:{}", tag.name),
+            format!("{server}/{name}@{}", tag.digest),
+        ];
+        shell
+            .pod_running(&references)
+            .map(|key| (Jump::Pod(key.clone()), "pod"))
+            .ok_or_else(|| format!("No pod runs {name}:{}", tag.name))
     }
 
     /// A repository when the tab is showing one, the registry itself

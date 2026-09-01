@@ -186,3 +186,37 @@ fn the_buttons_under_the_details_pane_are_the_keys_they_name() {
         "and asks once more, the way the key does"
     );
 }
+
+#[test]
+fn the_details_header_carries_the_chip_g_would_follow_and_the_footer_names_it() {
+    let mut app = pull_requests_app();
+    tab_text(160, 50, &mut app);
+    app.pull_requests.cursor.focus(2);
+    let text = render_text(160, 50, &mut app);
+
+    assert!(text.contains("[Go to work items]"), "{text}");
+    assert!(
+        text.contains("g work items"),
+        "and the footer names the key: {text}"
+    );
+
+    let (y, x) = text
+        .lines()
+        .enumerate()
+        .find_map(|(y, line)| {
+            line.find("[Go to work items]")
+                .map(|x| (u16::try_from(y).unwrap(), u16::try_from(x).unwrap()))
+        })
+        .expect("the chip is on screen");
+    click(&mut app, x + 2, y);
+    assert_eq!(app.tab, TabId::WorkItems, "the chip follows on a click");
+    assert_eq!(app.work_items.query(), "id:10001");
+
+    // A request that carries nothing has no chip, and the footer does not
+    // offer the key either.
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(1);
+    let text = render_text(160, 50, &mut app);
+    assert!(!text.contains("[Go to"), "{text}");
+    assert!(!text.contains("  g "), "{text}");
+}

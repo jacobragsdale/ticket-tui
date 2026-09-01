@@ -77,10 +77,11 @@ offline, browsing whatever the database already holds.
 | `?` | The in-app help, generated from the same table the keys are bound in |
 | `L` / `D` | On AKS: tail the selected pod's log, or `kubectl describe` it |
 | `x` / `s` | On AKS: restart the pod after a confirm, or open a shell in it |
-| `g` | On AKS: jump to the repository the pod's image names |
+| `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a pod's repository, a tag's pod |
 | `Enter` / `h` | On ACR and Key Vault: into the registry or vault under the cursor, and back out |
 | `y` / `D` | On ACR: copy the pull reference, or the tag's digest |
 | `R` / `Y` | On Key Vault: show a secret's value for one minute, or copy it while it is up |
+| `[` / `]` | Back and forward through everywhere you have been, across tabs |
 | `q` | Quit |
 
 The mouse works throughout: click a field to edit it, drag the divider, scroll

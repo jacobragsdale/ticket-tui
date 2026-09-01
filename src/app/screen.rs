@@ -313,6 +313,14 @@ pub trait Screen {
         None
     }
 
+    /// Where `g` goes from the row under the cursor, and the noun the footer
+    /// and the details pane's chip call it. `Err` is what the status line
+    /// says instead, which is why this is not an `Option`: a row with nowhere
+    /// to go says what it looked for.
+    fn follow_target(&self, _shell: &Shell) -> Result<(Jump, &'static str), String> {
+        Err("Nothing to go to from here".to_owned())
+    }
+
     /// Settles on whatever a jump points at, and says whether this screen had
     /// it. A screen that answers `false` is not switched to, and the shell
     /// says the target is not on file.

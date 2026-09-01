@@ -46,6 +46,8 @@ impl WorkItemsScreen {
             .map(|ticket| self.ticket_context(ticket))
             .collect();
         WorkItemsContext {
+            // Where `g` goes from here is `App`'s to work out.
+            follow: None,
             mode: mode_name(self.mode).into(),
             focus: focus_name(shell.focus).into(),
             screen: if shell.narrow_details {

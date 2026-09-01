@@ -510,3 +510,31 @@ fn a_pull_keeps_the_cursor_on_the_same_pull_request_and_a_jump_beats_the_query()
         "the query is cleared rather than the reference refused"
     );
 }
+
+#[test]
+fn g_goes_to_the_work_items_the_request_carries_and_says_when_it_carries_none() {
+    use crate::app::{Jump, Screen};
+
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    // !11 closes one work item; the rows are newest first, so it is last.
+    app.pull_requests.cursor.focus(2);
+
+    assert_eq!(
+        Screen::follow_target(&app.pull_requests, &app.shell),
+        Ok((Jump::WorkItems(vec![10_001]), "work items"))
+    );
+    assert_eq!(press(&mut app, KeyCode::Char('g')), AppAction::None);
+    assert_eq!(app.tab, TabId::WorkItems, "and the key lands there");
+    assert_eq!(app.work_items.query(), "id:10001");
+
+    // !12 carries nothing and has no build behind it either.
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(1);
+    assert_eq!(press(&mut app, KeyCode::Char('g')), AppAction::None);
+    assert_eq!(app.tab, TabId::PullRequests, "nowhere to go");
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some("!12 carries no work items")
+    );
+}

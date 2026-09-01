@@ -267,6 +267,8 @@ impl ReposScreen {
     pub fn agent_context(&self, shell: &Shell) -> crate::agent_context::ReposContext {
         let rows = self.visible(shell);
         crate::agent_context::ReposContext {
+            // Where `g` goes from here is `App`'s to work out.
+            follow: None,
             selected: rows.get(self.cursor.index).map(repo_context),
             visible_rows: rows.iter().map(repo_context).collect(),
             workspace: shell
@@ -646,6 +648,29 @@ impl Screen for ReposScreen {
             ScrollSurface::Details => &mut self.details,
             _ => &mut self.cursor.scroll,
         }
+    }
+
+    /// The newest pull request open on the repository. A closed one is not
+    /// held here: `set_related` only keeps what is still open.
+    fn follow_target(&self, shell: &Shell) -> Result<(Jump, &'static str), String> {
+        let row = self
+            .selected(shell)
+            .ok_or_else(|| "No repository is selected".to_owned())?;
+        self.pull_requests
+            .iter()
+            .filter(|(repo_id, _, _)| *repo_id == row.repo.id)
+            .map(|(_, id, _)| *id)
+            .max()
+            .map(|id| {
+                (
+                    Jump::PullRequest {
+                        repo: row.repo.name.clone(),
+                        id,
+                    },
+                    "pull request",
+                )
+            })
+            .ok_or_else(|| format!("No open pull request on {}", row.repo.name))
     }
 
     fn here(&self, shell: &Shell) -> Option<Jump> {
