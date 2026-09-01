@@ -212,13 +212,17 @@ fn mark(request: &PullRequest, me: Option<&str>) -> PrMark {
 }
 
 /// The first reviewer whose vote is not what it was, as a headline. A reviewer
-/// who has only just been added is not a vote until they cast one.
+/// who was not there last time counts from no vote: added with nothing cast
+/// is not news, added with an approval in the same step — which is how
+/// `az repos pr set-vote` lands one — is the approval.
 fn changed_vote(was: &PrMark, request: &PullRequest) -> Option<String> {
     let reviewer = request.reviewers.iter().find(|reviewer| {
-        was.votes
+        let before = was
+            .votes
             .iter()
             .find(|(id, _)| *id == reviewer.id)
-            .is_some_and(|(_, vote)| *vote != reviewer.vote)
+            .map_or(0, |(_, vote)| *vote);
+        before != reviewer.vote
     })?;
     let id = request.id;
     let who = &reviewer.display_name;
@@ -454,6 +458,26 @@ mod tests {
         let (again, news) = pull_request_news(Some(&marks), &requests, Some("Dana Ali"));
         assert!(news.is_empty(), "nothing moved");
         assert_eq!(again, marks);
+    }
+
+    #[test]
+    fn a_reviewer_added_with_a_vote_in_one_step_is_that_vote_and_one_added_without_is_nothing() {
+        let before = vec![pull_request("Jacob", Vec::new())];
+        let (marks, _) = pull_request_news(None, &before, Some("Jacob"));
+
+        let quiet = vec![pull_request("Jacob", vec![reviewer("d", "Dana Ali", 0)])];
+        let (marks, news) = pull_request_news(Some(&marks), &quiet, Some("Jacob"));
+        assert!(news.is_empty(), "added, nothing cast: {news:?}");
+
+        let voted = vec![pull_request("Jacob", vec![reviewer("e", "Eli Park", 10)])];
+        let (_, news) = pull_request_news(Some(&marks), &voted, Some("Jacob"));
+        assert_eq!(
+            news,
+            [(
+                "!812 approved by Eli Park".to_owned(),
+                "Tidy the watcher".to_owned()
+            )]
+        );
     }
 
     #[test]
