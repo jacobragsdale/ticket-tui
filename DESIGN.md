@@ -2003,7 +2003,7 @@ ticket-tui sync [--full]
 ticket-tui show <id> [--json]
 ticket-tui list [--query '<filter>'] [--json]
 ticket-tui edit <id> [--state S] [--assignee A] [--priority N] [--iteration I] [--area A] [--title T] [--tags a,b] [--description-file F]
-ticket-tui comment <id> "text"
+ticket-tui comment <id> ["text" | -]
 ticket-tui create --type Issue --title T [--parent ID] [--iteration I] [--assignee A] [--priority N] [--tags a,b]
 ticket-tui repos list [--query '<filter>'] [--json]
 ticket-tui repos show <name> [--json]
@@ -2013,7 +2013,7 @@ ticket-tui prs vote <id> approve|suggest|wait|reject|none
 ticket-tui prs complete <id> [--strategy squash|merge|rebase] [--keep-source] [--no-transition]
 ticket-tui prs abandon <id>
 ticket-tui prs autocomplete <id> on|off
-ticket-tui prs comment <id> "text"
+ticket-tui prs comment <id> ["text" | -]
 ticket-tui pipelines [--json]
 ticket-tui runs list [--pipeline NAME] [--query '<filter>'] [--json]
 ticket-tui runs show <id> [--json]
@@ -2081,6 +2081,26 @@ refused rather than overwritten — run `ticket-tui sync` and try again.
 value takes the work item off whoever holds it; `--tags` replaces the tag list;
 `--description-file` reads Markdown and writes the HTML Azure DevOps stores,
 the same conversion the Actions menu's description editor makes.
+
+`comment` takes its body as an argument or down a pipe, and `prs comment` the
+same way. `-` reads standard input to end of file, which is also what leaving
+the body out does when standard input is not a terminal; leaving it out **at** a
+terminal is a usage error naming both forms rather than a wait for input nobody
+is going to type.
+
+```console
+$ cargo test 2>&1 | tail -30 | ticket-tui comment 642 -
+#642 comment 91 posted
+```
+
+A body that came down a pipe is program output, so it is posted as a fenced
+code block — `<pre>` on a work item, a ` ``` ` fence on a pull-request thread,
+which is what each API stores — and its columns line up in the portal and in
+the TUI's own comment view. A body typed as an argument is a sentence and stays
+plain text, as it always has. The trailing newline a pipe carries comes off; the
+tabs a test runner lines its output up with do not. Over 64 kB the post stops
+and says the size — `that is a log, not a comment: 212 kB. Pipe it through
+tail` — because truncating silently would keep the half that does not matter.
 
 `repos` and `prs` are the Repos and Pull requests tabs without the tab. Both
 reads answer from the database and take the tab's own filter grammar —

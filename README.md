@@ -156,6 +156,16 @@ can. The vault commands print names, dates and whether a thing is enabled;
 secret's value, raw, to stdout — so run it deliberately and keep what it prints
 out of anything you save.
 
+`comment` takes its body down a pipe, so the tail of a test run reaches a work
+item — or a pull request — without going through the clipboard:
+
+```console
+cargo test 2>&1 | tail -30 | ticket-tui comment 642 -
+```
+
+A piped body is posted as a code block, so its columns line up in the portal
+and in the TUI.
+
 ## More
 
 - [DESIGN.md](DESIGN.md) — how all of it works, in full: the sync protocol, the
