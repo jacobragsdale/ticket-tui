@@ -223,6 +223,16 @@ impl ArmWatcher {
                 .find(|held| held.name == *name)
                 .cloned()
             else {
+                // A vault the inventory does not hold is answered rather than
+                // waited on: the board names its vaults from config.toml, and
+                // a name the subscription lacks would otherwise hold the focus
+                // for ever, starving every vault behind it.
+                let event = ArmEvent::Items {
+                    vault: name.clone(),
+                    items: Err(format!("{name} is not in this subscription")),
+                };
+                self.read.push(focus);
+                self.send(event);
                 return;
             };
             self.read.push(focus);

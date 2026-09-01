@@ -518,6 +518,7 @@ impl App {
             Jump::Pod(_) => TabId::Aks,
             Jump::Registry(_) | Jump::Repository { .. } => TabId::Acr,
             Jump::Vault(_) | Jump::VaultItem { .. } => TabId::KeyVault,
+            Jump::Service { .. } => TabId::Environments,
         };
         let previous = self.tab;
         self.select_tab(tab);

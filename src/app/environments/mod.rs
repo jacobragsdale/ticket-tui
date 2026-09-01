@@ -19,7 +19,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 
 use super::{AppAction, Focus, ListCursor, Screen, Shell, TabId};
-use crate::columns::{ColumnId, ColumnLayout, TableLayout};
+use crate::columns::{ColumnLayout, TableLayout};
 use crate::command::{CommandId, command_for_key};
 use crate::config::Environment;
 use crate::filter::{MatchContext, ParsedQuery, parse_query};
@@ -61,6 +61,8 @@ pub enum DiffLineKind {
     Section,
     /// One thing the promotion would do.
     Entry,
+    /// The pod running it, from the AKS tab: a fact about now, not a change.
+    Pod,
     /// Something the environment under the cursor is missing.
     Missing,
     /// A word about why there is nothing more to say.
@@ -166,7 +168,9 @@ impl EnvironmentsScreen {
             self.manifests.clear();
             self.errors.clear();
             self.findings.clear();
-            self.pending.clear();
+            // `pending` is kept: a render still out for the old clone has to
+            // land before the new one is asked for, or its answer would be
+            // mistaken for the new clone's.
             self.stale = deployment.is_some();
         }
         self.deployment = deployment;
@@ -415,6 +419,9 @@ impl EnvironmentsScreen {
     }
 
     /// What one environment says about one service.
+    // ponytail: one namespace speaks for a name — the first in namespace order
+    // gives the tag and the diff — while ✗N sums every namespace's findings;
+    // per-namespace rows if a cluster ever holds one service more than once.
     fn cell(&self, environment: &Environment, service: &str) -> EnvCell {
         let Some(manifest) = self.manifest(&environment.name) else {
             return EnvCell::default();
@@ -722,9 +729,16 @@ impl EnvironmentsScreen {
             .iter()
             .map(|container| container.image.clone())
             .collect();
-        if let Some(key) = shell.pod_running(&images) {
+        // The environment's own cluster, when the file names one: a qa pod on
+        // the same tag is not what prod is running.
+        let cluster = self
+            .environments()
+            .iter()
+            .find(|held| held.name == manifest.environment)
+            .and_then(|held| held.cluster.as_deref());
+        if let Some(key) = shell.pod_running(&images, cluster) {
             lines.push(DiffLine::going(
-                DiffLineKind::Entry,
+                DiffLineKind::Pod,
                 format!("running as {}/{}", key.namespace, key.name),
                 Some(Jump::Pod(key.clone())),
             ));
@@ -764,26 +778,29 @@ impl EnvironmentsScreen {
             environments: self
                 .environments()
                 .iter()
-                .enumerate()
-                .map(
-                    |(index, environment)| crate::agent_context::EnvironmentContext {
-                        name: environment.name.clone(),
-                        vault: environment.vault.clone(),
-                        overlays: environment.overlays.clone(),
-                        rendered: self.manifest(&environment.name).is_some(),
-                        error: self.error(&environment.name).map(str::to_owned),
-                        findings: rows
-                            .iter()
-                            .filter_map(|row| row.cells.get(index))
-                            .map(|cell| cell.findings)
-                            .sum(),
-                        expiring: rows
-                            .iter()
-                            .filter_map(|row| row.cells.get(index))
-                            .map(|cell| cell.expiring)
-                            .sum(),
-                    },
-                )
+                .map(|environment| crate::agent_context::EnvironmentContext {
+                    name: environment.name.clone(),
+                    vault: environment.vault.clone(),
+                    overlays: environment.overlays.clone(),
+                    rendered: self.manifest(&environment.name).is_some(),
+                    error: self.error(&environment.name).map(str::to_owned),
+                    findings: self
+                        .findings
+                        .iter()
+                        .filter(|finding| {
+                            finding.environment == environment.name
+                                && !matches!(finding.missing, Missing::Expiring { .. })
+                        })
+                        .count(),
+                    expiring: self
+                        .findings
+                        .iter()
+                        .filter(|finding| {
+                            finding.environment == environment.name
+                                && matches!(finding.missing, Missing::Expiring { .. })
+                        })
+                        .count(),
+                })
                 .collect(),
             selected_service: selected.map(|row| row.workload.clone()),
             selected_environment: self.target().map(|environment| environment.name.clone()),
@@ -821,6 +838,18 @@ impl EnvironmentsScreen {
                 return AppAction::Arm(crate::arm_watch::ArmRequest::Refresh);
             }
             CommandId::Open => return self.open_in_browser(shell),
+            CommandId::CopyId => {
+                return match self.selected() {
+                    Some(row) => AppAction::Copy {
+                        text: row.workload,
+                        content: crate::app::CopiedContent::Id,
+                    },
+                    None => {
+                        shell.set_error("Nothing here to copy");
+                        AppAction::None
+                    }
+                };
+            }
             CommandId::HistoryBack => return AppAction::HistoryBack,
             CommandId::HistoryForward => return AppAction::HistoryForward,
             CommandId::Quit => shell.should_quit = true,
@@ -1097,6 +1126,42 @@ impl Screen for EnvironmentsScreen {
         }
     }
 
+    /// The service under the cursor in the environment under the column
+    /// cursor, which is what `[` comes back to after `g` has left the board.
+    fn here(&self, _shell: &Shell) -> Option<Jump> {
+        let row = self.selected()?;
+        Some(Jump::Service {
+            environment: self.target()?.name.clone(),
+            service: row.workload,
+        })
+    }
+
+    fn select(&mut self, _shell: &mut Shell, jump: &Jump) -> bool {
+        let Jump::Service {
+            environment,
+            service,
+        } = jump
+        else {
+            return false;
+        };
+        let Some(index) = self
+            .visible()
+            .iter()
+            .position(|row| row.workload == *service)
+        else {
+            return false;
+        };
+        self.cursor.focus(index);
+        if let Some(column) = self
+            .environments()
+            .iter()
+            .position(|held| held.name == *environment)
+        {
+            self.column = column;
+        }
+        true
+    }
+
     /// Where the line under the details cursor points: a run, a vault object,
     /// or the pod running it. The board's rows are services rather than things
     /// another tab holds, so the pane is where a jump comes from.
@@ -1133,7 +1198,6 @@ impl Screen for EnvironmentsScreen {
     fn snapshot(&self) -> TabSession {
         TabSession {
             query: self.query.text().to_owned(),
-            sort_field: EnvColumn::Service.key().to_owned(),
             columns: self.layout.to_session_columns(),
             ..TabSession::default()
         }

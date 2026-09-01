@@ -1207,8 +1207,9 @@ shorten, and then go altogether leaving the digits, as the terminal narrows, so
 every tab stays on the bar and stays clickable at any width. Each
 screen keeps its own query, cursor and scroll while another is showing, and a
 tab wears a badge after its name when it has something waiting.
-[`ticket-tui status`](#status-the-tab-badges-outside-the-app) prints those same
-badges as one line, for a pane that is not this one.
+[`ticket-tui status`](#status-the-tab-badges-outside-the-app) prints the ones
+the database and the context file hold as one line, for a pane that is not
+this one — the board's `✗` is not among them.
 
 The first four read the database the sync worker fills; the last four read
 nothing of the sort. AKS reads clusters through `kubectl`, ACR and Key Vault read
@@ -1380,7 +1381,11 @@ Secret an overlay never fills points at the vault the environment pulls from,
 one naming a vault object points at the object itself, and both follow on a
 click. The table's `Pre-flight` column carries `✓`,
 `✗N`, the spinner, `!` for a pre-flight that could not look at all, and
-nothing for a pull request on any other repository.
+nothing for a pull request on any other repository. `✗N` counts what the merge
+would leave missing; a vault object in use that is about to lapse is a `◇`
+line in the pane and not a count, the board's own rule. The vault half is
+the listing tab 7 held when the flight left: a vault read after that reaches
+the pane on `r`.
 
 **It never blocks.** A pull request can still be approved or completed with
 findings: the pane says what will be missing and the vote is the reviewer's.
@@ -1831,8 +1836,12 @@ anything on tab `1`.
 | `R` (Key Vault) | Reveal the selected secret's value: on this screen, for one minute, nowhere else |
 | `Y` (Key Vault) | Copy the revealed value, and only while it is showing |
 | `y` (Key Vault) | Copy the item's name |
-| `o` (ACR, Key Vault) | Open the registry or the vault in the Azure portal — the resource is what the portal has a page for, whichever level you are on |
-| `r` (AKS, ACR, Key Vault) | Re-read that tab's own source rather than pulling from Azure DevOps |
+| `h` / `l` (Environments) | Move the environment cursor: the promotion pane reads from the column to the left into the one under it |
+| `F` (Environments) | Only the services with a finding |
+| `Tab` (Environments) | Focus the promotion pane, where `j`/`k` walk its lines and `g` follows the one under the cursor |
+| `y` (Environments) | Copy the service's name |
+| `o` (ACR, Key Vault, Environments) | Open the registry, the vault or the deployment repository in the portal — the resource is what the portal has a page for, whichever level you are on |
+| `r` (AKS, ACR, Key Vault, Environments) | Re-read that tab's own source rather than pulling from Azure DevOps — on Environments, render the overlays again and ask for the vaults afresh |
 | `i` | Show database path, row counts, hidden finished rows, and sync freshness |
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |

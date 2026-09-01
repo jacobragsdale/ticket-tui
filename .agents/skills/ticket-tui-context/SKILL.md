@@ -296,7 +296,7 @@ Interpreting what comes back:
   not implied by their looking at it.
 - **`environments.reason`** means tab `8` has nothing to draw and says where it
   looked: no `[deployment]`, no `[[environments]]`, or no clone here. The board
-  is rendered on focus, on `r`, and after a `git pull` of that clone, never on
+  is rendered when the tab is first opened, on `r`, and after a `git pull` of that clone, never on
   a timer, so it is as current as the last render.
 
 Field-level semantics, including exactly when each `sync` field moves:

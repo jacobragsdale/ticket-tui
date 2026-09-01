@@ -1018,7 +1018,7 @@ fn short_sha(sha: &str) -> String {
 /// A section heading drawn as a rule across the pane — `── Planning ────` —
 /// so a heading is told from a pane title and from a bold field label by its
 /// shape rather than by its colour, which is what `NO_COLOR` leaves.
-pub(super) fn section_line(title: &'static str, width: u16) -> Line<'static> {
+pub(super) fn section_line(title: &str, width: u16) -> Line<'static> {
     let rule = Style::default().fg(theme().header);
     let head = "── ";
     let tail = usize::from(width)
@@ -1027,7 +1027,7 @@ pub(super) fn section_line(title: &'static str, width: u16) -> Line<'static> {
         .saturating_sub(1);
     Line::from(vec![
         Span::styled(head, rule),
-        Span::styled(title, rule.add_modifier(Modifier::BOLD)),
+        Span::styled(title.to_owned(), rule.add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {}", "─".repeat(tail)), rule),
     ])
 }

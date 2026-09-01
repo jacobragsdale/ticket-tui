@@ -940,7 +940,7 @@ impl Screen for AcrScreen {
             format!("{server}/{name}@{}", tag.digest),
         ];
         shell
-            .pod_running(&references)
+            .pod_running(&references, None)
             .map(|key| (Jump::Pod(key.clone()), "pod"))
             .ok_or_else(|| format!("No pod runs {name}:{}", tag.name))
     }

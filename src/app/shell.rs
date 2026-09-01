@@ -374,10 +374,17 @@ impl Shell {
     /// The first pod whose image is one of these references, if the clusters
     /// read so far hold one.
     #[must_use]
-    pub fn pod_running(&self, references: &[String]) -> Option<&crate::aks::PodKey> {
+    pub fn pod_running(
+        &self,
+        references: &[String],
+        cluster: Option<&str>,
+    ) -> Option<&crate::aks::PodKey> {
         self.pod_images
             .iter()
-            .find(|(image, _)| references.iter().any(|held| held == image))
+            .find(|(image, key)| {
+                references.iter().any(|held| held == image)
+                    && cluster.is_none_or(|held| key.cluster == held)
+            })
             .map(|(_, key)| key)
     }
 

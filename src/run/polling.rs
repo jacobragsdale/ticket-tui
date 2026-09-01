@@ -230,6 +230,7 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     // a pull request. The vault half of that check travels with the request:
     // the local thread cannot reach a subscription.
     if app.tab == TabId::PullRequests
+        && app.pull_requests.preflight_wanted(&app.shell)
         && let Some(request) = app
             .pull_requests
             .preflight_due(&app.shell, read_vaults(app))

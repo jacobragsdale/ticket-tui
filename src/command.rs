@@ -611,6 +611,7 @@ pub const COMMANDS: &[Command] = &[
         scope: Scope::Tabs(&[
             TabId::WorkItems,
             TabId::Repos,
+            TabId::Environments,
             TabId::Aks,
             TabId::Acr,
             TabId::KeyVault,
@@ -1242,6 +1243,7 @@ mod tests {
             TabId::Environments => &[
                 CommandId::Search,
                 CommandId::Open,
+                CommandId::CopyId,
                 CommandId::Sync,
                 CommandId::ToggleFindings,
                 CommandId::HistoryBack,

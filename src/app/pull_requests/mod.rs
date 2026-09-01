@@ -419,6 +419,18 @@ impl PullRequestsScreen {
         })
     }
 
+    /// Whether the selected pull request wants a pre-flight this tick: the
+    /// guards of `preflight_due` without the request, so the vault names are
+    /// only gathered when there is a flight to give them to.
+    #[must_use]
+    pub fn preflight_wanted(&self, shell: &Shell) -> bool {
+        self.deployment.is_some()
+            && !self.preflight_running()
+            && self.selected(shell).is_some_and(|row| {
+                self.pre_flyable(&row) && !self.preflight.contains_key(&self.preflight_key(&row))
+            })
+    }
+
     /// Whether one is in the air, which is what turns the spinner.
     #[must_use]
     pub fn preflight_running(&self) -> bool {

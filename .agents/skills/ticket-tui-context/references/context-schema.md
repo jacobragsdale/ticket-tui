@@ -237,7 +237,7 @@ one from outside the TUI, and it is an audited read — see
 The Environments board: every service the deployment repository declares,
 across every environment it declares them for. Nothing here comes from Azure
 DevOps or from a subscription — it is `kubectl kustomize` over a clone on the
-user's machine, rendered when the tab is opened, when `r` asks, and when a
+user's machine, rendered when the tab is first opened, when `r` asks, and when a
 `git pull` moves that clone. It is therefore as current as the last render and
 no fresher.
 

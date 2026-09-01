@@ -484,12 +484,12 @@ fn detail_line(
     jumped: usize,
 ) -> Line<'static> {
     match entry.kind {
-        DiffLineKind::Section => section_rule(&entry.text, width),
+        DiffLineKind::Section => super::details::section_line(&entry.text, width),
         DiffLineKind::Note => Line::styled(
             format!("  {}", entry.text),
             Style::default().fg(theme().muted),
         ),
-        DiffLineKind::Missing | DiffLineKind::Entry => {
+        DiffLineKind::Missing | DiffLineKind::Entry | DiffLineKind::Pod => {
             let glyph = if entry.kind == DiffLineKind::Missing {
                 "\u{2717}"
             } else {
@@ -524,20 +524,6 @@ fn detail_line(
             }
         }
     }
-}
-
-/// The same rule every other details pane wears, over a title that is not a
-/// `&'static str`: the sections here are named after the environment.
-fn section_rule(title: &str, width: u16) -> Line<'static> {
-    let rule = Style::default().fg(theme().header);
-    let tail = usize::from(width)
-        .saturating_sub(4)
-        .saturating_sub(title.chars().count());
-    Line::from(vec![
-        Span::styled("\u{2500}\u{2500} ", rule),
-        Span::styled(title.to_owned(), rule.add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" {}", "\u{2500}".repeat(tail)), rule),
-    ])
 }
 
 /// What the pane says with nothing to compare.

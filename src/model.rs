@@ -823,6 +823,11 @@ pub enum Jump {
         kind: String,
         name: String,
     },
+    /// One service on the environments board, in one environment's column.
+    Service {
+        environment: String,
+        service: String,
+    },
 }
 
 impl Jump {
@@ -844,6 +849,10 @@ impl Jump {
             Self::Repository { registry, name } => format!("Repository {name} in {registry}"),
             Self::Vault(name) => format!("Vault {name}"),
             Self::VaultItem { vault, kind, name } => format!("The {kind} {name} in {vault}"),
+            Self::Service {
+                environment,
+                service,
+            } => format!("Service {service} in {environment}"),
         }
     }
 
@@ -857,6 +866,7 @@ impl Jump {
             | Self::Repository { .. }
             | Self::Vault(_)
             | Self::VaultItem { .. } => "subscription",
+            Self::Service { .. } => "board",
             _ => "database",
         };
         format!("{} is not in this {place}", self.describe())

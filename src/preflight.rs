@@ -118,6 +118,8 @@ pub enum Mark {
     /// An overlay that renders with nothing missing.
     Clean,
     Missing,
+    /// A vault object in use that is about to lapse: said, not counted.
+    Expiring,
     /// Something the merge would change rather than leave missing.
     Change,
     Failed,
@@ -176,7 +178,11 @@ impl Report {
             }
             said.push(environment);
             notes.extend(mine.into_iter().map(|finding| Note {
-                mark: Mark::Missing,
+                mark: if matches!(finding.missing, crate::kustomize::Missing::Expiring { .. }) {
+                    Mark::Expiring
+                } else {
+                    Mark::Missing
+                },
                 text: finding.to_string(),
                 jump: finding_jump(&deployment.environments, finding),
             }));
@@ -220,7 +226,14 @@ impl Report {
     /// How many things would be missing, which is what the column counts.
     #[must_use]
     pub fn missing(&self) -> usize {
-        self.findings.len()
+        // What the merge would leave missing; an object that is merely
+        // expiring is a line in the pane, not a count in the column.
+        self.findings
+            .iter()
+            .filter(|finding| {
+                !matches!(finding.missing, crate::kustomize::Missing::Expiring { .. })
+            })
+            .count()
     }
 }
 
