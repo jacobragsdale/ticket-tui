@@ -1078,6 +1078,8 @@ shorten, and then go altogether leaving the digits, as the terminal narrows, so
 every tab stays on the bar and stays clickable at any width. Each
 screen keeps its own query, cursor and scroll while another is showing, and a
 tab wears a badge after its name when it has something waiting.
+[`ticket-tui status`](#status-the-tab-badges-outside-the-app) prints those same
+badges as one line, for a pane that is not this one.
 
 The first four read the database the sync worker fills; the last three read
 nothing of the sort. AKS reads clusters through `kubectl`, and ACR and Key Vault
@@ -2037,6 +2039,7 @@ ticket-tui secrets list --vault NAME [--json]
 ticket-tui secrets show --vault NAME <name> [--json | --value]
 ticket-tui keys list --vault NAME [--json]
 ticket-tui certs list --vault NAME [--json]
+ticket-tui status [--json]
 ```
 
 `sync` pulls and exits, printing what moved — `Synced 3 changes from
@@ -2239,6 +2242,69 @@ at the command line rather than resolving into a quiet preference for one of
 them; and it is the only caller of `Secret::expose` outside the details pane. The
 metadata form of the same command reads the listing every other form reads, never
 the value, and ends by saying so — `value: not shown; pass --value to print it`.
+
+### `status`: the tab badges outside the app
+
+`ticket-tui status` prints the numbers the [tab bar](#tabs) badges as one line,
+with no ANSI in it, for a herdr status bar or a shell prompt that wants the
+same glance without switching panes. It answers from SQLite alone — no network,
+no `az`, no `kubectl` — in a few milliseconds, so a prompt can call it every
+time it draws.
+
+```console
+$ ticket-tui status
+doing 4 · stale 2 · review 3 · rejected 1 · ◐1 · failed 1 · ✗2 pods · ◇2 certs · synced 14m ago
+```
+
+Segments are left out when they are zero, and the glyphs and the ` · `
+separator are the tab bar's and the status bar's, so there is one vocabulary
+rather than two:
+
+- `doing` — work items in the `InProgress` category assigned to the signed-in
+  name the database holds, and `stale` those of yours untouched past
+  `--stale-days`, resolved the way the TUI resolves it: the flag, then
+  `TICKET_TUI_STALE_DAYS`, then the session file, then 14. With no signed-in
+  name nothing is anybody's and both are zero.
+- `review` — `reviewer:@me vote:none status:active`, the same number the Pull
+  requests tab badges, counted by the same function; `rejected` — open pull
+  requests you raised that somebody has voted `✗` on.
+- `◐N` — runs going, the Pipelines tab's own badge arithmetic; `failed N` —
+  runs that finished failed in the last 24 hours.
+- `✗N pods` and `◇N certs` — pods in trouble and certificates within thirty
+  days of lapsing. These are live reads the database never holds, so they come
+  out of `aks.unhealthy` and `key_vault.expiring_certificates` in the
+  [context file](#live-agent-context) a running TUI publishes. **No running TUI
+  means no such segment:** `status` never shells out to `kubectl` or ARM.
+- `synced Nm ago` — only once the rows are older than twice the refresh
+  interval (`--refresh`, then `TICKET_TUI_REFRESH`, then 60), so a stale number
+  says that it is stale and a current one says nothing at all.
+
+Nothing to say prints nothing and exits 0, so a prompt stays clean. `--json`
+prints one object with every figure under its own name and the zeros left in,
+plus `synced_at` and `context`:
+
+```console
+$ ticket-tui status --json
+{"certs_expiring":2,"context":"live","doing":4,"failed_runs":1,"live_runs":1,"pods_unhealthy":2,"rejected":1,"review":3,"stale":2,"synced_at":"2026-08-31T11:46:00Z"}
+```
+
+`context` is `live` when a context file is there and the process that wrote it
+is still up, `stale` when the file was left behind by a run that is gone, and
+`absent` when there is no file. Only `live` fills `pods_unhealthy` and
+`certs_expiring`; the other two leave them `null`, which is why they are `null`
+rather than `0` — a nought there would read as good news. Liveness is
+`/proc/<pid>` on Linux and one `ps -p` on macOS, and only when a context file
+exists at all.
+
+`synced_at` is when the stored rows last moved, read off the database and its
+write-ahead log rather than from a stamp of its own: a pull that finds nothing
+deliberately writes nothing, which is what keeps every other reader from
+reloading for no reason, so this is the age of the data rather than the age of
+the last attempt.
+
+The counts the tab bar also shows are computed in one place — `awaiting_review`,
+`rejected_of_mine`, `live_runs` and `runs_failed_since` in `model.rs` — which
+each `Screen::badge` calls too, so the line and the bar cannot drift apart.
 
 ## Live agent context
 

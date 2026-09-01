@@ -46,6 +46,7 @@ use crate::model::{
     Run, RunResult, Ticket, TicketKey, TimelineKind, TimelineRecord, same_text,
 };
 use crate::search;
+use crate::status;
 use crate::sync::{self, AzureConnector, PrAction, SyncMode, SyncOutcome, WorkItemSource};
 use crate::timestamp::Timestamp;
 use crate::ui::acr::{count_label, platform_label};
@@ -253,6 +254,13 @@ pub enum Command {
     /// Read one vault's certificates
     #[command(subcommand)]
     Certs(CertsCommand),
+    /// Print the tab badges as one line, for a status bar or a shell prompt
+    Status {
+        /// Print every figure as a JSON object, zeros and all, rather than as
+        /// the line
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The ACR tab, without the tab. There is no database behind this one either:
@@ -664,7 +672,31 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Secrets(command) => run_vaults(cli, &VaultCliCommand::Secrets(command.clone())),
         Command::Keys(command) => run_vaults(cli, &VaultCliCommand::Keys(command.clone())),
         Command::Certs(command) => run_vaults(cli, &VaultCliCommand::Certs(command.clone())),
+        Command::Status { json } => run_status(cli, &database, *json),
     }
+}
+
+/// The tab badges on one line, from SQLite and the context file beside it and
+/// nothing else. It prints nothing when there is nothing to say, so a shell
+/// prompt can call it every time it draws.
+fn run_status(cli: &Cli, database: &Path, json: bool) -> Result<()> {
+    let repository = open_database(database)?;
+    let me = resolve_me(
+        repository.meta(db::ME_DISPLAY_NAME_KEY)?,
+        std::env::var("TICKET_TUI_ME").ok(),
+    );
+    let asked = resolve_stale_days(cli.stale_days, std::env::var("TICKET_TUI_STALE_DAYS").ok())?;
+    let status = status::collect(
+        &repository,
+        me.as_deref(),
+        status::stale_days(asked, database),
+        resolve_refresh(cli.refresh, std::env::var("TICKET_TUI_REFRESH").ok())?,
+        Timestamp::now(),
+    )?;
+    if let Some(line) = status::report(&status, json)? {
+        emit(&line);
+    }
+    Ok(())
 }
 
 /// Who `@me` is: the display name the last sync recorded, overridden by
@@ -677,6 +709,54 @@ pub fn resolve_me(stored: Option<String>, env: Option<String>) -> Option<String>
         .flatten()
         .map(|name| name.trim().to_owned())
         .find(|name| !name.is_empty())
+}
+
+/// How often the background pull runs when nothing says otherwise.
+pub const DEFAULT_REFRESH_SECONDS: u64 = 60;
+
+/// How often the background pull runs: `--refresh`, then `TICKET_TUI_REFRESH`,
+/// then a minute. A variable that is not a number of seconds is a startup
+/// error rather than a silent fall back to the default, because a typo there
+/// would otherwise change how often the TUI reaches Azure DevOps and say
+/// nothing about it. `status` reads it the same way, so the age it calls stale
+/// is the age this run calls stale.
+pub fn resolve_refresh(flag: Option<u64>, env: Option<String>) -> Result<u64> {
+    if let Some(seconds) = flag {
+        return Ok(seconds);
+    }
+    let Some(raw) = env else {
+        return Ok(DEFAULT_REFRESH_SECONDS);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_REFRESH_SECONDS);
+    }
+    trimmed
+        .parse()
+        .with_context(|| format!("TICKET_TUI_REFRESH is not a number of seconds: {trimmed}"))
+}
+
+/// How long a work item may sit untouched before the Changed column flags it:
+/// `--stale-days`, then `TICKET_TUI_STALE_DAYS`, and `None` when neither was
+/// given, which leaves whatever the session remembers standing. A variable
+/// that is not a number of days is a startup error naming it, the way
+/// `TICKET_TUI_REFRESH` is: a typo there would otherwise change which rows are
+/// flagged and say nothing about it.
+pub fn resolve_stale_days(flag: Option<u16>, env: Option<String>) -> Result<Option<u16>> {
+    if let Some(days) = flag {
+        return Ok(Some(days));
+    }
+    let Some(raw) = env else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse()
+        .map(Some)
+        .with_context(|| format!("TICKET_TUI_STALE_DAYS is not a number of days: {trimmed}"))
 }
 
 /// One pull, run to completion, reporting what moved. The database is opened

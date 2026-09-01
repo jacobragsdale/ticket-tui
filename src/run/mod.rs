@@ -28,7 +28,7 @@ use ticket_tui::app::{
 use ticket_tui::arm::ArmConfig;
 use ticket_tui::arm_watch::{ArmEvent, ArmFocus, ArmHandle, ArmRequest};
 use ticket_tui::azure::AzureConfig;
-use ticket_tui::cli::{self, Cli, resolve_me};
+use ticket_tui::cli::{self, Cli, resolve_me, resolve_refresh, resolve_stale_days};
 use ticket_tui::db::{self, SqliteTicketRepository, default_database_path};
 use ticket_tui::edit::{EditRejection, EditRequest, FieldEdit};
 use ticket_tui::local::{self, LocalEvent, LocalHandle, LocalRequest};
@@ -293,50 +293,6 @@ fn project_mismatch(
     Some(format!(
         "Database holds {organization}/{project}; pass --database for another project or run `ticket-tui sync --full` to replace it"
     ))
-}
-
-/// How often the background pull runs: `--refresh`, then `TICKET_TUI_REFRESH`,
-/// then a minute. A variable that is not a number of seconds is a startup
-/// error rather than a silent fall back to the default, because a typo there
-/// would otherwise change how often the TUI reaches Azure DevOps and say
-/// nothing about it.
-fn resolve_refresh(flag: Option<u64>, env: Option<String>) -> Result<u64> {
-    if let Some(seconds) = flag {
-        return Ok(seconds);
-    }
-    let Some(raw) = env else {
-        return Ok(DEFAULT_REFRESH_SECONDS);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(DEFAULT_REFRESH_SECONDS);
-    }
-    trimmed
-        .parse()
-        .with_context(|| format!("TICKET_TUI_REFRESH is not a number of seconds: {trimmed}"))
-}
-
-/// How long a work item may sit untouched before the Changed column flags it:
-/// `--stale-days`, then `TICKET_TUI_STALE_DAYS`, and `None` when neither was
-/// given, which leaves whatever the session remembers standing. A variable
-/// that is not a number of days is a startup error naming it, the way
-/// `TICKET_TUI_REFRESH` is: a typo there would otherwise change which rows are
-/// flagged and say nothing about it.
-fn resolve_stale_days(flag: Option<u16>, env: Option<String>) -> Result<Option<u16>> {
-    if let Some(days) = flag {
-        return Ok(Some(days));
-    }
-    let Some(raw) = env else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    trimmed
-        .parse()
-        .map(Some)
-        .with_context(|| format!("TICKET_TUI_STALE_DAYS is not a number of days: {trimmed}"))
 }
 
 /// What the database overlay says about where the rows come from: the project,

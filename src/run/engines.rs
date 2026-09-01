@@ -4,9 +4,6 @@
 
 use super::*;
 
-/// How often the background pull runs when nothing says otherwise.
-pub(super) const DEFAULT_REFRESH_SECONDS: u64 = 60;
-
 /// How often the workspace is read while the Repos tab is showing. It is a
 /// handful of `git status` calls, and none of them touches the network.
 pub(super) const LOCAL_SCAN_CADENCE: Duration = Duration::from_secs(60);

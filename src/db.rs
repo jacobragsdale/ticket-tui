@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::slice;
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -1314,6 +1314,20 @@ pub fn data_signature(path: &Path) -> u128 {
     let db = file_stamp(path);
     let wal = file_stamp(&wal_path(path));
     (u128::from(db) << 64) | u128::from(wal)
+}
+
+/// When the stored rows last moved, which is as close as this file comes to
+/// recording when the last pull landed: writes go to the write-ahead log, so
+/// the later of the two stamps is the one that means anything. A pull that
+/// found nothing deliberately writes nothing — that is what keeps every other
+/// reader from reloading for no reason — so this is the age of the data rather
+/// than the age of the last attempt.
+#[must_use]
+pub fn data_modified(path: &Path) -> Option<SystemTime> {
+    [path.to_path_buf(), wal_path(path)]
+        .iter()
+        .filter_map(|file| fs::metadata(file).ok()?.modified().ok())
+        .max()
 }
 
 fn wal_path(path: &Path) -> PathBuf {
