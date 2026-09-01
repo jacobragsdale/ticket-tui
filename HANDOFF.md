@@ -1,11 +1,38 @@
 # Where to pick up
 
-Last updated 2026-08-31. The backlog itself lives in Azure DevOps
+Last updated 2026-09-01. The backlog itself lives in Azure DevOps
 (`jacobragsdale/development`); this file is only the pointer into it. Run
 `ticket-tui` and browse the epics for the current state.
 
 ## State of `main`
 
+- **The ergonomics round is done** (Epic #735, 2026-09-01; Issues #736–#741,
+  see "Ergonomics and environment board, 2026-09-01" below): `g` follows the
+  link on every tab, `[`/`]` retrace every visit, `+` captures a thought into
+  an `inbox` Issue from any tab, `ticket-tui comment ID -` reads its body from
+  a pipe, `ticket-tui status` prints the tab badges for a prompt, and
+  `[notify]` in `config.toml` raises a desktop notification when a watched run,
+  a vote, a review request, a pod or an approval changes.
+- **The environment board is done** (Epic #743, 2026-09-01; Issues #744–#749):
+  `[deployment]` + `[[environments]]` name a kustomize repository and its
+  overlays; `ticket-tui env list|show|check|diff` render them with `kubectl
+  kustomize` and read names only; `env check` is the pre-deploy gate (exit 1
+  on findings, 2 when an overlay will not render), joined to the environment's
+  Key Vault; tab `8` is the board with the promotion diff in its pane; a pull
+  request against the deployment repository carries a pre-flight on tab 3.
+  **No real deployment repository has been rendered yet** — everything was
+  built against `fixtures/kustomize`; see "Environment board — integration
+  checklist" below for the day one is cloned.
+- **A review + QA round followed both epics** (#750, 2026-09-01): three
+  read-only reviewers over `e286f63..main`, every finding fixed or accepted
+  with a reason on the ticket, the theme matrix and the ignored real-`kubectl`
+  test green, and two pty walks kept beside the AKS one:
+  `scripts/walk_ergonomics.py` and `scripts/walk_environments.py`.
+- **The Work items tab opens on Mine** when there is no session file yet
+  (#753); a remembered session is restored over it.
+- Two ideas are written down as `maybe` tickets and not scheduled: #742 (`T`
+  dispatches an agent: gather → prompt → launch, one worded verb per tab) and
+  #752 (tab 9 Artifacts: Azure Artifacts, PyPI, npm, NuGet feeds).
 - **The four-tab roadmap is done**: Epics 656 (#661–#667), 657 (#669–#673),
   658 (#674–#679), 659 (#680–#689) and 660 (#690–#694) are all closed, as is
   #668, and the gate below was green when it closed.
@@ -49,8 +76,9 @@ Last updated 2026-08-31. The backlog itself lives in Azure DevOps
   tabs and all five CLI groups were built against `arm::tests::FakeArm`. See
   "ARM tabs — integration checklist" below for the day one is.
 - The gate is `cargo fmt --check`, `cargo clippy --all-targets --all-features
-  -D warnings`, `cargo test --all-targets` (698 lib + 29 bin tests, one ignored because it
-  shells out to `az`) and
+  -D warnings`, `cargo test --all-targets` (817 lib + 34 bin tests, two ignored because they
+  shell out to `az` and to `kubectl kustomize` — `cargo test -- --ignored
+  kustomize` runs the second) and
   `cargo build --release`, with the test run repeated under `NO_COLOR=1`,
   `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` — the theme
   matrix, which is real because `Theme::from_env` reads the variable.
@@ -63,7 +91,7 @@ Last updated 2026-08-31. The backlog itself lives in Azure DevOps
 
 `src/app.rs`, `src/ui.rs` and `src/run.rs` are directory modules; every file is
 under 1,500 lines. `App` is `{ shell, tab, work_items, repos, pull_requests, pipelines, aks, acr,
-key_vault }`:
+key_vault, environments }`:
 `Shell` is the state every screen shares and each tab is a `Screen`. A screen
 method that needs the shell takes `shell: &mut Shell` (or `&Shell`) as its
 first argument after the receiver; nothing else reaches across.
@@ -93,6 +121,21 @@ first argument after the receiver; nothing else reaches across.
                         mod.rs, columns.rs, filters.rs, rows.rs, tests.rs
         key_vault/      the Key Vault tab: vaults and one vault's items, and
                         the reveal that clears itself — the same five files
+        environments/   tab 8: services × environments, the column cursor,
+                        the promotion pane — the same five files
+    src/kustomize.rs    the environment model: render (kubectl kustomize, with
+                        a deadline), parse (names only, never a value), expand
+                        (the `*` glob), check and check_with (the repo-only and
+                        vault findings), VaultNames
+        kustomize/diff.rs  the promotion diff between two environments and the
+                        image read-back to runs, pull requests and work items
+    src/preflight.rs    a pull request's pre-flight: the touched overlays
+                        rendered at both branches in scratch worktrees, checked
+                        and diffed, the worktrees removed however it leaves
+    src/notify.rs       [notify]: the command, its quoting, and the three
+                        edge diffs (votes, pods, approvals) behind the events
+    src/status.rs       `ticket-tui status`: the badges from SQLite and the
+                        context file, on one line
     src/watch.rs        the pipeline watcher thread: live runs, timelines, logs,
                         approvals — cadences that stretch, and no SQLite at all
     src/local.rs        the local-repos thread: the workspace scan and the three
@@ -146,6 +189,10 @@ first argument after the receiver; nothing else reaches across.
                         streaming logs -f, describe, delete and exec
     scripts/walk_aks.py walks every AKS verb in the release binary under a pty
                         against that fake, PASS/FAIL per step (needs `pyte`)
+    scripts/walk_ergonomics.py  the same shape over the ergonomics round: g,
+                        [ ], +, status against the live TUI, the session
+    scripts/walk_environments.py  the same over tab 8, with fixtures/kustomize
+                        made into a clone and rendered by the real kubectl
 
 Every ui function takes `screen` and `shell` rather than `app`, and
 `ui::render` paints the tab bar itself and then goes through `App::screen()`
@@ -368,6 +415,59 @@ implemented what the real client did not**.
 - `parse_timeline` sorted by an `order` field that only ranks siblings, and a
   job's log lives on the Phase record that gets flattened away — so the tree
   read out of order and no job had a log (#693).
+
+## Ergonomics and environment board, 2026-09-01 (Epics #735, #743)
+
+Twelve issues, implemented by one Opus agent each in a git worktree — five in
+parallel, then three, then the board — with the orchestrator reading every
+diff, merging, gating and closing the ticket. The decisions made at the seams
+are on the tickets themselves; the ones worth knowing before touching the code:
+
+- `Screen::follow_target` answers `Result<(Jump, &str), String>` — the `Err`
+  is the row-specific refusal the footer shows — and only offers what the
+  database holds (`shell.work_item_title`, `pull_request_label`, `run_label`).
+  `App::new` publishes the titles it is given so tests read the same rows.
+- History records on the browser's rule: `App::record_move` around every key
+  and every press/release, when the tab or the `Jump` variant changed; a
+  follow and the `[`/`]` walk mark `moved` so nothing is recorded twice; a
+  target that has gone falls out of the walk.
+- `[notify]` values are single-quoted shell words; the first read of each
+  source is the baseline, and the pull requests loaded at startup are seeded
+  as one (`App::seed_pull_request_marks`) so the first pull can be news.
+- `kustomize::parse` keeps names only; a `Secret`'s `data` never reaches a
+  type. `check_with` is pure over one `EnvManifest` plus an optional
+  `VaultNames`; the CLI reads vaults live and the TUI passes what tab 7 holds.
+  `diff` pairs workloads by name and kind, preferring the same namespace, since
+  qa and prod keep namespaces of their own.
+- The pre-flight is cached per `(pull request, source head)`; `r` re-flies;
+  one is in the air at a time; scratch worktrees under `$TMPDIR` are swept on
+  the next run even after a kill.
+
+## Environment board — integration checklist
+
+The day a real deployment repository is in the workspace:
+
+1. `config.toml`: `[deployment] repo = "<name as the Repos tab shows it>"`,
+   and one `[[environments]]` per overlay set with `overlays` globs relative to
+   the clone, `vault`, `registry`, `cluster`. `render = "kustomize build"` if
+   the repository needs a newer kustomize than kubectl embeds.
+2. `ticket-tui env list` — every environment says `rendered` or the renderer's
+   own last line. A remote `resources:` URL in a kustomization will hit the
+   120 s render deadline; vendor it or raise `RENDER_TIMEOUT`.
+3. `ticket-tui env show prod` — read the providers block: the vault name each
+   `SecretProviderClass`/`ExternalSecret` resolves to must be the environment's
+   own, or every check for it reads as `pulls from <other>`.
+4. `ticket-tui env check` — expect noise first: `envFrom` on a Secret the
+   provider fills whole (`dataFrom`) is silent, a volume with `items` is
+   checked per key; a projected volume is read. Anything false is a parse gap
+   in `src/kustomize.rs` — add the YAML to the tests and fix the reader.
+5. `ticket-tui env diff qa prod <service>` — the image read-back needs the
+   runs on file (`build_number` or `source_version` prefix) and a clone of the
+   service's repository named like the workload; the OCI `revision` rule is a
+   parameter nobody passes yet.
+6. Tab `8`, then `r`; then a pull request against the repository on tab 3 —
+   the pre-flight fetches through `local::remote_git`, so the MSA header
+   applies, and the scratch worktrees appear under `$TMPDIR` for the render.
 
 ## AKS tab — integration checklist
 
