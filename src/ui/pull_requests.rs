@@ -5,6 +5,7 @@ use super::*;
 use crate::app::pull_requests::{PrColumn, PrMode, PrRow, PullRequestsScreen};
 use crate::command::CommandId;
 use crate::model::{Jump, PrStatus};
+use crate::preflight::{Mark, Note, Preflight};
 use crate::ui::details::section_line;
 use crate::ui::table::{TableSpec, render_list_table, table_geometry};
 
@@ -228,6 +229,12 @@ fn render_table(
 ) {
     let now = Timestamp::now();
     let rows = screen.visible(shell);
+    // Read before the table borrows the screen back, one per row, so the
+    // column paints what was flown without the closure holding the cache.
+    let flights: Vec<Cell<'static>> = rows
+        .iter()
+        .map(|row| preflight_cell(screen.preflight(row)))
+        .collect();
     let geometry = table_geometry(area, 1);
     screen
         .cursor
@@ -237,8 +244,10 @@ fn render_table(
     let (sorted, descending) = screen.sort;
     let layout = screen.layout.clone();
     let mut cell = |index: usize, column: PrColumn| {
-        rows.get(index)
-            .map_or_else(|| Cell::from(""), |row| pr_cell(row, column, now))
+        rows.get(index).map_or_else(
+            || Cell::from(""),
+            |row| pr_cell(row, column, now, &flights[index]),
+        )
     };
     let mut spec = TableSpec {
         title: " Pull requests ".to_owned(),
@@ -259,7 +268,7 @@ fn render_table(
     render_list_table(frame, shell, area, &mut spec);
 }
 
-fn pr_cell(row: &PrRow, column: PrColumn, now: Timestamp) -> Cell<'static> {
+fn pr_cell(row: &PrRow, column: PrColumn, now: Timestamp, flight: &Cell<'static>) -> Cell<'static> {
     let faded = row.is_closed();
     let plain = if faded {
         Style::default().fg(theme().muted)
@@ -288,6 +297,7 @@ fn pr_cell(row: &PrRow, column: PrColumn, now: Timestamp) -> Cell<'static> {
                 .collect::<Vec<_>>(),
         )),
         PrColumn::Build => Cell::from(build_line(row)),
+        PrColumn::Preflight => flight.clone(),
         PrColumn::Age => Cell::from(
             Line::styled(
                 row.changed_at()
@@ -297,6 +307,44 @@ fn pr_cell(row: &PrRow, column: PrColumn, now: Timestamp) -> Cell<'static> {
             .right_aligned(),
         ),
     }
+}
+
+/// What the Pre-flight column says: nothing at all for a pull request on any
+/// other repository, the shared spinner while it is in the air, `✓` for an
+/// overlay that renders clean and `✗N` for what would be missing.
+fn preflight_cell(state: Option<&Preflight>) -> Cell<'static> {
+    let (text, color) = match state {
+        None => return Cell::from(""),
+        Some(Preflight::Running) => (spinner_frame().to_string(), theme().muted),
+        Some(Preflight::Failed(_)) => ("!".to_owned(), theme().warning),
+        Some(Preflight::Ready(report)) if report.missing() == 0 => {
+            ("\u{2713}".to_owned(), theme().state_completed)
+        }
+        Some(Preflight::Ready(report)) => (format!("\u{2717}{}", report.missing()), theme().error),
+    };
+    Cell::from(Line::styled(text, Style::default().fg(color)))
+}
+
+/// One line of the Pre-flight section. A line that names something another tab
+/// holds is drawn as a link and is a click away, the way Related's are.
+fn preflight_note_line(note: &Note) -> Line<'static> {
+    let (glyph, color) = match note.mark {
+        Mark::Running => (spinner_frame().to_string(), theme().muted),
+        Mark::Clean => ("\u{2713}".to_owned(), theme().state_completed),
+        Mark::Missing => ("\u{2717}".to_owned(), theme().error),
+        Mark::Failed => ("!".to_owned(), theme().warning),
+    };
+    let text = if note.jump.is_some() {
+        Style::default()
+            .fg(theme().link)
+            .add_modifier(Modifier::UNDERLINED)
+    } else {
+        Style::default()
+    };
+    Line::from(vec![
+        Span::styled(format!("  {glyph} "), Style::default().fg(color)),
+        Span::styled(note.text.clone(), text),
+    ])
 }
 
 /// `⚠ conflicts` in red beats whatever the build says: a merge that cannot
@@ -445,6 +493,17 @@ fn render_details(
             ),
         ]));
     }
+    // What a pull request against the deployment repository would leave an
+    // environment missing if it merged, which is the thing to know before the
+    // vote. Nothing here blocks it: the pane says it and the vote is yours.
+    let notes = screen.preflight_notes(&row);
+    let mut notes_start = 0;
+    if let Some(notes) = &notes {
+        lines.push(Line::from(""));
+        lines.push(section_line("Pre-flight", inner.width));
+        notes_start = lines.len();
+        lines.extend(notes.iter().map(preflight_note_line));
+    }
     if !row.request.threads.is_empty() {
         lines.push(Line::from(""));
         lines.push(section_line("Discussion", inner.width));
@@ -533,6 +592,19 @@ fn render_details(
     }
     for (index, (_, jump)) in jumps.iter().enumerate() {
         if let Some(y) = row_on_screen(inner, &rows, jump_start + index, offset) {
+            shell.hit_regions.push(region(
+                Rect::new(inner.x, y, inner.width, 1),
+                PointerTarget::Follow(jump.clone()),
+                PointerLayer::Base,
+                None,
+                None,
+            ));
+        }
+    }
+    for (index, note) in notes.iter().flatten().enumerate() {
+        if let Some(jump) = &note.jump
+            && let Some(y) = row_on_screen(inner, &rows, notes_start + index, offset)
+        {
             shell.hit_regions.push(region(
                 Rect::new(inner.x, y, inner.width, 1),
                 PointerTarget::Follow(jump.clone()),

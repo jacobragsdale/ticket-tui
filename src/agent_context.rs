@@ -289,6 +289,35 @@ pub struct PullRequestContext {
     /// How many comment threads it has, and how many are unresolved.
     pub thread_count: usize,
     pub unresolved_threads: usize,
+    /// What a pre-flight of it against the deployment repository found.
+    /// `not_applicable` for a pull request on any other repository.
+    pub preflight: PreflightContext,
+}
+
+/// The pre-flight of a pull request against the deployment repository: what
+/// the environments it touches would be missing if it merged. Findings are
+/// read, never enforced — the pull request can still be approved.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum PreflightContext {
+    /// Not against the deployment repository, or no clone of it to fly in.
+    #[default]
+    NotApplicable,
+    Running,
+    /// Every overlay it touches renders with nothing missing.
+    Clean {
+        overlays: Vec<String>,
+    },
+    /// One line per thing an overlay asks for that it does not answer, as the
+    /// details pane and `env check` both write it.
+    Findings {
+        findings: Vec<String>,
+    },
+    /// It could not be looked at: the head is not on this machine, or the
+    /// renderer refused an overlay.
+    Failed {
+        error: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

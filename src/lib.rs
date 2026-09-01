@@ -20,6 +20,7 @@ pub mod markdown;
 pub mod model;
 pub mod notify;
 pub mod pointer;
+pub mod preflight;
 pub mod search;
 pub mod session;
 pub mod sprint;

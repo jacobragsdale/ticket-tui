@@ -64,6 +64,18 @@ pub enum LocalRequest {
         overlay: String,
         command: String,
     },
+    /// Pre-fly one pull request against the deployment repository: what the
+    /// head it was read at would leave an environment missing. It sits here
+    /// for the same reason a render does — a fetch, a worktree and a `kubectl`
+    /// per overlay take as long as they take.
+    Preflight {
+        id: i64,
+        /// The head it is flown at, which is what the answer is cached under.
+        commit: String,
+        source: String,
+        target: String,
+        deployment: crate::preflight::Deployment,
+    },
     Stop,
 }
 
@@ -90,6 +102,13 @@ pub enum LocalEvent {
         environment: String,
         overlay: String,
         rendered: Result<String, String>,
+    },
+    /// One pull request, pre-flown: what its overlays would be missing, or the
+    /// one line saying why it could not be looked at.
+    Preflighted {
+        id: i64,
+        commit: String,
+        found: Result<crate::preflight::Report, String>,
     },
     Stopped,
 }
@@ -164,6 +183,18 @@ fn work(requests: &Receiver<LocalRequest>, events: &Sender<LocalEvent>) {
                     .map_err(|error| last_line(&format!("{error:#}"))),
                 environment,
                 overlay,
+            }),
+            LocalRequest::Preflight {
+                id,
+                commit,
+                source,
+                target,
+                deployment,
+            } => events.send(LocalEvent::Preflighted {
+                found: crate::preflight::run(&deployment, &source, &target, &commit)
+                    .map_err(|error| last_line(&format!("{error:#}"))),
+                id,
+                commit,
             }),
         };
         if sent.is_err() {
@@ -348,7 +379,7 @@ fn clone(url: &str, into: &Path) -> Result<String> {
 }
 
 /// One git command inside one repository that talks to its `origin`.
-fn remote_git(path: &Path, arguments: &[&str]) -> Result<String> {
+pub(crate) fn remote_git(path: &Path, arguments: &[&str]) -> Result<String> {
     let origin = git(path, &["remote", "get-url", "origin"])
         .map(|url| url.trim().to_owned())
         .unwrap_or_default();
@@ -444,7 +475,7 @@ pub fn azure_https_host(remote: &str) -> Option<String> {
 }
 
 /// One git command inside one repository that stays on this machine.
-fn git(path: &Path, arguments: &[&str]) -> Result<String> {
+pub(crate) fn git(path: &Path, arguments: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(path)

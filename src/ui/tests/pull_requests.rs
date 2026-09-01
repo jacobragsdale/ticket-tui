@@ -186,3 +186,96 @@ fn the_buttons_under_the_details_pane_are_the_keys_they_name() {
         "and asks once more, the way the key does"
     );
 }
+
+/// One finding, as a pre-flight of the deployment repository would report it.
+fn missing(object: crate::kustomize::ObjectKind, key: &str) -> crate::kustomize::Finding {
+    crate::kustomize::Finding {
+        environment: "qa".into(),
+        namespace: "shop-qa".into(),
+        workload: "billing-api".into(),
+        kind: "Deployment".into(),
+        container: Some("api".into()),
+        reference: crate::kustomize::Reference {
+            source: crate::kustomize::Source::Env { var: key.into() },
+            object,
+            name: "billing-kv".into(),
+            key: Some(key.into()),
+            optional: false,
+        },
+        missing: crate::kustomize::Missing::Key,
+    }
+}
+
+#[test]
+fn the_pre_flight_section_says_what_would_be_missing_and_its_lines_are_a_click_away() {
+    let mut app = pull_requests_app();
+    app.pull_requests
+        .set_deployment(Some(crate::app::pull_requests::tests::deployment(
+            "ticket-tui",
+        )));
+    // Wide enough that every column is on the table, the Pre-flight one last.
+    tab_text(220, 50, &mut app);
+    let row = app.pull_requests.selected(&app.shell).expect("a row");
+    app.pull_requests.set_preflight(
+        row.request.id,
+        row.request.last_merge_source_commit.clone(),
+        Ok(crate::preflight::Report {
+            rendered: vec![("qa".into(), "overlays/qa".into())],
+            findings: vec![missing(crate::kustomize::ObjectKind::Secret, "SIGNING_KEY")],
+        }),
+    );
+    let text = render_text(220, 50, &mut app);
+
+    assert!(text.contains("Pre-flight"), "the section is drawn: {text}");
+    assert!(
+        text.contains("SIGNING_KEY"),
+        "it says what would be missing: {text}"
+    );
+    assert!(
+        text.contains("\u{2717}1"),
+        "and the column counts it: {text}"
+    );
+
+    // The same line the eye follows is the line the mouse follows.
+    let line = app
+        .shell
+        .hit_regions
+        .find_target(|target| matches!(target, PointerTarget::Follow(Jump::Vault(_))))
+        .expect("a missing secret key points at the vault")
+        .rect;
+    click(&mut app, line.x + 6, line.y);
+    let (message, _) = app.shell.notification().expect("the jump is answered");
+    assert!(message.contains("kv-qa"), "{message}");
+}
+
+#[test]
+fn an_overlay_that_renders_clean_says_so_and_points_nowhere() {
+    let mut app = pull_requests_app();
+    app.pull_requests
+        .set_deployment(Some(crate::app::pull_requests::tests::deployment(
+            "ticket-tui",
+        )));
+    tab_text(160, 50, &mut app);
+    let row = app.pull_requests.selected(&app.shell).expect("a row");
+    app.pull_requests.set_preflight(
+        row.request.id,
+        row.request.last_merge_source_commit.clone(),
+        Ok(crate::preflight::Report {
+            rendered: vec![("qa".into(), "overlays/qa".into())],
+            findings: Vec::new(),
+        }),
+    );
+    let text = render_text(160, 50, &mut app);
+
+    assert!(
+        text.contains("qa overlays/qa renders clean"),
+        "the clean line names the overlay it rendered: {text}"
+    );
+    assert!(
+        app.shell
+            .hit_regions
+            .find_target(|target| matches!(target, PointerTarget::Follow(Jump::Vault(_))))
+            .is_none(),
+        "a clean line points nowhere"
+    );
+}
