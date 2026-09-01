@@ -379,3 +379,38 @@ fn g_goes_to_the_pull_request_a_run_was_raised_for() {
         Some("Run 20260829.12 was not started by a pull request")
     );
 }
+
+#[test]
+fn a_drill_into_the_runs_records_the_level_it_came_from_and_the_bracket_climbs_back() {
+    let mut app = pipelines_app();
+    app.select_tab(TabId::Pipelines);
+    let index = app
+        .pipelines
+        .visible_pipelines(&app.shell)
+        .iter()
+        .position(|row| row.pipeline.name == "ticket-tui CI")
+        .expect("the CI pipeline is listed");
+    app.pipelines.pipeline_cursor.focus(index);
+
+    // The cursor walking the pipelines is not a move.
+    key(&mut app, KeyCode::Char('j'));
+    key(&mut app, KeyCode::Char('k'));
+    assert!(app.shell.history().is_empty(), "j and k record nothing");
+
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(app.pipelines.level(), Level::Runs(1));
+    assert_eq!(
+        app.shell.history(),
+        [crate::app::Jump::Pipeline(1), crate::app::Jump::Run(14)],
+        "the level it left, then the run it landed on"
+    );
+
+    key(&mut app, KeyCode::Char('['));
+    assert_eq!(
+        app.pipelines.level(),
+        Level::Pipelines,
+        "back out of the runs, not just onto another run"
+    );
+    key(&mut app, KeyCode::Char(']'));
+    assert_eq!(app.pipelines.level(), Level::Runs(1), "and forward again");
+}

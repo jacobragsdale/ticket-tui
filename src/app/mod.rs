@@ -259,6 +259,11 @@ pub struct App {
     /// those overlays; while this is set, every key and click goes to it, and
     /// what it decides comes back to the tab named here.
     overlay_for: Option<TabId>,
+    /// Set while an event has already written its own move into the history:
+    /// a follow, and the `[`/`]` walk that goes through one. What is left for
+    /// [`App::record_move`] is the moves no one announces — a tab switch, and
+    /// a drill in or out of a level.
+    moved: bool,
     pub work_items: WorkItemsScreen,
     pub repos: ReposScreen,
     pub pull_requests: PullRequestsScreen,
@@ -277,6 +282,7 @@ impl App {
             shell,
             tab: TabId::WorkItems,
             overlay_for: None,
+            moved: false,
             work_items,
             repos: ReposScreen::default(),
             pull_requests: PullRequestsScreen::default(),
@@ -471,6 +477,7 @@ impl App {
     /// screen there settles on it. One nothing holds says so rather than
     /// switching to an empty tab.
     pub fn follow(&mut self, jump: &Jump) -> bool {
+        self.moved = true;
         // Where the walk starts from is what `[` comes back to.
         let here = {
             let (shell, screen) = self.screen();
@@ -524,6 +531,50 @@ impl App {
             .follow_target(&self.shell)
             .ok()
             .map(|(jump, _)| jump)
+    }
+
+    /// Where the run is standing: the tab, and the jump that lands on the row
+    /// under its cursor.
+    fn here_now(&self) -> (TabId, Option<Jump>) {
+        (self.tab, self.screen_for(self.tab).here(&self.shell))
+    }
+
+    /// Everywhere the run has been, browser-style: a place goes on the list
+    /// when it is left, not while the cursor is moving over it. Ten rows
+    /// walked and left record the row you stopped on, not the nine you passed
+    /// — `j` and `k` change where you are on a tab, not which place you are
+    /// at, so nothing here fires on them.
+    ///
+    /// A follow and the `[`/`]` walk write their own; what reaches this is a
+    /// tab switch and a drill in or out, neither of which `App` can see by
+    /// name because the drill keys are the screen's own.
+    fn record_move(&mut self, before: (TabId, Option<Jump>)) {
+        let settled = std::mem::take(&mut self.moved);
+        let (tab, before) = before;
+        let (now, after) = self.here_now();
+        // On the way out, where you were reading is worth keeping: the session
+        // file is what the next run opens on.
+        if self.shell.should_quit {
+            if let Some(after) = after {
+                self.shell.record_jump(after);
+            }
+            return;
+        }
+        if settled {
+            return;
+        }
+        let level_changed = |before: &Jump| {
+            after.as_ref().is_some_and(|after| {
+                std::mem::discriminant(after) != std::mem::discriminant(before)
+            })
+        };
+        let Some(before) = before.filter(|before| tab != now || level_changed(before)) else {
+            return;
+        };
+        self.shell.record_jump(before);
+        if let Some(after) = after {
+            self.shell.record_jump(after);
+        }
     }
 
     /// `[`: back to wherever the run was before this, on whatever tab.
@@ -773,6 +824,13 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
+        let before = self.here_now();
+        let action = self.dispatch_key(key);
+        self.record_move(before);
+        action
+    }
+
+    fn dispatch_key(&mut self, key: KeyEvent) -> AppAction {
         if self.shell_overlay_open() {
             return self.handle_overlay_key(key);
         }
@@ -817,6 +875,13 @@ impl App {
     /// it answers with is the shell's, not something a screen reports. A click
     /// on the tab bar never reaches a screen — the bar is the shell's.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> PointerUpdate {
+        let before = self.here_now();
+        let update = self.dispatch_mouse(mouse);
+        self.record_move(before);
+        update
+    }
+
+    fn dispatch_mouse(&mut self, mouse: MouseEvent) -> PointerUpdate {
         if self.shell_overlay_open() {
             return self.handle_overlay_mouse(mouse);
         }

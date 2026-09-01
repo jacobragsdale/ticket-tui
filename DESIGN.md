@@ -1103,7 +1103,15 @@ there is somewhere to go. Each details pane carries the same jump as a
 `[Go to …]` chip in its header, so the mouse follows what the key would.
 
 `[` and `]` walk back and forward through everywhere the run has been,
-switching tabs as they go: a work item, then its repository, then back. A
+switching tabs as they go: a work item, then its repository, then back. A place
+goes on that list when it is *left*, the way a browser's history works rather
+than the way a cursor moves — a tab switch, a drill into a level or back out of
+one, a follow, and the way out on `q`. Ten rows walked and left record the row
+you stopped on, not the nine you passed, so `j` and `k` put nothing on it. Every
+tab keeps its place there by level: a repository, a pull request, a pipeline or
+one of its runs, a pod, a registry or one of its repositories, a vault or one of
+its items. Fifty deep, and a target that has since gone — a pod that was
+replaced — falls out rather than landing nowhere. A
 reference in a details pane — the family tree's rows today — is underlined and
 follows on `Enter` or a click; one this database does not hold says so rather
 than opening an empty screen. The walk is remembered in the session file, and a

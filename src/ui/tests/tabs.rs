@@ -539,3 +539,96 @@ fn a_work_item_with_nothing_linked_says_so_rather_than_going_nowhere() {
         Some("#10001 has no linked pull request or build")
     );
 }
+
+#[test]
+fn the_history_records_every_tab_it_is_left_from_rather_than_the_cursor_moving() {
+    let mut app = crate::app::pull_requests::tests::pull_requests_app();
+    app.repos.set_repos(&app.shell);
+    app.select_tab(TabId::PullRequests);
+    render_text(160, 40, &mut app);
+
+    for _ in 0..5 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert!(
+        app.shell.history().is_empty(),
+        "walking the rows is not going anywhere"
+    );
+    let settled = app
+        .pull_requests
+        .selected(&app.shell)
+        .expect("a row under the cursor")
+        .request
+        .id;
+
+    press(&mut app, KeyCode::Char('2'));
+    assert_eq!(app.tab, TabId::Repos);
+    assert_eq!(
+        app.shell.history().len(),
+        2,
+        "the row it stopped on, then the row it arrived at"
+    );
+
+    press(&mut app, KeyCode::Char('['));
+    assert_eq!(app.tab, TabId::PullRequests);
+    assert_eq!(
+        app.pull_requests
+            .selected(&app.shell)
+            .map(|row| row.request.id),
+        Some(settled),
+        "back on the pull request the cursor was left on"
+    );
+
+    press(&mut app, KeyCode::Char(']'));
+    assert_eq!(app.tab, TabId::Repos, "and forward again");
+}
+
+#[test]
+fn a_reloaded_session_still_walks_back_through_a_pull_request_and_a_pod() {
+    use crate::aks::tests::{cluster, pod};
+
+    let build = || {
+        let mut app = crate::app::pull_requests::tests::pull_requests_app();
+        app.repos.set_repos(&app.shell);
+        app.aks.set_clusters(vec![cluster("qa", &["orders"])]);
+        app.aks.set_pods(
+            &mut app.shell,
+            "qa",
+            Some("orders"),
+            Ok(vec![pod(
+                "qa",
+                "orders",
+                "orders-api-7d9f5b-abc12",
+                "Running",
+            )]),
+        );
+        app
+    };
+
+    let mut app = build();
+    app.select_tab(TabId::PullRequests);
+    render_text(160, 40, &mut app);
+    press(&mut app, KeyCode::Char('5'));
+    assert_eq!(app.tab, TabId::Aks);
+    let session = app.snapshot_session();
+
+    let mut reopened = build();
+    reopened.restore_session(session);
+    assert_eq!(reopened.tab, TabId::Aks);
+
+    press(&mut reopened, KeyCode::Char('['));
+    assert_eq!(
+        reopened.tab,
+        TabId::PullRequests,
+        "the walk is on file, so the next run can take it"
+    );
+    press(&mut reopened, KeyCode::Char(']'));
+    assert_eq!(reopened.tab, TabId::Aks);
+    assert_eq!(
+        reopened
+            .aks
+            .selected_pod(&reopened.shell)
+            .map(|row| row.pod.key.name),
+        Some("orders-api-7d9f5b-abc12".to_owned())
+    );
+}

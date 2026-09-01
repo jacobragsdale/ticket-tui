@@ -80,6 +80,7 @@ offline, browsing whatever the database already holds.
 | `Enter` / `h` | On ACR and Key Vault: into the registry or vault under the cursor, and back out |
 | `y` / `D` | On ACR: copy the pull reference, or the tag's digest |
 | `R` / `Y` | On Key Vault: show a secret's value for one minute, or copy it while it is up |
+| `[` / `]` | Back and forward through everywhere you have been, across tabs |
 | `q` | Quit |
 
 The mouse works throughout: click a field to edit it, drag the divider, scroll
