@@ -3,6 +3,7 @@
 mod acr;
 mod aks;
 mod details;
+mod environments;
 mod key_vault;
 mod overlays;
 mod panes;

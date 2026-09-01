@@ -77,6 +77,8 @@ pub struct Session {
     #[serde(default)]
     pub key_vault: TabSession,
     #[serde(default)]
+    pub environments: TabSession,
+    #[serde(default)]
     pub bookmarks: Vec<TicketKey>,
     /// Everywhere the run had been, oldest last, across every tab. A kind
     /// this build does not know — one a newer build wrote — is dropped on
@@ -152,6 +154,7 @@ impl Session {
             TabId::Aks => &self.aks,
             TabId::Acr => &self.acr,
             TabId::KeyVault => &self.key_vault,
+            TabId::Environments => &self.environments,
         }
     }
 
@@ -164,6 +167,7 @@ impl Session {
             TabId::Aks => self.aks = session,
             TabId::Acr => self.acr = session,
             TabId::KeyVault => self.key_vault = session,
+            TabId::Environments => self.environments = session,
         }
     }
 }
@@ -201,6 +205,7 @@ impl Default for Session {
             aks: TabSession::default(),
             acr: TabSession::default(),
             key_vault: TabSession::default(),
+            environments: TabSession::default(),
             bookmarks: Vec::new(),
             history: Vec::new(),
             show_finished: false,

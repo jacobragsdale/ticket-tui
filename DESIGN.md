@@ -1197,11 +1197,11 @@ scheduled and no row selected — it says so rather than painting an empty grid.
 
 ## Tabs
 
-A one-row bar across the top names the seven screens:
+A one-row bar across the top names the eight screens:
 
-    1 Work items   2 Repos   3 Pull requests   4 Pipelines   5 AKS   6 ACR   7 Key Vault
+    1 Work items   2 Repos   3 Pull requests   4 Pipelines   5 AKS   6 ACR   7 Key Vault   8 Environments
 
-`1`–`7` switch between them from anywhere a digit is not being typed — an
+`1`–`8` switch between them from anywhere a digit is not being typed — an
 overlay comes down on the way out — and clicking a tab does the same. The names
 shorten, and then go altogether leaving the digits, as the terminal narrows, so
 every tab stays on the bar and stays clickable at any width. Each
@@ -1210,14 +1210,15 @@ tab wears a badge after its name when it has something waiting.
 [`ticket-tui status`](#status-the-tab-badges-outside-the-app) prints those same
 badges as one line, for a pane that is not this one.
 
-The first four read the database the sync worker fills; the last three read
-nothing of the sort. AKS reads clusters through `kubectl`, and ACR and Key Vault
-read one Azure **subscription** through Resource Manager — a different service
-from Azure DevOps, reached with a different login. See
+The first four read the database the sync worker fills; the last four read
+nothing of the sort. AKS reads clusters through `kubectl`, ACR and Key Vault read
+one Azure **subscription** through Resource Manager — a different service from
+Azure DevOps, reached with a different login — and Environments reads the
+deployment repository's own kustomize overlays off this machine. See
 [Azure Resource Manager](#azure-resource-manager) for what that costs and what
 it buys.
 
-All seven are drawn by one pane system: the same two panes, the same three
+All eight are drawn by one pane system: the same two panes, the same three
 arrangements as the terminal narrows, and the same draggable seam between them,
 described under [Controls](#controls). The split, which
 pane is showing below 70 columns, and the focus are the shell's rather than any
@@ -1356,14 +1357,27 @@ fetches the branch, checks the head the row was read at out into a scratch
 worktree of its own, renders only the overlays the change touches — each
 changed file walks up to its nearest `kustomization.yaml`, and a change under
 `base/` is under every overlay — runs the same check `env check` runs over
-the result, and removes the worktree however it leaves. It is cached per pull
-request and head, so a re-selection costs nothing until the branch moves.
+the result, and removes the worktree however it leaves. The *target branch's*
+render of the same overlays goes into a second scratch worktree beside it, so
+the pane can say what the merge would change as well as what it would leave
+missing. It is cached per pull request and head, so a re-selection costs
+nothing until the branch moves.
+
+The vault half of the check comes with the request rather than out of it:
+`preflight::run` never reaches a subscription, so what the Key Vault tab has
+already listed travels along as names, kinds and dates, and an environment
+whose vault nobody has read is answered against its own overlays with `prod:
+kv-prod not read, so the overlays answer alone` said once.
 
 The details pane says it under a `── Pre-flight ──` rule:
 one line per thing an environment would be missing, or `✓ qa overlays/qa
-renders clean`; the shared spinner while it is in the air. A line naming a
+renders clean`; the shared spinner while it is in the air; and then, marked
+`→`, what merging would *change* — `this pull request adds
+RATE_LIMIT_PER_MIN to prod/orders-config`, in the environments board's own
+wording, because both read `kustomize::diff::promotion_lines`. A line naming a
 Secret an overlay never fills points at the vault the environment pulls from,
-and follows on a click. The table's `Pre-flight` column carries `✓`,
+one naming a vault object points at the object itself, and both follow on a
+click. The table's `Pre-flight` column carries `✓`,
 `✗N`, the spinner, `!` for a pre-flight that could not look at all, and
 nothing for a pull request on any other repository.
 
@@ -1693,6 +1707,65 @@ Deliberately out: create, set and delete; access policies and IAM; and a secret'
 version history, which would be one more data-plane read per item for a question
 nobody has asked yet. The portal link is the way to all of it.
 
+## Environments
+
+Tab `8` is the four `env` subcommands as one glance. They answer a question at
+a time; this answers the one asked at a keyboard, mid-task, about one service:
+*is prod ready for this?*
+
+One row per service — the workload's name, deduplicated across namespaces
+with the namespace beside it — and one column per `[[environments]]`, in the
+order `config.toml` lists them. A cell is the image tag the environment runs
+with `✗N` for what it asks for and does not answer — the repository half and
+the vault half both, attributed to the service whose provider pulls the object
+rather than to the provider — and `◇N` for the vault objects it uses that fall
+due inside the Key Vault tab's own thirty days. Clean reads in the completed
+colour, a count in the error colour, and an environment that would not render
+is a `?`, which is not the same thing as an environment that has no such
+service (`—`). `/` narrows by service and namespace, and the filter bar is one
+chip, `Findings`, which is `findings:yes` in the search box.
+
+The board is the one table in the app whose columns are not a fixed set, so it
+lays itself out rather than going through `TableLayout`, which can only name
+columns a build knows. Service and Namespace are ordinary columns and the `c`
+overlay edits them.
+
+`h` and `l` move the column cursor. The environment under it is the one a
+promotion is read **into**; the one to its left is what it comes **from**, and
+the details pane's frame says which: `Promotion · orders-api · qa → prod`. Under
+the frame, what that cell is missing sits above the diff under `── Missing in
+prod ──`, then the promotion itself: `Image`, `Secrets`, `Config`, `Variables`,
+`Expiry`. The wording is `kustomize::diff::promotion_lines`, shared with the
+pull request pre-flight, so `adds RATE_LIMIT_PER_MIN to prod/orders-config`
+reads the same in both places.
+
+Every line that names a thing another tab holds goes there: an image line to
+the run that built the tag arriving, a vault line to `Jump::VaultItem`, and the
+pod the target environment is actually running — matched against the images
+the AKS tab has already read — to `Jump::Pod`. `Tab` moves the focus to the
+pane, `j`/`k` walk those lines, and `g` and `Enter` follow the one the cursor is
+on. The pull requests between two image tags are the CLI's: reading them is a
+`git log` in the service's own clone, which is no business of a render pass, so
+the line says `run \`ticket-tui env diff\` for the pull requests between them`
+and `env diff` prints them in full.
+
+The overlays are rendered when the tab is first opened, when `r` asks, and when
+a `git pull` on the Repos tab moves the deployment clone. Never on a timer: a
+render shells out to `kubectl` per overlay, and a repository only changes when
+somebody pushes. `r` also drops what the environments' vaults hold so the Key
+Vault tab lists them afresh, because a repository half as new as this minute
+deserves a vault half to match. The renders run on the local thread, the one
+that runs git, for the same reason a clone does.
+
+The tab wears a `✗N` badge counting the environments that would be missing
+something, so the bar says "prod is not ready" from any tab. Without a
+`[deployment]` table, without `[[environments]]`, or without a clone of the
+repository on this machine, the tab is the one line saying so and where it
+looked — the Repos tab's rule.
+
+Deliberately out: applying anything. This reads a repository and says what it
+finds; `kubectl apply` is the pipeline's.
+
 ## Controls
 
 Everything above the tabs line is global; the work-item keys under it only do
@@ -1700,7 +1773,7 @@ anything on tab `1`.
 
 | Input | Action |
 |---|---|
-| `1`–`7` | Switch to Work items, Repos, Pull requests, Pipelines, AKS, ACR, or Key Vault |
+| `1`–`8` | Switch to Work items, Repos, Pull requests, Pipelines, AKS, ACR, Key Vault, or Environments |
 | `↑`/`↓`, `j`/`k` | Move the ticket selection, family row, or focused details pane |
 | `Page Up`/`Page Down` | Move ten tickets or one family page |
 | `Home`/`End` | Select the first/last ticket, family row, or details line |
@@ -2649,7 +2722,8 @@ Schema 3 describes the whole workspace rather than one tab. At the top level:
 the cache path, the signed-in display name that marks your own work items, the
 process ID and last-change timestamp, a `sync` block, the `pending_edits` not
 yet answered, and `active_tab` — `work_items`, `repos`, `pull_requests`,
-`pipelines`, `aks`, `acr` or `key_vault`. Under those, one block per tab, **all
+`pipelines`, `aks`, `acr`, `key_vault` or `environments`. Under those, one block
+per tab, **all
 of them filled whether or not the tab is showing**, so an agent asked about a
 pull request need not ask the user to press `3`:
 
@@ -2693,6 +2767,15 @@ pull request need not ask the user to press `3`:
   also carries `revealed`, which says whether its value is on the screen this
   minute. **There is no field for the value and there is not meant to be one:**
   a value is read for the screen alone and this file is written to disk.
+- `environments` — the board: one entry per `[[environments]]` with its
+  `vault`, its `overlays`, whether it `rendered`, the renderer's `error` where
+  it did not, and how many `findings` and `expiring` objects it holds; then
+  `selected_service`, `selected_environment` — the column the cursor is on,
+  which is what a promotion is read into — that cell's `findings` one line
+  each, and the `diff` the details pane is reading (`from`, `to`, and its lines
+  in the words the pre-flight uses). `reason` is the one line saying why the
+  board is empty when it is: no `[deployment]`, no `[[environments]]`, or no
+  clone of the repository on this machine.
 - Every tab block also carries `follow`: where `g` would go from the row
   under that tab's cursor, written the way a jump is stored — `{"kind":
   "pull-request", "at": {"repo": "ticket-tui", "id": 812}}` — or `null` when
@@ -2708,8 +2791,8 @@ and once per focus for everything under it.
 
 Schema 2 consumers read the work-item fields at the top level and will find them
 under `work_items` instead. A block added within schema 3 — `aks`, `acr`,
-`key_vault` and `arm` all were — is additive, and a reader should ignore fields
-it does not know rather than refuse them.
+`key_vault`, `arm` and `environments` all were — is additive, and a reader should
+ignore fields it does not know rather than refuse them.
 
 The file is replaced after meaningful rendered-state changes and removed on a
 clean exit. A crash or forced termination can leave a stale file, so consumers

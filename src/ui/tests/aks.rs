@@ -14,12 +14,12 @@ fn aks_text(width: u16, height: u16, app: &mut App) -> String {
 #[test]
 fn the_bar_seats_a_fifth_tab_at_every_breakpoint_and_the_digit_reaches_it() {
     let mut app = aks_app();
-    for width in [120, 90, 60] {
+    for width in [120, 90, 70] {
         let text = render_text(width, 30, &mut app);
         let bar = text.lines().next().expect("a tab bar row").to_owned();
         assert!(bar.contains("5 AKS"), "{width} columns: {bar}");
     }
-    // Narrower than the five names, the numbers stand alone and stay
+    // Narrower than the eight names, the numbers stand alone and stay
     // clickable.
     let narrow = render_text(40, 30, &mut app);
     let bar = narrow.lines().next().expect("a tab bar row");

@@ -3,10 +3,10 @@
 //! screen.
 //!
 //! Versioning: adding a block, or a field to one, is additive and leaves
-//! [`SCHEMA_VERSION`] where it is — `aks`, `acr`, `key_vault` and `arm` all
-//! arrived within schema 3, and a reader that does not know a field ignores
-//! it. Only removing or reshaping something already documented bumps the
-//! version.
+//! [`SCHEMA_VERSION`] where it is — `aks`, `acr`, `key_vault`, `arm` and
+//! `environments` all arrived within schema 3, and a reader that does not know
+//! a field ignores it. Only removing or reshaping something already documented
+//! bumps the version.
 //!
 //! There is no field here for a secret's value and there is not meant to be
 //! one: this file is written to disk, and a vault is read for the screen
@@ -39,9 +39,9 @@ pub struct AgentContext {
     /// list.
     pub pending_edits: Vec<PendingEditContext>,
     /// Which tab is showing: `work_items`, `repos`, `pull_requests`,
-    /// `pipelines`, `aks`, `acr` or `key_vault`. Every tab is described
-    /// whether or not it is the one on screen, so an agent can read the whole
-    /// workspace; this says where the user actually is.
+    /// `pipelines`, `aks`, `acr`, `key_vault` or `environments`. Every tab is
+    /// described whether or not it is the one on screen, so an agent can read
+    /// the whole workspace; this says where the user actually is.
     pub active_tab: String,
     pub work_items: WorkItemsContext,
     pub repos: ReposContext,
@@ -50,6 +50,7 @@ pub struct AgentContext {
     pub aks: AksContext,
     pub acr: AcrContext,
     pub key_vault: KeyVaultContext,
+    pub environments: EnvironmentsContext,
     /// What the ARM tabs can reach: the subscription they read, and why they
     /// read nothing when they cannot.
     pub arm: ArmContext,
@@ -144,6 +145,65 @@ pub struct VaultItemContext {
     pub updated: Option<String>,
     pub expires: Option<String>,
     pub revealed: bool,
+}
+
+/// The environments board: what the deployment repository declares, what each
+/// environment would be missing, and the promotion the details pane is reading.
+///
+/// Nothing here is stored and nothing here is on a timer: the overlays are
+/// rendered when the tab is opened, when `r` asks, and when a `git pull` moves
+/// the deployment clone, so this is as current as the last render.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct EnvironmentsContext {
+    /// Why the board is empty, when it is: no `[deployment]` in `config.toml`,
+    /// no `[[environments]]`, or no clone of the repository on this machine —
+    /// in the line that says where it looked.
+    pub reason: Option<String>,
+    /// One per `[[environments]]`, in the order the file lists them, which is
+    /// the order of the board's columns.
+    pub environments: Vec<EnvironmentContext>,
+    /// The workload the row cursor is on.
+    pub selected_service: Option<String>,
+    /// The environment the column cursor is on, which is the one a promotion
+    /// is read *into*.
+    pub selected_environment: Option<String>,
+    /// What that cell is missing, one line each, as `env check` writes it.
+    pub findings: Vec<String>,
+    /// The promotion the details pane is reading, when there is a column to
+    /// the left of the cursor to promote from.
+    pub diff: Option<PromotionContext>,
+    pub visible_rows: usize,
+    /// Where `g` would go from the line the details pane's cursor is on, or
+    /// `null` when it points nowhere. Written the way a jump is stored:
+    /// `{"kind": "run", "at": 14}`.
+    pub follow: Option<crate::model::Jump>,
+}
+
+/// One environment the deployment repository declares.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct EnvironmentContext {
+    pub name: String,
+    /// The key vault it pulls its secrets from, when the file names one.
+    pub vault: Option<String>,
+    /// The overlay patterns it is made of, relative to the clone.
+    pub overlays: Vec<String>,
+    /// Whether its overlays rendered at all.
+    pub rendered: bool,
+    /// The renderer's own line, for an environment that would not render.
+    pub error: Option<String>,
+    /// How many things it asks for that it does not answer, expiries apart.
+    pub findings: usize,
+    /// Vault objects in use that fall due inside thirty days.
+    pub expiring: usize,
+}
+
+/// The promotion the details pane is reading: one environment into the next.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PromotionContext {
+    pub from: String,
+    pub to: String,
+    /// One line each, in the same words the pull request pre-flight uses.
+    pub lines: Vec<String>,
 }
 
 /// Whether the ACR and Key Vault tabs have a subscription to read at all. An
@@ -633,6 +693,7 @@ mod tests {
             aks: AksContext::default(),
             acr: AcrContext::default(),
             key_vault: KeyVaultContext::default(),
+            environments: EnvironmentsContext::default(),
             arm: ArmContext::default(),
             work_items: WorkItemsContext {
                 follow: None,

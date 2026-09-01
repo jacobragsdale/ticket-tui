@@ -456,7 +456,7 @@ fn pulled(providers: &[&Provider]) -> Vec<(String, String)> {
 
 /// The providers one workload reaches: the `SecretProviderClass` it mounts,
 /// and whatever produces a Secret it reads.
-fn providers<'a>(manifest: &'a EnvManifest, workload: &Workload) -> Vec<&'a Provider> {
+pub(crate) fn providers<'a>(manifest: &'a EnvManifest, workload: &Workload) -> Vec<&'a Provider> {
     let referenced = referenced(workload);
     let mounted: Vec<&str> = workload
         .containers
@@ -515,6 +515,139 @@ fn one_sided(mine: &[String], theirs: &[String], object: &str) -> Vec<Entry> {
         .collect();
     entries.extend(right.difference(&left).map(|name| entry(name, Side::To)));
     entries
+}
+
+/// Which part of a promotion one line belongs to. The board draws a rule per
+/// section; the pre-flight, which says the same things as sentences, ignores
+/// them.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Section {
+    /// The workload itself, which one side has and the other has not.
+    Service,
+    Image,
+    Secrets,
+    Config,
+    Variables,
+}
+
+impl Section {
+    /// What the rule over the section says.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Service => "Service",
+            Self::Image => "Image",
+            Self::Secrets => "Secrets",
+            Self::Config => "Config",
+            Self::Variables => "Variables",
+        }
+    }
+}
+
+/// What one line names that another tab holds, so a reader with tabs can point
+/// at it and one without can ignore it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Names {
+    Nothing,
+    /// The vault, and the object pulled from it.
+    VaultObject {
+        vault: String,
+        object: String,
+    },
+    /// The container whose image moves, which a caller with the runs on file
+    /// reads back to the build that made it.
+    Container(String),
+}
+
+/// One line of a promotion, in the words both readers use.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PromotionLine {
+    pub section: Section,
+    pub text: String,
+    pub names: Names,
+}
+
+impl PromotionLine {
+    fn plain(section: Section, text: String) -> Self {
+        Self {
+            section,
+            text,
+            names: Names::Nothing,
+        }
+    }
+}
+
+/// One service's promotion, line by line, in the one wording the environments
+/// board and the pull request pre-flight both read.
+///
+/// A diff is handed in as `diff(what is arriving, what is there)`: the board
+/// reads qa into prod, the pre-flight reads the source branch into the target,
+/// and both come out as what the change would add to, and take away from, the
+/// environment `diff.to` names. `Side::From` is therefore always the arriving
+/// side, which is why one function serves both.
+#[must_use]
+pub fn promotion_lines(diff: &PromotionDiff, service: &ServiceDiff) -> Vec<PromotionLine> {
+    let mut lines = Vec::new();
+    let place = |object: &str| format!("{}/{object}", diff.to);
+    if let Some(side) = service.only_in {
+        let verb = if side == Side::From {
+            "adds"
+        } else {
+            "removes"
+        };
+        lines.push(PromotionLine::plain(
+            Section::Service,
+            format!("{verb} {} {}", service.kind, service.workload),
+        ));
+        return lines;
+    }
+    for change in &service.images {
+        let text = match (&change.from, &change.to) {
+            (Some(arriving), Some(there)) => {
+                format!("moves {} from {there} to {arriving}", change.container)
+            }
+            (Some(arriving), None) => format!("adds {} at {arriving}", change.container),
+            (None, _) => format!("removes {}", change.container),
+        };
+        lines.push(PromotionLine {
+            section: Section::Image,
+            text,
+            names: Names::Container(change.container.clone()),
+        });
+    }
+    for entry in &service.vault_objects {
+        let verb = if entry.side == Side::From {
+            "pulls"
+        } else {
+            "stops pulling"
+        };
+        lines.push(PromotionLine {
+            section: Section::Secrets,
+            text: format!("{verb} {} from {}", entry.name, entry.object),
+            names: Names::VaultObject {
+                vault: entry.object.clone(),
+                object: entry.name.clone(),
+            },
+        });
+    }
+    for entry in &service.keys {
+        let text = if entry.side == Side::From {
+            format!("adds {} to {}", entry.name, place(&entry.object))
+        } else {
+            format!("removes {} from {}", entry.name, place(&entry.object))
+        };
+        lines.push(PromotionLine::plain(Section::Config, text));
+    }
+    for entry in &service.variables {
+        let text = if entry.side == Side::From {
+            format!("sets {} on {}", entry.name, place(&entry.object))
+        } else {
+            format!("unsets {} on {}", entry.name, place(&entry.object))
+        };
+        lines.push(PromotionLine::plain(Section::Variables, text));
+    }
+    lines
 }
 
 /// One tag read back to the run that built it: the run whose build number it

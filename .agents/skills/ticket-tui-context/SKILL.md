@@ -6,15 +6,16 @@ description: Read and change an Azure DevOps project with ticket-tui. Use when t
 # ticket-tui
 
 ticket-tui is a terminal front-end for one Azure DevOps project: work items,
-repositories, pull requests and pipelines, on the first four of seven tabs. It
+repositories, pull requests and pipelines, on the first four of eight tabs. It
 keeps a local SQLite database of what the project holds and writes changes
 straight back to Azure DevOps. Azure DevOps is the record of truth; the database
 is a durable local copy of it that survives across runs, not a scratch cache.
-Tabs `5`–`7` have no database behind them at all: AKS reads clusters through
-`kubectl`, and ACR and Key Vault read one Azure subscription through Resource
-Manager, both live.
+Tabs `5`–`8` have no database behind them at all: AKS reads clusters through
+`kubectl`, ACR and Key Vault read one Azure subscription through Resource
+Manager, both live, and Environments renders the deployment repository's
+kustomize overlays off this machine.
 
-Seven surfaces, each with a read, a write and a live view:
+Eight surfaces, each with a read, a write and a live view:
 
 | Surface | Read (from SQLite) | Write (to Azure DevOps) | In the live context |
 |---|---|---|---|
@@ -25,6 +26,7 @@ Seven surfaces, each with a read, a write and a live view:
 | AKS pods | `pods` (live, through `kubectl`) | — (restart and shell are the TUI's keys `x` and `s`) | `aks` |
 | Registries | `acr list`, `acr show`, `acr repos list`, `acr tags list`, `acr tags show` (live, through ARM) | — read-only, no untag and no delete | `acr`, `arm` |
 | Key vaults | `vaults list`, `vaults show`, `secrets list`, `secrets show`, `keys list`, `certs list` (live, through ARM) | — read-only, no create, set or delete | `key_vault`, `arm` |
+| Environments | `env list`, `env show`, `env check`, `env diff` (live, through `kubectl kustomize`) | — read-only; nothing here applies anything | `environments` |
 
 `runs show`, `runs logs`, `runs wait` and `approvals list` read Azure DevOps
 rather than the database: a timeline, a log and a run's own progress are not
@@ -194,6 +196,44 @@ user's screen this minute.
 
 Flags, columns and JSON shapes: [references/cli.md](references/cli.md).
 
+## Environments: what an overlay declares, and what it forgot
+
+Tab `8` and the four `env` commands read one **deployment repository** — the
+kustomize overlays on this machine — rather than Azure DevOps or a
+subscription. `[deployment]` in `~/.config/ticket-tui/config.toml` names the
+repository and `[[environments]]` names what each environment is made of;
+without them every form here says where it looked and does nothing else.
+
+```console
+ticket-tui env list                       # name overlays vault registry cluster counts
+ticket-tui env show prod                  # every workload, its images and its references
+ticket-tui env check prod                 # the pre-deploy gate; exit 1 on any finding
+ticket-tui env check                      # every environment the file declares
+ticket-tui env check prod --offline       # skip the vault half, which is the half needing a token
+ticket-tui env diff qa prod orders        # the promotion, read before it is made
+```
+
+`env check` is the one worth wiring into a pipeline: it renders the
+environment's own overlays and reports every ConfigMap and Secret key a
+workload reads that the overlay never defines, every vault object a provider
+pulls that the vault does not hold, every provider pulling from another
+environment's vault, and every object in use inside thirty days of its expiry.
+It exits **1** for any finding, **0** for clean, and **2** when an overlay
+would not render — a gate that could not look must not read as clean.
+Everything it says is that a name is **absent**; no value is read, here or
+anywhere else in this feature.
+
+`env diff <from> <to> [service]` is the same two environments read against each
+other: the keys, vault objects and variables one has that the other has not,
+and the image gap read back through the runs to the pull requests and work
+items between them. That last half needs the service's own clone; the TUI's
+board does not read it, so `env diff` is where the pull request list lives.
+
+When a TUI is running and the user says "is prod ready", "what is prod
+missing", or "this service" while on tab `8`, read `environments` from the live
+context instead of asking them: it carries every environment, what the cell
+under their cursor is missing, and the promotion the details pane is showing.
+
 ## How fresh the data is
 
 A running ticket-tui pulls every 60 seconds by default (`--refresh SECONDS`,
@@ -254,6 +294,10 @@ Interpreting what comes back:
 - **`key_vault.selected_item.revealed`** says a secret's value is on the
   user's screen right now. The value is not in the file, and asking for it is
   not implied by their looking at it.
+- **`environments.reason`** means tab `8` has nothing to draw and says where it
+  looked: no `[deployment]`, no `[[environments]]`, or no clone here. The board
+  is rendered on focus, on `r`, and after a `git pull` of that clone, never on
+  a timer, so it is as current as the last render.
 
 Field-level semantics, including exactly when each `sync` field moves:
 [references/context-schema.md](references/context-schema.md).
@@ -359,6 +403,18 @@ question is `kind:cert expires:<+30d` in the search box (the `+` compares
 against *now plus thirty days*, not against an age), and the answer is already
 in the context as `key_vault.expiring_certificates`, which is what the `◇N`
 badge on the tab counts.
+
+**Is prod ready for this?**
+
+```console
+ticket-tui env check prod
+ticket-tui env diff qa prod orders
+```
+The first says what prod would be short of, the second what promoting qa into
+it would change. Both read the clone and neither applies anything. On tab `8`
+the same two answers are the cell under the cursor and the details pane beside
+it, and `environments.diff.lines` in the live context is the second of them
+word for word.
 
 **Never** reach for `secrets show --value` on the way to either of these: a name,
 a date and an `enabled` flag answer almost every question about a vault, and a

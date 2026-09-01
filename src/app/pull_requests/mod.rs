@@ -389,7 +389,16 @@ impl PullRequestsScreen {
     /// on a pull request against the deployment repository and nothing has been
     /// flown at this head yet. One at a time, so holding `j` down the table
     /// never queues a render per row it crosses.
-    pub fn preflight_due(&mut self, shell: &Shell) -> Option<LocalRequest> {
+    ///
+    /// `vaults` is what whoever reads vaults holds of them. The local thread
+    /// cannot reach a subscription, so the half of the check that needs one
+    /// travels with the request; an environment whose vault is not among them
+    /// is answered against its own overlays and the pane says so.
+    pub fn preflight_due(
+        &mut self,
+        shell: &Shell,
+        vaults: Vec<crate::kustomize::VaultNames>,
+    ) -> Option<LocalRequest> {
         let deployment = self.deployment.clone()?;
         let row = self.selected(shell)?;
         if !self.pre_flyable(&row) || self.preflight_running() {
@@ -406,6 +415,7 @@ impl PullRequestsScreen {
             source: row.source_branch(),
             target: row.target_branch(),
             deployment,
+            vaults,
         })
     }
 

@@ -780,6 +780,7 @@ pub(super) fn row_like(target: &PointerTarget) -> bool {
             | PointerTarget::TreeRow { .. }
             | PointerTarget::SelectTab { .. }
             | PointerTarget::TableRow { .. }
+            | PointerTarget::TableCell { .. }
             | PointerTarget::OpenInBrowser { .. }
             | PointerTarget::ToggleBookmark { .. }
             | PointerTarget::ToggleRowSelect { .. }

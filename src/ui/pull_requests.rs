@@ -332,6 +332,7 @@ fn preflight_note_line(note: &Note) -> Line<'static> {
         Mark::Running => (spinner_frame().to_string(), theme().muted),
         Mark::Clean => ("\u{2713}".to_owned(), theme().state_completed),
         Mark::Missing => ("\u{2717}".to_owned(), theme().error),
+        Mark::Change => ("\u{2192}".to_owned(), theme().info),
         Mark::Failed => ("!".to_owned(), theme().warning),
     };
     let text = if note.jump.is_some() {

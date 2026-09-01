@@ -11,7 +11,7 @@ field changed in the TUI is written straight back over the REST API. Everything
 else it does is local.
 
 ```
- 1 Work items  2 Repos  3 Pull requests  4 Pipelines  5 AKS  6 ACR  7 Key Vault     ?
+ 1 Work items  2 Repos  3 Pull requests  4 Pipelines  5 AKS  6 ACR  7 Key Vault  8 Env  ?
 / Type / to search, or pick a filter from the bar below
  State ▾   Assignee ▾   Iteration ▾   Type ▾   Priority ▾   Tags ▾   +
 ╭ Tickets 116/116 · Changed ↑ ───────────────────────────────────────────────────────╮
@@ -68,13 +68,13 @@ offline, browsing whatever the database already holds.
 
 | Key | Does |
 |---|---|
-| `1`–`7` | Work items, Repos, Pull requests, Pipelines, AKS, ACR, Key Vault |
+| `1`–`8` | Work items, Repos, Pull requests, Pipelines, AKS, ACR, Key Vault, Environments |
 | `/` | Live fuzzy search — `state:active`, `assignee:@me`, `id:642` |
 | `p` / `:` | The command palette: every action the tab can take |
 | `e` | The Actions menu — edit title, state, assignee, tags, description |
 | `n` / `N` | New work item, or a new child of the selected one |
 | `+` | Quick capture, on every tab: one row, a title, `Enter` — an Issue on you, in the current sprint, tagged `inbox` |
-| `r` | Sync now, without waiting for the timer — on AKS, ACR and Key Vault it re-reads that tab's own source, and on Pull requests it flies the pre-flight again |
+| `r` | Sync now, without waiting for the timer — on AKS, ACR and Key Vault it re-reads that tab's own source, on Pull requests it flies the pre-flight again, and on Environments it renders the overlays again |
 | `o` | Open the selected row in the system browser; the Azure portal on ACR and Key Vault |
 | `?` | The in-app help, generated from the same table the keys are bound in |
 | `L` / `D` | On AKS: tail the selected pod's log, or `kubectl describe` it |
@@ -83,6 +83,8 @@ offline, browsing whatever the database already holds.
 | `Enter` / `h` | On ACR and Key Vault: into the registry or vault under the cursor, and back out |
 | `y` / `D` | On ACR: copy the pull reference, or the tag's digest |
 | `R` / `Y` | On Key Vault: show a secret's value for one minute, or copy it while it is up |
+| `h` / `l` | On Environments: move the column cursor, which is the environment a promotion is read into |
+| `F` | On Environments: only the services something is missing |
 | `[` / `]` | Back and forward through everywhere you have been, across tabs |
 | `q` | Quit |
 
@@ -180,8 +182,19 @@ overlays = ["services/*/overlays/prod"]
 vault = "kv-prod"
 ```
 
-Without a `[deployment]` table, or without a clone, the `env` commands say
-where they looked and do nothing else.
+Without a `[deployment]` table, or without a clone, the `env` commands and tab
+`8` say where they looked and do nothing else.
+
+Tab `8` is the glance those commands answer one at a time: one row per service,
+one column per `[[environments]]`, each cell the image tag with `✗N` for what
+that environment would be missing and `◇N` for the vault objects it uses that
+are about to lapse. `h` and `l` move the column cursor, and the details pane
+reads the promotion into the environment under it from the one to its left —
+image, secrets, config, variables and expiry — with every line that names a
+run, a vault object or a pod one `g` away from the tab that holds it. The
+overlays are rendered when the tab is first opened, when `r` asks, and when a
+`git pull` on the Repos tab moves the deployment clone; never on a timer,
+because a repository only changes when somebody pushes.
 
 And it holds the colour theme: a `[theme.custom]` palette in the vocabulary of
 the `theme` tool, which applies one palette to every program on the machine,

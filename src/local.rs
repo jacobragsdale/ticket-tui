@@ -75,6 +75,10 @@ pub enum LocalRequest {
         source: String,
         target: String,
         deployment: crate::preflight::Deployment,
+        /// What the vaults hold, as whoever reads vaults read them. This
+        /// thread has no way to reach a subscription, so the half of the check
+        /// that needs one travels with the request as names.
+        vaults: Vec<crate::kustomize::VaultNames>,
     },
     Stop,
 }
@@ -104,11 +108,13 @@ pub enum LocalEvent {
         rendered: Result<String, String>,
     },
     /// One pull request, pre-flown: what its overlays would be missing, or the
-    /// one line saying why it could not be looked at.
+    /// one line saying why it could not be looked at. Boxed: a report carries
+    /// both renders of every overlay it touched, and every other event on this
+    /// channel is a line or two.
     Preflighted {
         id: i64,
         commit: String,
-        found: Result<crate::preflight::Report, String>,
+        found: Result<Box<crate::preflight::Report>, String>,
     },
     Stopped,
 }
@@ -190,8 +196,10 @@ fn work(requests: &Receiver<LocalRequest>, events: &Sender<LocalEvent>) {
                 source,
                 target,
                 deployment,
+                vaults,
             } => events.send(LocalEvent::Preflighted {
-                found: crate::preflight::run(&deployment, &source, &target, &commit)
+                found: crate::preflight::run(&deployment, &source, &target, &commit, &vaults)
+                    .map(Box::new)
                     .map_err(|error| last_line(&format!("{error:#}"))),
                 id,
                 commit,

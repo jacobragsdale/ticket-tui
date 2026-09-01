@@ -6,7 +6,14 @@
 //! own, only the overlays the change touches are rendered there, and the same
 //! check `ticket-tui env check` runs is run over the result — the branch's
 //! tree rather than the clone's, and nothing of the clone's own state is
-//! disturbed.
+//! disturbed. The target branch's own render of the same overlays goes into a
+//! second scratch worktree beside it, so the pane can also say what the merge
+//! would *change*, not only what it would leave missing.
+//!
+//! Nothing here reaches a vault. What the environment's vault holds is read on
+//! the app side, by the tab that reads vaults, and handed in as names — so the
+//! half that needs a token is somebody else's, and this stays a function of a
+//! repository and a commit.
 //!
 //! It never blocks. A pull request may be approved or completed with findings;
 //! the pane says what will be missing and the vote is the reviewer's. A gate
@@ -19,7 +26,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::config::{Config, Environment};
-use crate::kustomize::{self, EnvManifest, Finding, ObjectKind};
+use crate::kustomize::diff::{self, Names};
+use crate::kustomize::{self, EnvManifest, Finding, Missing, ObjectKind, Source, VaultNames};
 use crate::local;
 use crate::model::Jump;
 
@@ -81,14 +89,26 @@ pub enum Preflight {
     Failed(String),
 }
 
-/// What one pre-flight found: which overlays were rendered, and what they ask
-/// for that they do not answer.
+/// What one pre-flight found: which overlays were rendered, what they ask for
+/// that they do not answer, and the two renders that say what the merge would
+/// change.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Report {
     /// The overlays rendered, as `(environment, overlay)`, in the order the
     /// file lists the environments.
     pub rendered: Vec<(String, String)>,
     pub findings: Vec<Finding>,
+    /// Each environment the change touches as the target branch has it, and
+    /// as the head the pull request was read at has it. The two read against
+    /// each other are what merging would do; `before` is empty when the target
+    /// branch could not be rendered, and the pane then says only what would be
+    /// missing.
+    pub before: Vec<(String, EnvManifest)>,
+    pub after: Vec<(String, EnvManifest)>,
+    /// The vaults the findings were answered against. An environment whose
+    /// vault is not here was checked against its own repository alone, which
+    /// is what the Key Vault tab not having read it yet leaves.
+    pub vaults: Vec<String>,
 }
 
 /// What one line of the Pre-flight section is.
@@ -98,6 +118,8 @@ pub enum Mark {
     /// An overlay that renders with nothing missing.
     Clean,
     Missing,
+    /// Something the merge would change rather than leave missing.
+    Change,
     Failed,
 }
 
@@ -156,10 +178,42 @@ impl Report {
             notes.extend(mine.into_iter().map(|finding| Note {
                 mark: Mark::Missing,
                 text: finding.to_string(),
-                jump: vault_jump(deployment, finding),
+                jump: finding_jump(&deployment.environments, finding),
             }));
         }
+        notes.extend(self.unread_vaults(deployment));
         notes.extend(promotion(self).into_iter().flatten());
+        notes
+    }
+
+    /// The environments whose vault nobody has read, said once each: the
+    /// overlays answered for themselves and the vault half is still open.
+    fn unread_vaults(&self, deployment: &Deployment) -> Vec<Note> {
+        let mut said: Vec<&str> = Vec::new();
+        let mut notes = Vec::new();
+        for (environment, _) in &self.rendered {
+            let Some(vault) = deployment
+                .environments
+                .iter()
+                .find(|held| held.name == *environment)
+                .and_then(|held| held.vault.as_deref())
+            else {
+                continue;
+            };
+            if said.contains(&environment.as_str())
+                || self
+                    .vaults
+                    .iter()
+                    .any(|held| held.eq_ignore_ascii_case(vault))
+            {
+                continue;
+            }
+            said.push(environment);
+            notes.push(Note::plain(
+                Mark::Failed,
+                format!("{environment}: {vault} not read, so the overlays answer alone"),
+            ));
+        }
         notes
     }
 
@@ -170,28 +224,67 @@ impl Report {
     }
 }
 
-/// What this pull request adds to the environments it touches: the target
-/// branch's render of the same overlay against the source's, in the words of
-/// the board — `this pull request adds RATE_LIMIT_PER_MIN to prod/orders-config`.
+/// What this pull request would change in the environments it touches: the
+/// target branch's render of the same overlays read against the head's, in the
+/// words the environments board uses — `this pull request adds
+/// RATE_LIMIT_PER_MIN to prod/orders-config`.
 ///
-/// TODO(#747): `env diff` lands the comparison itself; this is the hook it is
-/// wired into, and until then the pane says only what would be missing.
-fn promotion(_report: &Report) -> Option<Vec<Note>> {
-    None
+/// The diff is taken as `diff(what is arriving, what is there)`, which is the
+/// way round [`diff::promotion_lines`] reads for the board too, so one wording
+/// serves both.
+fn promotion(report: &Report) -> Option<Vec<Note>> {
+    let mut notes = Vec::new();
+    for (environment, after) in &report.after {
+        let Some((_, before)) = report.before.iter().find(|(held, _)| held == environment) else {
+            continue;
+        };
+        let promotion = diff::diff(after, before, None);
+        for service in &promotion.services {
+            notes.extend(
+                diff::promotion_lines(&promotion, service)
+                    .into_iter()
+                    .map(|line| Note {
+                        mark: Mark::Change,
+                        text: format!("this pull request {}", line.text),
+                        // The vault as a whole: a line saying an object is now
+                        // pulled names the vault to go and look in, and the kind
+                        // it is filed under is the vault's own business.
+                        jump: match line.names {
+                            Names::VaultObject { vault, .. } => Some(Jump::Vault(vault)),
+                            _ => None,
+                        },
+                    }),
+            );
+        }
+    }
+    (!notes.is_empty()).then_some(notes)
 }
 
-/// Where a finding points. A key an overlay never defines is a question for
-/// the vault the environment pulls its secrets from, which is the tab that
-/// answers it.
-///
-/// TODO(#746): the vault check names the vault object itself, which is a
-/// `Jump::VaultItem` rather than the vault as a whole.
-fn vault_jump(deployment: &Deployment, finding: &Finding) -> Option<Jump> {
+/// Where a finding points. The vault half names the object itself, which is a
+/// row on the Key Vault tab; the repository half names a Secret, which is a
+/// question for the vault the environment pulls its secrets from as a whole.
+#[must_use]
+pub fn finding_jump(environments: &[Environment], finding: &Finding) -> Option<Jump> {
+    if finding.reference.object == ObjectKind::Vault {
+        let vault = finding.vault.clone()?;
+        // A provider pulling from the wrong vault names that vault rather than
+        // an object in it, and an `ExternalSecret` says no kind at all, so
+        // neither is a row this can point at.
+        return Some(
+            match (finding.missing, item_kind(&finding.reference.source)) {
+                (Missing::WrongVault, _) | (_, None) => Jump::Vault(vault),
+                (_, Some(kind)) => Jump::VaultItem {
+                    vault,
+                    kind,
+                    name: finding.reference.name.clone(),
+                },
+            },
+        );
+    }
     if finding.reference.object != ObjectKind::Secret {
         return None;
     }
-    deployment
-        .environments
+    environments
         .iter()
         .find(|environment| environment.name == finding.environment)?
         .vault
@@ -199,36 +292,110 @@ fn vault_jump(deployment: &Deployment, finding: &Finding) -> Option<Jump> {
         .map(Jump::Vault)
 }
 
+/// What the Key Vault tab files a vault object under, out of the `objectType`
+/// a provider wrote. `certificate` and `cert` are the same kind spelled two
+/// ways; anything else is a kind this cannot name.
+fn item_kind(source: &Source) -> Option<String> {
+    let Source::Vault { kind } = source else {
+        return None;
+    };
+    match kind.as_deref()? {
+        "secret" => Some("secret".to_owned()),
+        "key" => Some("key".to_owned()),
+        "cert" | "certificate" => Some("cert".to_owned()),
+        _ => None,
+    }
+}
+
 /// One pull request, pre-flown: fetch what it is, put its head in a scratch
-/// worktree, render the overlays it touches there and check them. The worktree
-/// goes however this leaves.
-pub fn run(deployment: &Deployment, source: &str, target: &str, commit: &str) -> Result<Report> {
+/// worktree, render the overlays it touches there, render the same overlays as
+/// the target branch has them beside it, and check the result. `vaults` is
+/// what whoever has already read a vault holds of it, by name — nothing here
+/// reaches one — and an environment with none is answered against its own
+/// repository alone. Both worktrees go however this leaves.
+pub fn run(
+    deployment: &Deployment,
+    source: &str,
+    target: &str,
+    commit: &str,
+    vaults: &[VaultNames],
+) -> Result<Report> {
     let clone = deployment.clone.as_path();
     // Best effort: what has to be here is the head the row was read at, and
     // `git worktree add` says precisely when it is not. A clone with no remote
     // to reach — the fixture repository the tests build — pre-flies from what
     // it already has.
     let _ = local::remote_git(clone, &["fetch", "origin", source, target]);
-    let changed = changed_files(clone, target, commit)?;
+    // The target as a commit rather than as a name: a scratch worktree is
+    // named after what it holds, and two of them may not share a name.
+    let target = commit_of(clone, &target_ref(clone, target));
+    let changed = changed_files(clone, &target, commit)?;
     let scratch = Scratch::add(clone, commit)?;
-    let mut rendered = Vec::new();
+    let rendered = touched(&scratch.path, &deployment.environments, &changed);
+    let after = render_touched(deployment, &scratch.path, &rendered)?;
+    // What the target branch already says, so the pane can name the change
+    // rather than only the gap. A branch whose overlays will not render there
+    // — one this pull request adds — leaves this empty, and the promotion half
+    // is simply not said.
+    let before = if target == commit {
+        after.clone()
+    } else {
+        Scratch::add(clone, &target)
+            .ok()
+            .and_then(|base| render_touched(deployment, &base.path, &rendered).ok())
+            .unwrap_or_default()
+    };
+    let mut findings = Vec::new();
+    let mut read = Vec::new();
+    for (environment, manifest) in &after {
+        let vault = deployment
+            .environments
+            .iter()
+            .find(|held| held.name == *environment)
+            .and_then(|held| held.vault.as_deref())
+            .and_then(|name| {
+                vaults
+                    .iter()
+                    .find(|held| held.vault.eq_ignore_ascii_case(name))
+            });
+        if let Some(vault) = vault {
+            read.push(vault.vault.clone());
+        }
+        findings.extend(kustomize::check_with(manifest, vault));
+    }
+    Ok(Report {
+        rendered,
+        findings,
+        before,
+        after,
+        vaults: read,
+    })
+}
+
+/// Every overlay in `touched`, rendered out of one tree and unioned into one
+/// manifest per environment.
+fn render_touched(
+    deployment: &Deployment,
+    tree: &Path,
+    touched: &[(String, String)],
+) -> Result<Vec<(String, EnvManifest)>> {
     let mut manifests: BTreeMap<String, EnvManifest> = BTreeMap::new();
-    for (environment, overlay) in touched(&scratch.path, &deployment.environments, &changed) {
-        let yaml = kustomize::render(&scratch.path, &overlay, &deployment.render)?;
-        let mut parsed = kustomize::parse(&environment, &yaml);
+    for (environment, overlay) in touched {
+        let yaml = kustomize::render(tree, overlay, &deployment.render)?;
+        let mut parsed = kustomize::parse(environment, &yaml);
         parsed.overlays.push(overlay.clone());
         manifests
             .entry(environment.clone())
-            .or_insert_with(|| EnvManifest::named(&environment))
+            .or_insert_with(|| EnvManifest::named(environment))
             .absorb(parsed);
-        rendered.push((environment, overlay));
     }
-    let mut findings = Vec::new();
-    for manifest in manifests.values_mut() {
-        manifest.tidy();
-        findings.extend(kustomize::check(manifest));
-    }
-    Ok(Report { rendered, findings })
+    Ok(manifests
+        .into_iter()
+        .map(|(name, mut manifest)| {
+            manifest.tidy();
+            (name, manifest)
+        })
+        .collect())
 }
 
 /// Which overlays a change puts in question. Each changed file walks up to its
@@ -292,9 +459,10 @@ fn nearest_kustomization(tree: &Path, file: &str) -> Option<String> {
 }
 
 /// What the pull request changes: everything between where it left the target
-/// branch and the head it was read at.
+/// branch and the head it was read at. `target` is the ref as this clone has
+/// it, which [`target_ref`] has already settled.
 fn changed_files(clone: &Path, target: &str, commit: &str) -> Result<Vec<String>> {
-    let range = format!("{}...{commit}", target_ref(clone, target));
+    let range = format!("{target}...{commit}");
     let output = local::git(clone, &["diff", "--name-only", &range])
         .with_context(|| format!("could not read what {commit} changes"))?;
     Ok(output
@@ -303,6 +471,17 @@ fn changed_files(clone: &Path, target: &str, commit: &str) -> Result<Vec<String>
         .filter(|line| !line.is_empty())
         .map(str::to_owned)
         .collect())
+}
+
+/// What a ref points at, or the ref itself where git will not say — which is a
+/// ref that is not here at all, and `git worktree add` says so better than
+/// this could.
+fn commit_of(clone: &Path, reference: &str) -> String {
+    local::git(clone, &["rev-parse", reference])
+        .ok()
+        .map(|head| head.trim().to_owned())
+        .filter(|head| !head.is_empty())
+        .unwrap_or_else(|| reference.to_owned())
 }
 
 /// The target branch as this clone has it: the remote-tracking ref the fetch

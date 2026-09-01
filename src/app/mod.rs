@@ -10,9 +10,9 @@ use ratatui::widgets::TableState;
 use serde_json::Value;
 
 use crate::agent_context::{
-    AcrContext, AgentContext, AksContext, ArmContext, KeyVaultContext, PendingEditContext,
-    PipelinesContext, PullRequestsContext, ReposContext, SearchContext, SortContext, SyncContext,
-    TicketContext, TicketReference, TicketsContext, WorkItemsContext,
+    AcrContext, AgentContext, AksContext, ArmContext, EnvironmentsContext, KeyVaultContext,
+    PendingEditContext, PipelinesContext, PullRequestsContext, ReposContext, SearchContext,
+    SortContext, SyncContext, TicketContext, TicketReference, TicketsContext, WorkItemsContext,
 };
 use crate::classification::{self, ClassificationNode, NodeKind};
 use crate::columns::{ColumnLayout, TableLayout};
@@ -53,6 +53,7 @@ use crate::timestamp::Timestamp;
 pub mod acr;
 pub mod aks;
 pub mod cursor;
+pub mod environments;
 pub mod key_vault;
 pub mod pipelines;
 pub mod pull_requests;
@@ -64,6 +65,7 @@ pub mod work_items;
 pub use acr::AcrScreen;
 pub use aks::AksScreen;
 pub use cursor::ListCursor;
+pub use environments::EnvironmentsScreen;
 pub use key_vault::KeyVaultScreen;
 pub use pipelines::PipelinesScreen;
 pub use pull_requests::PullRequestsScreen;
@@ -251,7 +253,7 @@ impl CopiedContent {
 /// The application: the shell every screen shares, and the screens themselves.
 pub struct App {
     pub shell: Shell,
-    /// The tab keys `1`–`7` switch between. Every screen keeps its own state
+    /// The tab keys `1`–`8` switch between. Every screen keeps its own state
     /// while another is showing.
     pub tab: TabId,
     /// Which tab one of the shared overlays — help, the palette, the columns
@@ -272,6 +274,7 @@ pub struct App {
     pub aks: AksScreen,
     pub acr: AcrScreen,
     pub key_vault: KeyVaultScreen,
+    pub environments: EnvironmentsScreen,
     /// The pull requests as the last snapshot left them, for telling a vote
     /// that has landed from a pull that changed nothing. `None` until the
     /// first snapshot of the run, which is the baseline rather than news.
@@ -303,6 +306,7 @@ impl App {
             aks: AksScreen::default(),
             acr: AcrScreen::default(),
             key_vault: KeyVaultScreen::default(),
+            environments: EnvironmentsScreen::default(),
             pull_request_marks: None,
         }
     }
@@ -327,6 +331,7 @@ impl App {
             TabId::Aks => &self.aks,
             TabId::Acr => &self.acr,
             TabId::KeyVault => &self.key_vault,
+            TabId::Environments => &self.environments,
         }
     }
 
@@ -386,6 +391,7 @@ impl App {
             TabId::Aks => self.aks.run_command(&mut self.shell, id),
             TabId::Acr => self.acr.run_command(&mut self.shell, id),
             TabId::KeyVault => self.key_vault.run_command(&mut self.shell, id),
+            TabId::Environments => self.environments.run_command(&mut self.shell, id),
         };
         self.apply(action)
     }
@@ -404,6 +410,7 @@ impl App {
                 aks,
                 acr,
                 key_vault,
+                environments,
                 tab,
                 ..
             } = self;
@@ -416,6 +423,7 @@ impl App {
                 TabId::Aks => aks.columns_mut(),
                 TabId::Acr => acr.columns_mut(),
                 TabId::KeyVault => key_vault.columns_mut(),
+                TabId::Environments => environments.columns_mut(),
             };
             work_items.handle_columns_key_on(shell, key, layout);
             AppAction::None
@@ -461,6 +469,7 @@ impl App {
                     aks,
                     acr,
                     key_vault,
+                    environments,
                     tab,
                     ..
                 } = self;
@@ -471,6 +480,7 @@ impl App {
                     TabId::Aks => aks.columns_mut(),
                     TabId::Acr => acr.columns_mut(),
                     TabId::KeyVault => key_vault.columns_mut(),
+                    TabId::Environments => environments.columns_mut(),
                 };
                 if work_items.apply_column_target(shell, &target, layout) {
                     shell.pointer.clear_press();
@@ -705,6 +715,9 @@ impl App {
         );
         self.work_items
             .replace_prepared_tickets(&mut self.shell, snapshot);
+        // The board reads an image tag back to the build that made it, which
+        // is the one half two overlays cannot answer between them.
+        self.environments.set_runs(runs.clone());
         self.pipelines.set_pipelines(pipelines, runs, &self.shell);
         self.pull_requests
             .set_pull_requests(pull_requests.clone(), &self.shell);
@@ -774,6 +787,7 @@ impl App {
                 TabId::Aks => "aks",
                 TabId::Acr => "acr",
                 TabId::KeyVault => "key_vault",
+                TabId::Environments => "environments",
             }
             .to_owned(),
             work_items: WorkItemsContext {
@@ -803,6 +817,10 @@ impl App {
             key_vault: KeyVaultContext {
                 follow: self.follow_of(TabId::KeyVault),
                 ..self.key_vault.agent_context()
+            },
+            environments: EnvironmentsContext {
+                follow: self.follow_of(TabId::Environments),
+                ..self.environments.agent_context(&self.shell)
             },
             arm: ArmContext {
                 subscription: self.shell.arm_subscription().map(str::to_owned),
@@ -862,6 +880,7 @@ impl App {
             aks,
             acr,
             key_vault,
+            environments,
             ..
         } = session;
         self.work_items
@@ -872,6 +891,7 @@ impl App {
         Screen::restore(&mut self.aks, &mut self.shell, aks);
         Screen::restore(&mut self.acr, &mut self.shell, acr);
         Screen::restore(&mut self.key_vault, &mut self.shell, key_vault);
+        Screen::restore(&mut self.environments, &mut self.shell, environments);
         self.shell.session_dirty = false;
     }
 
@@ -886,6 +906,7 @@ impl App {
             TabId::Aks => &mut self.aks,
             TabId::Acr => &mut self.acr,
             TabId::KeyVault => &mut self.key_vault,
+            TabId::Environments => &mut self.environments,
         };
         (&mut self.shell, screen)
     }
@@ -901,7 +922,7 @@ impl App {
         if self.shell_overlay_open() {
             return self.handle_overlay_key(key);
         }
-        // `1`–`7` switch tabs from anywhere the digit is not being typed into
+        // `1`–`8` switch tabs from anywhere the digit is not being typed into
         // something. An overlay is closed on the way out rather than left open
         // behind the tab that comes back.
         // A confirmation that is up answers every key first, so nothing

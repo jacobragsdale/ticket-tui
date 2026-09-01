@@ -70,6 +70,9 @@ pub enum CommandId {
     AutoCompletePr,
     CommentPr,
     ToggleClosedPrs,
+    /// The environments board's one filter: the services something is missing
+    /// from, and everything again.
+    ToggleFindings,
     /// The AKS tab's verbs.
     ShowLogs,
     DescribePod,
@@ -328,6 +331,13 @@ pub const COMMANDS: &[Command] = &[
         keys: &[],
         help: "Completed and abandoned",
         scope: Scope::Tabs(&[TabId::PullRequests]),
+    },
+    Command {
+        id: CommandId::ToggleFindings,
+        title: "Only services with findings",
+        keys: &[key('F')],
+        help: "The rows a \u{2717} is on, and back",
+        scope: Scope::Tabs(&[TabId::Environments]),
     },
     Command {
         id: CommandId::ShowLogs,
@@ -876,6 +886,7 @@ fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
             TabId::Pipelines => "Open run in browser",
             TabId::Aks => "Open in browser",
             TabId::Acr | TabId::KeyVault => "Open in the Azure portal",
+            TabId::Environments => "Open the deployment repository",
         },
         // One key, a different neighbour on each tab, so the palette says
         // which one it would go to from here.
@@ -884,7 +895,10 @@ fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
             TabId::PullRequests => "Go to work items",
             TabId::Aks => "Go to repository",
             TabId::Acr => "Go to pod",
-            TabId::KeyVault => return command,
+            // Neither of these two has one neighbour to name: the vault tab
+            // has none, and the board's details pane points at a run, a vault
+            // object or a pod depending on the line the cursor is on.
+            TabId::KeyVault | TabId::Environments => return command,
         },
         // A registry tag is copied as the reference `docker pull` wants, not
         // as a number.
@@ -897,6 +911,9 @@ fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
         // The same for the two ARM tabs: neither pulls from Azure DevOps.
         CommandId::Sync if tab == TabId::Acr => "Refresh registries",
         CommandId::Sync if tab == TabId::KeyVault => "Refresh vaults",
+        // And the board renders the overlays again rather than pulling
+        // anything at all.
+        CommandId::Sync if tab == TabId::Environments => "Render the overlays again",
         _ => return command,
     };
     Command { title, ..command }
@@ -1222,6 +1239,17 @@ mod tests {
                 CommandId::ToggleDetails,
                 CommandId::ResetPaneSplit,
             ],
+            TabId::Environments => &[
+                CommandId::Search,
+                CommandId::Open,
+                CommandId::Sync,
+                CommandId::ToggleFindings,
+                CommandId::HistoryBack,
+                CommandId::HistoryForward,
+                CommandId::Quit,
+                CommandId::ToggleDetails,
+                CommandId::ResetPaneSplit,
+            ],
             // The work items screen matches exhaustively and answers
             // everything except the other tabs' verbs, which are exactly the
             // commands no other tab shares with it.
@@ -1255,11 +1283,13 @@ mod tests {
         assert_eq!(title(TabId::Pipelines), Some("Go to pull request"));
         assert_eq!(title(TabId::Aks), Some("Go to repository"));
         assert_eq!(title(TabId::Acr), Some("Go to pod"));
-        assert_eq!(
-            title(TabId::KeyVault),
-            Some("Go to what this row points at"),
-            "the one tab with no neighbour keeps the plain wording"
-        );
+        for tab in [TabId::KeyVault, TabId::Environments] {
+            assert_eq!(
+                title(tab),
+                Some("Go to what this row points at"),
+                "a tab with no one neighbour keeps the plain wording"
+            );
+        }
     }
 
     #[test]

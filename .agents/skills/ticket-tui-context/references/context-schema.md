@@ -50,7 +50,7 @@ unchanged.
 | `me` | string or null | Signed-in display name recorded by sync, including the background refresh, overridden by `TICKET_TUI_ME`; null when neither is set |
 | `sync` | object | Where the rows are pulled from and how the last pull went |
 | `pending_edits` | pending edit array | Edits sent to Azure DevOps and not answered yet |
-| `active_tab` | string | `work_items`, `repos`, `pull_requests`, `pipelines`, `aks`, `acr`, or `key_vault` |
+| `active_tab` | string | `work_items`, `repos`, `pull_requests`, `pipelines`, `aks`, `acr`, `key_vault`, or `environments` |
 | `work_items` | object | The Work items tab |
 | `repos` | object | The Repos tab |
 | `pull_requests` | object | The Pull requests tab |
@@ -58,6 +58,7 @@ unchanged.
 | `aks` | object | The AKS tab |
 | `acr` | object | The ACR tab |
 | `key_vault` | object | The Key Vault tab |
+| `environments` | object | The Environments board |
 | `arm` | object | What the ACR and Key Vault tabs can reach at all |
 
 ### `work_items`
@@ -230,6 +231,37 @@ is read out of the vault for the screen alone, once, and this file is written to
 disk. `ticket-tui secrets show --vault V NAME --value` is the one way to read
 one from outside the TUI, and it is an audited read — see
 [cli.md](cli.md#secrets-keys-certs).
+
+### `environments`
+
+The Environments board: every service the deployment repository declares,
+across every environment it declares them for. Nothing here comes from Azure
+DevOps or from a subscription — it is `kubectl kustomize` over a clone on the
+user's machine, rendered when the tab is opened, when `r` asks, and when a
+`git pull` moves that clone. It is therefore as current as the last render and
+no fresher.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `reason` | string or null | Why the board is empty: no `[deployment]` in `config.toml`, no `[[environments]]`, or no clone of the repository on this machine, in the line that says where it looked |
+| `environments` | environment array | One per `[[environments]]`, in file order, which is the order of the columns |
+| `selected_service` | string or null | The workload the row cursor is on |
+| `selected_environment` | string or null | The environment the column cursor is on, which is the one a promotion is read *into* |
+| `findings` | string array | What that cell is missing, one line each, as `env check` writes it |
+| `diff` | object or null | The promotion the details pane is reading, when there is an environment to the left of the cursor to promote from |
+| `visible_rows` | integer | How many services the query leaves on the board |
+| `follow` | jump or null | Where `g` would go from the line the details pane's cursor is on |
+
+An environment carries `name`, `vault` (the key vault it pulls its secrets
+from, or null), `overlays` (the patterns it is made of, relative to the clone),
+`rendered`, `error` (the renderer's own line for one that would not render),
+`findings` and `expiring`.
+
+`diff` carries `from`, `to` and `lines` — one line each, in the same wording
+the pull request pre-flight uses: `adds RATE_LIMIT_PER_MIN to
+prod/orders-config`, `pulls billing-legacy-token from kv-prod`, `moves api from
+1.3.9 to 1.4.0`. The pull requests between two image tags are not here: reading
+them is a `git log`, and `ticket-tui env diff qa prod orders` prints them.
 
 ## Sync fields
 
