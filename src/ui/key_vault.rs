@@ -34,7 +34,7 @@ pub(crate) fn render(
     .split(area);
     render_search(frame, screen, shell, sections[0]);
     render_content(frame, screen, shell, sections[1]);
-    render_status_bar(frame, shell, sections[2], screen.footer_hint(shell));
+    render_screen_status_bar(frame, screen, shell, sections[2]);
 }
 
 fn render_search(frame: &mut Frame<'_>, screen: &KeyVaultScreen, shell: &mut Shell, area: Rect) {

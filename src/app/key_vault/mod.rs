@@ -599,6 +599,8 @@ impl KeyVaultScreen {
     pub fn agent_context(&self) -> crate::agent_context::KeyVaultContext {
         let visible_rows = self.row_count();
         crate::agent_context::KeyVaultContext {
+            // Where `g` goes from here is `App`'s to work out.
+            follow: None,
             level: match self.level {
                 Level::Vaults => "vaults",
                 Level::Items(_) => "items",

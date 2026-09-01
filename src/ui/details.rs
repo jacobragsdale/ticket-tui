@@ -99,6 +99,14 @@ pub(super) fn render_details(
     }
     let url_line = u16::try_from(lines.len()).ok();
     lines.push(link_line(ticket.web_url.clone()));
+    // The chip that stands for `g`: what carried this work item, when
+    // anything did. It follows on a click like the artifact lines below.
+    if let Some((line, jump)) = follow_chip(&*screen, shell)
+        && let Ok(index) = u16::try_from(lines.len())
+    {
+        artifact_links.push((index, jump));
+        lines.push(line);
+    }
     lines.push(Line::default());
 
     if has_family {

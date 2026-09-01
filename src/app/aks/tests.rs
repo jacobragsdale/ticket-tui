@@ -28,7 +28,7 @@ pub(crate) fn sidecar_app() -> App {
         last_termination: None,
     });
     app.aks
-        .set_pods(&app.shell, "qa", Some("orders"), Ok(vec![sidecar]));
+        .set_pods(&mut app.shell, "qa", Some("orders"), Ok(vec![sidecar]));
     let index = names(&app)
         .iter()
         .position(|name| name == "orders-api-7d9f5b-abc12")
@@ -64,7 +64,7 @@ pub(crate) fn aks_app() -> App {
         cluster("prod", &["orders"]),
     ]);
     app.aks.set_pods(
-        &app.shell,
+        &mut app.shell,
         "qa",
         Some("orders"),
         Ok(vec![
@@ -73,7 +73,7 @@ pub(crate) fn aks_app() -> App {
         ]),
     );
     app.aks.set_pods(
-        &app.shell,
+        &mut app.shell,
         "prod",
         Some("orders"),
         Ok(vec![
@@ -134,7 +134,7 @@ fn a_re_read_in_another_order_leaves_the_cursor_on_the_pod_it_was_on() {
     // The same pods, listed the other way round, plus one that sorts ahead of
     // both and pushes the chosen row down a line.
     app.aks.set_pods(
-        &app.shell,
+        &mut app.shell,
         "qa",
         Some("orders"),
         Ok(vec![
@@ -157,7 +157,7 @@ fn a_re_read_in_another_order_leaves_the_cursor_on_the_pod_it_was_on() {
     // A read that takes the pod away pulls the cursor back onto the list.
     app.aks.cursor.focus(4);
     app.aks
-        .set_pods(&app.shell, "qa", Some("orders"), Ok(Vec::<Pod>::new()));
+        .set_pods(&mut app.shell, "qa", Some("orders"), Ok(Vec::<Pod>::new()));
     assert_eq!(app.aks.pod_count(), 2);
     assert!(app.aks.cursor.index < 2, "{}", app.aks.cursor.index);
 }
@@ -167,7 +167,7 @@ fn an_unreadable_cluster_says_so_once_and_leaves_the_other_clusters_rows() {
     let mut app = aks_app();
 
     let toast = app.aks.set_pods(
-        &app.shell,
+        &mut app.shell,
         "qa",
         Some("orders"),
         Err("context \"aks-qa\" does not exist".to_owned()),
@@ -192,7 +192,7 @@ fn an_unreadable_cluster_says_so_once_and_leaves_the_other_clusters_rows() {
     );
 
     let again = app.aks.set_pods(
-        &app.shell,
+        &mut app.shell,
         "qa",
         Some("orders"),
         Err("context \"aks-qa\" does not exist".to_owned()),
@@ -202,7 +202,7 @@ fn an_unreadable_cluster_says_so_once_and_leaves_the_other_clusters_rows() {
     // Asking for a read makes the next refusal news again, however old it is.
     app.aks.run_command(&mut app.shell, CommandId::Sync);
     let forced = app.aks.set_pods(
-        &app.shell,
+        &mut app.shell,
         "qa",
         Some("orders"),
         Err("context \"aks-qa\" does not exist".to_owned()),
@@ -210,7 +210,7 @@ fn an_unreadable_cluster_says_so_once_and_leaves_the_other_clusters_rows() {
     assert!(forced.is_some(), "a read the user asked for reports itself");
 
     let recovered = app.aks.set_pods(
-        &app.shell,
+        &mut app.shell,
         "qa",
         Some("orders"),
         Ok(vec![pod(
@@ -234,7 +234,7 @@ fn the_badge_counts_the_pods_somebody_has_to_look_at() {
     assert_eq!(Screen::badge(&app.aks), Some("\u{2717}1".to_owned()));
 
     app.aks
-        .set_pods(&app.shell, "qa", Some("orders"), Ok(Vec::<Pod>::new()));
+        .set_pods(&mut app.shell, "qa", Some("orders"), Ok(Vec::<Pod>::new()));
     assert_eq!(
         Screen::badge(&app.aks),
         None,
@@ -556,8 +556,12 @@ fn esc_leaves_the_pod_where_it_is_and_a_pod_with_no_controller_is_never_asked_ab
     assert!(app.aks.restarting.is_none());
     assert!(!app.aks.busy(), "nothing was sent");
 
-    app.aks
-        .set_pods(&app.shell, "qa", Some("orders"), Ok(vec![bare("debug")]));
+    app.aks.set_pods(
+        &mut app.shell,
+        "qa",
+        Some("orders"),
+        Ok(vec![bare("debug")]),
+    );
     select(&mut app, "debug");
 
     assert_eq!(press(&mut app, KeyCode::Char('x')), AppAction::None);
@@ -633,8 +637,8 @@ fn g_goes_to_the_repository_the_image_names_and_says_what_it_tried_when_none_mat
     settle(&mut app);
 
     assert_eq!(
-        app.aks.run_command(&mut app.shell, CommandId::OpenRepo),
-        AppAction::Follow(Jump::Repo("orders-api".to_owned()))
+        Screen::follow_target(&app.aks, &app.shell),
+        Ok((Jump::Repo("orders-api".to_owned()), "repository"))
     );
     press(&mut app, KeyCode::Char('g'));
     assert_eq!(app.tab, TabId::Repos, "and the key lands on that tab");
@@ -644,7 +648,7 @@ fn g_goes_to_the_repository_the_image_names_and_says_what_it_tried_when_none_mat
     stranger.labels = vec![("app".to_owned(), "payments".to_owned())];
     stranger.containers[0].image = "myacr.azurecr.io/team/payments:4".to_owned();
     app.aks
-        .set_pods(&app.shell, "qa", Some("orders"), Ok(vec![stranger]));
+        .set_pods(&mut app.shell, "qa", Some("orders"), Ok(vec![stranger]));
     select(&mut app, "payments-7f-aaa");
 
     assert_eq!(press(&mut app, KeyCode::Char('g')), AppAction::None);
@@ -687,7 +691,7 @@ fn o_says_what_does_get_you_inside_a_pod() {
 fn narrowing_a_clusters_namespaces_drops_the_pods_it_no_longer_reads() {
     let mut app = aks_app();
     app.aks.set_pods(
-        &app.shell,
+        &mut app.shell,
         "qa",
         Some("billing"),
         Ok(vec![pod("qa", "billing", "billing-api-1", "Running")]),
@@ -702,7 +706,7 @@ fn narrowing_a_clusters_namespaces_drops_the_pods_it_no_longer_reads() {
     );
     // A cluster reading every namespace keeps them all.
     app.aks.set_pods(
-        &app.shell,
+        &mut app.shell,
         "prod",
         Some("billing"),
         Ok(vec![pod("prod", "billing", "billing-api-2", "Running")]),
@@ -789,11 +793,8 @@ fn g_records_the_pod_so_the_history_comes_back_to_it() {
     app.aks.cursor.focus(index);
     settle(&mut app);
     let key = target(&app).key;
-    let AppAction::Follow(jump) = app.aks.run_command(&mut app.shell, CommandId::OpenRepo) else {
-        panic!("g did not follow");
-    };
-    assert!(app.follow(&jump), "the repository is on file");
-    assert_eq!(app.tab, TabId::Repos);
+    press(&mut app, KeyCode::Char('g'));
+    assert_eq!(app.tab, TabId::Repos, "the repository is on file");
     app.history_back();
     assert_eq!(app.tab, TabId::Aks, "[ comes back to the pod");
     assert_eq!(

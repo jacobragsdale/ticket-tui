@@ -10,7 +10,8 @@ use ratatui::widgets::TableState;
 use serde_json::Value;
 
 use crate::agent_context::{
-    AgentContext, ArmContext, PendingEditContext, SearchContext, SortContext, SyncContext,
+    AcrContext, AgentContext, AksContext, ArmContext, KeyVaultContext, PendingEditContext,
+    PipelinesContext, PullRequestsContext, ReposContext, SearchContext, SortContext, SyncContext,
     TicketContext, TicketReference, TicketsContext, WorkItemsContext,
 };
 use crate::classification::{self, ClassificationNode, NodeKind};
@@ -347,6 +348,9 @@ impl App {
     /// Runs one command on the tab showing: a shared overlay opens over it,
     /// anything else is the screen's own.
     fn run_tab_command(&mut self, id: CommandId) -> AppAction {
+        if id == CommandId::Follow {
+            return self.follow_here();
+        }
         if self.tab != TabId::WorkItems && Self::SHELL_OVERLAYS.contains(&id) {
             self.work_items
                 .open_shell_overlay(&mut self.shell, id, self.tab);
@@ -497,6 +501,31 @@ impl App {
         found
     }
 
+    /// `g`: goes where the row under the cursor points, or says why it
+    /// cannot. Each screen names its own neighbour; the walk from here is the
+    /// same one a link in a details pane takes.
+    fn follow_here(&mut self) -> AppAction {
+        let target = {
+            let (shell, screen) = self.screen();
+            screen.follow_target(shell)
+        };
+        match target {
+            Ok((jump, _)) => {
+                self.follow(&jump);
+            }
+            Err(message) => self.shell.set_error(message),
+        }
+        AppAction::None
+    }
+
+    /// Where `g` would go from one tab, for the context file.
+    fn follow_of(&self, tab: TabId) -> Option<Jump> {
+        self.screen_for(tab)
+            .follow_target(&self.shell)
+            .ok()
+            .map(|(jump, _)| jump)
+    }
+
     /// `[`: back to wherever the run was before this, on whatever tab.
     pub fn history_back(&mut self) {
         if self.shell.history.len() < 2 {
@@ -629,13 +658,34 @@ impl App {
                 TabId::KeyVault => "key_vault",
             }
             .to_owned(),
-            work_items: self.work_items.agent_context(&self.shell),
-            repos: self.repos.agent_context(&self.shell),
-            pull_requests: self.pull_requests.agent_context(&self.shell),
-            pipelines: self.pipelines.agent_context(&self.shell),
-            aks: self.aks.agent_context(&self.shell),
-            acr: self.acr.agent_context(),
-            key_vault: self.key_vault.agent_context(),
+            work_items: WorkItemsContext {
+                follow: self.follow_of(TabId::WorkItems),
+                ..self.work_items.agent_context(&self.shell)
+            },
+            repos: ReposContext {
+                follow: self.follow_of(TabId::Repos),
+                ..self.repos.agent_context(&self.shell)
+            },
+            pull_requests: PullRequestsContext {
+                follow: self.follow_of(TabId::PullRequests),
+                ..self.pull_requests.agent_context(&self.shell)
+            },
+            pipelines: PipelinesContext {
+                follow: self.follow_of(TabId::Pipelines),
+                ..self.pipelines.agent_context(&self.shell)
+            },
+            aks: AksContext {
+                follow: self.follow_of(TabId::Aks),
+                ..self.aks.agent_context(&self.shell)
+            },
+            acr: AcrContext {
+                follow: self.follow_of(TabId::Acr),
+                ..self.acr.agent_context()
+            },
+            key_vault: KeyVaultContext {
+                follow: self.follow_of(TabId::KeyVault),
+                ..self.key_vault.agent_context()
+            },
             arm: ArmContext {
                 subscription: self.shell.arm_subscription().map(str::to_owned),
                 offline: self.shell.arm_state().is_some(),
@@ -742,6 +792,12 @@ impl App {
         {
             self.select_tab(tab);
             return AppAction::None;
+        }
+        // `g` goes where the row under the cursor points, which only `App`
+        // can work out: the target may be on another tab, and the ACR tab's
+        // is on a screen that tab cannot see.
+        if screen_is_free && command_for_key(key, self.tab) == Some(CommandId::Follow) {
+            return self.follow_here();
         }
         // The shared overlays open over any tab; the work items screen
         // answers its own keys, the others hand these four up.

@@ -28,7 +28,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, screen: &mut AcrScreen, shell: &mut 
     .split(area);
     render_search(frame, screen, shell, sections[0]);
     render_content(frame, screen, shell, sections[1]);
-    render_status_bar(frame, shell, sections[2], screen.footer_hint(shell));
+    render_screen_status_bar(frame, screen, shell, sections[2]);
 }
 
 fn render_search(frame: &mut Frame<'_>, screen: &AcrScreen, shell: &mut Shell, area: Rect) {
@@ -357,6 +357,12 @@ fn render_repository_details(
         ),
         Line::from(""),
     ];
+    // The chip that stands for `g`, in the header, where the pane names what
+    // this row goes to.
+    let follow = follow_chip(screen, shell);
+    if let Some((line, _)) = follow.clone() {
+        lines.insert(2, line);
+    }
     let buttons: [(&str, PointerTarget); 3] = [
         (" Copy pull ", PointerTarget::RunCommand(CommandId::CopyId)),
         (
@@ -414,6 +420,17 @@ fn render_repository_details(
     // the row its line landed on rather than by the line's index.
     let (rows, _) = wrapped_rows(&lines, inner.width);
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    if let Some((_, jump)) = follow
+        && let Some(y) = row_on_screen(inner, &rows, 2, 0)
+    {
+        shell.hit_regions.push(region(
+            Rect::new(inner.x, y, inner.width, 1),
+            PointerTarget::Follow(jump),
+            PointerLayer::Base,
+            None,
+            None,
+        ));
+    }
     if let Some(y) = row_on_screen(inner, &rows, buttons_index, 0) {
         register_buttons(shell, inner, y, PointerLayer::Base, &buttons);
     }

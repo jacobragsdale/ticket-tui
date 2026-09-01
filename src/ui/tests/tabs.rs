@@ -452,3 +452,90 @@ fn help_palette_columns_and_database_open_over_every_tab() {
     assert_eq!(app.tab, TabId::PullRequests);
     press(&mut app, KeyCode::Esc);
 }
+
+#[test]
+fn g_goes_from_a_work_item_to_the_pull_request_that_carried_it() {
+    use crate::app::pull_requests::tests::pull_request;
+    use crate::model::{ArtifactKind, ArtifactLink, PrStatus, TicketGraph};
+
+    let mut app = App::new(vec![ticket()]);
+    let key = app.work_items.tickets()[0].key.clone();
+    let link = |kind| ArtifactLink {
+        work_item: key.clone(),
+        kind,
+        name: "Pull Request".to_owned(),
+    };
+    app.shell.set_repos(vec![crate::app::repos::tests::repo(
+        "aaa-111",
+        "ticket-tui",
+        false,
+    )]);
+    app.repos.set_repos(&app.shell);
+    app.shell.set_artifact_labels(
+        vec![
+            (41, "Earlier work".to_owned(), PrStatus::Completed),
+            (42, "Split the files".to_owned(), PrStatus::Active),
+        ],
+        Vec::new(),
+    );
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            artifacts: vec![
+                // The completed one is the newer number, and still loses to
+                // the one that is open.
+                link(ArtifactKind::PullRequest {
+                    repo_id: "aaa-111".into(),
+                    id: 43,
+                }),
+                link(ArtifactKind::PullRequest {
+                    repo_id: "aaa-111".into(),
+                    id: 42,
+                }),
+            ],
+            ..TicketGraph::default()
+        },
+    );
+    let requests = vec![
+        pull_request(42, "Split the files", "Avery", PrStatus::Active),
+        pull_request(43, "Earlier work", "Avery", PrStatus::Completed),
+    ];
+    let shell = &app.shell;
+    app.pull_requests.set_pull_requests(requests, shell);
+    app.shell.set_artifact_labels(
+        vec![
+            (43, "Earlier work".to_owned(), PrStatus::Completed),
+            (42, "Split the files".to_owned(), PrStatus::Active),
+        ],
+        Vec::new(),
+    );
+    render_text(120, 40, &mut app);
+
+    press(&mut app, KeyCode::Char('g'));
+    assert_eq!(app.tab, TabId::PullRequests);
+    assert_eq!(
+        app.pull_requests
+            .selected(&app.shell)
+            .map(|row| row.request.id),
+        Some(42),
+        "the one still open, not the newer one that closed"
+    );
+
+    // `[` comes back to the work item, which is where the walk started.
+    press(&mut app, KeyCode::Char('['));
+    assert_eq!(app.tab, TabId::WorkItems);
+    assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_001);
+}
+
+#[test]
+fn a_work_item_with_nothing_linked_says_so_rather_than_going_nowhere() {
+    let mut app = App::new(vec![ticket()]);
+    render_text(120, 40, &mut app);
+
+    press(&mut app, KeyCode::Char('g'));
+    assert_eq!(app.tab, TabId::WorkItems);
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some("#10001 has no linked pull request or build")
+    );
+}

@@ -912,6 +912,10 @@ impl WorkItemsScreen {
             // walk can cross tabs.
             CommandId::HistoryBack => AppAction::HistoryBack,
             CommandId::HistoryForward => AppAction::HistoryForward,
+            // `g` is the same: what a row points at may be on another tab,
+            // and one target is on a screen this one cannot see at all, so
+            // `App` works it out from every tab's `follow_target`.
+            CommandId::Follow => AppAction::None,
             // The Repos tab's own; the palette does not offer them here.
             // Another tab's verbs: nothing to do with a work item.
             CommandId::CloneRepo
@@ -938,7 +942,6 @@ impl WorkItemsScreen {
             | CommandId::NextContainer
             | CommandId::RestartPod
             | CommandId::ExecShell
-            | CommandId::OpenRepo
             | CommandId::CopyDigest
             | CommandId::RevealSecret
             | CommandId::CopyValue => AppAction::None,

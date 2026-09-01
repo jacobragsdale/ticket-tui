@@ -1092,6 +1092,16 @@ described under [Controls](#controls). The split, which
 pane is showing below 70 columns, and the focus are the shell's rather than any
 screen's, so switching tabs keeps the layout you were working in.
 
+`g` goes to whatever the row under the cursor points at, one neighbour per
+tab: a work item's pull request — the newest still open, else the newest of
+any status, else the build it went out in — a pull request's work items or the
+run gating it, a run's pull request, a repository's newest open pull request,
+a pod's repository, and a registry tag's pod, matched against the images the
+AKS tab has already read. A row with nowhere to go says what it looked for
+rather than switching to an empty tab, and the footer only offers `g` when
+there is somewhere to go. Each details pane carries the same jump as a
+`[Go to …]` chip in its header, so the mouse follows what the key would.
+
 `[` and `]` walk back and forward through everywhere the run has been,
 switching tabs as they go: a work item, then its repository, then back. A
 reference in a details pane — the family tree's rows today — is underlined and
@@ -1572,7 +1582,7 @@ anything on tab `1`.
 | `l` / `End` (AKS) | Give the text pane the whole details pane; follow the tail again |
 | `x` (AKS) | Delete the pod so its controller puts it back; a second `x` confirms |
 | `s` (AKS) | `kubectl exec -it … -- sh` in this terminal |
-| `g` (AKS) | Go to the repository the pod's image or app label names |
+| `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a repository's newest open pull request, a pod's repository, a tag's pod |
 | `y` (AKS) | Copy `namespace/pod` |
 | `Enter` (ACR, Key Vault) | Into the registry's repositories, or the vault's items |
 | `Backspace` / `h` (ACR, Key Vault) | Back up to the registries or the vaults |
@@ -2272,6 +2282,10 @@ pull request need not ask the user to press `3`:
   also carries `revealed`, which says whether its value is on the screen this
   minute. **There is no field for the value and there is not meant to be one:**
   a value is read for the screen alone and this file is written to disk.
+- Every tab block also carries `follow`: where `g` would go from the row
+  under that tab's cursor, written the way a jump is stored — `{"kind":
+  "pull-request", "at": {"repo": "ticket-tui", "id": 812}}` — or `null` when
+  the row points nowhere. Added within schema 3, like everything else here.
 - `arm` — whether those two have anything to read at all: `subscription`,
   `offline`, and `last_error`, the one line that says why an offline run reads
   nothing. Both tabs are described on every run; `arm.offline` is what tells an

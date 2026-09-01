@@ -208,6 +208,12 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
     // A URL is long, wraps badly in a narrow pane, and is never read here:
     // it is wanted on the clipboard. So the section is three chips, not three
     // lines of text.
+    // The chip that stands for `g`, in the header, where the pane names what
+    // this row goes to.
+    let follow = follow_chip(screen, shell);
+    if let Some((line, _)) = follow.clone() {
+        lines.insert(2, line);
+    }
     let copies: [(&str, PointerTarget); 3] = [
         (
             " Copy web ",
@@ -366,6 +372,17 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
     // The chips that copy the URLs, and the path, which copies itself. The
     // path's target is only as wide as the text, so the pointer reverses the
     // path rather than the row it sits on.
+    if let Some((_, jump)) = follow
+        && let Some(y) = row_on_screen(inner, &rows, 2, offset)
+    {
+        shell.hit_regions.push(region(
+            Rect::new(inner.x, y, inner.width, 1),
+            PointerTarget::Follow(jump),
+            PointerLayer::Base,
+            None,
+            None,
+        ));
+    }
     if let Some(y) = row_on_screen(inner, &rows, copies_index, offset) {
         register_buttons(shell, inner, y, PointerLayer::Base, &copies);
     }
@@ -416,5 +433,5 @@ pub(crate) fn size_label(bytes: i64) -> String {
 }
 
 fn render_footer(frame: &mut Frame<'_>, screen: &ReposScreen, shell: &Shell, area: Rect) {
-    render_status_bar(frame, shell, area, screen.footer_hint(shell));
+    render_screen_status_bar(frame, screen, shell, area);
 }

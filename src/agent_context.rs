@@ -65,6 +65,10 @@ pub struct AcrContext {
     pub selected_repository: Option<RepositoryContext>,
     pub selected_tag: Option<TagContext>,
     pub visible_rows: usize,
+    /// Where `g` would go from the row under the cursor on this tab, or
+    /// `null` when it has nowhere to go. Written the way a jump is stored:
+    /// `{"kind": "pull-request", "at": {"repo": "…", "id": 812}}`.
+    pub follow: Option<crate::model::Jump>,
 }
 
 /// One container registry, as an agent reads it.
@@ -111,6 +115,10 @@ pub struct KeyVaultContext {
     /// Certificates within thirty days of expiring, across every vault whose
     /// items have been read. The same count the tab bar badges.
     pub expiring_certificates: usize,
+    /// Where `g` would go from the row under the cursor on this tab, or
+    /// `null` when it has nowhere to go. Written the way a jump is stored:
+    /// `{"kind": "pull-request", "at": {"repo": "…", "id": 812}}`.
+    pub follow: Option<crate::model::Jump>,
 }
 
 /// One key vault, as an agent reads it.
@@ -163,6 +171,10 @@ pub struct AksContext {
     /// One line per `(cluster, namespace)` that could not be read.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
+    /// Where `g` would go from the row under the cursor on this tab, or
+    /// `null` when it has nowhere to go. Written the way a jump is stored:
+    /// `{"kind": "pull-request", "at": {"repo": "…", "id": 812}}`.
+    pub follow: Option<crate::model::Jump>,
 }
 
 /// One pod, as an agent reads it.
@@ -208,6 +220,10 @@ pub struct WorkItemsContext {
     pub checked_tickets: Vec<TicketContext>,
     pub family_cursor: Option<TicketReference>,
     pub details_scroll_line: u16,
+    /// Where `g` would go from the row under the cursor on this tab, or
+    /// `null` when it has nowhere to go. Written the way a jump is stored:
+    /// `{"kind": "pull-request", "at": {"repo": "…", "id": 812}}`.
+    pub follow: Option<crate::model::Jump>,
 }
 
 /// The Repos tab: the project's repositories and which of them are on this
@@ -218,6 +234,10 @@ pub struct ReposContext {
     pub visible_rows: Vec<RepoContext>,
     /// Where clones are looked for and made, or `null` when there is nowhere.
     pub workspace: Option<String>,
+    /// Where `g` would go from the row under the cursor on this tab, or
+    /// `null` when it has nowhere to go. Written the way a jump is stored:
+    /// `{"kind": "pull-request", "at": {"repo": "…", "id": 812}}`.
+    pub follow: Option<crate::model::Jump>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -255,6 +275,10 @@ pub struct PullRequestsContext {
     pub to_review_count: usize,
     /// Whether closed pull requests are on the table.
     pub closed_shown: bool,
+    /// Where `g` would go from the row under the cursor on this tab, or
+    /// `null` when it has nowhere to go. Written the way a jump is stored:
+    /// `{"kind": "pull-request", "at": {"repo": "…", "id": 812}}`.
+    pub follow: Option<crate::model::Jump>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -319,6 +343,10 @@ pub struct PipelinesContext {
     /// The runs `w` is following, by id.
     pub watched: Vec<i64>,
     pub pending_approvals: usize,
+    /// Where `g` would go from the row under the cursor on this tab, or
+    /// `null` when it has nowhere to go. Written the way a jump is stored:
+    /// `{"kind": "pull-request", "at": {"repo": "…", "id": 812}}`.
+    pub follow: Option<crate::model::Jump>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -578,6 +606,7 @@ mod tests {
             key_vault: KeyVaultContext::default(),
             arm: ArmContext::default(),
             work_items: WorkItemsContext {
+                follow: None,
                 mode: "browse".into(),
                 focus: "tickets".into(),
                 screen: "workspace".into(),

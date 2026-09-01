@@ -231,6 +231,12 @@ pub struct Shell {
     /// nothing about what it does not.
     pub(crate) pull_request_labels: Vec<(i64, String, PrStatus)>,
     pub(crate) run_labels: Vec<(i64, String, RunStatus, Option<RunResult>)>,
+    /// Every container image the AKS tab has read, with the pod running it,
+    /// in the order the pods are held. The ACR tab reads it to go from a tag
+    /// to what is running it: the pods live on another screen, and asking the
+    /// cluster again for a question the last read already answered is a read
+    /// nobody asked for.
+    pub(crate) pod_images: Vec<(String, crate::aks::PodKey)>,
     /// What the pipeline watcher is doing, as the database overlay reports
     /// it. `None` for a run with no watcher at all.
     pub(crate) watch_state: Option<String>,
@@ -301,6 +307,7 @@ impl Default for Shell {
             work_item_titles: Vec::new(),
             pull_request_labels: Vec::new(),
             run_labels: Vec::new(),
+            pod_images: Vec::new(),
             watch_state: None,
             history: Vec::new(),
             future: Vec::new(),
@@ -351,6 +358,21 @@ impl Shell {
             .iter()
             .find(|(held, _, _)| *held == id)
             .map(|(_, title, status)| (title.as_str(), *status))
+    }
+
+    /// What the AKS tab has read, for the ACR tab to match a tag against.
+    pub fn set_pod_images(&mut self, images: Vec<(String, crate::aks::PodKey)>) {
+        self.pod_images = images;
+    }
+
+    /// The first pod whose image is one of these references, if the clusters
+    /// read so far hold one.
+    #[must_use]
+    pub fn pod_running(&self, references: &[String]) -> Option<&crate::aks::PodKey> {
+        self.pod_images
+            .iter()
+            .find(|(image, _)| references.iter().any(|held| held == image))
+            .map(|(_, key)| key)
     }
 
     /// One run's build number and how it went, when the database holds it.

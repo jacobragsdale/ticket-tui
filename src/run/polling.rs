@@ -234,7 +234,7 @@ pub(super) fn poll_aks(app: &mut App, runtime: &mut SyncRuntime) -> bool {
             } => {
                 if let Some(toast) =
                     app.aks
-                        .set_pods(&app.shell, &cluster, namespace.as_deref(), pods)
+                        .set_pods(&mut app.shell, &cluster, namespace.as_deref(), pods)
                 {
                     app.shell.set_error(toast);
                 }

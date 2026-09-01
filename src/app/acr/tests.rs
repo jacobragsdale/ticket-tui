@@ -534,3 +534,48 @@ fn repositories_with_no_stamp_sort_last_whichever_way_the_column_is_turned() {
     );
     assert_eq!(one_way[0], other_way[1], "{one_way:?} vs {other_way:?}");
 }
+
+#[test]
+fn g_goes_to_the_pod_running_the_tag_the_details_pane_is_on() {
+    use crate::aks::tests::{cluster, pod};
+    use crate::app::{Jump, Screen};
+
+    let mut app = acr_app();
+    app.aks.set_clusters(vec![cluster("qa", &["orders"])]);
+    let mut running = pod("qa", "orders", "api-7d9f5b-abc12", "Running");
+    running.containers[0].image = "atlas.azurecr.io/team/api:latest".to_owned();
+    app.aks
+        .set_pods(&mut app.shell, "qa", Some("orders"), Ok(vec![running]));
+    app.select_tab(TabId::Acr);
+
+    press(&mut app, KeyCode::Enter);
+    app.acr.sync_focus();
+    assert_eq!(
+        Screen::follow_target(&app.acr, &app.shell),
+        Ok((
+            Jump::Pod(crate::aks::PodKey {
+                cluster: "qa".to_owned(),
+                namespace: "orders".to_owned(),
+                name: "api-7d9f5b-abc12".to_owned(),
+            }),
+            "pod"
+        ))
+    );
+    press(&mut app, KeyCode::Char('g'));
+    assert_eq!(app.tab, TabId::Aks);
+    assert_eq!(
+        app.aks.selected_pod(&app.shell).map(|row| row.pod.key.name),
+        Some("api-7d9f5b-abc12".to_owned())
+    );
+
+    // The tag below it is not running anywhere the clusters have been read.
+    app.select_tab(TabId::Acr);
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Char('j'));
+    assert_eq!(press(&mut app, KeyCode::Char('g')), AppAction::None);
+    assert_eq!(app.tab, TabId::Acr);
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some("No pod runs team/api:2026.8.1")
+    );
+}

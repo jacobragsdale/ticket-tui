@@ -340,6 +340,8 @@ impl PipelinesScreen {
                 .cloned(),
         };
         crate::agent_context::PipelinesContext {
+            // Where `g` goes from here is `App`'s to work out.
+            follow: None,
             level: match self.level {
                 Level::Pipelines => "pipelines",
                 Level::Runs(_) => "runs",
@@ -1046,6 +1048,27 @@ impl Screen for PipelinesScreen {
             }
             _ => &mut self.cursor_mut().scroll,
         }
+    }
+
+    /// The pull request a run was raised for. A pipeline is not a row that
+    /// points anywhere: its runs are, one level down.
+    fn follow_target(&self, shell: &Shell) -> Result<(Jump, &'static str), String> {
+        if matches!(self.level, Level::Pipelines) {
+            return Err("Open a pipeline first".to_owned());
+        }
+        let row = self
+            .selected_run(shell)
+            .ok_or_else(|| "No run is selected".to_owned())?;
+        self.run_jumps(shell)
+            .into_iter()
+            .find(|(_, jump)| matches!(jump, Jump::PullRequest { .. }))
+            .map(|(_, jump)| (jump, "pull request"))
+            .ok_or_else(|| {
+                format!(
+                    "Run {} was not started by a pull request",
+                    row.run.build_number
+                )
+            })
     }
 
     /// A run when the tab is showing one, the pipeline itself otherwise.

@@ -884,6 +884,48 @@ impl Screen for WorkItemsScreen {
         Self::scroll_state_mut(self, surface)
     }
 
+    /// What carried the work item: the newest pull request still open on it,
+    /// else the newest of any status, else the newest build it went out in.
+    fn follow_target(&self, shell: &Shell) -> Result<(Jump, &'static str), String> {
+        let ticket = self
+            .selected_ticket()
+            .ok_or_else(|| "No work item is selected".to_owned())?;
+        let artifacts = self.artifacts_for(&ticket.key);
+        // Only what the database holds: `g` goes where the details pane's own
+        // link would, and a link to something nothing here has is drawn as
+        // plain text rather than as somewhere to go.
+        let requests = || {
+            artifacts.iter().filter_map(|link| match &link.kind {
+                crate::model::ArtifactKind::PullRequest { repo_id, id } => shell
+                    .pull_request_label(*id)
+                    .map(|(_, status)| (repo_id, *id, status)),
+                _ => None,
+            })
+        };
+        // Newest is the highest number: Azure DevOps counts them up.
+        let open = requests()
+            .filter(|(_, _, status)| !status.is_closed())
+            .max_by_key(|(_, id, _)| *id);
+        if let Some((repo_id, id, _)) = open.or_else(|| requests().max_by_key(|(_, id, _)| *id)) {
+            return Ok((
+                Jump::PullRequest {
+                    repo: shell.repo_name(repo_id),
+                    id,
+                },
+                "pull request",
+            ));
+        }
+        artifacts
+            .iter()
+            .filter_map(|link| match link.kind {
+                crate::model::ArtifactKind::Build(id) if shell.run_label(id).is_some() => Some(id),
+                _ => None,
+            })
+            .max()
+            .map(|id| (Jump::Run(id), "run"))
+            .ok_or_else(|| format!("#{} has no linked pull request or build", ticket.key.id))
+    }
+
     fn here(&self, _shell: &Shell) -> Option<Jump> {
         self.selected_ticket()
             .map(|ticket| Jump::WorkItem(ticket.key.clone()))

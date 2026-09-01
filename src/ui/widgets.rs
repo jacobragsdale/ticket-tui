@@ -85,6 +85,52 @@ pub(super) fn register_close_button(shell: &mut Shell, area: Rect, layer: Pointe
     ));
 }
 
+/// The `[Go to …]` chip a details pane carries in its header: what `g`
+/// would follow from the row on screen, painted like every other line that
+/// goes somewhere and clicked the same way.
+pub(super) fn follow_chip(screen: &dyn Screen, shell: &Shell) -> Option<(Line<'static>, Jump)> {
+    let (jump, noun) = screen.follow_target(shell).ok()?;
+    Some((
+        Line::styled(
+            format!("[Go to {noun}]"),
+            Style::default()
+                .fg(theme().link)
+                .add_modifier(Modifier::UNDERLINED),
+        ),
+        jump,
+    ))
+}
+
+/// The footer of one screen: its own hints, and `g <noun>` when the row
+/// under the cursor points somewhere, so the key never promises a jump it
+/// cannot make. Left out while an editor or a confirmation is up, where `g`
+/// is a letter or an answer rather than a jump.
+pub(super) fn render_screen_status_bar(
+    frame: &mut Frame<'_>,
+    screen: &dyn Screen,
+    shell: &Shell,
+    area: Rect,
+) {
+    let hint = screen.footer_hint(shell);
+    let noun = (screen.active_editor().is_none() && !screen.modal_open())
+        .then(|| screen.follow_target(shell).ok())
+        .flatten()
+        .map(|(_, noun)| noun);
+    match noun {
+        Some(noun) => render_status_bar(frame, shell, area, &with_follow_hint(hint, noun)),
+        None => render_status_bar(frame, shell, area, hint),
+    }
+}
+
+/// `g <noun>` goes in front of `? help`, the last hint on every tab that has
+/// one, so a narrow terminal drops the help before the jump.
+fn with_follow_hint(hint: &str, noun: &str) -> String {
+    hint.strip_suffix("  ? help").map_or_else(
+        || format!("{hint}  g {noun}"),
+        |head| format!("{head}  g {noun}  ? help"),
+    )
+}
+
 /// The footer: what the keys do on the left, how the sync is going on the
 /// right. A notification takes the left segment over until it expires and
 /// never covers the right one, so the sync state is on screen whatever else

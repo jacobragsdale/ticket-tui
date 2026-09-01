@@ -241,6 +241,8 @@ impl PullRequestsScreen {
         let rows = self.visible(shell);
         let me = shell.me.clone().unwrap_or_default();
         crate::agent_context::PullRequestsContext {
+            // Where `g` goes from here is `App`'s to work out.
+            follow: None,
             selected: rows.get(self.cursor.index).map(|row| {
                 let request = &row.request;
                 crate::agent_context::PullRequestContext {
@@ -909,6 +911,25 @@ impl Screen for PullRequestsScreen {
             ScrollSurface::Details => &mut self.details,
             _ => &mut self.cursor.scroll,
         }
+    }
+
+    /// What the request carries: its work items, or the run gating it.
+    fn follow_target(&self, shell: &Shell) -> Result<(Jump, &'static str), String> {
+        let row = self
+            .selected(shell)
+            .ok_or_else(|| "No pull request is selected".to_owned())?;
+        if !row.request.work_items.is_empty() {
+            return Ok((
+                Jump::WorkItems(row.request.work_items.clone()),
+                "work items",
+            ));
+        }
+        row.request
+            .build
+            .as_ref()
+            .and_then(|build| build.run_id)
+            .map(|run| (Jump::Run(run), "run"))
+            .ok_or_else(|| format!("!{} carries no work items", row.request.id))
     }
 
     fn here(&self, shell: &Shell) -> Option<Jump> {

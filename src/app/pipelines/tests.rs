@@ -322,3 +322,60 @@ fn retry_is_refused_on_a_success_and_a_watch_on_a_run_that_has_finished() {
         "a run that is going can be watched"
     );
 }
+
+#[test]
+fn g_goes_to_the_pull_request_a_run_was_raised_for() {
+    use crate::app::pull_requests::tests::pull_request;
+    use crate::app::{Jump, Screen};
+    use crate::model::PrStatus;
+
+    let mut app = pipelines_app();
+    let mut validating = run(15, 1, RunStatus::Completed, Some(RunResult::Succeeded));
+    validating.pr_id = Some(11);
+    let runs = vec![validating, run(12, 1, RunStatus::Completed, None)];
+    let shell = &app.shell;
+    app.pipelines
+        .set_pipelines(vec![pipeline(1, "ticket-tui CI", "\\")], runs, shell);
+    let requests = vec![pull_request(
+        11,
+        "Split the files",
+        "Avery",
+        PrStatus::Active,
+    )];
+    let shell = &app.shell;
+    app.pull_requests.set_pull_requests(requests, shell);
+    app.select_tab(TabId::Pipelines);
+
+    assert_eq!(
+        Screen::follow_target(&app.pipelines, &app.shell),
+        Err("Open a pipeline first".to_owned()),
+        "a pipeline is not a row that points anywhere; its runs are"
+    );
+
+    key(&mut app, KeyCode::Enter);
+    assert_eq!(
+        Screen::follow_target(&app.pipelines, &app.shell),
+        Ok((
+            Jump::PullRequest {
+                repo: "ticket-tui".to_owned(),
+                id: 11,
+            },
+            "pull request"
+        ))
+    );
+    key(&mut app, KeyCode::Char('g'));
+    assert_eq!(app.tab, TabId::PullRequests);
+
+    // The run below it was nobody's pull request.
+    app.select_tab(TabId::Pipelines);
+    app.pipelines.run_cursor.focus(1);
+    assert_eq!(
+        key(&mut app, KeyCode::Char('g')),
+        crate::app::AppAction::None
+    );
+    assert_eq!(app.tab, TabId::Pipelines);
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some("Run 20260829.12 was not started by a pull request")
+    );
+}
