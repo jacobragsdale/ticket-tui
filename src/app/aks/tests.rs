@@ -59,10 +59,10 @@ pub(crate) fn aks_app() -> App {
     app.shell
         .set_repos(vec![repo("aaa-111", "orders-api", false)]);
     app.repos.set_repos(&app.shell);
-    app.aks.set_clusters(vec![
-        cluster("qa", &["orders"]),
-        cluster("prod", &["orders"]),
-    ]);
+    app.aks.set_clusters(
+        vec![cluster("qa", &["orders"]), cluster("prod", &["orders"])],
+        &mut app.shell,
+    );
     app.aks.set_pods(
         &mut app.shell,
         "qa",
@@ -300,7 +300,8 @@ fn the_sync_key_asks_the_cluster_worker_to_read_again() {
 fn a_cluster_the_file_no_longer_names_takes_its_pods_with_it() {
     let mut app = aks_app();
 
-    app.aks.set_clusters(vec![cluster("qa", &["orders"])]);
+    app.aks
+        .set_clusters(vec![cluster("qa", &["orders"])], &mut app.shell);
 
     assert_eq!(app.aks.pod_count(), 2);
     assert!(
@@ -622,7 +623,9 @@ fn s_hands_the_terminal_to_kubectl_exec_on_the_container_the_log_is_on() {
     );
 
     let mut empty = App::new(Vec::new());
-    empty.aks.set_clusters(vec![cluster("qa", &["orders"])]);
+    empty
+        .aks
+        .set_clusters(vec![cluster("qa", &["orders"])], &mut empty.shell);
     empty.select_tab(TabId::Aks);
     assert_eq!(press(&mut empty, KeyCode::Char('s')), AppAction::None);
     assert_eq!(
@@ -697,8 +700,10 @@ fn narrowing_a_clusters_namespaces_drops_the_pods_it_no_longer_reads() {
         Ok(vec![pod("qa", "billing", "billing-api-1", "Running")]),
     );
     assert!(names(&app).iter().any(|name| name == "billing-api-1"));
-    app.aks
-        .set_clusters(vec![cluster("qa", &["orders"]), cluster("prod", &[])]);
+    app.aks.set_clusters(
+        vec![cluster("qa", &["orders"]), cluster("prod", &[])],
+        &mut app.shell,
+    );
     assert!(
         !names(&app).iter().any(|name| name == "billing-api-1"),
         "a namespace the file no longer names goes: {:?}",
@@ -711,8 +716,10 @@ fn narrowing_a_clusters_namespaces_drops_the_pods_it_no_longer_reads() {
         Some("billing"),
         Ok(vec![pod("prod", "billing", "billing-api-2", "Running")]),
     );
-    app.aks
-        .set_clusters(vec![cluster("qa", &["orders"]), cluster("prod", &[])]);
+    app.aks.set_clusters(
+        vec![cluster("qa", &["orders"]), cluster("prod", &[])],
+        &mut app.shell,
+    );
     assert!(names(&app).iter().any(|name| name == "billing-api-2"));
 }
 
@@ -829,4 +836,21 @@ fn a_global_key_or_a_digit_does_not_reach_past_the_restart_confirm() {
     );
     assert_eq!(app.aks.mode, AksMode::Browse);
     assert!(app.aks.restarting.is_none());
+}
+
+#[test]
+fn a_cluster_dropped_from_the_file_takes_its_pods_off_the_acr_tabs_reach() {
+    let mut app = aks_app();
+    app.aks.set_pods(
+        &mut app.shell,
+        "qa",
+        Some("orders"),
+        Ok(vec![pod("qa", "orders", "orders-api-1", "Running")]),
+    );
+    assert!(!app.shell.pod_images.is_empty());
+    app.aks.set_clusters(Vec::new(), &mut app.shell);
+    assert!(
+        app.shell.pod_images.is_empty(),
+        "what the ACR tab may jump to went with the pods"
+    );
 }

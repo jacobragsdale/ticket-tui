@@ -703,9 +703,17 @@ impl WorkItemsScreen {
     /// it was caused.
     pub fn reject_create(&mut self, shell: &mut Shell, message: &str) {
         if let Some(form) = self.pending_create.take() {
-            self.form = Some(form);
-            self.mode = WorkItemMode::Form;
-            shell.overlay_anchor = OverlayAnchor::Centered;
+            if form.kind == FormKind::QuickCapture {
+                // The row comes back with the thought in it rather than a
+                // five-field form nobody opened.
+                self.capture
+                    .set_text(form.value(FormFieldId::Title).to_owned());
+                self.mode = WorkItemMode::Capture;
+            } else {
+                self.form = Some(form);
+                self.mode = WorkItemMode::Form;
+                shell.overlay_anchor = OverlayAnchor::Centered;
+            }
         }
         shell.set_error(format!("Work item not created: {message}"));
     }

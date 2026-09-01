@@ -541,7 +541,8 @@ fn g_goes_to_the_pod_running_the_tag_the_details_pane_is_on() {
     use crate::app::{Jump, Screen};
 
     let mut app = acr_app();
-    app.aks.set_clusters(vec![cluster("qa", &["orders"])]);
+    app.aks
+        .set_clusters(vec![cluster("qa", &["orders"])], &mut app.shell);
     let mut running = pod("qa", "orders", "api-7d9f5b-abc12", "Running");
     running.containers[0].image = "atlas.azurecr.io/team/api:latest".to_owned();
     app.aks

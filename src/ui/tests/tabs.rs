@@ -590,7 +590,8 @@ fn a_reloaded_session_still_walks_back_through_a_pull_request_and_a_pod() {
     let build = || {
         let mut app = crate::app::pull_requests::tests::pull_requests_app();
         app.repos.set_repos(&app.shell);
-        app.aks.set_clusters(vec![cluster("qa", &["orders"])]);
+        app.aks
+            .set_clusters(vec![cluster("qa", &["orders"])], &mut app.shell);
         app.aks.set_pods(
             &mut app.shell,
             "qa",

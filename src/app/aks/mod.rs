@@ -130,7 +130,7 @@ impl Default for AksScreen {
 impl AksScreen {
     /// The clusters the file names, as `config.toml` is read and whenever it
     /// changes. Pods of a cluster nobody names any more go with it.
-    pub fn set_clusters(&mut self, clusters: Vec<Cluster>) {
+    pub fn set_clusters(&mut self, clusters: Vec<Cluster>, shell: &mut Shell) {
         // A namespace the file no longer names is never read again, so what
         // it held goes now rather than sitting on the table as it last was.
         let kept = |cluster: &str, namespace: &str| {
@@ -148,6 +148,8 @@ impl AksScreen {
                 None => clusters.iter().any(|held| held.name == *cluster),
             });
         self.clusters = clusters;
+        // The pods went, so what the ACR tab may jump to goes with them.
+        shell.set_pod_images(self.pod_images());
     }
 
     #[must_use]

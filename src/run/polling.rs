@@ -78,7 +78,8 @@ impl ConfigWatch {
         // are written. So does the notification command, which is the same
         // bargain: write `[notify]` and the next thing worth interrupting for
         // interrupts you.
-        app.aks.set_clusters(config.clusters.clone());
+        app.aks
+            .set_clusters(config.clusters.clone(), &mut app.shell);
         app.shell
             .set_notifier(Notifier::new(config.notify.command.clone()));
         // And so does the deployment repository: `[deployment]` written into
@@ -752,9 +753,7 @@ pub(super) fn poll_sync(
                         .apply_created(&mut app.shell, created.ticket, created.relations);
                     stamp_database(app, repository);
                 }
-                Err(rejection) => app
-                    .work_items
-                    .reject_create(&mut app.shell, &rejection.message),
+                Err(rejection) => app.reject_create(&rejection.message),
             },
             // The worker rewrote both halves of this work item's hierarchy
             // link itself, so the signature moves with them and the watcher

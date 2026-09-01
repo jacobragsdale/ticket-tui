@@ -149,14 +149,23 @@ pub(super) fn run() -> Result<()> {
         repository.meta(db::ME_DISPLAY_NAME_KEY)?,
         std::env::var("TICKET_TUI_ME").ok(),
     ));
+    // After `me` is known, since the marks say which votes are mine.
+    app.seed_pull_request_marks(&pull_requests);
     stamp_database(&mut app, &repository);
     app.shell.set_offline_reason(offline_reason.clone());
     let session_path = session::path_for(repository.path());
-    match session::load(&session_path) {
-        Ok(loaded) => app.restore_session(loaded),
-        Err(error) => app
-            .shell
-            .set_error(format!("Could not load session: {error:#}")),
+    // A run with no session yet opens on Mine — after `me` is known, so
+    // `@me` matches; one that remembers a query, an empty one included,
+    // reopens on that instead.
+    if session_path.exists() {
+        match session::load(&session_path) {
+            Ok(loaded) => app.restore_session(loaded),
+            Err(error) => app
+                .shell
+                .set_error(format!("Could not load session: {error:#}")),
+        }
+    } else {
+        app.work_items.open_on(&mut app.shell, "Mine");
     }
     // After the session, so a threshold asked for on this run beats the one
     // the last run left behind.

@@ -1256,14 +1256,21 @@ impl CommentBody {
     /// rather than HTML, so the fence goes out as a fence.
     fn markdown(&self) -> String {
         if self.fenced {
-            format!("{FENCE}\n{}\n{FENCE}", self.text)
+            // A fence one backtick longer than any run inside the body, so
+            // a log that quotes a code block cannot close it early.
+            let longest = self
+                .text
+                .split(|held| held != '`')
+                .map(str::len)
+                .max()
+                .unwrap_or(0);
+            let fence = "`".repeat(longest.max(2) + 1);
+            format!("{fence}\n{}\n{fence}", self.text)
         } else {
             self.text.clone()
         }
     }
 }
-
-const FENCE: &str = "```";
 
 /// What one `comment` posts. The argument as typed, or standard input when the
 /// argument is `-` — and when there is no argument at all but something is
@@ -1298,14 +1305,16 @@ fn comment_body(
 /// left exactly as they came.
 fn piped_comment(stdin: &mut impl Read) -> Result<CommentBody> {
     let mut raw = String::new();
+    // Read one byte past the limit and no further: a log of any size is
+    // refused without first being held in memory.
     stdin
+        .take(u64::try_from(COMMENT_LIMIT).unwrap_or(u64::MAX) + 1)
         .read_to_string(&mut raw)
         .context("failed to read the comment from standard input")?;
-    let size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
-    if size > COMMENT_LIMIT {
+    if i64::try_from(raw.len()).unwrap_or(i64::MAX) > COMMENT_LIMIT {
         bail!(
-            "that is a log, not a comment: {}. Pipe it through tail",
-            size_label(size)
+            "that is a log, not a comment: more than {}. Pipe it through tail",
+            size_label(COMMENT_LIMIT)
         );
     }
     let text = raw.trim_end().to_owned();
@@ -5278,6 +5287,20 @@ mod tests {
     }
 
     #[test]
+    fn a_piped_body_quoting_a_code_block_is_fenced_longer_than_the_block() {
+        let body = CommentBody {
+            text: "before\n```\ninner\n```\nafter".to_owned(),
+            fenced: true,
+        };
+        let markdown = body.markdown();
+        assert!(markdown.starts_with("````\n"), "{markdown}");
+        assert!(markdown.ends_with("\n````"), "{markdown}");
+        let html = body.html();
+        assert_eq!(html.matches("<pre>").count(), 1, "one block: {html}");
+        assert!(html.contains("inner"), "{html}");
+    }
+
+    #[test]
     fn a_body_over_the_limit_is_refused_with_its_size_rather_than_truncated() {
         let over = vec![b'x'; usize::try_from(COMMENT_LIMIT).unwrap() + 1];
         let refusal = format!(
@@ -5286,7 +5309,7 @@ mod tests {
         );
 
         assert!(
-            refusal.contains("that is a log, not a comment: 64 kB"),
+            refusal.contains("that is a log, not a comment: more than 64 kB"),
             "{refusal}"
         );
         assert!(refusal.contains("Pipe it through tail"), "{refusal}");

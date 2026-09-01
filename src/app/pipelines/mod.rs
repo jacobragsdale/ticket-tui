@@ -1567,7 +1567,13 @@ impl PipelinesScreen {
                 Jump::Repo(shell.repo_name(repo_id)),
             ));
         }
-        if let Some(pr) = row.run.pr_id {
+        // A pull request outside the window the sync keeps is not on file, so
+        // it is not offered.
+        if let Some(pr) = row
+            .run
+            .pr_id
+            .filter(|pr| shell.pull_request_label(*pr).is_some())
+        {
             let repo = self
                 .pipelines
                 .iter()

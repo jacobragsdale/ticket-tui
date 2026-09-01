@@ -144,9 +144,10 @@ fn an_unreadable_cluster_says_what_it_said_on_the_table_and_in_the_pane() {
 
     // With nothing to select at all, the pane is the list of complaints.
     let mut empty = App::new(Vec::new());
-    empty
-        .aks
-        .set_clusters(vec![crate::aks::tests::cluster("qa", &["orders"])]);
+    empty.aks.set_clusters(
+        vec![crate::aks::tests::cluster("qa", &["orders"])],
+        &mut empty.shell,
+    );
     let waiting = aks_text(150, 30, &mut empty);
     assert!(waiting.contains("Reading qa"), "{waiting}");
 

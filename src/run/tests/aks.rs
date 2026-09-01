@@ -84,11 +84,14 @@ fn the_aks_thread_starts_with_the_first_cluster_and_hears_when_the_tab_shows_and
     let fake = FakeKube::default();
     let mut runtime = aks_runtime(fake.clone());
     let mut app = App::new(Vec::new());
-    app.aks.set_clusters(vec![Cluster {
-        name: "qa".to_owned(),
-        context: "aks-qa".to_owned(),
-        namespaces: vec!["orders".to_owned()],
-    }]);
+    app.aks.set_clusters(
+        vec![Cluster {
+            name: "qa".to_owned(),
+            context: "aks-qa".to_owned(),
+            namespaces: vec!["orders".to_owned()],
+        }],
+        &mut app.shell,
+    );
 
     // The clusters go out at once; nothing is read while the tab is hidden.
     poll_aks(&mut app, &mut runtime);

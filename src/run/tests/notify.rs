@@ -151,3 +151,53 @@ fn the_first_read_of_a_clusters_pods_is_the_baseline_and_a_restart_after_it_is_n
     announce_pods(&mut app, &mut seen, "qa", namespace, &[pod(4)]);
     assert_eq!(said.lock().unwrap().len(), 1);
 }
+
+fn authored_by_me_with(vote: i8) -> ticket_tui::model::PullRequest {
+    ticket_tui::model::PullRequest {
+        repo_id: "repo".to_owned(),
+        id: 812,
+        title: "Tidy the watcher".to_owned(),
+        description: String::new(),
+        status: ticket_tui::model::PrStatus::Active,
+        is_draft: false,
+        created_by: ticket_tui::model::Identity {
+            display_name: "Jacob".to_owned(),
+            unique_name: None,
+        },
+        created_at: None,
+        closed_at: None,
+        source_ref: "refs/heads/feature".to_owned(),
+        target_ref: "refs/heads/main".to_owned(),
+        merge_status: "succeeded".to_owned(),
+        last_merge_source_commit: String::new(),
+        auto_complete_set_by: None,
+        url: String::new(),
+        reviewers: vec![ticket_tui::model::PrReviewer {
+            id: "d".to_owned(),
+            display_name: "Dana Ali".to_owned(),
+            unique_name: None,
+            vote,
+            is_required: false,
+        }],
+        work_items: Vec::new(),
+        build: None,
+        threads: Vec::new(),
+    }
+}
+
+/// The rows loaded at startup never went through `apply_snapshot`, so they
+/// have to be seeded as the baseline by hand — otherwise the first pull of the
+/// run is taken as the baseline and the vote it carries is never said.
+#[test]
+fn the_rows_loaded_at_startup_are_the_baseline_so_the_first_pull_can_be_news() {
+    let mut app = App::new(Vec::new());
+    let (notifier, log) = ticket_tui::notify::Notifier::recording();
+    app.shell.set_notifier(notifier);
+    app.shell.set_me(Some("Jacob".to_owned()));
+    app.seed_pull_request_marks(&[authored_by_me_with(0)]);
+
+    app.announce_pull_requests(&[authored_by_me_with(10)]);
+    let fired = log.lock().unwrap();
+    assert_eq!(fired.len(), 1, "{fired:?}");
+    assert_eq!(fired[0].0, "!812 approved by Dana Ali");
+}

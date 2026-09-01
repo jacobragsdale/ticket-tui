@@ -924,3 +924,21 @@ fn esc_leaves_nothing_behind_a_capture() {
         "the next `+` opens on nothing: a one-line title abandoned is not a draft"
     );
 }
+
+#[test]
+fn a_refused_capture_comes_back_as_the_row_with_the_thought_still_in_it() {
+    let mut app = crate::app::aks::tests::aks_app();
+    app.shell.enable_sync();
+    app.shell.set_me(Some("Avery Chen".into()));
+    press(&mut app, KeyCode::Char('+'));
+    type_text(&mut app, "a thought");
+    press(&mut app, KeyCode::Enter);
+
+    app.reject_create("no network");
+    assert_eq!(app.work_items.mode, WorkItemMode::Capture);
+    assert_eq!(app.work_items.capture.text(), "a thought");
+    assert!(
+        app.shell_overlay_open(),
+        "the row is painted over the AKS tab again, not a form nobody opened"
+    );
+}

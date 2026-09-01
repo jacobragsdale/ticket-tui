@@ -396,6 +396,15 @@ impl WorkItemsScreen {
         }
     }
 
+    /// Opens on one built-in view by name: what a fresh run — no session file
+    /// yet — does with **Mine**, so the rows that matter first are your own
+    /// and the whole project is `V` away.
+    pub fn open_on(&mut self, shell: &mut Shell, name: &str) {
+        if let Some(view) = builtin_named(name) {
+            self.apply_builtin_view(shell, *view);
+        }
+    }
+
     /// A built-in sets the query and the sort and leaves the rest of the table
     /// alone, so loading one never rearranges the columns somebody has set up.
     fn apply_builtin_view(&mut self, shell: &mut Shell, view: BuiltinView) {

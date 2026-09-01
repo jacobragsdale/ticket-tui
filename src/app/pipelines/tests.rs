@@ -330,6 +330,11 @@ fn g_goes_to_the_pull_request_a_run_was_raised_for() {
     use crate::model::PrStatus;
 
     let mut app = pipelines_app();
+    // The pull request is on file, which is what makes it somewhere to go.
+    app.shell.set_artifact_labels(
+        vec![(11, "Split the files".to_owned(), PrStatus::Active)],
+        Vec::new(),
+    );
     let mut validating = run(15, 1, RunStatus::Completed, Some(RunResult::Succeeded));
     validating.pr_id = Some(11);
     let runs = vec![validating, run(12, 1, RunStatus::Completed, None)];

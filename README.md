@@ -59,7 +59,9 @@ the matching `TICKET_TUI_*` variable, and whatever none of the three name is
 left for the Azure CLI to answer.
 
 The first `sync` fills the database; every run after it opens immediately and
-pulls in the background. Without a configured organization the TUI runs
+pulls in the background. The Work items tab opens on **Mine** — the rows
+assigned to you — until a session remembers something else; `V` picks another
+view. Without a configured organization the TUI runs
 offline, browsing whatever the database already holds.
 
 ## The keys worth knowing
@@ -77,7 +79,7 @@ offline, browsing whatever the database already holds.
 | `?` | The in-app help, generated from the same table the keys are bound in |
 | `L` / `D` | On AKS: tail the selected pod's log, or `kubectl describe` it |
 | `x` / `s` | On AKS: restart the pod after a confirm, or open a shell in it |
-| `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a pod's repository, a tag's pod |
+| `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a repository's open pull request, a pod's repository, a tag's pod |
 | `Enter` / `h` | On ACR and Key Vault: into the registry or vault under the cursor, and back out |
 | `y` / `D` | On ACR: copy the pull reference, or the tag's digest |
 | `R` / `Y` | On Key Vault: show a secret's value for one minute, or copy it while it is up |
@@ -146,8 +148,8 @@ namespaces = ["orders", "billing"]
 
 `[notify]` is one command, run through `sh -c` when something worth
 interrupting for happens: a run you pressed `w` on finishes, a vote lands on a
-pull request you wrote, one turns up wanting your review, a pod starts
-crash-looping, an approval lands on a run. The status line says the same words
+pull request you wrote, one turns up wanting your review, a pod restarts or
+starts crash-looping, an approval lands on a run. The status line says the same words
 whether or not the table is there, so this is the copy you get when ticket-tui
 is in a pane you are not looking at:
 

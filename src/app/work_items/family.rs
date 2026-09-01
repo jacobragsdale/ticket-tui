@@ -200,6 +200,13 @@ impl WorkItemsScreen {
                 true
             }
             Jump::WorkItems(ids) => {
+                // Ids the database does not hold would only replace the query
+                // with one that matches nothing.
+                let ids: Vec<i64> = ids
+                    .iter()
+                    .copied()
+                    .filter(|id| shell.work_item_title(*id).is_some())
+                    .collect();
                 if ids.is_empty() {
                     return false;
                 }

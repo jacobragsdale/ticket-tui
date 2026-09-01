@@ -1074,16 +1074,23 @@ impl Screen for PullRequestsScreen {
         let row = self
             .selected(shell)
             .ok_or_else(|| "No pull request is selected".to_owned())?;
-        if !row.request.work_items.is_empty() {
-            return Ok((
-                Jump::WorkItems(row.request.work_items.clone()),
-                "work items",
-            ));
+        // Only what the database holds is offered: a work item the query
+        // leaves out, or a run outside the window, is not somewhere to go.
+        let held: Vec<i64> = row
+            .request
+            .work_items
+            .iter()
+            .copied()
+            .filter(|id| shell.work_item_title(*id).is_some())
+            .collect();
+        if !held.is_empty() {
+            return Ok((Jump::WorkItems(held), "work items"));
         }
         row.request
             .build
             .as_ref()
             .and_then(|build| build.run_id)
+            .filter(|run| shell.run_label(*run).is_some())
             .map(|run| (Jump::Run(run), "run"))
             .ok_or_else(|| format!("!{} carries no work items", row.request.id))
     }

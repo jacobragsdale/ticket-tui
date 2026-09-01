@@ -136,7 +136,7 @@ pub(super) fn start_create(
         parent,
     };
     if let Err(message) = runtime.send(request) {
-        app.work_items.reject_create(&mut app.shell, &message);
+        app.reject_create(&message);
     }
 }
 

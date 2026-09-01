@@ -516,6 +516,9 @@ fn g_goes_to_the_work_items_the_request_carries_and_says_when_it_carries_none() 
     use crate::app::{Jump, Screen};
 
     let mut app = pull_requests_app();
+    // The work item is on file, which is what makes it somewhere to go.
+    app.shell
+        .set_work_item_titles(vec![(10_001, "Split the files".to_owned())]);
     app.select_tab(TabId::PullRequests);
     // !11 closes one work item; the rows are newest first, so it is last.
     app.pull_requests.cursor.focus(2);
@@ -649,5 +652,50 @@ fn a_pull_request_on_any_other_repository_carries_no_pre_flight_at_all() {
             .expect("a selected pull request")
             .preflight,
         crate::agent_context::PreflightContext::NotApplicable
+    );
+}
+
+#[test]
+fn a_follow_that_finds_nothing_leaves_the_history_and_the_forward_list_as_they_were() {
+    use crate::app::Jump;
+
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    app.shell.record_jump(Jump::Repo("somewhere".to_owned()));
+    app.shell.future.push(Jump::Repo("ahead".to_owned()));
+    let history = app.shell.history().to_vec();
+
+    assert!(!app.follow(&Jump::Run(999_999)), "nothing on file");
+    assert_eq!(app.shell.history(), history.as_slice());
+    assert_eq!(app.shell.future.len(), 1, "`]` still has somewhere to go");
+}
+
+#[test]
+fn arriving_from_a_tab_with_no_place_still_records_the_arrival() {
+    use crate::app::Jump;
+
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::WorkItems);
+    app.shell.history.clear();
+    press(&mut app, KeyCode::Char('3'));
+    assert!(
+        matches!(app.shell.history().last(), Some(Jump::PullRequest { .. })),
+        "{:?}",
+        app.shell.history()
+    );
+}
+
+#[test]
+fn g_offers_only_the_work_items_and_the_run_the_database_holds() {
+    use crate::app::{Jump, Screen};
+
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(2);
+    app.shell.set_work_item_titles(Vec::new());
+    let target = Screen::follow_target(&app.pull_requests, &app.shell);
+    assert!(
+        !matches!(target, Ok((Jump::WorkItems(_), _))),
+        "a work item the query leaves out is not somewhere to go: {target:?}"
     );
 }

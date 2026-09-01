@@ -282,6 +282,14 @@ impl App {
     #[must_use]
     pub fn new(tickets: Vec<Ticket>) -> Self {
         let mut shell = Shell::default();
+        // What is on file, as every tab reads it: the titles a jump is gated
+        // on come from the same rows the table is built from.
+        shell.set_work_item_titles(
+            tickets
+                .iter()
+                .map(|ticket| (ticket.key.id, ticket.title.clone()))
+                .collect(),
+        );
         let work_items = WorkItemsScreen::new(&mut shell, tickets);
         Self {
             shell,
@@ -485,14 +493,13 @@ impl App {
     /// switching to an empty tab.
     pub fn follow(&mut self, jump: &Jump) -> bool {
         self.moved = true;
-        // Where the walk starts from is what `[` comes back to.
+        // Where the walk starts from is what `[` comes back to — recorded
+        // once the walk has somewhere to go, so a target that is not on file
+        // leaves the history, and the forward list, exactly as they were.
         let here = {
             let (shell, screen) = self.screen();
             screen.here(shell)
         };
-        if let Some(here) = here {
-            self.shell.record_jump(here);
-        }
         let tab = match jump {
             Jump::WorkItem(_) | Jump::WorkItems(_) => TabId::WorkItems,
             Jump::Repo(_) => TabId::Repos,
@@ -507,6 +514,9 @@ impl App {
         let (shell, screen) = self.screen();
         let found = screen.select(shell, jump);
         if found {
+            if let Some(here) = here {
+                self.shell.record_jump(here);
+            }
             self.shell.record_jump(jump.clone());
         } else {
             self.tab = previous;
@@ -576,11 +586,36 @@ impl App {
             })
         };
         let Some(before) = before.filter(|before| tab != now || level_changed(before)) else {
+            // Nothing to come back to on the tab left — a query matching no
+            // row — but the place arrived at is still one.
+            if tab != now
+                && let Some(after) = after
+            {
+                self.shell.record_jump(after);
+            }
             return;
         };
         self.shell.record_jump(before);
         if let Some(after) = after {
             self.shell.record_jump(after);
+        }
+    }
+
+    /// The pull requests as the run starts: the baseline the `[notify]` diff
+    /// reads the first pull against, so a vote that lands after startup is
+    /// news and the rows that were already there are not.
+    pub fn seed_pull_request_marks(&mut self, pull_requests: &[PullRequest]) {
+        self.pull_request_marks =
+            Some(crate::notify::pull_request_news(None, pull_requests, self.shell.me()).0);
+    }
+
+    /// A create Azure DevOps refused, handed back to the work items screen —
+    /// and, for a capture typed over another tab, the row reopened there with
+    /// the thought still in it, which only the shell can arrange.
+    pub fn reject_create(&mut self, message: &str) {
+        self.work_items.reject_create(&mut self.shell, message);
+        if self.tab != TabId::WorkItems && self.work_items.mode == WorkItemMode::Capture {
+            self.overlay_for = Some(self.tab);
         }
     }
 
@@ -613,9 +648,14 @@ impl App {
     fn walk_to(&mut self, jump: &Jump) {
         let history = std::mem::take(&mut self.shell.history);
         let future = std::mem::take(&mut self.shell.future);
-        self.follow(jump);
+        let found = self.follow(jump);
         self.shell.history = history;
         self.shell.future = future;
+        // A place that has since gone — a pod that was replaced — falls out,
+        // so the next step does not land on it again.
+        if !found {
+            self.shell.forget_jump(jump);
+        }
         self.shell.session_dirty = true;
     }
 
@@ -676,7 +716,7 @@ impl App {
     /// up wanting your review: news wherever you are, whichever tab is
     /// showing. A snapshot with no pull requests in it at all — the database
     /// reload carries none — says nothing about them and is left alone.
-    fn announce_pull_requests(&mut self, pull_requests: &[PullRequest]) {
+    pub fn announce_pull_requests(&mut self, pull_requests: &[PullRequest]) {
         if pull_requests.is_empty() {
             return;
         }
@@ -902,9 +942,14 @@ impl App {
     /// it answers with is the shell's, not something a screen reports. A click
     /// on the tab bar never reaches a screen — the bar is the shell's.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> PointerUpdate {
-        let before = self.here_now();
+        // Only a press or a release can move the run somewhere else; a hover
+        // or a drag is not worth asking every screen where it stands for.
+        let before = matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Up(_))
+            .then(|| self.here_now());
         let update = self.dispatch_mouse(mouse);
-        self.record_move(before);
+        if let Some(before) = before {
+            self.record_move(before);
+        }
         update
     }
 

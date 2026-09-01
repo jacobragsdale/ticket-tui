@@ -460,12 +460,25 @@ struct HtmlBuilder {
     lists: Vec<bool>,
     /// The lines of the fenced block being read, if a fence is open.
     fenced: Option<Vec<String>>,
+    /// How many backticks opened it, which is how many close it.
+    fence_len: usize,
+}
+
+/// The run of backticks a line starts with, after any indent.
+fn backticks(line: &str) -> usize {
+    line.trim_start()
+        .chars()
+        .take_while(|held| *held == '`')
+        .count()
 }
 
 impl HtmlBuilder {
     fn line(&mut self, line: &str) {
         if let Some(fenced) = self.fenced.as_mut() {
-            if line.trim_start().starts_with("```") {
+            // The closing fence is at least as long as the opening one and
+            // stands alone, so a shorter run of backticks inside is content.
+            let run = backticks(line);
+            if run >= self.fence_len && line.trim_start()[run..].trim().is_empty() {
                 self.close_fence();
             } else {
                 fenced.push(line.to_owned());
@@ -475,6 +488,7 @@ impl HtmlBuilder {
         let trimmed = line.trim();
         if trimmed.starts_with("```") {
             self.close_blocks();
+            self.fence_len = backticks(trimmed);
             self.fenced = Some(Vec::new());
         } else if trimmed.is_empty() {
             self.close_blocks();

@@ -1423,7 +1423,8 @@ opens, and the tab badge adds `◇1` beside the `◐2` of anything running.
 `W` on a run — or on a pipeline, meaning the run it is having now — follows it:
 the row wears a `◉` in its gutter, the watcher keeps polling it whatever tab is
 showing, and when it stops the footer says so for eight seconds, `✓ Build
-20260829.4 succeeded · 4m 12s` or `✗ Build 20260829.4 failed`, with a desktop
+20260829.4 succeeded · 4m 12s — Nightly · main` or `✗ Build 20260829.4 failed —
+Nightly · main`, with a desktop
 notification saying the same when [`[notify]`](#notify-a-desktop-notification-when-a-watched-thing-changes)
 names a command. Clicking the marker does the same. A run that has already finished is refused rather than
 announced. Watches live for the session only.
@@ -2022,7 +2023,9 @@ bold, and a hovered row reverses.
 heading, above whatever you have saved: **Mine** (`assignee:@me`),
 **Unassigned** (`assignee:@none`), **Doing** (`state:doing`), **Stale**
 (`changed:>14d state:@open`, oldest first, leaving out work that is finished),
-and **Current sprint** (`iteration:@current`). A built-in sets the query and
+and **Current sprint** (`iteration:@current`). A fresh run — one with no
+session file yet — opens on **Mine**; a session that remembers a query or a
+view is restored over it, an empty query included. A built-in sets the query and
 the sort and leaves the columns and the row density as you have them; it is
 never written to the session file, cannot be deleted, and owns its name, so
 saving a view called `Mine` is refused. `n` saves the current query, sort,
@@ -2478,9 +2481,11 @@ deliberately writes nothing, which is what keeps every other reader from
 reloading for no reason, so this is the age of the data rather than the age of
 the last attempt.
 
-The counts the tab bar also shows are computed in one place — `awaiting_review`,
-`rejected_of_mine`, `live_runs` and `runs_failed_since` in `model.rs` — which
-each `Screen::badge` calls too, so the line and the bar cannot drift apart.
+The counts the tab bar also shows are computed in one place — `awaiting_review`
+and `live_runs` in `model.rs`, which the Pull requests and Pipelines badges call
+too, so the line and the bar cannot drift apart; `rejected_of_mine` and
+`runs_failed_since` sit beside them and are the status line's alone, since no
+tab badges those two.
 
 ### `env`: what an environment declares, and what it forgot
 

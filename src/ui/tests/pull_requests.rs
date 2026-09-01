@@ -99,6 +99,8 @@ fn the_tab_badge_counts_what_is_waiting_on_my_review() {
 #[test]
 fn the_details_pane_follows_a_pull_request_to_its_work_items() {
     let mut app = pull_requests_app();
+    app.shell
+        .set_work_item_titles(vec![(10_001, "Split the files".to_owned())]);
     tab_text(160, 50, &mut app);
     app.pull_requests.cursor.focus(2);
     render_text(160, 50, &mut app);
@@ -190,6 +192,8 @@ fn the_buttons_under_the_details_pane_are_the_keys_they_name() {
 #[test]
 fn the_details_header_carries_the_chip_g_would_follow_and_the_footer_names_it() {
     let mut app = pull_requests_app();
+    app.shell
+        .set_work_item_titles(vec![(10_001, "Split the files".to_owned())]);
     tab_text(160, 50, &mut app);
     app.pull_requests.cursor.focus(2);
     let text = render_text(160, 50, &mut app);

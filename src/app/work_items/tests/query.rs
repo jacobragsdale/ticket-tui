@@ -279,3 +279,18 @@ fn a_key_belonging_to_another_tab_does_nothing_on_this_one() {
         }
     }
 }
+
+#[test]
+fn a_fresh_run_opens_on_mine_and_a_remembered_session_is_restored_over_it() {
+    let mut app = App::new(Vec::new());
+    app.work_items.open_on(&mut app.shell, "Mine");
+    assert_eq!(app.work_items.active_view.as_deref(), Some("Mine"));
+    assert_eq!(app.work_items.query(), "assignee:@me");
+
+    let remembered = crate::session::TabSession {
+        query: "state:doing".to_owned(),
+        ..Default::default()
+    };
+    app.work_items.restore(&mut app.shell, remembered, None);
+    assert_eq!(app.work_items.query(), "state:doing");
+}
