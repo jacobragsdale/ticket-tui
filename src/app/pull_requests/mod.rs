@@ -57,6 +57,8 @@ pub enum PrMode {
     ConfirmAbandon,
     /// The one-line comment prompt.
     Comment,
+    /// The work-item picker a link is made from.
+    WorkItemPicker,
 }
 
 pub struct PullRequestsScreen {
@@ -88,6 +90,11 @@ pub struct PullRequestsScreen {
     /// than completing now.
     auto_completing: bool,
     comment: TextInput,
+    /// The work-item picker's filter and where its cursor is. The pull request
+    /// a link goes to is whichever the table's cursor is on, which cannot move
+    /// while the picker is open.
+    link_query: TextInput,
+    link_cursor: ListCursor,
 }
 
 impl Default for PullRequestsScreen {
@@ -111,6 +118,8 @@ impl Default for PullRequestsScreen {
             completion_field: 0,
             auto_completing: false,
             comment: TextInput::default(),
+            link_query: TextInput::default(),
+            link_cursor: ListCursor::default(),
         }
     }
 }
@@ -459,6 +468,86 @@ impl PullRequestsScreen {
         }
     }
 
+    /// `L`: the work-item picker, over everything on file the pull request is
+    /// not already carrying.
+    pub fn open_work_item_picker(&mut self, shell: &mut Shell) {
+        if self.selected(shell).is_none() {
+            shell.set_error("No pull request to link a work item to");
+            return;
+        }
+        self.link_query = TextInput::default();
+        self.link_cursor = ListCursor::default();
+        self.mode = PrMode::WorkItemPicker;
+    }
+
+    #[must_use]
+    pub const fn link_query(&self) -> &TextInput {
+        &self.link_query
+    }
+
+    #[must_use]
+    pub const fn link_cursor(&self) -> usize {
+        self.link_cursor.index
+    }
+
+    /// What the picker is showing: every work item on file, less the ones the
+    /// pull request already carries, less what the filter leaves out. The
+    /// filter reads ids as well as titles, since a work item is as often known
+    /// by its number.
+    #[must_use]
+    pub fn work_item_matches(&self, shell: &Shell) -> Vec<(i64, String)> {
+        let needle = self.link_query.text().trim().to_lowercase();
+        let held = self
+            .selected(shell)
+            .map(|row| row.request.work_items.clone())
+            .unwrap_or_default();
+        shell
+            .work_item_titles()
+            .iter()
+            .filter(|(id, _)| !held.contains(id))
+            .filter(|(id, title)| {
+                needle.is_empty()
+                    || title.to_lowercase().contains(&needle)
+                    || id.to_string().contains(&needle)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Links the work item the picker is on. Not optimistic: the Related
+    /// section gains it when Azure DevOps answers, as every write here.
+    pub fn choose_work_item(&mut self, shell: &mut Shell) -> AppAction {
+        let chosen = self
+            .work_item_matches(shell)
+            .get(self.link_cursor.index)
+            .map(|(id, _)| *id);
+        self.mode = PrMode::Browse;
+        let (Some(work_item), Some(row)) = (chosen, self.selected(shell)) else {
+            return AppAction::None;
+        };
+        shell.set_status(format!(
+            "Linking #{work_item} to !{}\u{2026}",
+            row.request.id
+        ));
+        AppAction::LinkWorkItem {
+            repo_id: row.request.repo_id.clone(),
+            id: row.request.id,
+            work_item,
+        }
+    }
+
+    /// A link Azure DevOps took, which joins the Related section at once. The
+    /// work item's own Related section follows at the next pull, which is what
+    /// reads the artifact links back.
+    pub fn apply_link(&mut self, shell: &mut Shell, id: i64, work_item: i64) {
+        if let Some(request) = self.requests.iter_mut().find(|request| request.id == id)
+            && !request.work_items.contains(&work_item)
+        {
+            request.work_items.push(work_item);
+        }
+        shell.set_status(format!("#{work_item} linked to !{id}"));
+    }
+
     /// What Azure DevOps answered a write with: the pull request as it stands.
     pub fn apply_pull_request(&mut self, shell: &mut Shell, updated: PullRequest) {
         let id = updated.id;
@@ -747,6 +836,27 @@ impl PullRequestsScreen {
         AppAction::None
     }
 
+    /// The work-item picker: type to filter, arrows to move, `Enter` to link.
+    fn handle_link_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => self.mode = PrMode::Browse,
+            KeyCode::Enter => return self.choose_work_item(shell),
+            KeyCode::Down => {
+                let count = self.work_item_matches(shell).len();
+                self.link_cursor.move_by(1, count);
+            }
+            KeyCode::Up => {
+                let count = self.work_item_matches(shell).len();
+                self.link_cursor.move_by(-1, count);
+            }
+            _ => {
+                self.link_query.handle_key(key);
+                self.link_cursor.reset();
+            }
+        }
+        AppAction::None
+    }
+
     fn handle_command_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
         command_for_key(key, TabId::PullRequests)
             .map_or(AppAction::None, |id| self.run_command(shell, id))
@@ -770,6 +880,7 @@ impl PullRequestsScreen {
             CommandId::AbandonPr => self.confirm_abandon(shell),
             CommandId::AutoCompletePr => return self.toggle_auto_complete(shell),
             CommandId::CommentPr => self.open_comment(shell),
+            CommandId::LinkWorkItem => self.open_work_item_picker(shell),
             CommandId::ToggleClosedPrs => self.show_closed = !self.show_closed,
             CommandId::Quit => shell.should_quit = true,
             // The panes are the shell's: every tab shows the same two and
@@ -789,6 +900,7 @@ impl Screen for PullRequestsScreen {
             PrMode::Complete => return self.handle_complete_key(shell, key),
             PrMode::ConfirmAbandon => return self.handle_abandon_key(shell, key),
             PrMode::Comment => return self.handle_comment_key(shell, key),
+            PrMode::WorkItemPicker => return self.handle_link_key(shell, key),
             PrMode::Browse => {}
         }
         match key.code {
@@ -862,14 +974,21 @@ impl Screen for PullRequestsScreen {
                 self.mode = PrMode::Search;
                 self.query.set_cursor(usize::from(column));
             }
+            PointerTarget::NodeOption { index } => {
+                self.link_cursor.focus(index);
+                return self.choose_work_item(shell);
+            }
+            PointerTarget::NodeQuery => self.link_query.set_cursor(usize::from(column)),
             _ => {}
         }
         AppAction::None
     }
 
     fn place_caret(&mut self, _shell: &mut Shell, editor: TextEditor, column: u16, _row: u16) {
-        if editor == TextEditor::Search {
-            self.query.set_cursor(usize::from(column));
+        match editor {
+            TextEditor::Search => self.query.set_cursor(usize::from(column)),
+            TextEditor::Node => self.link_query.set_cursor(usize::from(column)),
+            _ => {}
         }
     }
 
@@ -885,6 +1004,7 @@ impl Screen for PullRequestsScreen {
         match self.mode {
             PrMode::Search => Some(TextEditor::Search),
             PrMode::Comment => Some(TextEditor::Prompt),
+            PrMode::WorkItemPicker => Some(TextEditor::Node),
             _ => None,
         }
     }
@@ -1011,8 +1131,9 @@ impl Screen for PullRequestsScreen {
             PrMode::Complete => "↑↓ rows  ←→/Space change  Enter send  Esc cancel",
             PrMode::ConfirmAbandon => "X abandon it  Esc leave it",
             PrMode::Comment => "Type a line  Enter post  Esc cancel",
+            PrMode::WorkItemPicker => "Type to filter  ↑↓ choose  Enter link it  Esc cancel",
             PrMode::Browse => {
-                "↑↓/jk move  a/A/w/x vote  u undo  n comment  C complete  X abandon  t auto  o open  ? help"
+                "↑↓/jk move  a/A/w/x vote  u undo  n comment  L link  C complete  X abandon  t auto  o open  ? help"
             }
         }
     }

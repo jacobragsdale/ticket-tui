@@ -1332,6 +1332,17 @@ section lists the first comment of each thread — author, age, status and the
 text — and replies and line comments are `o`. All four are non-optimistic: the
 row changes when Azure DevOps answers.
 
+`L` fills the Related section, which until now only ever read: it opens a
+work-item picker — a filter field over everything the database holds, matching
+on ids as well as titles, with the ones the pull request already carries left
+out — and `Enter` links the one it is on. Azure DevOps keeps that pairing on
+the work item rather than on the pull request, as an artifact link to the
+`vstfs:///Git/PullRequestId/…` URL naming it, so the write is one patch on the
+work item, led by a revision test the way a reparent is. Related gains the line
+when Azure DevOps answers, and the work item's own Related section follows at
+the next pull, which is what reads those links back. Taking a link off is a job
+for the browser.
+
 `a` approves, `A` approves with suggestions, `w` waits for the author and `x`
 rejects; `u` puts the last vote back. The glyph changes at once and a refusal
 reverts it and says why. Voting on a pull request you were not asked to review
@@ -1912,6 +1923,7 @@ ticket-tui prs vote <id> approve|suggest|wait|reject|none
 ticket-tui prs complete <id> [--strategy squash|merge|rebase] [--keep-source] [--no-transition]
 ticket-tui prs abandon <id>
 ticket-tui prs autocomplete <id> on|off
+ticket-tui prs link <id> <work-item>
 ticket-tui prs comment <id> ["text" | -]
 ticket-tui pipelines [--json]
 ticket-tui runs list [--pipeline NAME] [--query '<filter>'] [--json]
@@ -2011,7 +2023,7 @@ votes, the work items it carries, the build and the discussion; `--json` prints
 the same, with `list` leaving out the reviewers, work items, threads and
 description the way `list` leaves out a work item's body.
 
-The five writes go out over the same REST API the TUI uses and store the copy
+The six writes go out over the same REST API the TUI uses and store the copy
 Azure DevOps answers with, so a running TUI shows the change without a pull. A
 completion carries the head commit the stored copy was read at, so a merge that
 raced somebody else's push is refused rather than landing over it; a refusal
@@ -2024,7 +2036,14 @@ $ ticket-tui prs vote 7 approve
 !7 vote: approve
 $ ticket-tui prs complete 7 --strategy squash
 !7 completed
+$ ticket-tui prs link 7 613
+#613 linked to !7
 ```
+
+`prs link` writes the artifact link on the work item, which is where Azure
+DevOps keeps it, so it needs the project GUID the last pull recorded: a
+database that has never synced is told to sync rather than sent a URL with a
+hole in it.
 
 `pipelines` and `runs list` read the database; everything else under `runs` and
 `approvals` reads or writes Azure DevOps, because a timeline, a log and a run's

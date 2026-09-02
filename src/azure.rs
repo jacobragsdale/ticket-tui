@@ -475,6 +475,28 @@ impl AzureClient {
         parse_work_item(&item, &self.config)
     }
 
+    /// Link one work item to one pull request. Azure DevOps keeps that pairing
+    /// on the work item, as an artifact link to the pull request's `vstfs:///`
+    /// URL, so this is one patch on the work item and nothing at all on the
+    /// pull request. The work item is read first for the revision the document
+    /// tests, the way a reparent is.
+    pub fn link_pull_request(
+        &self,
+        project_id: &str,
+        repo_id: &str,
+        pull_request: i64,
+        work_item: i64,
+    ) -> Result<()> {
+        let url = format!(
+            "{}/_apis/wit/workitems/{work_item}?$expand=relations&api-version={API_VERSION}",
+            self.config.base_url()
+        );
+        let current = self.get(&url)?;
+        let document = pull_request_link(&current, project_id, repo_id, pull_request)?;
+        self.send(&url, Request::Patch(&document))?;
+        Ok(())
+    }
+
     /// Add a work item to the project, answering with Azure DevOps's own copy
     /// of what it stored. `fields` are the operations that set its fields —
     /// [`crate::edit::set_field`] builds one each — and `parent` is the work
@@ -2101,6 +2123,47 @@ fn parent_link(parent: i64, config: &AzureConfig) -> Value {
     })
 }
 
+/// The JSON Patch document that hangs one pull request off a work item, built
+/// against `item` — the copy of the work item just read, links and all.
+///
+/// A pull request is not a work item, so the pairing is not a hierarchy link
+/// but an `ArtifactLink` to the `vstfs:///` URL naming it, which is the form
+/// [`artifact_kind`] reads back. As with a reparent, the `test /rev` leads so
+/// a work item somebody else changed between the read and this write is
+/// refused rather than appended to blind, and a link already held is refused
+/// here rather than sent for Azure DevOps to reject.
+fn pull_request_link(
+    item: &Value,
+    project_id: &str,
+    repo_id: &str,
+    pull_request: i64,
+) -> Result<Vec<Value>> {
+    let revision = item
+        .get("rev")
+        .and_then(Value::as_i64)
+        .context("the work item came back without a revision to test")?;
+    let url = format!("vstfs:///Git/PullRequestId/{project_id}%2F{repo_id}%2F{pull_request}");
+    if let Some(relations) = item.get("relations").and_then(Value::as_array)
+        && relations
+            .iter()
+            .any(|relation| relation.get("url").and_then(Value::as_str) == Some(url.as_str()))
+    {
+        bail!("that work item is already linked to !{pull_request}");
+    }
+    Ok(vec![
+        crate::edit::revision_test(revision),
+        json!({
+            "op": "add",
+            "path": "/relations/-",
+            "value": {
+                "rel": "ArtifactLink",
+                "url": url,
+                "attributes": {"name": "Pull Request"},
+            },
+        }),
+    ])
+}
+
 /// The JSON Patch document that creates a work item: the operations setting
 /// its fields, then the link to its parent when it has one.
 #[must_use]
@@ -3433,6 +3496,58 @@ mod tests {
                 json!({"op": "remove", "path": "/relations/2"}),
                 json!({"op": "remove", "path": "/relations/0"}),
             ]
+        );
+    }
+
+    #[test]
+    fn linking_a_pull_request_appends_the_artifact_url_the_read_side_parses() {
+        let item = with_relations(6, vec![related_relation(700)]);
+
+        let document = pull_request_link(&item, "project-guid", "repo-guid", 45).unwrap();
+
+        assert_eq!(
+            document,
+            vec![
+                json!({"op": "test", "path": "/rev", "value": 6}),
+                json!({
+                    "op": "add",
+                    "path": "/relations/-",
+                    "value": {
+                        "rel": "ArtifactLink",
+                        "url": "vstfs:///Git/PullRequestId/project-guid%2Frepo-guid%2F45",
+                        "attributes": {"name": "Pull Request"},
+                    },
+                }),
+            ],
+            "the revision test leads, and the separators inside the artifact id are encoded"
+        );
+        assert_eq!(
+            artifact_kind("vstfs:///Git/PullRequestId/project-guid%2Frepo-guid%2F45"),
+            Some(ArtifactKind::PullRequest {
+                repo_id: "repo-guid".into(),
+                id: 45,
+            }),
+            "what is written is what the pull reads back"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_already_linked_is_refused_here_rather_than_sent() {
+        let item = with_relations(
+            6,
+            vec![json!({
+                "rel": "ArtifactLink",
+                "url": "vstfs:///Git/PullRequestId/project-guid%2Frepo-guid%2F45",
+                "attributes": {"name": "Pull Request"},
+            })],
+        );
+
+        let error = pull_request_link(&item, "project-guid", "repo-guid", 45)
+            .expect_err("the link is already there");
+
+        assert!(
+            format!("{error:#}").contains("already linked to !45"),
+            "{error:#}"
         );
     }
 

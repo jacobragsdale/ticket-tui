@@ -119,6 +119,13 @@ pub enum SyncRequest {
         id: i64,
         text: String,
     },
+    /// Link one work item to one pull request. The link is written on the work
+    /// item, so the next pull is what puts it on that work item's Related.
+    LinkWorkItem {
+        repo_id: String,
+        id: i64,
+        work_item: i64,
+    },
     /// Record one vote on one pull request, as the signed-in user.
     VotePullRequest { repo_id: String, id: i64, vote: i8 },
     /// Approve or reject one approval, with an optional word about why.
@@ -178,6 +185,9 @@ pub enum SyncEvent {
     PullRequestUpdated(Result<Box<PullRequest>, String>),
     /// One comment this session left on a pull request.
     PullRequestCommented(Result<(i64, PrThread), String>),
+    /// One work item this session linked to a pull request, as the pull
+    /// request and the work item, or why it could not be.
+    WorkItemLinked(Result<(i64, i64), String>),
     /// One vote this session recorded — the pull request and the vote — or the
     /// pull request and why it could not be, so the glyph goes back.
     Voted(Result<(i64, i8), (i64, String)>),
@@ -590,6 +600,18 @@ pub trait WorkItemSource {
     fn comment_on_pull_request(&self, _repo_id: &str, _id: i64, _text: &str) -> Result<PrThread> {
         Err(anyhow!("this source cannot comment on pull requests"))
     }
+    /// Links one work item to one pull request. The link is kept on the work
+    /// item, which is why the project the pull request lives in has to be
+    /// named: the artifact URL carries it.
+    fn link_work_item(
+        &self,
+        _project_id: &str,
+        _repo_id: &str,
+        _id: i64,
+        _work_item: i64,
+    ) -> Result<()> {
+        Err(anyhow!("this source cannot link work items"))
+    }
     /// The first comment of each thread on one pull request.
     fn pull_request_threads(&self, _repo_id: &str, _id: i64) -> Result<Vec<PrThread>> {
         Ok(Vec::new())
@@ -776,6 +798,16 @@ impl WorkItemSource for AzureClient {
 
     fn comment_on_pull_request(&self, repo_id: &str, id: i64, text: &str) -> Result<PrThread> {
         self.post_pull_request_comment(repo_id, id, text)
+    }
+
+    fn link_work_item(
+        &self,
+        project_id: &str,
+        repo_id: &str,
+        id: i64,
+        work_item: i64,
+    ) -> Result<()> {
+        self.link_pull_request(project_id, repo_id, id, work_item)
     }
 
     fn pull_request_threads(&self, repo_id: &str, id: i64) -> Result<Vec<PrThread>> {
@@ -1041,6 +1073,11 @@ fn work(
                         .map_err(|error| format!("{error:#}")),
                 )
             }
+            SyncRequest::LinkWorkItem {
+                repo_id,
+                id,
+                work_item,
+            } => SyncEvent::WorkItemLinked(worker.link_work_item(&repo_id, id, work_item, events)),
             SyncRequest::VotePullRequest { repo_id, id, vote } => {
                 SyncEvent::Voted(worker.vote(&repo_id, id, vote, events))
             }
@@ -1775,6 +1812,30 @@ impl Worker {
             .map_err(|error| format!("{error:#}"))
     }
 
+    /// Links one work item to one pull request. The artifact URL the link
+    /// carries names the project by its GUID, which is the one the last pull
+    /// recorded when it read the repositories.
+    fn link_work_item(
+        &mut self,
+        repo_id: &str,
+        id: i64,
+        work_item: i64,
+        events: &Sender<SyncEvent>,
+    ) -> Result<(i64, i64), String> {
+        let project_id = match self
+            .repository()
+            .and_then(|repository| repository.meta(db::PROJECT_ID_KEY))
+        {
+            Ok(Some(project_id)) => project_id,
+            Ok(None) => return Err("The project id is not on file yet; sync first".to_owned()),
+            Err(error) => return Err(format!("{error:#}")),
+        };
+        self.source(events)
+            .and_then(|source| source.link_work_item(&project_id, repo_id, id, work_item))
+            .map(|()| (id, work_item))
+            .map_err(|error| format!("{error:#}"))
+    }
+
     /// Records one vote, as whoever is signed in. Their own id is read once
     /// and kept in `sync_meta`: a vote is written under it, and it is not
     /// something the work-item endpoints ever report.
@@ -2237,6 +2298,8 @@ mod tests {
         /// left on one.
         pr_patches: Arc<Mutex<Vec<String>>>,
         pr_comments: Arc<Mutex<Vec<String>>>,
+        /// The links it was asked to make, as `project repo pr work-item`.
+        pr_links: Arc<Mutex<Vec<String>>>,
         /// The repositories this source lists, and the project GUID they carry.
         repos: Arc<Mutex<Vec<Repo>>>,
         /// The pipelines and runs it lists, and how often they were asked for.
@@ -2504,6 +2567,20 @@ mod tests {
             let body = pull_request_patch(&action, me);
             self.pr_patches.lock().unwrap().push(body.to_string());
             Ok(pull_request(id, "commit-a", PrStatus::Active))
+        }
+
+        fn link_work_item(
+            &self,
+            project_id: &str,
+            repo_id: &str,
+            id: i64,
+            work_item: i64,
+        ) -> Result<()> {
+            self.pr_links
+                .lock()
+                .unwrap()
+                .push(format!("{project_id} {repo_id} {id} {work_item}"));
+            Ok(())
         }
 
         fn comment_on_pull_request(&self, _repo_id: &str, id: i64, text: &str) -> Result<PrThread> {
@@ -3575,10 +3652,65 @@ mod tests {
         assert_eq!(*comments.lock().unwrap(), vec!["11 LGTM once CI is green"]);
     }
 
+    #[test]
+    fn a_link_names_the_project_the_repository_and_both_ids() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        SqliteTicketRepository::open(&path)
+            .unwrap()
+            .set_meta(db::PROJECT_ID_KEY, "project-guid")
+            .unwrap();
+        let source = FakeSource {
+            pr_links: Arc::new(Mutex::new(Vec::new())),
+            ..FakeSource::with(vec![])
+        };
+        let links = Arc::clone(&source.pr_links);
+        let handle = SyncHandle::spawn(path, Box::new(source)).unwrap();
+
+        handle
+            .send(SyncRequest::LinkWorkItem {
+                repo_id: "aaa-111".into(),
+                id: 11,
+                work_item: 613,
+            })
+            .unwrap();
+        let SyncEvent::WorkItemLinked(result) = next_pr_event(&handle) else {
+            panic!("expected a link");
+        };
+        assert_eq!(result.expect("the link was taken"), (11, 613));
+        assert_eq!(
+            *links.lock().unwrap(),
+            vec!["project-guid aaa-111 11 613"],
+            "the project GUID the last pull recorded is what the artifact URL carries"
+        );
+    }
+
+    #[test]
+    fn a_link_asked_for_before_the_project_id_is_known_comes_back_as_a_refusal() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let handle = SyncHandle::spawn(path, Box::new(FakeSource::with(vec![]))).unwrap();
+
+        handle
+            .send(SyncRequest::LinkWorkItem {
+                repo_id: "aaa-111".into(),
+                id: 11,
+                work_item: 613,
+            })
+            .unwrap();
+        let SyncEvent::WorkItemLinked(result) = next_pr_event(&handle) else {
+            panic!("expected a link");
+        };
+        let refusal = result.expect_err("there is no project id to build the URL from");
+        assert!(refusal.contains("sync first"), "{refusal}");
+    }
+
     fn next_pr_event(handle: &SyncHandle) -> SyncEvent {
         loop {
             match next_event(handle) {
-                event @ (SyncEvent::PullRequestUpdated(_) | SyncEvent::PullRequestCommented(_)) => {
+                event @ (SyncEvent::PullRequestUpdated(_)
+                | SyncEvent::PullRequestCommented(_)
+                | SyncEvent::WorkItemLinked(_)) => {
                     return event;
                 }
                 SyncEvent::DisplayName(_) => continue,
@@ -4263,6 +4395,7 @@ mod tests {
                 | SyncEvent::Voted(_)
                 | SyncEvent::PullRequestUpdated(_)
                 | SyncEvent::PullRequestCommented(_)
+                | SyncEvent::WorkItemLinked(_)
                 | SyncEvent::Details(_)
                 | SyncEvent::Identities(_)
                 | SyncEvent::ClassificationNodes(_)

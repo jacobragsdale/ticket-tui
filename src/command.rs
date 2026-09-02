@@ -63,6 +63,7 @@ pub enum CommandId {
     AbandonPr,
     AutoCompletePr,
     CommentPr,
+    LinkWorkItem,
     ToggleClosedPrs,
     /// `g`: whatever the row under the cursor points at, worked out per tab.
     Follow,
@@ -307,6 +308,13 @@ pub const COMMANDS: &[Command] = &[
         title: "Comment",
         keys: &[key('n')],
         help: "One line, as a new thread",
+        scope: Scope::Tabs(&[TabId::PullRequests]),
+    },
+    Command {
+        id: CommandId::LinkWorkItem,
+        title: "Link work item",
+        keys: &[key('L')],
+        help: "Pick one, and the pull request closes it",
         scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
@@ -1062,6 +1070,7 @@ mod tests {
                 CommandId::AbandonPr,
                 CommandId::AutoCompletePr,
                 CommandId::CommentPr,
+                CommandId::LinkWorkItem,
                 CommandId::ToggleClosedPrs,
                 CommandId::Quit,
                 CommandId::ToggleDetails,

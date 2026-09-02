@@ -434,6 +434,81 @@ fn n_posts_one_comment_and_it_joins_the_discussion() {
 }
 
 #[test]
+fn l_picks_a_work_item_and_links_it_to_the_pull_request_under_the_cursor() {
+    let mut app = pull_requests_app();
+    app.shell.set_work_item_titles(vec![
+        (10_001, "Split the files".to_owned()),
+        (10_002, "Rename the menu".to_owned()),
+        (10_003, "Draw the tab bar".to_owned()),
+    ]);
+    app.select_tab(TabId::PullRequests);
+    // !11, which already carries #10001.
+    app.pull_requests.cursor.focus(2);
+
+    press(&mut app, KeyCode::Char('L'));
+    assert_eq!(app.pull_requests.mode, PrMode::WorkItemPicker);
+    assert_eq!(
+        app.pull_requests
+            .work_item_matches(&app.shell)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![10_002, 10_003],
+        "what the pull request already carries is not offered again"
+    );
+
+    // The filter reads titles and ids alike.
+    press(&mut app, KeyCode::Char('t'));
+    press(&mut app, KeyCode::Char('a'));
+    press(&mut app, KeyCode::Char('b'));
+    assert_eq!(
+        app.pull_requests
+            .work_item_matches(&app.shell)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>(),
+        vec![10_003]
+    );
+
+    let action = press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        action,
+        AppAction::LinkWorkItem {
+            repo_id: "aaa-111".into(),
+            id: 11,
+            work_item: 10_003,
+        }
+    );
+    assert_eq!(app.pull_requests.mode, PrMode::Browse);
+
+    // Nothing moves until the worker answers, and then it does.
+    let row = app.pull_requests.selected(&app.shell).expect("a row");
+    assert_eq!(row.request.work_items, vec![10_001]);
+    app.pull_requests.apply_link(&mut app.shell, 11, 10_003);
+    let row = app.pull_requests.selected(&app.shell).expect("a row");
+    assert_eq!(row.request.work_items, vec![10_001, 10_003]);
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some("#10003 linked to !11")
+    );
+}
+
+#[test]
+fn esc_leaves_the_work_item_picker_without_linking_anything() {
+    let mut app = pull_requests_app();
+    app.shell
+        .set_work_item_titles(vec![(10_002, "Rename the menu".to_owned())]);
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(2);
+
+    press(&mut app, KeyCode::Char('L'));
+    assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
+    assert_eq!(app.pull_requests.mode, PrMode::Browse);
+    let row = app.pull_requests.selected(&app.shell).expect("a row");
+    assert_eq!(row.request.work_items, vec![10_001], "nothing was linked");
+}
+
+#[test]
 fn a_completed_pull_request_leaves_the_active_view() {
     let mut app = pull_requests_app();
     app.select_tab(TabId::PullRequests);

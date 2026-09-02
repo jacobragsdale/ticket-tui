@@ -33,6 +33,7 @@ pub(crate) fn render(
         PrMode::Complete => render_complete_form(frame, screen, shell),
         PrMode::ConfirmAbandon => render_abandon_confirm(frame, screen, shell),
         PrMode::Comment => render_comment_prompt(frame, screen, shell),
+        PrMode::WorkItemPicker => render_work_item_picker(frame, screen, shell),
         _ => {}
     }
 }
@@ -129,6 +130,72 @@ fn render_comment_prompt(
         )),
         Rect::new(inner.x, inner.y.saturating_add(2), inner.width, 1),
     );
+}
+
+/// The work-item picker a link is made from: a filter field over what the
+/// database holds, less what the pull request already carries.
+fn render_work_item_picker(
+    frame: &mut Frame<'_>,
+    screen: &mut PullRequestsScreen,
+    shell: &mut Shell,
+) {
+    let Some(row) = screen.selected(shell) else {
+        return;
+    };
+    let title = format!(" Link a work item to !{} ", row.request.id);
+    let matches = screen.work_item_matches(shell);
+    let height = u16::try_from(matches.len().clamp(1, 12) + 5).unwrap_or(12);
+    let area = centered_rect(frame.area(), 64, height);
+    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, &title);
+    render_query_field(
+        frame,
+        shell,
+        Rect::new(inner.x, inner.y, inner.width, 1),
+        screen.link_query().text(),
+        screen.link_query().cursor(),
+        "Type an id or a title",
+        PointerTarget::NodeQuery,
+    );
+    let list = Rect::new(
+        inner.x,
+        inner.y.saturating_add(2),
+        inner.width,
+        inner.height.saturating_sub(2),
+    );
+    // A project holds far more work items than a repository holds branches,
+    // so the window follows the cursor rather than always starting at the top.
+    let capacity = usize::from(list.height).max(1);
+    let selected = screen.link_cursor();
+    let first = selected.saturating_sub(capacity - 1);
+    let rows: Vec<Line> = matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(capacity)
+        .map(|(index, (id, title))| {
+            let marker = if index == selected { "\u{203a}" } else { " " };
+            Line::from(vec![
+                Span::raw(format!("{marker} #{id}  ")),
+                Span::styled(title.clone(), Style::default().fg(theme().text)),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), list);
+    for (offset, index) in (first..matches.len()).take(capacity).enumerate() {
+        shell.hit_regions.push(region(
+            Rect::new(
+                list.x,
+                list.y
+                    .saturating_add(u16::try_from(offset).unwrap_or(u16::MAX)),
+                list.width,
+                1,
+            ),
+            PointerTarget::NodeOption { index },
+            PointerLayer::Modal,
+            None,
+            None,
+        ));
+    }
 }
 
 fn render_search(

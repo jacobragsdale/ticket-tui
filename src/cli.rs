@@ -352,6 +352,12 @@ pub enum PrsCommand {
         /// `on` or `off`
         state: String,
     },
+    /// Link a work item to it, so it closes with the merge
+    Link {
+        id: i64,
+        /// The work item to link
+        work_item: i64,
+    },
     /// Leave one comment, as a thread of its own
     Comment {
         id: i64,
@@ -1593,7 +1599,7 @@ fn describe_repo(row: &RepoRow) -> String {
     lines.join("\n")
 }
 
-/// The Pull requests tab, without the tab: two reads and five writes.
+/// The Pull requests tab, without the tab: two reads and six writes.
 fn run_prs(cli: &Cli, database: &Path, command: &PrsCommand) -> Result<()> {
     match command {
         PrsCommand::List { query, json } => {
@@ -1662,6 +1668,7 @@ fn run_prs(cli: &Cli, database: &Path, command: &PrsCommand) -> Result<()> {
                 },
             )
         }
+        PrsCommand::Link { id, work_item } => run_pr_link(cli, database, *id, *work_item),
         PrsCommand::Comment { id, text } => run_pr_comment(cli, database, *id, text.as_deref()),
     }
 }
@@ -1902,6 +1909,26 @@ fn run_pr_action(cli: &Cli, database: &Path, id: i64, action: PrAction, said: &s
     let updated = client.pull_request_action(&row.request.repo_id, id, action, me.as_deref())?;
     store_pull_request(&mut repository, updated)?;
     emit(&format!("!{id} {said}"));
+    Ok(())
+}
+
+/// One link between a work item and a pull request. Azure DevOps keeps it on
+/// the work item, so the stored pull request is updated here and the work
+/// item's own Related section follows at the next pull.
+fn run_pr_link(cli: &Cli, database: &Path, id: i64, work_item: i64) -> Result<()> {
+    let mut repository = open_database(database)?;
+    let row = find_pull_request(&repository, id)?;
+    let project_id = repository
+        .meta(db::PROJECT_ID_KEY)?
+        .context("the project id is not on file yet; run `ticket-tui sync` first")?;
+    let client = connect(cli)?;
+    client.link_pull_request(&project_id, &row.request.repo_id, id, work_item)?;
+    let mut request = row.request;
+    if !request.work_items.contains(&work_item) {
+        request.work_items.push(work_item);
+    }
+    store_pull_request(&mut repository, request)?;
+    emit(&format!("#{work_item} linked to !{id}"));
     Ok(())
 }
 
@@ -3713,6 +3740,17 @@ mod tests {
             Cli::parse_from(["ticket-tui", "prs", "abandon", "11"]).command,
             Some(Command::Prs(PrsCommand::Abandon { id: 11 }))
         ));
+
+        assert!(
+            matches!(
+                Cli::parse_from(["ticket-tui", "prs", "link", "11", "613"]).command,
+                Some(Command::Prs(PrsCommand::Link {
+                    id: 11,
+                    work_item: 613
+                }))
+            ),
+            "the pull request comes first, as it does everywhere under `prs`"
+        );
         assert!(matches!(
             Cli::parse_from(["ticket-tui", "prs", "autocomplete", "11", "on"]).command,
             Some(Command::Prs(PrsCommand::Autocomplete { id: 11, ref state })) if state == "on"

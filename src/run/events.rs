@@ -168,6 +168,19 @@ pub(super) fn handle_action(
                 app.shell.set_error(refusal);
             }
         }
+        AppAction::LinkWorkItem {
+            repo_id,
+            id,
+            work_item,
+        } => {
+            if let Err(refusal) = runtime.send(SyncRequest::LinkWorkItem {
+                repo_id,
+                id,
+                work_item,
+            }) {
+                app.shell.set_error(refusal);
+            }
+        }
         AppAction::VotePullRequest { repo_id, id, vote } => {
             if let Err(refusal) = runtime.send(SyncRequest::VotePullRequest { repo_id, id, vote }) {
                 app.pull_requests

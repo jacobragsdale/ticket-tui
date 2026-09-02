@@ -332,6 +332,10 @@ pub(super) fn poll_sync(
                 Ok((id, thread)) => app.pull_requests.apply_comment(&mut app.shell, id, thread),
                 Err(refusal) => app.shell.set_error(refusal),
             },
+            SyncEvent::WorkItemLinked(result) => match result {
+                Ok((id, work_item)) => app.pull_requests.apply_link(&mut app.shell, id, work_item),
+                Err(refusal) => app.shell.set_error(refusal),
+            },
             SyncEvent::Voted(result) => match result {
                 Ok((id, _)) => app.pull_requests.vote_accepted(id),
                 Err((id, refusal)) => {

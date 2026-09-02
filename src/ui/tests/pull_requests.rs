@@ -224,3 +224,58 @@ fn the_details_header_carries_the_chip_g_would_follow_and_the_footer_names_it() 
     assert!(!text.contains("[Go to"), "{text}");
     assert!(!text.contains("  g "), "{text}");
 }
+
+#[test]
+fn l_draws_the_work_item_picker_and_a_click_links_the_row_it_lands_on() {
+    let mut app = pull_requests_app();
+    app.shell.set_work_item_titles(vec![
+        (10_001, "Split the files".to_owned()),
+        (10_002, "Rename the menu".to_owned()),
+    ]);
+    tab_text(160, 40, &mut app);
+    app.pull_requests.cursor.focus(2);
+    render_text(160, 40, &mut app);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+    let text = render_text(160, 40, &mut app);
+    assert!(text.contains("Link a work item to !11"), "{text}");
+    assert!(text.contains("\u{203a} #10002  Rename the menu"), "{text}");
+
+    let (y, x) = text
+        .lines()
+        .enumerate()
+        .find_map(|(y, line)| {
+            line.find("#10002")
+                .map(|x| (u16::try_from(y).unwrap(), u16::try_from(x).unwrap()))
+        })
+        .expect("the row is on screen");
+    click(&mut app, x + 2, y);
+    assert_eq!(
+        app.pull_requests.mode,
+        crate::app::pull_requests::PrMode::Browse,
+        "a click on a row links it and closes the picker"
+    );
+}
+
+#[test]
+fn the_pickers_window_follows_the_cursor_down_a_list_longer_than_the_modal() {
+    let mut app = pull_requests_app();
+    app.shell.set_work_item_titles(
+        (0..40)
+            .map(|index| (20_000 + index, format!("Work item {index}")))
+            .collect(),
+    );
+    tab_text(160, 40, &mut app);
+    app.pull_requests.cursor.focus(2);
+    render_text(160, 40, &mut app);
+    app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+
+    for _ in 0..30 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let text = render_text(160, 40, &mut app);
+    assert!(
+        text.contains("\u{203a} #20030  Work item 30"),
+        "the row the cursor is on is drawn, not left below the window: {text}"
+    );
+}

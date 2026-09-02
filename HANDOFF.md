@@ -16,6 +16,11 @@ Last updated 2026-09-01. The backlog itself lives in Azure DevOps
   status segments, the pod notification, and the pty walk scripts and fixtures
   behind them. **The complete pre-teardown tree is on the `azure-infra`
   branch** (`origin/azure-infra`, at `c84ca7f`) if any of it is wanted back.
+- **A pull request can be linked to a work item from here** (#757,
+  2026-09-01): `L` on the Pull requests tab opens a work-item picker and
+  `Enter` writes the `ArtifactLink` Azure DevOps keeps the pairing under, on
+  the work item; `ticket-tui prs link <PR> <WORK_ITEM>` does the same from a
+  shell. Taking a link off is still the web UI's job.
 - **The Work items tab opens on Mine** when there is no session file yet
   (#753); a remembered session is restored over it. With a team configured it
   opens on Current sprint instead.
@@ -64,7 +69,7 @@ Last updated 2026-09-01. The backlog itself lives in Azure DevOps
   dispatches an agent: gather -> prompt -> launch, one worded verb per tab).
   #752 (tab 9 Artifacts) is superseded by the teardown.
 - The gate is `cargo fmt --check`, `cargo clippy --all-targets --all-features
-  -D warnings`, `cargo test --all-targets` (613 lib + 32 bin tests) and
+  -D warnings`, `cargo test --all-targets` (621 lib + 32 bin tests) and
   `cargo build --release`, with the test run repeated under `NO_COLOR=1`,
   `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` - the theme
   matrix, which is real because `Theme::from_env` reads the variable.

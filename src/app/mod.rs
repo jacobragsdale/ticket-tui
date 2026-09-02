@@ -111,6 +111,12 @@ pub enum AppAction {
         id: i64,
         text: String,
     },
+    /// Link one work item to one pull request.
+    LinkWorkItem {
+        repo_id: String,
+        id: i64,
+        work_item: i64,
+    },
     /// Record one vote on one pull request, as the signed-in user.
     VotePullRequest {
         repo_id: String,
