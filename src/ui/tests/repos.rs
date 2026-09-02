@@ -72,9 +72,21 @@ fn the_details_pane_carries_the_urls_the_local_copy_and_what_is_open() {
         text.contains("read just now"),
         "and when the workspace was last read: {text}"
     );
-    assert!(text.contains("Open against it"), "{text}");
-    assert!(text.contains("!11  Split the files"), "{text}");
-    assert!(text.contains("ticket-tui CI"), "{text}");
+    let open = text
+        .find("Open against it")
+        .expect("the pull requests' section");
+    let request = text
+        .find("!11  Split the files")
+        .expect("a pull request line");
+    let pipelines = text[open..]
+        .find("Pipelines")
+        .map(|at| open + at)
+        .expect("the pipelines' own section");
+    let pipeline = text.find("ticket-tui CI").expect("a pipeline line");
+    assert!(
+        open < request && request < pipelines && pipelines < pipeline,
+        "pull requests under Open against it, pipelines under their own heading: {text}"
+    );
     assert!(
         text.contains("[Fetch]") && text.contains("[Pull]"),
         "{text}"

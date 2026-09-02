@@ -306,38 +306,43 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
     }
     lines.push(Line::from(""));
     lines.push(section_line("Open against it", inner.width));
-    let jump_start = lines.len();
-    if jumps.is_empty() {
+    // Where each reference landed, for the hit regions below: the pipelines
+    // sit under their own heading, so the references are not one run of lines.
+    let mut reference_rows: Vec<(usize, usize)> = Vec::with_capacity(jumps.len());
+    let cursor = (shell.focus == Focus::Details).then_some(screen.jump_cursor);
+    let requests: Vec<(usize, &String)> = jumps
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, jump))| matches!(jump, Jump::PullRequest { .. }))
+        .map(|(index, (label, _))| (index, label))
+        .collect();
+    if requests.is_empty() {
         lines.push(Line::styled(
             "  Nothing open",
             Style::default().fg(theme().muted),
         ));
     }
-    for (index, (label, jump)) in jumps.iter().enumerate() {
-        let what = match jump {
-            Jump::PullRequest { .. } => "Pull request",
-            _ => "Pipeline",
-        };
-        // The line the pane's cursor is on, which `Enter` follows.
-        let chosen = shell.focus == Focus::Details && index == screen.jump_cursor;
-        let line = Line::from(vec![
-            Span::styled(format!("  {what}: "), Style::default().fg(theme().muted)),
-            Span::styled(
-                label.clone(),
-                Style::default()
-                    .fg(theme().link)
-                    .add_modifier(Modifier::UNDERLINED),
-            ),
-        ]);
-        lines.push(if chosen {
-            line.style(
-                Style::default()
-                    .bg(theme().selected_background)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            line
-        });
+    for (index, label) in requests {
+        reference_rows.push((index, lines.len()));
+        lines.push(reference_line(label, cursor == Some(index)));
+    }
+    lines.push(Line::from(""));
+    lines.push(section_line("Pipelines", inner.width));
+    let pipelines: Vec<(usize, &String)> = jumps
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, jump))| matches!(jump, Jump::Pipeline(_)))
+        .map(|(index, (label, _))| (index, label))
+        .collect();
+    if pipelines.is_empty() {
+        lines.push(Line::styled(
+            "  Nothing builds it",
+            Style::default().fg(theme().muted),
+        ));
+    }
+    for (index, label) in pipelines {
+        reference_rows.push((index, lines.len()));
+        lines.push(reference_line(label, cursor == Some(index)));
     }
     lines.push(Line::from(""));
     let controls: Vec<(&str, PointerTarget)> = if row.local.is_some() {
@@ -428,11 +433,11 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
             None,
         ));
     }
-    for (index, (_, jump)) in jumps.iter().enumerate() {
-        if let Some(y) = row_on_screen(inner, &rows, jump_start + index, offset) {
+    for (index, row) in reference_rows {
+        if let Some(y) = row_on_screen(inner, &rows, row, offset) {
             shell.hit_regions.push(region(
                 Rect::new(inner.x, y, inner.width, 1),
-                PointerTarget::Follow(jump.clone()),
+                PointerTarget::Follow(jumps[index].1.clone()),
                 PointerLayer::Base,
                 None,
                 None,
@@ -446,6 +451,29 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
 }
 
 /// Bytes as the API reports them, in the units a person reads.
+/// One reference in the details pane: a link, and lit when the pane's cursor
+/// is on it, which is the line `Enter` follows.
+fn reference_line(label: &str, chosen: bool) -> Line<'static> {
+    let line = Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            label.to_owned(),
+            Style::default()
+                .fg(theme().link)
+                .add_modifier(Modifier::UNDERLINED),
+        ),
+    ]);
+    if chosen {
+        line.style(
+            Style::default()
+                .bg(theme().selected_background)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        line
+    }
+}
+
 pub(crate) fn size_label(bytes: i64) -> String {
     let bytes = bytes.max(0);
     match bytes {

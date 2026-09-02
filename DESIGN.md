@@ -1241,9 +1241,9 @@ this machine — `main ✓` clean, `feat/x *` dirty, `main ↑2 ↓1` ahead and 
 
 The details pane carries the name and project, the default branch and size, the
 local copy — its path, its status, and when the workspace was last read — and
-what is open against the repository: its active
-pull requests and the pipelines that build it — each pipeline with the glyph
-and number of the run it last had — each a jump: `Tab` moves the
+what is open against the repository — its active
+pull requests — and, under their own heading, the pipelines that build it, each
+with the glyph and number of the run it last had. Each is a jump: `Tab` moves the
 focus to the pane, `j`/`k` walk the references, `Enter` follows the one they are
 on, and a click does both at once. `[` comes back, here as everywhere. `[Clone]`, or
 `[Fetch]` and `[Pull]` where there is a clone, run what they say on a click.

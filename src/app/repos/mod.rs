@@ -52,8 +52,8 @@ pub struct ReposScreen {
     pub sort: (RepoColumn, bool),
     pub cursor: ListCursor,
     pub details: ScrollState,
-    /// Which line of the details pane's "Open against it" section `Enter`
-    /// follows, while the focus is on the pane.
+    /// Which line of the details pane's references — "Open against it", then
+    /// "Pipelines" — `Enter` follows, while the focus is on the pane.
     pub jump_cursor: usize,
     /// When the workspace was last read.
     scanned_at: Option<std::time::Instant>,
