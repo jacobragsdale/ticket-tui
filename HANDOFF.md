@@ -17,7 +17,16 @@ Last updated 2026-09-01. The backlog itself lives in Azure DevOps
   behind them. **The complete pre-teardown tree is on the `azure-infra`
   branch** (`origin/azure-infra`, at `c84ca7f`) if any of it is wanted back.
 - **The Work items tab opens on Mine** when there is no session file yet
-  (#753); a remembered session is restored over it.
+  (#753); a remembered session is restored over it. With a team configured it
+  opens on Current sprint instead.
+- **One team of a department board** (2026-09-01): `team` in `config.toml`
+  (or `--team` / `TICKET_TUI_TEAM`) narrows every pull to the team's area
+  paths as Azure DevOps's own team settings list them, restricts the assignee
+  picker to the team, and makes `@current` the team's sprint. The id query is
+  paged at 20,000, so a project of any size lists. The parents a team's rows
+  hang off are pulled in from outside the scope and kept while something in
+  it still hangs off them. `ticket-tui teams` prints the names. See
+  "`team`: one team's slice of a department board" in DESIGN.md.
 - **The ergonomics round is done** (Epic #735, 2026-09-01; Issues #736-#741,
   see "Ergonomics and environment board, 2026-09-01" below): `g` follows the
   link on every tab, `[`/`]` retrace every visit, `+` captures a thought into

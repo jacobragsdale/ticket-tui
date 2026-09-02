@@ -10,6 +10,7 @@
 //! project = "ISTO"           # where the work items live
 //! code_project = "Fiquants"  # repos, pull requests and pipelines; left out = project
 //! query = "[System.AreaPath] UNDER 'ISTO\\Team'"   # optional WIQL scope on every pull
+//! # team = "Payments"          # the team whose areas, members and sprint this is
 //! workspace = "~/Development"                      # where clones live
 //!
 //! [theme]
@@ -87,6 +88,11 @@ pub struct DevOps {
     /// One extra WIQL condition ANDed into every pull.
     #[serde(default)]
     pub query: Option<String>,
+    /// The team whose slice of the project this is: its area paths narrow
+    /// every pull, its members fill the assignee picker, and its sprint is
+    /// what `@current` means.
+    #[serde(default)]
+    pub team: Option<String>,
     /// Where the Repos tab looks for clones and makes new ones. A leading
     /// `~/` is the home directory.
     #[serde(default)]
@@ -250,6 +256,7 @@ pub fn parse(source: &str) -> Result<Config> {
         ("devops.project", config.devops.project.as_deref()),
         ("devops.code_project", config.devops.code_project.as_deref()),
         ("devops.query", config.devops.query.as_deref()),
+        ("devops.team", config.devops.team.as_deref()),
         ("notify.command", config.notify.command.as_deref()),
     ] {
         if value.is_some_and(|value| value.trim().is_empty()) {

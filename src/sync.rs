@@ -387,6 +387,9 @@ pub struct Snapshot {
     /// The project's pull requests: every active one, and a window of those
     /// recently closed.
     pub pull_requests: Vec<PullRequest>,
+    /// The sprint the configured team is in, as the pull read it. `None`
+    /// without a team, and then `@current` is read off the iteration dates.
+    pub team_iteration: Option<String>,
 }
 
 impl Snapshot {
@@ -407,6 +410,7 @@ impl Snapshot {
             pipelines: Vec::new(),
             runs: Vec::new(),
             pull_requests: Vec::new(),
+            team_iteration: None,
         }
     }
 
@@ -457,6 +461,12 @@ impl Snapshot {
     #[must_use]
     pub fn with_pull_requests(mut self, pull_requests: Vec<PullRequest>) -> Self {
         self.pull_requests = pull_requests;
+        self
+    }
+
+    #[must_use]
+    pub fn with_team_iteration(mut self, team_iteration: Option<String>) -> Self {
+        self.team_iteration = team_iteration;
         self
     }
 
@@ -523,6 +533,21 @@ pub trait WorkItemSource {
     /// Every work item id the project still has, which is what tells a pull
     /// which stored rows have been deleted.
     fn list_ids(&self) -> Result<Vec<i64>>;
+    /// The WIQL condition this source's pulls are narrowed by, once whatever
+    /// it derives from — a team's area paths — has been read. `None` for a
+    /// source that only knows what it was configured with.
+    fn scope_condition(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+    /// The named work items whatever the scope says, for the parents a pull's
+    /// rows hang off. A source that cannot answers with nothing.
+    fn fetch_by_ids(&self, _ids: &[i64]) -> Result<SyncBatch> {
+        Ok(SyncBatch::default())
+    }
+    /// The sprint the configured team is in, and `None` without a team.
+    fn team_current_iteration(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
     /// Display name of the signed-in user, used to mark their own work items.
     fn display_name(&self) -> Result<Option<String>>;
     /// The project's Git repositories, and the project's own GUID. One cheap
@@ -677,6 +702,18 @@ pub trait WorkItemSource {
 impl WorkItemSource for AzureClient {
     fn pull(&self) -> Result<SyncBatch> {
         self.fetch_all_work_items()
+    }
+
+    fn scope_condition(&self) -> Result<Option<String>> {
+        AzureClient::scope_condition(self)
+    }
+
+    fn fetch_by_ids(&self, ids: &[i64]) -> Result<SyncBatch> {
+        self.fetch_work_items(ids)
+    }
+
+    fn team_current_iteration(&self) -> Result<Option<String>> {
+        self.fetch_team_current_iteration()
     }
 
     fn repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
@@ -1460,7 +1497,7 @@ impl Worker {
             // the project: the condition may have widened, and only a full pull
             // brings in what it now admits, or narrowed, and only a full pull
             // drops what it now excludes.
-            Some(watermark) if !self.force_full && !self.rescoped()? => {
+            Some(watermark) if !self.force_full && !self.rescoped(events)? => {
                 self.pull_changed(watermark, events)?
             }
             _ => self.pull_everything(events)?,
@@ -1468,7 +1505,7 @@ impl Worker {
         // Which project these rows came from, recorded after the pull that
         // brought them rather than before it: a pull that failed says nothing
         // about what the database holds.
-        self.record_scope()?;
+        self.record_scope(events)?;
         Ok(outcome)
     }
 
@@ -1482,11 +1519,24 @@ impl Worker {
     /// Whether the configured scope differs from the one the stored rows were
     /// pulled under. A connector that does not know its own scope — every fake
     /// — never rescopes anything.
-    fn rescoped(&mut self) -> Result<bool> {
-        let Some(scope) = self.connector.scope() else {
+    fn rescoped(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
+        let Some(scope) = self.scope(events)? else {
             return Ok(false);
         };
         Ok(self.stored_condition()? != scope.condition)
+    }
+
+    /// The slice the connector names, narrowed further by whatever the source
+    /// derives once connected — a team's area paths — so the condition
+    /// recorded and compared is the one the pull actually ran with.
+    fn scope(&mut self, events: &Sender<SyncEvent>) -> Result<Option<SyncScope>> {
+        let Some(mut scope) = self.connector.scope() else {
+            return Ok(None);
+        };
+        if let Some(condition) = self.source(events)?.scope_condition()? {
+            scope.condition = Some(condition);
+        }
+        Ok(Some(scope))
     }
 
     /// The WIQL condition the stored rows were pulled under. It is written as
@@ -1502,8 +1552,8 @@ impl Worker {
     /// Records the project and condition this pull ran under, and only when one
     /// of them moved: an idle project's pull still leaves the file untouched,
     /// which is what keeps every other reader from reloading for nothing.
-    fn record_scope(&mut self) -> Result<()> {
-        let Some(scope) = self.connector.scope() else {
+    fn record_scope(&mut self, events: &Sender<SyncEvent>) -> Result<()> {
+        let Some(scope) = self.scope(events)? else {
             return Ok(());
         };
         let condition = scope.condition.clone().unwrap_or_default();
@@ -1522,14 +1572,17 @@ impl Worker {
 
     /// Replaces every stored work item with a fresh copy of the project.
     fn pull_everything(&mut self, events: &Sender<SyncEvent>) -> Result<SyncOutcome> {
-        let batch = self.source(events)?.pull()?;
+        let mut batch = self.source(events)?.pull()?;
+        // Read before the parents join the batch: an Epic edited outside the
+        // scope says nothing about what changed inside it.
+        let watermark = watermark_of(&batch.tickets);
+        self.with_ancestors(&mut batch, HashSet::new(), events)?;
         let graph = TicketGraph {
             relations: batch.relations,
             artifacts: batch.artifacts,
             ..TicketGraph::default()
         };
         let types = self.uncached_types(&batch.tickets)?;
-        let watermark = watermark_of(&batch.tickets);
         let repository = self.repository()?;
         let count = repository.replace_all(&batch.tickets, &graph)?;
         if let Some(watermark) = watermark {
@@ -1539,6 +1592,7 @@ impl Worker {
         self.sync_repos(events)?;
         self.sync_pipelines(events)?;
         self.sync_pull_requests(events)?;
+        self.sync_team_sprint(events)?;
         Ok(SyncOutcome::Pulled {
             snapshot: Box::new(self.reload()?),
             mode: SyncMode::Full,
@@ -1555,12 +1609,13 @@ impl Worker {
         watermark: Timestamp,
         events: &Sender<SyncEvent>,
     ) -> Result<SyncOutcome> {
-        let batch = self.source(events)?.pull_changed_since(watermark)?;
+        let mut batch = self.source(events)?.pull_changed_since(watermark)?;
         let live_ids = self.source(events)?.list_ids()?;
-        let types = self.uncached_types(&batch.tickets)?;
         // Only ever forward: the query is inclusive and rounded down to the
         // second, so a boundary work item can come back reading a shade older
-        // than the watermark that asked for it.
+        // than the watermark that asked for it. Read before the parents join
+        // the batch, since an Epic edited outside the scope says nothing
+        // about what changed inside it.
         let next = watermark_of(&batch.tickets).filter(|next| *next > watermark);
 
         // A work item that moved is a work item somebody is about to look at,
@@ -1568,6 +1623,9 @@ impl Worker {
         // transaction. A full pull does not do this: two more requests per
         // work item is a price only a handful of changes can pay.
         let details = self.details_for(&batch.tickets, events)?;
+        let held = self.repository()?.stored_ids()?;
+        self.with_ancestors(&mut batch, held, events)?;
+        let types = self.uncached_types(&batch.tickets)?;
 
         let repository = self.repository()?;
         if !batch.tickets.is_empty() {
@@ -1584,7 +1642,13 @@ impl Worker {
         let repos_changed = self.sync_repos(events)?;
         let pipelines_changed = self.sync_pipelines(events)?;
         let pull_requests_changed = self.sync_pull_requests(events)?;
-        if count == 0 && !repos_changed && !pipelines_changed && !pull_requests_changed {
+        let sprint_changed = self.sync_team_sprint(events)?;
+        if count == 0
+            && !repos_changed
+            && !pipelines_changed
+            && !pull_requests_changed
+            && !sprint_changed
+        {
             return Ok(SyncOutcome::Unchanged);
         }
         Ok(SyncOutcome::Pulled {
@@ -1592,6 +1656,55 @@ impl Worker {
             mode: SyncMode::Incremental,
             count,
         })
+    }
+
+    /// Brings down the parents a batch's rows hang off that neither the batch
+    /// nor `held` — what the database already has — holds, and their parents
+    /// in turn, so a family tree reaches its Epic even when the scope stops at
+    /// one team's area. Each round is one batched read of a handful of
+    /// Features and Epics, and a parent the source cannot answer with is
+    /// asked for once.
+    fn with_ancestors(
+        &mut self,
+        batch: &mut SyncBatch,
+        mut held: HashSet<i64>,
+        events: &Sender<SyncEvent>,
+    ) -> Result<()> {
+        held.extend(batch.tickets.iter().map(|ticket| ticket.key.id));
+        let mut fresh = batch.relations.clone();
+        loop {
+            let missing: Vec<i64> = fresh
+                .iter()
+                .filter(|relation| relation.kind == RelationKind::Parent)
+                .map(|relation| relation.to.id)
+                .filter(|id| held.insert(*id))
+                .collect();
+            if missing.is_empty() {
+                return Ok(());
+            }
+            let parents = self.source(events)?.fetch_by_ids(&missing)?;
+            fresh.clone_from(&parents.relations);
+            batch.tickets.extend(parents.tickets);
+            batch.relations.extend(parents.relations);
+            batch.artifacts.extend(parents.artifacts);
+        }
+    }
+
+    /// Reads which sprint the configured team is in and stores it when it
+    /// moved, so `@current` follows the team's calendar rather than the
+    /// project's. Answers whether anything was written. A read that fails
+    /// leaves the stored sprint alone: it is not what the pull is for.
+    fn sync_team_sprint(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
+        let sprint = match self.source(events)?.team_current_iteration() {
+            Ok(found) => found.unwrap_or_default(),
+            Err(error) => return Ok(Self::warn(events, "Team sprint", &error)),
+        };
+        let repository = self.repository()?;
+        if repository.meta(db::TEAM_ITERATION_KEY)?.unwrap_or_default() == sprint {
+            return Ok(false);
+        }
+        repository.set_meta(db::TEAM_ITERATION_KEY, &sprint)?;
+        Ok(true)
     }
 
     /// Reports a read on the side of a pull that failed, and answers that
@@ -1777,11 +1890,15 @@ impl Worker {
         let pipelines = repository.load_pipelines()?;
         let runs = repository.load_runs()?;
         let pull_requests = repository.load_pull_requests()?;
+        let team_iteration = repository
+            .meta(db::TEAM_ITERATION_KEY)?
+            .filter(|path| !path.is_empty());
         Ok(Snapshot::with_graph(tickets, graph)
             .with_states(states)
             .with_repos(repos)
             .with_pipelines(pipelines, runs)
-            .with_pull_requests(pull_requests))
+            .with_pull_requests(pull_requests)
+            .with_team_iteration(team_iteration))
     }
 
     /// The work item types in a batch whose states nobody has read yet, in the
@@ -2096,6 +2213,15 @@ mod tests {
         /// stands in for a source that does not know, which is what leaves
         /// every other test's database free of sync scope rows.
         scope: Option<SyncScope>,
+        /// The condition this source derives once connected — a team's areas
+        /// — or `None` for one that only knows what it was configured with.
+        scope_condition: Option<String>,
+        /// The sprint this source's team is in, or `None` without a team.
+        team_iteration: Option<String>,
+        /// The work items this source answers a read by id with, whatever the
+        /// scope says, and every id list it was asked for, in order.
+        parents: Arc<Mutex<Vec<StoredWorkItem>>>,
+        fetched_by_ids: Arc<Mutex<Vec<Vec<i64>>>>,
         /// Every run this source was asked to start, cancel or retry.
         started: Arc<Mutex<Vec<String>>>,
         /// The active pull requests it lists, and every one whose extras were
@@ -2200,6 +2326,32 @@ mod tests {
             }
         }
 
+        /// The work items this source answers a read by id with, whatever the
+        /// scope says: the parents a pull brings in from outside it.
+        fn with_parents(self, parents: Vec<StoredWorkItem>) -> Self {
+            Self {
+                parents: Arc::new(Mutex::new(parents)),
+                ..self
+            }
+        }
+
+        /// The condition this source derives once connected, as a team's
+        /// areas are.
+        fn deriving(self, condition: &str) -> Self {
+            Self {
+                scope_condition: Some(condition.to_owned()),
+                ..self
+            }
+        }
+
+        /// The sprint this source's team is in.
+        fn in_sprint(self, path: &str) -> Self {
+            Self {
+                team_iteration: Some(path.to_owned()),
+                ..self
+            }
+        }
+
         /// Which project this source pulls, and how much of it.
         fn scoped(self, condition: Option<&str>) -> Self {
             Self {
@@ -2249,6 +2401,30 @@ mod tests {
         fn pull_changed_since(&self, watermark: Timestamp) -> Result<SyncBatch> {
             self.watermarks.lock().unwrap().push(watermark);
             self.take_next_batch()
+        }
+
+        fn scope_condition(&self) -> Result<Option<String>> {
+            Ok(self.scope_condition.clone())
+        }
+
+        fn fetch_by_ids(&self, ids: &[i64]) -> Result<SyncBatch> {
+            self.fetched_by_ids.lock().unwrap().push(ids.to_vec());
+            let parents = self.parents.lock().unwrap();
+            let mut batch = SyncBatch::default();
+            for id in ids {
+                if let Some((ticket, relations, artifacts)) =
+                    parents.iter().find(|(ticket, ..)| ticket.key.id == *id)
+                {
+                    batch.tickets.push(ticket.clone());
+                    batch.relations.extend(relations.iter().cloned());
+                    batch.artifacts.extend(artifacts.iter().cloned());
+                }
+            }
+            Ok(batch)
+        }
+
+        fn team_current_iteration(&self) -> Result<Option<String>> {
+            Ok(self.team_iteration.clone())
         }
 
         fn list_ids(&self) -> Result<Vec<i64>> {
@@ -3886,6 +4062,109 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn the_parents_a_scope_leaves_out_come_down_with_it_and_stay_while_something_hangs_off_them() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let scoped = SyncBatch {
+            tickets: vec![ticket(5, "Wire the ledger")],
+            relations: vec![parent_link(5, 9)],
+            ..SyncBatch::default()
+        };
+        let source = FakeSource::with(vec![
+            Ok(scoped),
+            Ok(SyncBatch::default()),
+            Ok(SyncBatch::default()),
+        ])
+        .with_parents(vec![
+            (
+                ticket(9, "The ledger"),
+                vec![parent_link(9, 12)],
+                Vec::new(),
+            ),
+            (ticket(12, "Finance"), Vec::new(), Vec::new()),
+        ]);
+        let fetched = source.fetched_by_ids.clone();
+        let live = source.live_ids.clone();
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+        let stored_ids = |path: &PathBuf| {
+            let stored = SqliteTicketRepository::open_existing(path).unwrap();
+            let mut ids: Vec<i64> = stored.stored_ids().unwrap().into_iter().collect();
+            ids.sort_unstable();
+            ids
+        };
+
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        assert!(matches!(
+            pulled(&handle),
+            SyncOutcome::Pulled { count: 3, .. }
+        ));
+        assert_eq!(
+            *fetched.lock().unwrap(),
+            vec![vec![9], vec![12]],
+            "each round asks for the parents the one before named"
+        );
+        assert_eq!(stored_ids(&path), vec![5, 9, 12]);
+
+        // A pull whose id list is the scope's own leaves the parents alone.
+        *live.lock().unwrap() = Some(vec![5]);
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        assert!(matches!(pulled(&handle), SyncOutcome::Unchanged));
+        assert_eq!(stored_ids(&path), vec![5, 9, 12]);
+
+        // Once nothing in the scope hangs off them, they go with it.
+        *live.lock().unwrap() = Some(Vec::new());
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        assert!(matches!(
+            pulled(&handle),
+            SyncOutcome::Pulled { count: 3, .. }
+        ));
+        assert!(stored_ids(&path).is_empty());
+    }
+
+    #[test]
+    fn a_team_narrows_the_recorded_scope_and_names_the_sprint_current_means() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let derived =
+            "[System.AreaPath] UNDER 'atlas\\Payments' AND ([System.ChangedDate] > @today-180)";
+        let source = FakeSource::with(vec![
+            Ok(SyncBatch {
+                tickets: vec![ticket(1, "One")],
+                ..SyncBatch::default()
+            }),
+            Ok(SyncBatch::default()),
+        ])
+        .scoped(Some("[System.ChangedDate] > @today-180"))
+        .deriving(derived)
+        .in_sprint("atlas\\Sprint 2");
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        let SyncOutcome::Pulled { snapshot, .. } = pulled(&handle) else {
+            panic!("expected a pull");
+        };
+        assert_eq!(
+            snapshot.team_iteration.as_deref(),
+            Some("atlas\\Sprint 2"),
+            "the snapshot carries the team's sprint to the screen"
+        );
+        assert_eq!(
+            stored_meta(&path, db::SYNC_SCOPE_KEY).as_deref(),
+            Some(derived),
+            "the condition recorded is the one the pull ran with, team and all"
+        );
+        assert_eq!(
+            stored_meta(&path, db::TEAM_ITERATION_KEY).as_deref(),
+            Some("atlas\\Sprint 2")
+        );
+
+        // The same team and the same sprint: nothing moved, and the pull is
+        // the incremental one the recorded condition allows.
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        assert!(matches!(pulled(&handle), SyncOutcome::Unchanged));
     }
 
     #[test]

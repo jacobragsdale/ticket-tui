@@ -163,10 +163,7 @@ pub(super) fn render_status_bar(frame: &mut Frame<'_>, shell: &Shell, area: Rect
                 .saturating_add(u16::try_from(project.chars().count()).unwrap_or(u16::MAX))
                 .saturating_add(32)
     {
-        right.insert(
-            0,
-            Span::styled(project.to_owned(), Style::default().fg(theme().muted)),
-        );
+        right.insert(0, Span::styled(project, Style::default().fg(theme().muted)));
         right.insert(1, Span::raw("  "));
     }
     let right_width = width(&right).min(area.width);

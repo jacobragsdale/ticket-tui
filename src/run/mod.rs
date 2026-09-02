@@ -96,6 +96,7 @@ pub(super) fn run() -> Result<()> {
         cli.project.clone(),
         cli.code_project.clone(),
         cli.query.clone(),
+        cli.team.clone(),
     ) {
         Ok(config) => (Some(config), None),
         Err(error) => (None, Some(format!("{error:#}"))),
@@ -141,6 +142,11 @@ pub(super) fn run() -> Result<()> {
             .meta(db::CLASSIFICATION_FETCHED_KEY)?
             .and_then(|raw| Timestamp::parse(&raw).ok()),
     );
+    app.work_items.set_team_iteration(
+        repository
+            .meta(db::TEAM_ITERATION_KEY)?
+            .filter(|path| !path.is_empty()),
+    );
     app.shell.set_me(resolve_me(
         repository.meta(db::ME_DISPLAY_NAME_KEY)?,
         std::env::var("TICKET_TUI_ME").ok(),
@@ -151,8 +157,9 @@ pub(super) fn run() -> Result<()> {
     app.shell.set_offline_reason(offline_reason.clone());
     let session_path = session::path_for(repository.path());
     // A run with no session yet opens on Mine — after `me` is known, so
-    // `@me` matches; one that remembers a query, an empty one included,
-    // reopens on that instead.
+    // `@me` matches — or, with a team, on its sprint; one that remembers a
+    // query, an empty one included, reopens on that instead.
+    let has_team = config.as_ref().is_some_and(|config| config.team.is_some());
     if session_path.exists() {
         match session::load(&session_path) {
             Ok(loaded) => app.restore_session(loaded),
@@ -161,7 +168,8 @@ pub(super) fn run() -> Result<()> {
                 .set_error(format!("Could not load session: {error:#}")),
         }
     } else {
-        app.work_items.open_on(&mut app.shell, "Mine");
+        let view = if has_team { "Current sprint" } else { "Mine" };
+        app.work_items.open_on(&mut app.shell, view);
     }
     // After the session, so a threshold asked for on this run beats the one
     // the last run left behind.
@@ -178,6 +186,7 @@ pub(super) fn run() -> Result<()> {
         .set_sync_target(config.as_ref().map(|config| SyncTarget {
             organization: config.organization.clone(),
             project: config.project.clone(),
+            team: config.team.clone(),
             refresh_seconds: refresh,
         }));
     let mut runtime = SyncRuntime {
@@ -308,6 +317,9 @@ fn sync_source(config: &AzureConfig, refresh: u64) -> String {
     }
     if let Some(scope) = &config.scope {
         source.push_str(&format!(" · scope ({scope})"));
+    }
+    if let Some(team) = &config.team {
+        source.push_str(&format!(" · team {team}"));
     }
     source
 }

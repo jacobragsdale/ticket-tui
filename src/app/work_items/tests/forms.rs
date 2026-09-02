@@ -217,6 +217,7 @@ fn submitting_a_form_sends_the_fields_it_holds_and_the_parent_as_a_link() {
         project: "atlas".into(),
         code_project: "atlas".into(),
         scope: None,
+        team: None,
     };
     let document = crate::azure::create_document(&patch, parent, &config);
     assert_eq!(&document[..patch.len()], &patch[..], "the fields lead");

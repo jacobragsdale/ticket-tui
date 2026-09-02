@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::slice;
@@ -46,6 +46,11 @@ pub const PROJECT_KEY: &str = "project";
 /// scope no longer matches this runs in full, because widening it has to bring
 /// work items in and narrowing it has to drop the ones now outside.
 pub const SYNC_SCOPE_KEY: &str = "sync_scope";
+
+/// `sync_meta` key holding the iteration path the configured team is in, as
+/// its own settings said on the last pull, and empty without a team or between
+/// sprints. This is what `iteration:@current` means while a team is set.
+pub const TEAM_ITERATION_KEY: &str = "team_current_iteration";
 
 /// `sync_meta` key holding the project's GUID, which the pull request policy
 /// and artifact-link endpoints ask for by id rather than by name.
@@ -1115,10 +1120,13 @@ impl SqliteTicketRepository {
     /// links, comments, and history hanging off it. `live_ids` is the complete
     /// id list the project's own query answered with, so a work item moved to
     /// the recycle bin — which vanishes from WIQL rather than being marked —
-    /// is caught here. Nothing at all is written when nothing is missing, so an
-    /// idle pull leaves the file's signature where it was.
+    /// is caught here. Whatever is above one of them stays too: the parents a
+    /// pull brought in from outside its scope are kept for as long as
+    /// something inside it still hangs off them. Nothing at all is written
+    /// when nothing is missing, so an idle pull leaves the file's signature
+    /// where it was.
     pub fn delete_missing(&mut self, live_ids: &[i64]) -> Result<usize> {
-        let live: HashSet<i64> = live_ids.iter().copied().collect();
+        let live = self.with_ancestors(live_ids.iter().copied().collect())?;
         let mut statement = self
             .connection
             .prepare("SELECT organization, work_item_id FROM work_items")?;
@@ -1144,6 +1152,53 @@ impl SqliteTicketRepository {
             .commit()
             .context("failed to remove the work items the project no longer has")?;
         Ok(missing.len())
+    }
+
+    /// `live` and every work item above one of them, read up the stored
+    /// hierarchy links in whichever direction they were recorded.
+    fn with_ancestors(&self, mut live: HashSet<i64>) -> Result<HashSet<i64>> {
+        let mut statement = self.connection.prepare(
+            "SELECT from_id, to_id, kind FROM work_item_relations WHERE kind IN ('parent', 'child')",
+        )?;
+        let mut parents_of: HashMap<i64, Vec<i64>> = HashMap::new();
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (from, to, kind) = row?;
+            let (child, parent) = if kind == "parent" {
+                (from, to)
+            } else {
+                (to, from)
+            };
+            parents_of.entry(child).or_default().push(parent);
+        }
+        let mut queue: Vec<i64> = live.iter().copied().collect();
+        while let Some(id) = queue.pop() {
+            for parent in parents_of.get(&id).into_iter().flatten() {
+                if live.insert(*parent) {
+                    queue.push(*parent);
+                }
+            }
+        }
+        Ok(live)
+    }
+
+    /// Every work item id the database holds, for a pull to tell which
+    /// parents it already has.
+    pub fn stored_ids(&self) -> Result<HashSet<i64>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT work_item_id FROM work_items")?;
+        let ids = statement
+            .query_map([], |row| row.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<HashSet<i64>>>()
+            .context("failed to list the cached work item ids")?;
+        Ok(ids)
     }
 
     /// Removes one work item and everything hanging off it, for a work item the

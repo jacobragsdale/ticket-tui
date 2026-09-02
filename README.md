@@ -101,13 +101,18 @@ whole of it.
 left out, they live in the same project, which is what one project in one place
 has always meant. `query` is one WIQL condition ANDed into every pull, and
 `workspace` is where the Repos tab looks for clones, with a leading `~/` read
-as the home directory:
+as the home directory. `team` is one team of a project that is a whole
+department's board: its area paths narrow every pull, its members are what
+the assignee picker offers, its sprint is what `@current` means, and a fresh
+session opens on Current sprint. `ticket-tui teams` prints the names to
+choose from:
 
 ```toml
 [devops]
 org = "myorg"
 project = "ISTO"
 code_project = "Fiquants"
+team = "Payments"
 ```
 
 `[notify]` is one command, run through `sh -c` when something worth

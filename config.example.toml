@@ -12,6 +12,9 @@ org = "myorg"                 # slug or https://dev.azure.com/myorg
 project = "ISTO"              # where the work items live
 code_project = "Fiquants"     # where the repos, pull requests and pipelines live; left out = project
 # query = "[System.AreaPath] UNDER 'ISTO\\Team'"   # optional WIQL scope on every pull
+# team = "Payments"           # one team of a department board: its areas narrow every
+#                             # pull, its members fill the assignee picker, its sprint
+#                             # is @current; `ticket-tui teams` prints the names
 # workspace = "~/Development" # where clones live; a leading ~ is the home directory
 
 # The colour theme. `preset` is terminal, terminal-light, mono or custom;

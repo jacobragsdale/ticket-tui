@@ -187,6 +187,7 @@ org = "myorg"                 # slug or https://dev.azure.com/myorg
 project = "ISTO"              # where the work items live
 code_project = "Fiquants"     # repos, pull requests and pipelines; left out = project
 # query = "[System.AreaPath] UNDER 'ISTO\\Team'"   # optional WIQL scope on every pull
+# team = "Payments"           # the team whose areas, members and sprint this is
 # workspace = "~/Development" # where clones live; a leading ~ is the home directory
 
 [notify]                      # a desktop notification when a watched thing moves
@@ -355,7 +356,33 @@ scope now admits and drop what a narrowed one now excludes.
 
 The `i` overlay's sync line names all of it: the organization and project, the
 refresh interval or `on request` when the timer is off, the scope when one is
-configured, and how the last pull went.
+configured, the team when one is, and how the last pull went.
+
+### `team`: one team's slice of a department board
+
+A project that is one board for a whole department is narrowed to one team
+with `team` in `config.toml`, `--team`, or `TICKET_TUI_TEAM`; `ticket-tui
+teams` prints the names to choose from, spelled as the project spells them.
+The team is Azure DevOps's own. Its area paths, read once a run from
+`{project}/{team}/_apis/work/teamsettings/teamfieldvalues`, become the pull's
+condition — `UNDER` for a path held with its children, `=` for one held alone,
+ORed in parentheses — ANDed with any `query` written beside it, so the stored
+scope, the full pull a changed team forces, and everything above hold as
+written. Its members are what the assignee picker offers instead of every team
+in the project. Its current sprint, read with every pull from
+`teamsettings/iterations?$timeframe=current` and stored in `sync_meta` as
+`team_current_iteration`, is what `iteration:@current` means and what a quick
+capture files into; the calendar heuristic under [Sprint summary](#sprint-summary)
+answers only without a team. A run with no session yet opens on **Current
+sprint** rather than Mine, and the status bar names the team beside the project.
+
+The parents a team's rows hang off usually live outside its areas. After every
+pull, the parents the batch names that neither it nor the database holds are
+read by id, and their parents in turn, until nothing is missing, so the family
+tree reaches its Epic. They stay for as long as something in the scope hangs
+off them: the deletion pass keeps every ancestor of a live work item. An
+Epic's child progress counts only the children the database holds, which is
+the team's own.
 
 ## Sync
 
@@ -390,8 +417,15 @@ than an edit made in the same second being missed.
 Every pull also runs the plain id query:
 
 ```sql
-SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project ORDER BY [System.Id]
+SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project
+AND [System.Id] > 0 ORDER BY [System.Id]
 ```
+
+Azure DevOps refuses a WIQL result larger than 20,000 rows rather than
+truncating it, so every id query is read in pages of that size with `$top`,
+each page's query starting after the last id of the page before, until one
+comes back short. A project of any size lists; a large one just takes more
+round trips.
 
 Deleting a work item is not an edit — it stops being listed — so this is what
 catches one moved to the recycle bin, and the rows it no longer names are
@@ -404,7 +438,7 @@ an edit has moved outside the scope:
 ```sql
 SELECT [System.Id] FROM WorkItems
 WHERE [System.TeamProject] = @project AND ([System.WorkItemType] <> 'Test Case')
-ORDER BY [System.Id]
+AND [System.Id] > 0 ORDER BY [System.Id]
 ```
 
 Whatever the changed-since query names is read in batches of 200 from
@@ -1886,6 +1920,7 @@ ticket-tui approvals list [--json]
 ticket-tui approvals approve <id> [--comment TEXT]
 ticket-tui approvals reject <id> [--comment TEXT]
 ticket-tui status [--json]
+ticket-tui teams
 ```
 
 `sync` pulls and exits, printing what moved — `Synced 3 changes from

@@ -1,7 +1,7 @@
 //! Azure DevOps work-item sync: authenticate with the Azure CLI, pull the
 //! project's work items over REST, and map them onto the local ticket model.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
@@ -77,6 +77,10 @@ const PROFILE_URL: &str =
 /// Every work item in the project, which both pulls narrow in their own way.
 const PROJECT_IDS_WIQL: &str =
     "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project";
+/// The most ids one WIQL answer may carry. Azure DevOps refuses a query whose
+/// result would be larger rather than truncating it, so the id list is read a
+/// page at a time, each page starting after the last id of the one before.
+const WIQL_PAGE: usize = 20_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AzureConfig {
@@ -94,19 +98,25 @@ pub struct AzureConfig {
     /// large to hold whole — `[System.ChangedDate] > @today-180`, say. `None`
     /// pulls the project entire.
     pub scope: Option<String>,
+    /// The team whose slice of the project this is: its area paths narrow
+    /// every pull, its members fill the assignee picker, and its current
+    /// sprint is what `@current` means. `None` is the whole project.
+    pub team: Option<String>,
 }
 
 impl AzureConfig {
     /// Resolve organization, both projects, and sync scope from explicit
     /// values, then the `TICKET_TUI_ORG` / `TICKET_TUI_PROJECT` /
-    /// `TICKET_TUI_CODE_PROJECT` / `TICKET_TUI_QUERY` environment, then the
-    /// `az devops configure` defaults file. A code project nobody named is the
-    /// project itself, which is what one project in one place has always meant.
+    /// `TICKET_TUI_CODE_PROJECT` / `TICKET_TUI_QUERY` / `TICKET_TUI_TEAM`
+    /// environment, then the `az devops configure` defaults file. A code
+    /// project nobody named is the project itself, which is what one project
+    /// in one place has always meant.
     pub fn resolve(
         organization: Option<String>,
         project: Option<String>,
         code_project: Option<String>,
         scope: Option<String>,
+        team: Option<String>,
     ) -> Result<Self> {
         let defaults = az_devops_defaults();
         let organization = organization
@@ -129,7 +139,8 @@ impl AzureConfig {
             organization: organization_slug(&organization),
             project,
             code_project,
-            scope: sync_scope(scope.or_else(|| std::env::var("TICKET_TUI_QUERY").ok())),
+            scope: non_blank(scope.or_else(|| std::env::var("TICKET_TUI_QUERY").ok())),
+            team: non_blank(team.or_else(|| std::env::var("TICKET_TUI_TEAM").ok())),
         })
     }
 
@@ -154,11 +165,11 @@ fn settled_code_project(named: Option<String>, project: &str) -> String {
         .unwrap_or_else(|| project.to_owned())
 }
 
-/// A sync scope is whatever the user wrote, trimmed; a blank one is no scope at
-/// all. The condition itself is never inspected here: WIQL is Azure DevOps's
-/// dialect to parse, and a mistake in it comes back as a failed sync rather
-/// than as a local guess about what is legal.
-fn sync_scope(raw: Option<String>) -> Option<String> {
+/// A sync scope or a team is whatever the user wrote, trimmed; a blank one is
+/// none at all. A scope's condition is never inspected here: WIQL is Azure
+/// DevOps's dialect to parse, and a mistake in it comes back as a failed sync
+/// rather than as a local guess about what is legal.
+fn non_blank(raw: Option<String>) -> Option<String> {
     raw.map(|scope| scope.trim().to_owned())
         .filter(|scope| !scope.is_empty())
 }
@@ -173,19 +184,64 @@ fn scoped_project_wiql(scope: Option<&str>) -> String {
     )
 }
 
-/// The query behind a full pull: every work item the scope allows.
+/// The condition behind a full pull: every work item the scope allows.
 fn all_ids_wiql(scope: Option<&str>) -> String {
-    format!("{} ORDER BY [System.Id]", scoped_project_wiql(scope))
+    scoped_project_wiql(scope)
 }
 
-/// The query behind an incremental pull: what the scope allows and the
+/// The condition behind an incremental pull: what the scope allows and the
 /// watermark says has moved.
 fn changed_ids_wiql(scope: Option<&str>, watermark: Timestamp) -> String {
     format!(
-        "{} AND [System.ChangedDate] >= '{}' ORDER BY [System.Id]",
+        "{} AND [System.ChangedDate] >= '{}'",
         scoped_project_wiql(scope),
         watermark.to_iso8601_utc()
     )
+}
+
+/// One page of an id query: the condition, from the id after `after` on, in
+/// id order — which is what makes the last id of one page the start of the
+/// next.
+fn page_wiql(condition: &str, after: i64) -> String {
+    format!("{condition} AND [System.Id] > {after} ORDER BY [System.Id]")
+}
+
+/// The WIQL condition one team's field values stand for, as Azure DevOps's own
+/// team settings list them: `UNDER` for a value held with its children, `=`
+/// for one held alone, ORed together and wrapped so the `OR` cannot reach the
+/// clauses around it. `None` for a team holding no values at all, which is a
+/// team without a board.
+fn team_condition(settings: &Value) -> Option<String> {
+    let field = settings
+        .pointer("/field/referenceName")
+        .and_then(Value::as_str)
+        .unwrap_or("System.AreaPath");
+    let clauses: Vec<String> = settings
+        .get("values")?
+        .as_array()?
+        .iter()
+        .filter_map(|value| {
+            let path = value.get("value")?.as_str()?;
+            let operator = if value
+                .get("includeChildren")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                "UNDER"
+            } else {
+                "="
+            };
+            Some(format!(
+                "[{field}] {operator} '{}'",
+                path.replace('\'', "''")
+            ))
+        })
+        .collect();
+    match clauses.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        _ => Some(format!("({})", clauses.join(" OR "))),
+    }
 }
 
 /// Accept `https://dev.azure.com/slug`, `https://slug.visualstudio.com`, or a bare slug.
@@ -242,6 +298,9 @@ pub struct AzureClient {
     /// When the rate-limit budget the last responses reported comes back, for
     /// a budget that is already spent. `None` while there is room to spare.
     throttled_until: Cell<Option<Instant>>,
+    /// The WIQL the configured team's area paths stand for, read once a
+    /// client: a team's areas change about as often as its name does.
+    team_condition: OnceCell<Option<String>>,
 }
 
 /// Everything one pull produces.
@@ -260,6 +319,7 @@ impl AzureClient {
             config,
             authorization: RefCell::new(authorization_header()?),
             throttled_until: Cell::new(None),
+            team_condition: OnceCell::new(),
         })
     }
 
@@ -278,7 +338,7 @@ impl AzureClient {
     /// more; that costs one row and is what keeps two edits made in the same
     /// second from hiding behind each other.
     pub fn fetch_changed_work_items(&self, watermark: Timestamp) -> Result<SyncBatch> {
-        let wiql = changed_ids_wiql(self.config.scope.as_deref(), watermark);
+        let wiql = changed_ids_wiql(self.scope_condition()?.as_deref(), watermark);
         self.fetch_work_items(&self.query_work_item_ids(&wiql)?)
     }
 
@@ -287,12 +347,71 @@ impl AzureClient {
     /// work item is not reported as changed — it simply stops being listed, and
     /// so does one an edit has moved outside the scope.
     pub fn query_ids(&self) -> Result<Vec<i64>> {
-        self.query_work_item_ids(&all_ids_wiql(self.config.scope.as_deref()))
+        self.query_work_item_ids(&all_ids_wiql(self.scope_condition()?.as_deref()))
+    }
+
+    /// The WIQL condition every pull is narrowed by: the configured team's
+    /// area paths, ANDed with any `query` the file also names, or that query
+    /// alone, or nothing. The team's paths are read once a client.
+    pub fn scope_condition(&self) -> Result<Option<String>> {
+        let team = match self.team_condition.get() {
+            Some(cached) => cached.clone(),
+            None => {
+                let fetched = self.fetch_team_condition()?;
+                let _ = self.team_condition.set(fetched.clone());
+                fetched
+            }
+        };
+        Ok(match (team, &self.config.scope) {
+            (Some(team), Some(query)) => Some(format!("{team} AND ({query})")),
+            (Some(team), None) => Some(team),
+            (None, query) => query.clone(),
+        })
+    }
+
+    fn fetch_team_condition(&self) -> Result<Option<String>> {
+        let Some(team) = &self.config.team else {
+            return Ok(None);
+        };
+        let url = self.team_settings_url(team, "teamfieldvalues", &version_query())?;
+        let settings = self.get(&url)?;
+        team_condition(&settings).map(Some).with_context(|| {
+            format!("team '{team}' owns no area paths, so there is nothing to pull")
+        })
+    }
+
+    /// The sprint the configured team is in right now, as its own settings
+    /// schedule it. `None` without a team, and for a team between sprints.
+    pub fn fetch_team_current_iteration(&self) -> Result<Option<String>> {
+        let Some(team) = &self.config.team else {
+            return Ok(None);
+        };
+        let query = format!("$timeframe=current&{}", version_query());
+        let response = self.get(&self.team_settings_url(team, "iterations", &query)?)?;
+        Ok(response
+            .pointer("/value/0/path")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
+    }
+
+    /// The names of the project's teams, for `ticket-tui teams` to print so
+    /// the right one can be copied into `config.toml` as written.
+    pub fn fetch_teams(&self) -> Result<Vec<String>> {
+        let teams = self.get(&self.teams_url(&[])?)?;
+        Ok(teams
+            .get("value")
+            .and_then(Value::as_array)
+            .context("teams response has no value array")?
+            .iter()
+            .filter_map(|team| team.get("name").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect())
     }
 
     /// Read the named work items, relations and all, in batches the endpoint
-    /// accepts. An empty id list makes no request at all.
-    fn fetch_work_items(&self, ids: &[i64]) -> Result<SyncBatch> {
+    /// accepts, whatever the scope says about them. An empty id list makes no
+    /// request at all.
+    pub fn fetch_work_items(&self, ids: &[i64]) -> Result<SyncBatch> {
         let mut batch = SyncBatch::default();
         for chunk in ids.chunks(BATCH_SIZE) {
             let joined = chunk
@@ -589,11 +708,18 @@ impl AzureClient {
         Ok(url.into())
     }
 
-    /// Everybody on the project's teams, so the assignee picker can offer
-    /// somebody who has no work item in the database yet. Azure DevOps lists the
-    /// teams first and the members of each separately, so this is one request
+    /// Everybody on the configured team, or on every team in the project when
+    /// none is configured, so the assignee picker can offer somebody who has no
+    /// work item in the database yet. Azure DevOps lists the teams first and
+    /// the members of each separately, so the project-wide read is one request
     /// per team plus one. Somebody on two teams is listed once.
     pub fn fetch_team_members(&self) -> Result<Vec<Identity>> {
+        if let Some(team) = &self.config.team {
+            let mut found = Vec::new();
+            let members = self.get(&self.teams_url(&[team, "members"])?)?;
+            collect_team_members(&members, &mut found);
+            return Ok(found);
+        }
         let teams = self.get(&self.teams_url(&[])?)?;
         let teams = teams
             .get("value")
@@ -1011,6 +1137,15 @@ impl AzureClient {
         Ok(url.into())
     }
 
+    /// One team's settings, which hang off `{project}/{team}/_apis/work`:
+    /// `tail` is the setting, and `query` the whole query string.
+    fn team_settings_url(&self, team: &str, tail: &str, query: &str) -> Result<String> {
+        let project = self.config.project.as_str();
+        let mut url = self.api_url(&[project, team, "_apis", "work", "teamsettings", tail])?;
+        url.set_query(Some(query));
+        Ok(url.into())
+    }
+
     /// Display name of the signed-in user, used to mark their own work items.
     /// The profile host is separate from the work-item host and may be blocked
     /// or unavailable, so a failure yields `None` rather than sinking the sync.
@@ -1022,28 +1157,39 @@ impl AzureClient {
             .and_then(profile_display_name))
     }
 
-    fn query_work_item_ids(&self, wiql: &str) -> Result<Vec<i64>> {
+    /// Every id `condition` names, read a page at a time. A page that comes
+    /// back full is followed by the one after it; a short page is the last.
+    fn query_work_item_ids(&self, condition: &str) -> Result<Vec<i64>> {
         // `timePrecision` is what lets a date in the query carry a time as
         // well. Without it Azure DevOps refuses the incremental pull outright:
         // the watermark names the second an edit landed, and a query read at
         // date precision may not mention one.
         let url = format!(
-            "{}/{}/_apis/wit/wiql?timePrecision=true&api-version={API_VERSION}",
+            "{}/{}/_apis/wit/wiql?timePrecision=true&$top={WIQL_PAGE}&api-version={API_VERSION}",
             self.config.base_url(),
             self.config.project
         );
-        let response = self.post(&url, &json!({ "query": wiql }))?;
-        response
-            .get("workItems")
-            .and_then(Value::as_array)
-            .context("WIQL response has no workItems array")?
-            .iter()
-            .map(|item| {
-                item.get("id")
-                    .and_then(Value::as_i64)
-                    .context("WIQL result without an id")
-            })
-            .collect()
+        let mut ids: Vec<i64> = Vec::new();
+        loop {
+            let after = ids.last().copied().unwrap_or(0);
+            let response = self.post(&url, &json!({ "query": page_wiql(condition, after) }))?;
+            let page = response
+                .get("workItems")
+                .and_then(Value::as_array)
+                .context("WIQL response has no workItems array")?
+                .iter()
+                .map(|item| {
+                    item.get("id")
+                        .and_then(Value::as_i64)
+                        .context("WIQL result without an id")
+                })
+                .collect::<Result<Vec<i64>>>()?;
+            let full = page.len() >= WIQL_PAGE;
+            ids.extend(page);
+            if !full {
+                return Ok(ids);
+            }
+        }
     }
 
     fn get(&self, url: &str) -> Result<Value> {
@@ -2418,6 +2564,7 @@ mod tests {
             project: "development".into(),
             code_project: "development".into(),
             scope: None,
+            team: None,
         }
     }
 
@@ -2428,6 +2575,7 @@ mod tests {
             config,
             authorization: RefCell::new("Bearer test".into()),
             throttled_until: Cell::new(None),
+            team_condition: OnceCell::new(),
         }
     }
 
@@ -2462,42 +2610,73 @@ mod tests {
     }
 
     #[test]
-    fn a_sync_scope_narrows_both_pulls_and_travels_verbatim_in_parentheses() {
+    fn a_team_owns_its_areas_with_or_without_their_children() {
+        let settings = json!({
+            "field": { "referenceName": "System.AreaPath" },
+            "defaultValue": "ISTO\\Payments",
+            "values": [
+                { "value": "ISTO\\Payments", "includeChildren": true },
+                { "value": "ISTO\\Shared\\O'Brien's", "includeChildren": false }
+            ]
+        });
         assert_eq!(
-            all_ids_wiql(None),
-            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project \
-             ORDER BY [System.Id]"
+            team_condition(&settings).as_deref(),
+            Some(
+                "([System.AreaPath] UNDER 'ISTO\\Payments' \
+                 OR [System.AreaPath] = 'ISTO\\Shared\\O''Brien''s')"
+            ),
+            "UNDER takes the children, = does not, and a quote is doubled"
         );
         assert_eq!(
-            changed_ids_wiql(None, crate::timestamp::ts("2026-08-28T20:15:03Z")),
+            team_condition(&json!({ "values": [{ "value": "ISTO\\Payments" }] })).as_deref(),
+            Some("[System.AreaPath] = 'ISTO\\Payments'"),
+            "one value needs no parentheses, and no field means the area path"
+        );
+        assert_eq!(
+            team_condition(&json!({ "values": [] })),
+            None,
+            "a team without areas has no board to pull"
+        );
+    }
+
+    #[test]
+    fn a_sync_scope_narrows_both_pulls_and_travels_verbatim_in_parentheses() {
+        assert_eq!(
+            page_wiql(&all_ids_wiql(None), 0),
             "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project \
-             AND [System.ChangedDate] >= '2026-08-28T20:15:03Z' ORDER BY [System.Id]"
+             AND [System.Id] > 0 ORDER BY [System.Id]"
+        );
+        assert_eq!(
+            page_wiql(
+                &changed_ids_wiql(None, crate::timestamp::ts("2026-08-28T20:15:03Z")),
+                20_000
+            ),
+            "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project \
+             AND [System.ChangedDate] >= '2026-08-28T20:15:03Z' \
+             AND [System.Id] > 20000 ORDER BY [System.Id]",
+            "the next page starts after the last id of the one before"
         );
 
         let scope = Some("[System.WorkItemType] <> 'Test Case' OR [System.Id] = 7");
         assert_eq!(
             all_ids_wiql(scope),
             "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project \
-             AND ([System.WorkItemType] <> 'Test Case' OR [System.Id] = 7) ORDER BY [System.Id]",
+             AND ([System.WorkItemType] <> 'Test Case' OR [System.Id] = 7)",
             "the condition is parenthesised so its own OR cannot swallow the project clause"
         );
         assert_eq!(
             changed_ids_wiql(scope, crate::timestamp::ts("2026-08-28T20:15:03Z")),
             "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project \
              AND ([System.WorkItemType] <> 'Test Case' OR [System.Id] = 7) \
-             AND [System.ChangedDate] >= '2026-08-28T20:15:03Z' ORDER BY [System.Id]"
+             AND [System.ChangedDate] >= '2026-08-28T20:15:03Z'"
         );
 
         assert_eq!(
-            sync_scope(Some("  [System.ChangedDate] > @today-180 ".into())).as_deref(),
+            non_blank(Some("  [System.ChangedDate] > @today-180 ".into())).as_deref(),
             Some("[System.ChangedDate] > @today-180")
         );
-        assert_eq!(
-            sync_scope(Some("   ".into())),
-            None,
-            "a blank scope is none"
-        );
-        assert_eq!(sync_scope(None), None);
+        assert_eq!(non_blank(Some("   ".into())), None, "a blank scope is none");
+        assert_eq!(non_blank(None), None);
     }
 
     #[test]

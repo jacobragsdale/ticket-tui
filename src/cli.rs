@@ -68,6 +68,11 @@ pub struct Cli {
     /// defaults to TICKET_TUI_QUERY, then config.toml
     #[arg(long, value_name = "WIQL")]
     pub query: Option<String>,
+    /// The team whose slice of the project to work in: its areas narrow every
+    /// pull, its members fill the assignee picker, and its sprint is what
+    /// `@current` means; defaults to TICKET_TUI_TEAM, then config.toml
+    #[arg(long, global = true, value_name = "TEAM")]
+    pub team: Option<String>,
     /// Days a work item may sit untouched before the Changed column flags it
     /// as stale; defaults to TICKET_TUI_STALE_DAYS, then whatever the session
     /// remembers, then 14
@@ -117,6 +122,7 @@ impl Cli {
             file.devops.code_project.as_ref(),
         );
         self.query = settled(self.query, "TICKET_TUI_QUERY", file.devops.query.as_ref());
+        self.team = settled(self.team, "TICKET_TUI_TEAM", file.devops.team.as_ref());
         self.workspace = self
             .workspace
             .or_else(|| variable("TICKET_TUI_WORKSPACE").map(PathBuf::from))
@@ -194,6 +200,8 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Print the project's teams, one name a line, to copy into config.toml
+    Teams,
 }
 
 /// The Pipelines tab, without the tab. `list` answers from the database; every
@@ -428,7 +436,17 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Runs(command) => run_runs(cli, &database, command),
         Command::Approvals(command) => run_approvals(cli, command),
         Command::Status { json } => run_status(cli, &database, *json),
+        Command::Teams => run_teams(cli),
     }
+}
+
+/// The project's teams as Azure DevOps names them, one a line, so `team` in
+/// `config.toml` can be written exactly as the project spells it.
+fn run_teams(cli: &Cli) -> Result<()> {
+    for team in connect(cli)?.fetch_teams()? {
+        println!("{team}");
+    }
+    Ok(())
 }
 
 /// The tab badges on one line, from SQLite and the context file beside it and
@@ -523,6 +541,7 @@ fn run_sync(cli: &Cli, database: PathBuf, full: bool) -> Result<()> {
         cli.project.clone(),
         cli.code_project.clone(),
         cli.query.clone(),
+        cli.team.clone(),
     )?;
     let repository = SqliteTicketRepository::open(&database)?;
     guard_stored_project(
@@ -1094,6 +1113,7 @@ fn connect(cli: &Cli) -> Result<AzureClient> {
         cli.project.clone(),
         cli.code_project.clone(),
         cli.query.clone(),
+        cli.team.clone(),
     )?)
 }
 
@@ -2554,6 +2574,7 @@ mod tests {
             project: "atlas".into(),
             code_project: "atlas".into(),
             scope: None,
+            team: None,
         }
     }
 

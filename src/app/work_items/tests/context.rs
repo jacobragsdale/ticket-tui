@@ -70,6 +70,7 @@ fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() 
     app.shell.set_sync_target(Some(SyncTarget {
         organization: "example-org".into(),
         project: "atlas".into(),
+        team: None,
         refresh_seconds: 60,
     }));
     app.shell.begin_sync();
