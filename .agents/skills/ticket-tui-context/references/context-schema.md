@@ -82,7 +82,9 @@ unchanged.
 | `workspace` | string or null | Where clones are looked for and made |
 
 A repo carries `id`, `name`, `default_branch`, `is_disabled`, `pull_requests`
-and `pipelines` (how many are open against it), `web_url`, and `local` — null
+and `pipelines` (how many are open against it), `build` — the worst of its
+pipelines' last runs, as `run_id`, `build_number`, `status` and `result`, or
+null while none of them has run — `web_url`, and `local` — null
 for a repository that is not on this machine, otherwise `path`, `branch`,
 `dirty`, `ahead`, `behind`, and `busy` (`cloning`, `fetching`, `pulling`, or
 null).

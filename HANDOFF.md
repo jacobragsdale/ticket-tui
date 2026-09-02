@@ -53,11 +53,18 @@ Last updated 2026-09-01. The backlog itself lives in Azure DevOps
   project the work items live in and the `code_project` the repositories, pull
   requests and pipelines live in. The `[azure]` half of that ticket is gone
   with the tabs it fed.
+- **A repository row says how its pipelines last ran** (#756, 2026-09-01): the
+  Repos tab's Pipelines count carries the glyph of the worst of its pipelines'
+  last runs, coloured as the Pipelines tab colours that state, the details
+  pane's pipeline lines carry each one's glyph and build number, and `g` on a
+  repository with no open pull request opens the pipeline that builds it - the
+  one that ran most recently - rather than stopping. The context's `repos` rows
+  carry the same run as `build`, which is additive and leaves the schema at 4.
 - One idea is written down as a `maybe` ticket and not scheduled: #742 (`T`
   dispatches an agent: gather -> prompt -> launch, one worded verb per tab).
   #752 (tab 9 Artifacts) is superseded by the teardown.
 - The gate is `cargo fmt --check`, `cargo clippy --all-targets --all-features
-  -D warnings`, `cargo test --all-targets` (606 lib + 32 bin tests) and
+  -D warnings`, `cargo test --all-targets` (613 lib + 32 bin tests) and
   `cargo build --release`, with the test run repeated under `NO_COLOR=1`,
   `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` - the theme
   matrix, which is real because `Theme::from_env` reads the variable.

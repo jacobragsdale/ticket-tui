@@ -76,7 +76,7 @@ offline, browsing whatever the database already holds.
 | `r` | Sync now, without waiting for the timer |
 | `o` | Open the selected row in the system browser |
 | `?` | The in-app help, generated from the same table the keys are bound in |
-| `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a repository's open pull request |
+| `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a repository's open pull request or, with none, the pipeline that builds it |
 | `[` / `]` | Back and forward through everywhere you have been, across tabs |
 | `q` | Quit |
 

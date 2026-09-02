@@ -50,7 +50,7 @@ pub(crate) fn repos_app() -> App {
             ("aaa-111".to_owned(), 11, "Split the files".to_owned()),
             ("aaa-111".to_owned(), 12, "Tab bar".to_owned()),
         ],
-        vec![("aaa-111".to_owned(), 1, "ticket-tui CI".to_owned())],
+        vec![("aaa-111".to_owned(), 1, "ticket-tui CI".to_owned(), None)],
     );
     app.select_tab(TabId::Repos);
     app
@@ -286,8 +286,10 @@ fn a_repository_git_is_busy_with_is_left_alone() {
 }
 
 /// The same app with the other two tabs filled in, so a jump has somewhere to
-/// land: three pull requests and two pipelines, all against ticket-tui.
-fn crossed_app() -> App {
+/// land: two pull requests and one pipeline, all against ticket-tui. The tabs
+/// are crossed the way the app crosses them, through `relate_repos`, so the
+/// rows carry the run their pipeline last had.
+pub(crate) fn crossed_app() -> App {
     use crate::app::pipelines::tests::{pipeline, run};
     use crate::app::pull_requests::tests::pull_request;
     use crate::model::{PrStatus, RunResult, RunStatus};
@@ -298,11 +300,12 @@ fn crossed_app() -> App {
         pull_request(12, "Tab bar", "Jacob Ragsdale", PrStatus::Active),
     ];
     let shell = &app.shell;
-    app.pull_requests.set_pull_requests(requests, shell);
+    app.pull_requests.set_pull_requests(requests.clone(), shell);
     let pipelines = vec![pipeline(1, "ticket-tui CI", "\\")];
     let runs = vec![run(14, 1, RunStatus::Completed, Some(RunResult::Succeeded))];
     let shell = &app.shell;
     app.pipelines.set_pipelines(pipelines, runs, shell);
+    app.relate_repos(&requests);
     app.select_tab(TabId::Repos);
     app
 }
@@ -450,13 +453,123 @@ fn g_goes_to_the_newest_pull_request_open_on_the_repository() {
         Some(12)
     );
 
-    // Nothing is open on this one, so the key says so and stays put.
+    // Nothing is open on this one and nothing builds it, so the key says so
+    // and stays put.
     app.select_tab(TabId::Repos);
     focus(&mut app, "skillbook");
     assert_eq!(go(&mut app), crate::app::AppAction::None);
     assert_eq!(app.tab, TabId::Repos);
     assert_eq!(
         app.shell.notification().map(|(text, _)| text),
-        Some("No open pull request on skillbook")
+        Some("No open pull request or pipeline on skillbook")
+    );
+}
+
+#[test]
+fn a_repository_row_says_how_its_pipelines_last_went() {
+    use crate::app::pipelines::tests::{pipeline, run};
+    use crate::model::{RunResult, RunStatus};
+
+    let build = |app: &App| {
+        app.repos
+            .visible(&app.shell)
+            .into_iter()
+            .find(|row| row.repo.name == "ticket-tui")
+            .expect("the repository")
+            .build
+    };
+
+    let mut app = crossed_app();
+    assert_eq!(
+        build(&app).map(|run| (run.id, run.result)),
+        Some((14, Some(RunResult::Succeeded))),
+        "the one pipeline that builds it went green"
+    );
+
+    // A second pipeline whose last run failed is what the row says: the worst
+    // of them is the thing to know.
+    let pipelines = vec![
+        pipeline(1, "ticket-tui CI", "\\"),
+        pipeline(2, "nightly", "\\"),
+    ];
+    let runs = vec![
+        run(14, 1, RunStatus::Completed, Some(RunResult::Succeeded)),
+        run(15, 2, RunStatus::Completed, Some(RunResult::Failed)),
+    ];
+    let shell = &app.shell;
+    app.pipelines.set_pipelines(pipelines, runs, shell);
+    app.relate_repos(&[]);
+    assert_eq!(
+        build(&app).map(|run| (run.id, run.result)),
+        Some((15, Some(RunResult::Failed)))
+    );
+    assert_eq!(
+        app.repos
+            .visible(&app.shell)
+            .into_iter()
+            .find(|row| row.repo.name == "skillbook")
+            .and_then(|row| row.build),
+        None,
+        "and a repository nothing builds says nothing"
+    );
+}
+
+#[test]
+fn the_details_pane_lines_carry_the_run_each_pipeline_last_had() {
+    let mut app = crossed_app();
+    focus(&mut app, "ticket-tui");
+    let jumps = app.repos.jumps(&app.shell);
+    assert!(
+        jumps
+            .iter()
+            .any(|(label, _)| label == "ticket-tui CI  \u{2713} 20260829.14"),
+        "the pipeline line says how it last went: {jumps:?}"
+    );
+}
+
+#[test]
+fn g_falls_through_to_the_pipeline_when_nothing_is_open() {
+    use crate::app::pipelines::tests::{pipeline, run};
+    use crate::app::{Jump, Screen};
+    use crate::model::{RunResult, RunStatus};
+
+    let mut app = crossed_app();
+    // Two pipelines build it and nothing is open against it any more.
+    let pipelines = vec![
+        pipeline(1, "ticket-tui CI", "\\"),
+        pipeline(2, "nightly", "\\"),
+    ];
+    let runs = vec![
+        run(14, 1, RunStatus::Completed, Some(RunResult::Succeeded)),
+        run(15, 2, RunStatus::Completed, Some(RunResult::Failed)),
+    ];
+    let shell = &app.shell;
+    app.pipelines.set_pipelines(pipelines, runs, shell);
+    app.relate_repos(&[]);
+    focus(&mut app, "ticket-tui");
+
+    assert_eq!(
+        Screen::follow_target(&app.repos, &app.shell),
+        Ok((Jump::Pipeline(2), "pipeline")),
+        "the one that ran most recently is where g goes"
+    );
+    go(&mut app);
+    assert_eq!(app.tab, TabId::Pipelines);
+    assert_eq!(
+        app.pipelines
+            .visible_pipelines(&app.shell)
+            .get(app.pipelines.pipeline_cursor.index)
+            .map(|row| row.pipeline.name.clone()),
+        Some("nightly".to_owned())
+    );
+
+    // One with neither still says so and stays put.
+    app.history_back();
+    focus(&mut app, "skillbook");
+    assert_eq!(go(&mut app), crate::app::AppAction::None);
+    assert_eq!(app.tab, TabId::Repos);
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some("No open pull request or pipeline on skillbook")
     );
 }

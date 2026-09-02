@@ -873,7 +873,9 @@ fn result_word(row: &RunRow) -> String {
     }
 }
 
-fn run_style(status: RunStatus, result: Option<RunResult>) -> Style {
+/// The colour a run is painted in, wherever it is drawn: the Pipelines table,
+/// its details pane, and the Repos tab's Pipelines column.
+pub(crate) fn run_style(status: RunStatus, result: Option<RunResult>) -> Style {
     let color = match (status, result) {
         (RunStatus::InProgress | RunStatus::Cancelling, _) => theme().state_in_progress,
         (RunStatus::NotStarted | RunStatus::Postponed, _) => theme().muted,

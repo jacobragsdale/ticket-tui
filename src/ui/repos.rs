@@ -4,10 +4,12 @@
 
 use super::*;
 use crate::app::CopiedContent;
+use crate::app::pipelines::rows::run_glyph;
 use crate::app::repos::{RepoColumn, RepoMode, RepoRow, ReposScreen};
 use crate::command::CommandId;
 use crate::model::Jump;
 use crate::ui::details::section_line;
+use crate::ui::pipelines::run_style;
 use crate::ui::table::{TableSpec, render_list_table, table_geometry};
 
 pub(crate) fn render(
@@ -116,11 +118,33 @@ fn repo_cell(row: &RepoRow, column: RepoColumn) -> Cell<'static> {
         RepoColumn::PullRequests => {
             Cell::from(Line::styled(count_label(row.pull_requests), plain).right_aligned())
         }
-        RepoColumn::Pipelines => {
-            Cell::from(Line::styled(count_label(row.pipelines), plain).right_aligned())
-        }
+        RepoColumn::Pipelines => Cell::from(pipelines_line(row, plain)),
         RepoColumn::Local => Cell::from(local_line(row)),
     }
+}
+
+/// `✓ 2`: how the repository's pipelines last went, then how many of them
+/// there are. The glyph and its colour are the run's, as the Pipelines tab
+/// paints them; `○` while none of them has run; a repository nothing builds
+/// is the em dash it always was.
+fn pipelines_line(row: &RepoRow, plain: Style) -> Line<'static> {
+    if row.pipelines == 0 {
+        return Line::styled(count_label(0), plain).right_aligned();
+    }
+    let (glyph, style) = row.build.as_ref().map_or_else(
+        || ("\u{25cb}", Style::default().fg(theme().muted)),
+        |run| {
+            (
+                run_glyph(run.status, run.result),
+                run_style(run.status, run.result),
+            )
+        },
+    );
+    Line::from(vec![
+        Span::styled(format!("{glyph} "), style),
+        Span::styled(row.pipelines.to_string(), plain),
+    ])
+    .right_aligned()
 }
 
 fn count_label(count: usize) -> String {

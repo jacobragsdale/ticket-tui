@@ -1,6 +1,6 @@
 use super::*;
 use crate::app::TabId;
-use crate::app::repos::tests::repos_app;
+use crate::app::repos::tests::{crossed_app, repos_app};
 
 #[test]
 fn the_table_draws_every_repository_with_its_counts_and_local_state() {
@@ -24,6 +24,21 @@ fn the_table_draws_every_repository_with_its_counts_and_local_state() {
     assert!(
         text.contains("\u{2014}"),
         "one nobody has here reads as an em dash: {text}"
+    );
+    assert!(
+        text.contains("\u{25cb} 1"),
+        "a pipeline that has not run yet is an open circle before the count: {text}"
+    );
+}
+
+#[test]
+fn the_pipelines_column_says_how_the_pipelines_last_went() {
+    let mut app = crossed_app();
+    let text = render_text(150, 24, &mut app);
+
+    assert!(
+        text.contains("\u{2713} 1"),
+        "the count carries the glyph of the last run: {text}"
     );
 }
 

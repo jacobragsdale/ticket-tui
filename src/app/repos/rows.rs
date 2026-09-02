@@ -1,7 +1,7 @@
 //! One repository as the Repos table sees it: what Azure DevOps says about it,
 //! what the other tabs have against it, and what it looks like on this machine.
 
-use crate::model::{LocalRepo, Repo};
+use crate::model::{LocalRepo, Repo, Run};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoRow {
@@ -9,6 +9,9 @@ pub struct RepoRow {
     pub local: Option<LocalRepo>,
     pub pull_requests: usize,
     pub pipelines: usize,
+    /// How the repository's pipelines are going: the worst of their last runs,
+    /// or `None` while none of them has run.
+    pub build: Option<Run>,
 }
 
 impl RepoRow {

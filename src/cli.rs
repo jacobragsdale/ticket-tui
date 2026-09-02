@@ -1486,6 +1486,8 @@ fn run_repos(cli: &Cli, database: &Path, command: &ReposCommand) -> Result<()> {
                 .iter()
                 .filter(|pipeline| pipeline.repo_id.as_deref() == Some(repo.id.as_str()))
                 .count(),
+            // The printed table has no build column; the glyph is the tab's.
+            build: None,
             repo: repo.clone(),
         })
         .collect();
@@ -3830,6 +3832,7 @@ mod tests {
             local: None,
             pull_requests: 1,
             pipelines: 0,
+            build: None,
         };
         let table = tabulate_repos(std::slice::from_ref(&row));
         assert!(

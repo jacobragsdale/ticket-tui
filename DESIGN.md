@@ -1207,7 +1207,8 @@ screen's, so switching tabs keeps the layout you were working in.
 tab: a work item's pull request — the newest still open, else the newest of
 any status, else the build it went out in — a pull request's work items or the
 run gating it, a run's pull request, and a repository's newest open pull
-request. A row with nowhere to go says what it looked for
+request, else the pipeline that builds it: the one that ran most recently, else
+the first by name. A row with nowhere to go says what it looked for
 rather than switching to an empty tab, and the footer only offers `g` when
 there is somewhere to go. Each details pane carries the same jump as a
 `[Go to …]` chip in its header, so the mouse follows what the key would.
@@ -1230,15 +1231,19 @@ file written before the tabs becomes the first cross-tab history.
 
 Tab `2` lists the project's repositories: `Name · Default branch · PRs ·
 Pipelines · Local`. The counts are the active pull requests and the pipelines
-that build each one; a repository the project has disabled stays on the table,
-faded, so a link naming it still resolves. The Local column says what is on
+that build each one; the Pipelines count carries the glyph of how those
+pipelines last went — `✓ 2`, `✗ 2`, `◐ 2`, and `○ 2` while none of them has
+run — the worst of their last runs, in the colour the Pipelines tab paints that
+state, because a red pipeline is the thing to know. A repository the project
+has disabled stays on the table, faded, so a link naming it still resolves. The Local column says what is on
 this machine — `main ✓` clean, `feat/x *` dirty, `main ↑2 ↓1` ahead and behind,
 `—` not cloned.
 
 The details pane carries the name and project, the default branch and size, the
 local copy — its path, its status, and when the workspace was last read — and
 what is open against the repository: its active
-pull requests and the pipelines that build it, each a jump: `Tab` moves the
+pull requests and the pipelines that build it — each pipeline with the glyph
+and number of the run it last had — each a jump: `Tab` moves the
 focus to the pane, `j`/`k` walk the references, `Enter` follows the one they are
 on, and a click does both at once. `[` comes back, here as everywhere. `[Clone]`, or
 `[Fetch]` and `[Pull]` where there is a clone, run what they say on a click.
@@ -1478,7 +1483,7 @@ anything on tab `1`.
 | `Enter` | Select the family cursor ticket; with details focused, edit the field under the pointer, or open the work item |
 | `o` | Open the selected ticket in the system browser |
 | `r` | Sync from Azure DevOps now, without waiting for the timer |
-| `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a repository's newest open pull request |
+| `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a repository's newest open pull request or, with none, the pipeline that builds it |
 | `i` | Show database path, row counts, hidden finished rows, and sync freshness |
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
 | `q`, `Ctrl-C` | Quit |
@@ -2141,8 +2146,10 @@ user to press `3`:
   named view, mode, focused pane, family cursor and details scroll. The selected
   ticket also carries `related`, its artifact links.
 - `repos` — the rows on the table and the selected one, each with its default
-  branch, its pull-request and pipeline counts and the clone on this machine
-  (path, branch, dirty, ahead, behind, and what git is doing to it), plus the
+  branch, its pull-request and pipeline counts, its `build` — the worst of its
+  pipelines' last runs, as `run_id`, `build_number`, `status` and `result`, or
+  `null` while none of them has run — and the clone on this machine (path,
+  branch, dirty, ahead, behind, and what git is doing to it), plus the
   `workspace` they live in.
 - `pull_requests` — the queue and the selected request with its reviewers and
   their votes, the work items it carries, its build, whether auto-complete is

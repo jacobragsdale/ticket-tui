@@ -89,9 +89,21 @@ pub struct RepoContext {
     /// How many active pull requests and pipelines name it.
     pub pull_requests: usize,
     pub pipelines: usize,
+    /// How its pipelines are going — the worst of their last runs — or `null`
+    /// while none of them has run.
+    pub build: Option<RepoBuildContext>,
     pub web_url: String,
     /// The clone on this machine, or `null` for a repository that is not here.
     pub local: Option<LocalRepoContext>,
+}
+
+/// The run a repository's Pipelines cell speaks for.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RepoBuildContext {
+    pub run_id: i64,
+    pub build_number: String,
+    pub status: String,
+    pub result: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

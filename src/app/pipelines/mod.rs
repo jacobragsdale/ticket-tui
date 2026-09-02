@@ -587,6 +587,17 @@ impl PipelinesScreen {
         &self.pipelines
     }
 
+    /// The run that says how one pipeline last went. The table reads it for
+    /// every row it draws; the Repos tab reads it for the repository a
+    /// pipeline builds, rather than working the same answer out twice.
+    #[must_use]
+    pub fn last_run_of(&self, pipeline_id: i64) -> Option<&Run> {
+        self.runs
+            .iter()
+            .filter(|run| run.pipeline_id == pipeline_id)
+            .max_by_key(|run| run.id)
+    }
+
     /// The runs still going, which is what the watcher is asked to follow.
     #[must_use]
     pub fn live_run_ids(&self) -> Vec<i64> {
@@ -713,12 +724,7 @@ impl PipelinesScreen {
     }
 
     fn row_for(&self, pipeline: &Pipeline) -> PipelineRow {
-        let last_run = self
-            .runs
-            .iter()
-            .filter(|run| run.pipeline_id == pipeline.id)
-            .max_by_key(|run| run.id)
-            .cloned();
+        let last_run = self.last_run_of(pipeline.id).cloned();
         PipelineRow {
             repo: pipeline.repo_id.as_ref().map_or_else(String::new, |id| {
                 self.repo_names

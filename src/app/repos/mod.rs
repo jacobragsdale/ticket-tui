@@ -6,12 +6,13 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 
+use super::pipelines::rows::run_glyph;
 use super::{AppAction, CopiedContent, Focus, ListCursor, Screen, Shell, TabId};
 use crate::columns::{ColumnLayout, TableLayout};
 use crate::command::{CommandId, command_for_key};
 use crate::filter::{MatchContext, ParsedQuery, parse_query};
 use crate::local::LocalRequest;
-use crate::model::{GitJob, Jump, LocalRepo, Repo};
+use crate::model::{GitJob, Jump, LocalRepo, Repo, Run, RunResult, RunStatus};
 use crate::pointer::{PointerTarget, ScrollState, ScrollSurface, TextEditor};
 use crate::session::TabSession;
 use crate::text_input::TextInput;
@@ -40,9 +41,11 @@ pub struct ReposScreen {
     /// How many active pull requests and pipelines each repository has.
     pull_request_counts: Vec<(String, usize)>,
     pipeline_counts: Vec<(String, usize)>,
-    /// The pull requests and pipelines the details pane links to.
+    /// The pull requests and pipelines the details pane links to. A pipeline
+    /// carries the run that says how it last went, which is what the table's
+    /// glyph and the pane's lines read.
     pull_requests: Vec<(String, i64, String)>,
-    pipelines: Vec<(String, i64, String)>,
+    pipelines: Vec<(String, i64, String, Option<Run>)>,
     pub mode: RepoMode,
     query: TextInput,
     pub layout: TableLayout<RepoColumn>,
@@ -99,10 +102,10 @@ impl ReposScreen {
     pub fn set_related(
         &mut self,
         pull_requests: Vec<(String, i64, String)>,
-        pipelines: Vec<(String, i64, String)>,
+        pipelines: Vec<(String, i64, String, Option<Run>)>,
     ) {
-        self.pull_request_counts = counts(&pull_requests);
-        self.pipeline_counts = counts(&pipelines);
+        self.pull_request_counts = counts(pull_requests.iter().map(|(repo_id, ..)| repo_id));
+        self.pipeline_counts = counts(pipelines.iter().map(|(repo_id, ..)| repo_id));
         self.pull_requests = pull_requests;
         self.pipelines = pipelines;
     }
@@ -217,9 +220,22 @@ impl ReposScreen {
                 local: self.local_with_job(&repo.id),
                 pull_requests: count_for(&self.pull_request_counts, &repo.id),
                 pipelines: count_for(&self.pipeline_counts, &repo.id),
+                build: self.build_of(&repo.id),
                 repo: repo.clone(),
             })
             .collect()
+    }
+
+    /// The run a repository's row speaks for: the worst of the last runs of
+    /// the pipelines that build it, because a red pipeline is the thing to
+    /// know. `None` while none of them has run.
+    fn build_of(&self, repo_id: &str) -> Option<Run> {
+        self.pipelines
+            .iter()
+            .filter(|(held, ..)| held == repo_id)
+            .filter_map(|(_, _, _, run)| run.as_ref())
+            .min_by_key(|run| build_rank(run))
+            .cloned()
     }
 
     #[must_use]
@@ -246,9 +262,21 @@ impl ReposScreen {
                 ));
             }
         }
-        for (repo_id, id, name) in &self.pipelines {
+        for (repo_id, id, name, last_run) in &self.pipelines {
             if *repo_id == row.repo.id {
-                jumps.push((name.clone(), Jump::Pipeline(*id)));
+                // The pipeline says how it last went, the way the pull request
+                // pane's build line does: the glyph, then the run's number.
+                let label = last_run.as_ref().map_or_else(
+                    || name.clone(),
+                    |run| {
+                        format!(
+                            "{name}  {} {}",
+                            run_glyph(run.status, run.result),
+                            run.build_number
+                        )
+                    },
+                );
+                jumps.push((label, Jump::Pipeline(*id)));
             }
         }
         jumps
@@ -465,6 +493,15 @@ fn repo_context(row: &RepoRow) -> crate::agent_context::RepoContext {
         is_disabled: row.repo.is_disabled,
         pull_requests: row.pull_requests,
         pipelines: row.pipelines,
+        build: row
+            .build
+            .as_ref()
+            .map(|run| crate::agent_context::RepoBuildContext {
+                run_id: run.id,
+                build_number: run.build_number.clone(),
+                status: run.status.as_str().to_owned(),
+                result: run.result.map(|result| result.as_str().to_owned()),
+            }),
         web_url: row.repo.web_url.clone(),
         local: row
             .local
@@ -500,10 +537,29 @@ fn clone_url(repo: &Repo) -> Option<String> {
         .cloned()
 }
 
-/// How many of something each repository has.
-fn counts(items: &[(String, i64, String)]) -> Vec<(String, usize)> {
+/// How loudly a run asks to be looked at, lowest first: something broken, then
+/// something still going, then something that only partly worked, then a run
+/// that is simply done.
+fn build_rank(run: &Run) -> u8 {
+    match (run.status, run.result) {
+        (_, Some(RunResult::Failed | RunResult::Canceled)) => 0,
+        (
+            RunStatus::InProgress
+            | RunStatus::Cancelling
+            | RunStatus::NotStarted
+            | RunStatus::Postponed,
+            _,
+        ) => 1,
+        (_, Some(RunResult::PartiallySucceeded)) => 2,
+        _ => 3,
+    }
+}
+
+/// How many of something each repository has, counted off the repository ids
+/// the pull requests and the pipelines are listed under.
+fn counts<'a>(repo_ids: impl Iterator<Item = &'a String>) -> Vec<(String, usize)> {
     let mut counts: Vec<(String, usize)> = Vec::new();
-    for (repo_id, _, _) in items {
+    for repo_id in repo_ids {
         if let Some((_, count)) = counts.iter_mut().find(|(held, _)| held == repo_id) {
             *count += 1;
         } else {
@@ -651,26 +707,43 @@ impl Screen for ReposScreen {
     }
 
     /// The newest pull request open on the repository. A closed one is not
-    /// held here: `set_related` only keeps what is still open.
+    /// held here: `set_related` only keeps what is still open. With nothing
+    /// open, the pipeline that builds it — the one that ran most recently,
+    /// else the first by name — because that is the other place a repository
+    /// leads to and it is one keypress away.
     fn follow_target(&self, shell: &Shell) -> Result<(Jump, &'static str), String> {
         let row = self
             .selected(shell)
             .ok_or_else(|| "No repository is selected".to_owned())?;
-        self.pull_requests
+        if let Some(id) = self
+            .pull_requests
             .iter()
             .filter(|(repo_id, _, _)| *repo_id == row.repo.id)
             .map(|(_, id, _)| *id)
             .max()
-            .map(|id| {
-                (
-                    Jump::PullRequest {
-                        repo: row.repo.name.clone(),
-                        id,
-                    },
-                    "pull request",
-                )
-            })
-            .ok_or_else(|| format!("No open pull request on {}", row.repo.name))
+        {
+            return Ok((
+                Jump::PullRequest {
+                    repo: row.repo.name.clone(),
+                    id,
+                },
+                "pull request",
+            ));
+        }
+        self.pipelines
+            .iter()
+            .filter(|(repo_id, ..)| *repo_id == row.repo.id)
+            .min_by(
+                |(_, _, left_name, left_run), (_, _, right_name, right_run)| {
+                    right_run
+                        .as_ref()
+                        .map(|run| run.id)
+                        .cmp(&left_run.as_ref().map(|run| run.id))
+                        .then_with(|| left_name.cmp(right_name))
+                },
+            )
+            .map(|(_, id, ..)| (Jump::Pipeline(*id), "pipeline"))
+            .ok_or_else(|| format!("No open pull request or pipeline on {}", row.repo.name))
     }
 
     fn here(&self, shell: &Shell) -> Option<Jump> {

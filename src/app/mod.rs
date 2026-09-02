@@ -696,10 +696,14 @@ impl App {
                 .pipelines()
                 .iter()
                 .filter_map(|pipeline| {
-                    pipeline
-                        .repo_id
-                        .as_ref()
-                        .map(|repo| (repo.clone(), pipeline.id, pipeline.name.clone()))
+                    pipeline.repo_id.as_ref().map(|repo| {
+                        (
+                            repo.clone(),
+                            pipeline.id,
+                            pipeline.name.clone(),
+                            self.pipelines.last_run_of(pipeline.id).cloned(),
+                        )
+                    })
                 })
                 .collect(),
         );
