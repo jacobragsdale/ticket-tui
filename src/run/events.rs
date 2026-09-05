@@ -16,8 +16,15 @@ pub(super) fn run_terminal(
     let mut mouse_pointer = MousePointerShape::Default;
     enable_terminal_input()?;
 
+    // ponytail: the one instrument this build has. TICKET_TUI_TRACE=<file>
+    // appends a line for every drawn frame and every loop turn slower than
+    // 30 ms — the polls, the draw, the context publish and the input
+    // handling, never the wait for input. Unset, no clock is read. Delete
+    // once the 35k round is done.
+    let trace = std::env::var_os("TICKET_TUI_TRACE").map(std::path::PathBuf::from);
     let mut redraw = true;
     while !app.shell.should_quit {
+        let turn = Instant::now();
         redraw |= app.work_items.poll_search(&mut app.shell);
         redraw |= poll_reload(app, repository, &mut reloader);
         redraw |= poll_sync(app, repository, runtime);
@@ -32,15 +39,21 @@ pub(super) fn run_terminal(
         // A spinner has to be repainted to turn. Nothing in flight and
         // nothing is repainted: an idle app draws no frames at all.
         redraw |= spinning(app);
+        let polled = turn.elapsed();
+        let (mut drew, mut published) = (Duration::ZERO, Duration::ZERO);
         if redraw {
+            let at = Instant::now();
             terminal.draw(|frame| ticket_tui::ui::render(frame, app))?;
             sync_mouse_pointer(app, &mut mouse_pointer);
             redraw = false;
+            drew = at.elapsed();
+            let at = Instant::now();
             if let Err(error) = context_publisher.publish(app) {
                 app.shell
                     .set_error(format!("Could not publish agent context: {error:#}"));
                 redraw = true;
             }
+            published = at.elapsed();
         }
 
         let timeout = if app.work_items.search_pending || app.shell.reload_pending {
@@ -64,8 +77,10 @@ pub(super) fn run_terminal(
             .min(Duration::from_secs(1))
         };
         if !event::poll(timeout)? {
+            trace_turn(trace.as_deref(), polled, drew, published, Duration::ZERO);
             continue;
         }
+        let handling = Instant::now();
         let (action, event_redraw) = match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => (app.handle_key(key), true),
             Event::Mouse(mouse) => {
@@ -92,8 +107,44 @@ pub(super) fn run_terminal(
             mouse_pointer = MousePointerShape::Default;
             redraw = true;
         }
+        trace_turn(
+            trace.as_deref(),
+            polled,
+            drew,
+            published,
+            handling.elapsed(),
+        );
     }
     Ok(())
+}
+
+/// ponytail: `TICKET_TUI_TRACE`'s one line per drawn frame or slow loop turn,
+/// appended to the file it names. A turn that drew nothing and took under
+/// 30 ms writes nothing.
+fn trace_turn(
+    path: Option<&std::path::Path>,
+    poll: Duration,
+    draw: Duration,
+    publish: Duration,
+    input: Duration,
+) {
+    use std::io::Write as _;
+    let Some(path) = path else { return };
+    let total = poll + draw + publish + input;
+    if draw.is_zero() && total < Duration::from_millis(30) {
+        return;
+    }
+    if let Ok(mut file) = fs::OpenOptions::new().append(true).create(true).open(path) {
+        let _ = writeln!(
+            file,
+            "turn {}ms poll {} draw {} publish {} input {}",
+            total.as_millis(),
+            poll.as_millis(),
+            draw.as_millis(),
+            publish.as_millis(),
+            input.as_millis()
+        );
+    }
 }
 
 /// Carries out one action, and says whether the screen has to be painted from

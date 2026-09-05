@@ -2225,6 +2225,15 @@ cargo build --release
 
 CI exercises these checks on current macOS and Linux runners.
 
+The dogfood project is small, so a database the size of a real one is made
+rather than pulled: `scripts/seed_large_db.py bench.sqlite3` fills a file with
+about 35,000 work items in a four-level hierarchy, every row in the
+organization `bench`, which a running ticket-tui refuses to sync over. Open it
+with `--database bench.sqlite3 --refresh 0`. `TICKET_TUI_TRACE=<file>` appends
+one line for every drawn frame and every event-loop turn slower than 30 ms —
+how long the polls, the draw, the context publish and the input handling took
+— which is how a slow machine says where its time goes.
+
 The renderer tests assert through the theme's tokens rather than through
 colour names, so the suite is run again in each palette that changes what a
 token holds:
