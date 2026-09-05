@@ -1723,8 +1723,12 @@ pub fn compare_tickets(
         .then_with(|| left.key.organization.cmp(&right.key.organization))
 }
 
+/// Case-insensitive, without building two lowercase copies per comparison:
+/// a sort over 35k rows by title calls this half a million times.
 fn compare_text(left: &str, right: &str) -> Ordering {
-    left.to_lowercase().cmp(&right.to_lowercase())
+    left.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(right.chars().flat_map(char::to_lowercase))
 }
 
 fn compare_optional_last<T: Ord>(
