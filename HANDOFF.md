@@ -23,9 +23,14 @@ Last updated 2026-09-05. The backlog itself lives in Azure DevOps
   section is the chain above, the siblings beside (windowed ±3) and the direct children
   below (capped at 20), with `… N more` lines closing what was cut (#761). Bench after
   all of it: `j` 1 ms, mouse 1 ms, typing 2–3 ms, first frame 10 ms (was 41 / 45 / 40 /
-  48). **Checkpoint: Jacob builds on the VDI with `TICKET_TUI_TRACE` before #764** (sync
-  sizing: pragmas, `prepare_cached`, reconcile deletions every 10 min, eager details only
-  for ≤10 changes) goes.
+  48). **#764 (sync sizing) landed on 2026-09-05 without the VDI checkpoint**, because
+  Jacob cannot build there: the connection runs `synchronous = NORMAL`, a 64 MB cache
+  and memory temp store, the hot inserts go through `prepare_cached`, the watermark
+  lands in the batch's own transaction, a timer tick asks for the project's id list
+  every ten minutes rather than every minute (`r`, a full pull and the first pull of a
+  run always ask), and comments and history come down with an incremental pull only when
+  at most ten work items changed. The 34k-row write phase went from 1.00 s to 0.77 s on
+  the Mac (`bench_replace_all_writes_the_seeded_project`, ignored, in `src/db.rs`).
   Deliberately left out, with triggers, in the Epic's description: lazy descriptions,
   borrowed filter values, `capture_selectable`, parallel first pull, an ASCII glyph mode.
 - **Peeking at a hidden relative** (84088c8, no ticket): walking the family tree onto a
@@ -98,7 +103,7 @@ Last updated 2026-09-05. The backlog itself lives in Azure DevOps
   dispatches an agent: gather -> prompt -> launch, one worded verb per tab).
   #752 (tab 9 Artifacts) is superseded by the teardown.
 - The gate is `cargo fmt --check`, `cargo clippy --all-targets --all-features
-  -D warnings`, `cargo test --all-targets` (629 lib + 34 bin tests) and
+  -D warnings`, `cargo test --all-targets` (634 lib + 34 bin tests, one ignored stopwatch) and
   `cargo build --release`, with the test run repeated under `NO_COLOR=1`,
   `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` - the theme
   matrix, which is real because `Theme::from_env` reads the variable.

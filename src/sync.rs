@@ -44,6 +44,17 @@ fn throttled_message(delay: Duration) -> String {
     )
 }
 
+/// How long a timer pull may go without asking for the project's whole id
+/// list. The list is the size of the project and says only what was deleted,
+/// which is rare, so a work item sent to the recycle bin lingers here for at
+/// most this long; `r` and a full pull always ask.
+const RECONCILE_EVERY: Duration = Duration::from_secs(600);
+
+/// The most changed work items whose comments and history an incremental pull
+/// reads eagerly, two requests each. Beyond it the settle fetch reads what is
+/// actually looked at.
+const EAGER_DETAILS_CAP: usize = 10;
+
 /// What asked for a pull. A timer pull is silent unless it fails; a keypress
 /// reports itself either way.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -946,11 +957,21 @@ impl SyncHandle {
     /// Starts the worker. It keeps running until the handle is dropped, then
     /// ends once the request in flight finishes.
     pub fn spawn(database: PathBuf, connector: Box<dyn SourceConnector>) -> Result<Self> {
+        Self::spawn_reconciling_every(database, connector, RECONCILE_EVERY)
+    }
+
+    /// The same, with the deletion pass due every `every` rather than every
+    /// ten minutes, for a test that cannot wait ten minutes.
+    fn spawn_reconciling_every(
+        database: PathBuf,
+        connector: Box<dyn SourceConnector>,
+        every: Duration,
+    ) -> Result<Self> {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         thread::Builder::new()
             .name("ticket-sync".into())
-            .spawn(move || work(database, connector, &request_receiver, &event_sender))
+            .spawn(move || work(database, connector, every, &request_receiver, &event_sender))
             .context("failed to start the Azure DevOps sync worker")?;
         Ok(Self {
             requests: request_sender,
@@ -994,7 +1015,7 @@ pub fn pull_once(
     let (events, received) = mpsc::channel();
     let mut worker = Worker::new(database, connector);
     worker.force_full = full;
-    let outcome = worker.pull(&events);
+    let outcome = worker.pull(PullOrigin::User, &events);
     // The TUI reads the iteration and area trees lazily, the first time a
     // picker opens. A one-shot pull has no picker to wait for and no next
     // session to leave them to, so it takes them now: they are two small reads,
@@ -1020,14 +1041,16 @@ pub fn pull_once(
 fn work(
     database: PathBuf,
     connector: Box<dyn SourceConnector>,
+    reconcile_every: Duration,
     requests: &Receiver<SyncRequest>,
     events: &Sender<SyncEvent>,
 ) {
     let mut worker = Worker::new(database, connector);
+    worker.reconcile_every = reconcile_every;
     while let Ok(request) = requests.recv() {
         let event = match request {
             SyncRequest::Pull(origin) => {
-                let outcome = worker.pull(events);
+                let outcome = worker.pull(origin, events);
                 SyncEvent::Finished {
                     origin,
                     outcome,
@@ -1147,6 +1170,12 @@ struct Worker {
     /// from the stored watermark. Only `ticket-tui sync --full` sets it: the
     /// TUI's worker lets the watermark decide.
     force_full: bool,
+    /// When the stored rows were last reconciled against the project's own id
+    /// list — a full pull, or an incremental one that asked for the list.
+    /// `None` until the first pull of the run, which always asks.
+    last_reconcile: Option<Instant>,
+    /// How long a timer pull may go without reconciling.
+    reconcile_every: Duration,
 }
 
 impl Worker {
@@ -1160,14 +1189,23 @@ impl Worker {
             typed_states_seeded: false,
             throttled: None,
             force_full: false,
+            last_reconcile: None,
+            reconcile_every: RECONCILE_EVERY,
         }
+    }
+
+    /// Whether the deletion pass is due: never run this run, or run longer
+    /// ago than the window allows.
+    fn reconcile_due(&self) -> bool {
+        self.last_reconcile
+            .is_none_or(|at| at.elapsed() >= self.reconcile_every)
     }
 
     /// A timer pull turned away for throttling is not retried here: the main
     /// thread owns the clock, and sleeping on this thread would only hold every
     /// edit typed in the meantime behind a pull nobody asked for.
-    fn pull(&mut self, events: &Sender<SyncEvent>) -> SyncOutcome {
-        match self.try_pull(events) {
+    fn pull(&mut self, origin: PullOrigin, events: &Sender<SyncEvent>) -> SyncOutcome {
+        match self.try_pull(origin, events) {
             Ok(outcome) => outcome,
             Err(error) => azure::throttle_delay(&error).map_or_else(
                 || SyncOutcome::Failed(format!("{error:#}")),
@@ -1528,14 +1566,14 @@ impl Worker {
     /// so everything comes down once and leaves a watermark for next time. A
     /// scope that no longer matches the one the rows were pulled under is the
     /// other way to lose that starting point.
-    fn try_pull(&mut self, events: &Sender<SyncEvent>) -> Result<SyncOutcome> {
+    fn try_pull(&mut self, origin: PullOrigin, events: &Sender<SyncEvent>) -> Result<SyncOutcome> {
         let outcome = match self.watermark()? {
             // A scope that has moved makes the stored rows the wrong slice of
             // the project: the condition may have widened, and only a full pull
             // brings in what it now admits, or narrowed, and only a full pull
             // drops what it now excludes.
             Some(watermark) if !self.force_full && !self.rescoped(events)? => {
-                self.pull_changed(watermark, events)?
+                self.pull_changed(watermark, origin, events)?
             }
             _ => self.pull_everything(events)?,
         };
@@ -1620,11 +1658,12 @@ impl Worker {
             ..TicketGraph::default()
         };
         let types = self.uncached_types(&batch.tickets)?;
-        let repository = self.repository()?;
-        let count = repository.replace_all(&batch.tickets, &graph)?;
-        if let Some(watermark) = watermark {
-            repository.set_meta(db::WATERMARK_KEY, &watermark.to_rfc3339())?;
-        }
+        let watermark = watermark.map(|watermark| watermark.to_rfc3339());
+        let count = self
+            .repository()?
+            .replace_all(&batch.tickets, &graph, watermark.as_deref())?;
+        // Every row was just replaced, so nothing deleted can be lingering.
+        self.last_reconcile = Some(Instant::now());
         self.cache_type_states(&types, events)?;
         self.sync_repos(events)?;
         self.sync_pipelines(events)?;
@@ -1637,17 +1676,24 @@ impl Worker {
         })
     }
 
-    /// Reads only what changed since `watermark`, then reconciles deletions
-    /// against the project's own id list. When neither turns anything up the
-    /// database is not touched at all: no write means no new data signature,
-    /// so no other ticket-tui or agent reading the file reloads for nothing.
+    /// Reads only what changed since `watermark`, and — every ten minutes, on
+    /// `r`, and on the first pull of a run — reconciles deletions against the
+    /// project's own id list, which is the size of the project and says only
+    /// what was deleted. When neither turns anything up the database is not
+    /// touched at all: no write means no new data signature, so no other
+    /// ticket-tui or agent reading the file reloads for nothing.
     fn pull_changed(
         &mut self,
         watermark: Timestamp,
+        origin: PullOrigin,
         events: &Sender<SyncEvent>,
     ) -> Result<SyncOutcome> {
         let mut batch = self.source(events)?.pull_changed_since(watermark)?;
-        let live_ids = self.source(events)?.list_ids()?;
+        let live_ids = if origin == PullOrigin::User || self.reconcile_due() {
+            Some(self.source(events)?.list_ids()?)
+        } else {
+            None
+        };
         // Only ever forward: the query is inclusive and rounded down to the
         // second, so a boundary work item can come back reading a shade older
         // than the watermark that asked for it. Read before the parents join
@@ -1657,22 +1703,38 @@ impl Worker {
 
         // A work item that moved is a work item somebody is about to look at,
         // so its comments and history come down with it and land in the same
-        // transaction. A full pull does not do this: two more requests per
-        // work item is a price only a handful of changes can pay.
-        let details = self.details_for(&batch.tickets, events)?;
+        // transaction — while only a handful moved. Two more requests per work
+        // item is a price a handful of changes can pay and a busy hour's worth
+        // cannot; past the cap the settle fetch reads what is looked at, the
+        // way it does after a full pull.
+        let details = if batch.tickets.len() <= EAGER_DETAILS_CAP {
+            self.details_for(&batch.tickets, events)?
+        } else {
+            Vec::new()
+        };
         let held = self.repository()?.stored_ids()?;
         self.with_ancestors(&mut batch, held, events)?;
         let types = self.uncached_types(&batch.tickets)?;
 
+        let next = next.map(|next| next.to_rfc3339());
         let repository = self.repository()?;
         if !batch.tickets.is_empty() {
-            repository.upsert_all(&batch.tickets, &batch.relations, &batch.artifacts, &details)?;
+            repository.upsert_all(
+                &batch.tickets,
+                &batch.relations,
+                &batch.artifacts,
+                &details,
+                next.as_deref(),
+            )?;
         }
-        let removed = repository.delete_missing(&live_ids)?;
+        let removed = match &live_ids {
+            Some(live_ids) => repository.delete_missing(live_ids)?,
+            None => 0,
+        };
+        if live_ids.is_some() {
+            self.last_reconcile = Some(Instant::now());
+        }
         let count = batch.tickets.len() + removed;
-        if let Some(next) = next {
-            repository.set_meta(db::WATERMARK_KEY, &next.to_rfc3339())?;
-        }
         self.cache_type_states(&types, events)?;
         // The repositories come down with every pull, and a project whose work
         // items and repositories are both untouched writes nothing at all.
@@ -2770,7 +2832,7 @@ mod tests {
         let path = directory.path().join("tickets.sqlite3");
         let mut repository = SqliteTicketRepository::open(&path).unwrap();
         repository
-            .replace_all(tickets, &TicketGraph::default())
+            .replace_all(tickets, &TicketGraph::default(), None)
             .unwrap();
         path
     }
@@ -2785,7 +2847,7 @@ mod tests {
     ) -> PathBuf {
         let path = directory.path().join("tickets.sqlite3");
         let mut repository = SqliteTicketRepository::open(&path).unwrap();
-        repository.replace_all(tickets, graph).unwrap();
+        repository.replace_all(tickets, graph, None).unwrap();
         repository.set_meta(db::WATERMARK_KEY, watermark).unwrap();
         path
     }
@@ -3840,6 +3902,144 @@ mod tests {
     }
 
     #[test]
+    fn an_incremental_pull_reads_details_eagerly_only_for_a_handful_of_changes() {
+        let directory = tempdir().unwrap();
+        let resting: Vec<Ticket> = (1..=11).map(|id| ticket(id, "Resting")).collect();
+        let path = watermarked_database(
+            &directory,
+            &resting,
+            &TicketGraph::default(),
+            "2026-02-01T00:00:00Z",
+        );
+        let moved = |ids: std::ops::RangeInclusive<i64>| SyncBatch {
+            tickets: ids
+                .map(|id| Ticket {
+                    revision: 4,
+                    changed_at: ts("2026-03-05T10:00:00Z"),
+                    ..ticket(id, "Moved")
+                })
+                .collect(),
+            ..SyncBatch::default()
+        };
+        let source = FakeSource::with(vec![Ok(moved(1..=11)), Ok(moved(1..=10))])
+            .listing((1..=11).collect());
+        let read = Arc::clone(&source.detailed);
+        let handle = SyncHandle::spawn(path, Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        assert!(matches!(
+            pulled(&handle),
+            SyncOutcome::Pulled { count: 11, .. }
+        ));
+        assert!(
+            read.lock().unwrap().is_empty(),
+            "eleven changes are left to the settle fetch"
+        );
+
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        assert!(matches!(
+            pulled(&handle),
+            SyncOutcome::Pulled { count: 10, .. }
+        ));
+        assert_eq!(
+            read.lock().unwrap().len(),
+            10,
+            "ten come down with the pull"
+        );
+    }
+
+    /// The stored ids, sorted, for the reconcile tests to read what a tick
+    /// deleted.
+    fn stored_ids_sorted(path: &PathBuf) -> Vec<i64> {
+        let stored = SqliteTicketRepository::open_existing(path).unwrap();
+        let mut ids: Vec<i64> = stored.stored_ids().unwrap().into_iter().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Two resting rows and a source that lists both and changes nothing; the
+    /// tests reach its id list and request count through the shared handles.
+    fn reconcile_fixture(directory: &TempDir) -> (PathBuf, FakeSource) {
+        let path = watermarked_database(
+            directory,
+            &[ticket(1, "One"), ticket(2, "Two")],
+            &TicketGraph::default(),
+            "2026-02-01T00:00:00Z",
+        );
+        let source = FakeSource::with(vec![
+            Ok(SyncBatch::default()),
+            Ok(SyncBatch::default()),
+            Ok(SyncBatch::default()),
+        ])
+        .listing(vec![1, 2]);
+        (path, source)
+    }
+
+    #[test]
+    fn a_timer_tick_within_the_reconcile_window_lists_no_ids_and_deletes_nothing() {
+        let directory = tempdir().unwrap();
+        let (path, source) = reconcile_fixture(&directory);
+        let live_ids = Arc::clone(&source.live_ids);
+        let requests = Arc::clone(&source.requests);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        // The first tick of a run reconciles: the changed-since query and the
+        // id list.
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        assert!(matches!(pulled(&handle), SyncOutcome::Unchanged));
+        assert_eq!(*requests.lock().unwrap(), 2);
+
+        // Work item 2 goes to the recycle bin. The tick a minute later does
+        // not ask, so it stays.
+        *live_ids.lock().unwrap() = Some(vec![1]);
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        assert!(matches!(pulled(&handle), SyncOutcome::Unchanged));
+        assert_eq!(
+            *requests.lock().unwrap(),
+            3,
+            "the changed-since query alone"
+        );
+        assert_eq!(stored_ids_sorted(&path), vec![1, 2]);
+
+        // `r` always asks.
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
+        assert!(matches!(
+            pulled(&handle),
+            SyncOutcome::Pulled { count: 1, .. }
+        ));
+        assert_eq!(*requests.lock().unwrap(), 5);
+        assert_eq!(stored_ids_sorted(&path), vec![1]);
+    }
+
+    #[test]
+    fn a_timer_tick_after_the_reconcile_window_lists_the_ids_and_deletes_what_is_gone() {
+        let directory = tempdir().unwrap();
+        let (path, source) = reconcile_fixture(&directory);
+        let live_ids = Arc::clone(&source.live_ids);
+        let requests = Arc::clone(&source.requests);
+        let handle =
+            SyncHandle::spawn_reconciling_every(path.clone(), Box::new(source), Duration::ZERO)
+                .unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        assert!(matches!(pulled(&handle), SyncOutcome::Unchanged));
+        assert_eq!(*requests.lock().unwrap(), 2);
+
+        *live_ids.lock().unwrap() = Some(vec![1]);
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        assert!(matches!(
+            pulled(&handle),
+            SyncOutcome::Pulled { count: 1, .. }
+        ));
+        assert_eq!(
+            *requests.lock().unwrap(),
+            4,
+            "the window passed, so it asked"
+        );
+        assert_eq!(stored_ids_sorted(&path), vec![1]);
+    }
+
+    #[test]
     fn a_details_request_reads_one_work_item_and_stores_it_against_that_revision() {
         let directory = tempdir().unwrap();
         let mut resting = ticket(1, "Resting");
@@ -4239,14 +4439,16 @@ mod tests {
         assert_eq!(stored_ids(&path), vec![5, 9, 12]);
 
         // A pull whose id list is the scope's own leaves the parents alone.
+        // `r`, so the pass that reads the list runs at once rather than in
+        // ten minutes.
         *live.lock().unwrap() = Some(vec![5]);
-        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
         assert!(matches!(pulled(&handle), SyncOutcome::Unchanged));
         assert_eq!(stored_ids(&path), vec![5, 9, 12]);
 
         // Once nothing in the scope hangs off them, they go with it.
         *live.lock().unwrap() = Some(Vec::new());
-        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
         assert!(matches!(
             pulled(&handle),
             SyncOutcome::Pulled { count: 3, .. }
@@ -4504,6 +4706,7 @@ mod tests {
                     relations: vec![parent_link(3, 1), child_link(1, 3)],
                     ..TicketGraph::default()
                 },
+                None,
             )
             .unwrap();
         drop(repository);
@@ -4564,6 +4767,7 @@ mod tests {
                     relations: vec![parent_link(3, 1), child_link(1, 3)],
                     ..TicketGraph::default()
                 },
+                None,
             )
             .unwrap();
         drop(repository);
@@ -4740,6 +4944,7 @@ mod tests {
                     }],
                     ..TicketGraph::default()
                 },
+                None,
             )
             .unwrap();
         (path, parent, child)

@@ -398,13 +398,7 @@ impl SqliteTicketRepository {
 
     /// Records one fact about the cache, such as who ran the last sync.
     pub fn set_meta(&mut self, key: &str, value: &str) -> Result<()> {
-        self.connection
-            .execute(
-                "INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?1, ?2)",
-                params![key, value],
-            )
-            .with_context(|| format!("failed to store the {key} cache setting"))?;
-        Ok(())
+        set_meta(&self.connection, key, value)
     }
 
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
@@ -984,8 +978,16 @@ impl SqliteTicketRepository {
         Ok(nodes)
     }
 
-    /// Replaces the cached work items and their graph with a freshly pulled set.
-    pub fn replace_all(&mut self, tickets: &[Ticket], graph: &TicketGraph) -> Result<usize> {
+    /// Replaces the cached work items and their graph with a freshly pulled
+    /// set, and records `watermark` — the pull's own — in the same
+    /// transaction, so the rows and the mark they were pulled to land in one
+    /// commit and one fsync.
+    pub fn replace_all(
+        &mut self,
+        tickets: &[Ticket],
+        graph: &TicketGraph,
+        watermark: Option<&str>,
+    ) -> Result<usize> {
         let transaction = self.connection.transaction()?;
         transaction
             .execute_batch(CLEAR_CACHE)
@@ -1005,6 +1007,9 @@ impl SqliteTicketRepository {
         for entry in &graph.history {
             insert_history(&transaction, entry)?;
         }
+        if let Some(watermark) = watermark {
+            set_meta(&transaction, WATERMARK_KEY, watermark)?;
+        }
         transaction.commit()?;
         Ok(tickets.len())
     }
@@ -1019,7 +1024,7 @@ impl SqliteTicketRepository {
         relations: &[RelationRecord],
         artifacts: &[ArtifactLink],
     ) -> Result<()> {
-        self.write_upserts(slice::from_ref(ticket), relations, artifacts, &[])
+        self.write_upserts(slice::from_ref(ticket), relations, artifacts, &[], None)
             .with_context(|| format!("failed to store work item {}", ticket.key.id))
     }
 
@@ -1064,15 +1069,17 @@ impl SqliteTicketRepository {
     /// other row alone. This is how an incremental pull lands: only what
     /// changed is rewritten, so the rows nobody touched keep the bytes they
     /// already had, and a work item's rows and its discussion never disagree
-    /// about which revision they came from.
+    /// about which revision they came from. `watermark`, when the pull moved
+    /// it, lands in the same commit as the rows it stands for.
     pub fn upsert_all(
         &mut self,
         tickets: &[Ticket],
         relations: &[RelationRecord],
         artifacts: &[ArtifactLink],
         details: &[DetailsUpdate],
+        watermark: Option<&str>,
     ) -> Result<()> {
-        self.write_upserts(tickets, relations, artifacts, details)
+        self.write_upserts(tickets, relations, artifacts, details, watermark)
             .with_context(|| format!("failed to store {} changed work items", tickets.len()))
     }
 
@@ -1242,6 +1249,7 @@ impl SqliteTicketRepository {
         relations: &[RelationRecord],
         artifacts: &[ArtifactLink],
         details: &[DetailsUpdate],
+        watermark: Option<&str>,
     ) -> Result<()> {
         let transaction = self.connection.transaction()?;
         for ticket in tickets {
@@ -1269,6 +1277,9 @@ impl SqliteTicketRepository {
         // After the work items: a fresh row carries `details_rev = 0`, and it
         // is this that lifts it to the revision the details were read at.
         write_details(&transaction, details)?;
+        if let Some(watermark) = watermark {
+            set_meta(&transaction, WATERMARK_KEY, watermark)?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -1441,8 +1452,12 @@ fn data_home() -> Option<PathBuf> {
 }
 
 /// One connection to the file, configured the way every reader and writer
-/// wants it: a short wait on a lock rather than an immediate refusal, and the
-/// write-ahead log so a reload never blocks a pull.
+/// wants it: a short wait on a lock rather than an immediate refusal, the
+/// write-ahead log so a reload never blocks a pull, and one fsync per
+/// checkpoint rather than per commit — `synchronous = NORMAL` is safe under
+/// WAL, and a commit lost to a power cut is one the next pull reads again,
+/// because Azure DevOps holds the truth. The cache is 64 MB, the size of a
+/// 35k-item file, and sort space stays in memory.
 fn connect(path: &Path) -> Result<Connection> {
     let connection = Connection::open(path)
         .with_context(|| format!("failed to open database at {}", path.display()))?;
@@ -1450,7 +1465,12 @@ fn connect(path: &Path) -> Result<Connection> {
         .busy_timeout(StdDuration::from_secs(3))
         .context("failed to configure SQLite busy timeout")?;
     connection
-        .execute_batch("PRAGMA journal_mode = WAL;")
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA cache_size = -65536;
+             PRAGMA temp_store = MEMORY;",
+        )
         .context("failed to configure SQLite")?;
     Ok(connection)
 }
@@ -1548,16 +1568,31 @@ fn forget_work_item(transaction: &Transaction<'_>, organization: &str, id: i64) 
     Ok(())
 }
 
+/// Records one fact about the cache inside whatever transaction is open.
+fn set_meta(connection: &Connection, key: &str, value: &str) -> Result<()> {
+    connection
+        .prepare_cached("INSERT OR REPLACE INTO sync_meta (key, value) VALUES (?1, ?2)")?
+        .execute(params![key, value])
+        .with_context(|| format!("failed to store the {key} cache setting"))?;
+    Ok(())
+}
+
+// The inserts a pull repeats tens of thousands of times are prepared once a
+// connection and reused: `prepare_cached` hands the same compiled statement
+// back for the same SQL text.
+
 fn insert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
-    transaction.execute(
-        "INSERT OR REPLACE INTO work_items (
+    transaction
+        .prepare_cached(
+            "INSERT OR REPLACE INTO work_items (
             organization, project, work_item_id, revision, work_item_type,
             title, state, reason, assigned_to, priority, area_path,
             iteration_path, tags, description, created_at, changed_at, web_url,
             details_rev, description_html
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
                    ?18, ?19)",
-        params![
+        )?
+        .execute(params![
             ticket.key.organization,
             ticket.project,
             ticket.key.id,
@@ -1577,66 +1612,70 @@ fn insert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
             ticket.web_url,
             ticket.details_rev,
             ticket.description_html,
-        ],
-    )?;
+        ])?;
     Ok(())
 }
 
 fn insert_relation(transaction: &Transaction<'_>, relation: &RelationRecord) -> Result<()> {
-    transaction.execute(
-        "INSERT OR REPLACE INTO work_item_relations (organization, from_id, to_id, kind)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![
+    transaction
+        .prepare_cached(
+            "INSERT OR REPLACE INTO work_item_relations (organization, from_id, to_id, kind)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?
+        .execute(params![
             relation.from.organization,
             relation.from.id,
             relation.to.id,
             relation.kind.as_str()
-        ],
-    )?;
+        ])?;
     Ok(())
 }
 
 fn insert_artifact_link(transaction: &Transaction<'_>, artifact: &ArtifactLink) -> Result<()> {
-    transaction.execute(
-        "INSERT OR REPLACE INTO work_item_artifact_links
-            (organization, work_item_id, kind, repo_id, target, name)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
+    transaction
+        .prepare_cached(
+            "INSERT OR REPLACE INTO work_item_artifact_links
+                (organization, work_item_id, kind, repo_id, target, name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?
+        .execute(params![
             artifact.work_item.organization,
             artifact.work_item.id,
             artifact.kind.as_str(),
             artifact.kind.repo_id().unwrap_or_default(),
             artifact.kind.target(),
             artifact.name
-        ],
-    )?;
+        ])?;
     Ok(())
 }
 
 fn insert_comment(transaction: &Transaction<'_>, comment: &CommentRecord) -> Result<()> {
-    transaction.execute(
-        "INSERT OR REPLACE INTO work_item_comments
-            (organization, work_item_id, comment_id, created_at, author, body)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
+    transaction
+        .prepare_cached(
+            "INSERT OR REPLACE INTO work_item_comments
+                (organization, work_item_id, comment_id, created_at, author, body)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?
+        .execute(params![
             comment.ticket.organization,
             comment.ticket.id,
             comment.comment_id,
             comment.created_at.to_rfc3339(),
             comment.author,
             comment.text
-        ],
-    )?;
+        ])?;
     Ok(())
 }
 
 fn insert_history(transaction: &Transaction<'_>, entry: &HistoryRecord) -> Result<()> {
-    transaction.execute(
-        "INSERT OR REPLACE INTO work_item_history
-            (organization, work_item_id, revision, changed_at, changed_by,
-             field_name, old_value, new_value)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![
+    transaction
+        .prepare_cached(
+            "INSERT OR REPLACE INTO work_item_history
+                (organization, work_item_id, revision, changed_at, changed_by,
+                 field_name, old_value, new_value)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )?
+        .execute(params![
             entry.ticket.organization,
             entry.ticket.id,
             entry.revision,
@@ -1645,8 +1684,7 @@ fn insert_history(transaction: &Transaction<'_>, entry: &HistoryRecord) -> Resul
             entry.field_name,
             entry.old_value,
             entry.new_value
-        ],
-    )?;
+        ])?;
     Ok(())
 }
 
@@ -1783,7 +1821,7 @@ mod tests {
             ..TicketGraph::default()
         };
         repository
-            .replace_all(&[one.clone(), two.clone()], &graph)
+            .replace_all(&[one.clone(), two.clone()], &graph, None)
             .unwrap();
 
         let stored = repository.load_graph().unwrap();
@@ -1854,7 +1892,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(repository.replace_all(&tickets, &graph).unwrap(), 2);
+        assert_eq!(repository.replace_all(&tickets, &graph, None).unwrap(), 2);
 
         let mut loaded = repository.load_all().unwrap();
         loaded.sort_by_key(|ticket| ticket.key.id);
@@ -1864,10 +1902,11 @@ mod tests {
             "the raw description survives the round trip beside its flattened reading"
         );
         assert_eq!(repository.load_graph().unwrap(), graph);
+        assert_eq!(repository.meta(WATERMARK_KEY).unwrap(), None);
 
         let survivor = vec![ticket(3)];
         repository
-            .replace_all(&survivor, &TicketGraph::default())
+            .replace_all(&survivor, &TicketGraph::default(), None)
             .unwrap();
         assert_eq!(repository.load_all().unwrap(), survivor);
         assert_eq!(repository.load_graph().unwrap(), TicketGraph::default());
@@ -1877,7 +1916,7 @@ mod tests {
             .set_meta(ME_DISPLAY_NAME_KEY, "Jacob Ragsdale")
             .unwrap();
         repository
-            .replace_all(&survivor, &TicketGraph::default())
+            .replace_all(&survivor, &TicketGraph::default(), None)
             .unwrap();
         assert_eq!(
             repository.meta(ME_DISPLAY_NAME_KEY).unwrap().as_deref(),
@@ -1920,7 +1959,7 @@ mod tests {
             ..TicketGraph::default()
         };
         repository
-            .replace_all(&[ticket(1), ticket(2), ticket(3)], &graph)
+            .replace_all(&[ticket(1), ticket(2), ticket(3)], &graph, None)
             .unwrap();
 
         let mut moved = ticket(3);
@@ -1974,7 +2013,7 @@ mod tests {
             ..TicketGraph::default()
         };
         repository
-            .replace_all(&[ticket(1), ticket(2)], &graph)
+            .replace_all(&[ticket(1), ticket(2)], &graph, None)
             .unwrap();
         let before = data_signature(&path);
 
@@ -2048,7 +2087,7 @@ mod tests {
         );
 
         repository
-            .replace_all(&[ticket(1)], &TicketGraph::default())
+            .replace_all(&[ticket(1)], &TicketGraph::default(), None)
             .unwrap();
         drop(repository);
         assert_eq!(
@@ -2110,7 +2149,7 @@ mod tests {
         assert!(stored.states_for("Epic").is_empty());
 
         repository
-            .replace_all(&[ticket(1)], &TicketGraph::default())
+            .replace_all(&[ticket(1)], &TicketGraph::default(), None)
             .unwrap();
         assert_eq!(
             repository.load_type_states().unwrap(),
@@ -2146,7 +2185,7 @@ mod tests {
         );
 
         repository
-            .replace_all(&[ticket(1)], &TicketGraph::default())
+            .replace_all(&[ticket(1)], &TicketGraph::default(), None)
             .unwrap();
         assert_eq!(
             repository.load_work_item_types().unwrap(),
@@ -2170,7 +2209,7 @@ mod tests {
         let path = directory.path().join("timestamps.sqlite3");
         let mut repository = SqliteTicketRepository::open(&path).unwrap();
         repository
-            .replace_all(&[ticket(10_001)], &TicketGraph::default())
+            .replace_all(&[ticket(10_001)], &TicketGraph::default(), None)
             .unwrap();
         repository
             .connection
@@ -2194,5 +2233,89 @@ mod tests {
         let error = format!("{:#}", repository.load_all().unwrap_err());
         assert!(error.contains("10001"), "{error}");
         assert!(error.contains("created_at"), "{error}");
+    }
+
+    #[test]
+    fn a_batch_write_lands_its_watermark_in_the_same_commit_and_only_when_given_one() {
+        let directory = tempdir().unwrap();
+        let mut repository =
+            SqliteTicketRepository::open(directory.path().join("tickets.sqlite3")).unwrap();
+
+        repository
+            .replace_all(
+                &[ticket(1)],
+                &TicketGraph::default(),
+                Some("2026-02-01T00:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(
+            repository.meta(WATERMARK_KEY).unwrap().as_deref(),
+            Some("2026-02-01T00:00:00Z")
+        );
+
+        repository
+            .upsert_all(&[ticket(2)], &[], &[], &[], Some("2026-03-01T00:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            repository.meta(WATERMARK_KEY).unwrap().as_deref(),
+            Some("2026-03-01T00:00:00Z"),
+            "an incremental batch moves it"
+        );
+
+        repository
+            .upsert_all(&[ticket(3)], &[], &[], &[], None)
+            .unwrap();
+        assert_eq!(
+            repository.meta(WATERMARK_KEY).unwrap().as_deref(),
+            Some("2026-03-01T00:00:00Z"),
+            "a batch that saw nothing newer leaves it where it was"
+        );
+        assert_eq!(repository.stored_ids().unwrap().len(), 3);
+    }
+
+    /// Not a test but a stopwatch: the write phase of a full pull at the 35k
+    /// scale `scripts/seed_large_db.py` builds. Run it by name with
+    /// `cargo test --release -- --ignored bench_replace_all --nocapture` and
+    /// read the time it prints; the assertion only says the rows landed.
+    #[test]
+    #[ignore = "a stopwatch, not a check; run by name with --nocapture"]
+    fn bench_replace_all_writes_the_seeded_project() {
+        let directory = tempdir().unwrap();
+        let mut repository =
+            SqliteTicketRepository::open(directory.path().join("bench.sqlite3")).unwrap();
+        let paragraph = "vault token ledger rotate reconcile settle batch retry alert queue ";
+        let html = format!("<div><h2>Title</h2><p>{}</p></div>", paragraph.repeat(30));
+        let text = paragraph.repeat(15);
+        let tickets: Vec<Ticket> = (1..=34_260)
+            .map(|id| Ticket {
+                description: text.clone(),
+                description_html: html.clone(),
+                tags: vec!["tech-debt".into()],
+                ..ticket(id)
+            })
+            .collect();
+        let key = |id: i64| TicketKey {
+            organization: "example-org".into(),
+            id,
+        };
+        let mut graph = TicketGraph::default();
+        for id in 2..=34_260 {
+            let parent = key(1 + (id - 2) / 8);
+            graph.relations.push(RelationRecord {
+                from: key(id),
+                to: parent.clone(),
+                kind: RelationKind::Parent,
+            });
+            graph.relations.push(RelationRecord {
+                from: parent,
+                to: key(id),
+                kind: RelationKind::Child,
+            });
+        }
+
+        let started = std::time::Instant::now();
+        let count = repository.replace_all(&tickets, &graph, None).unwrap();
+        println!("replace_all wrote {count} rows in {:?}", started.elapsed());
+        assert_eq!(count, 34_260);
     }
 }

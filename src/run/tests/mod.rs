@@ -342,7 +342,7 @@ fn seeded_repository(path: &Path) -> SqliteTicketRepository {
     let mut repository = SqliteTicketRepository::open(path).unwrap();
     let tickets: Vec<Ticket> = (1..=3).map(ticket).collect();
     repository
-        .replace_all(&tickets, &TicketGraph::default())
+        .replace_all(&tickets, &TicketGraph::default(), None)
         .unwrap();
     repository
 }

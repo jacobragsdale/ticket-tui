@@ -215,7 +215,7 @@ fn the_watcher_reloads_another_writer_but_never_our_own_sync() {
     let write = |tickets: &[Ticket]| {
         SqliteTicketRepository::open_existing(&path)
             .unwrap()
-            .replace_all(tickets, &TicketGraph::default())
+            .replace_all(tickets, &TicketGraph::default(), None)
             .unwrap();
     };
 

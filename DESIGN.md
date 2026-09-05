@@ -422,7 +422,8 @@ table as `watermark_changed_at` and written down to the second, so the
 comparison is inclusive and the work item it came from is read once more rather
 than an edit made in the same second being missed.
 
-Every pull also runs the plain id query:
+Every tenth minute — and every `r`, every full pull, and the first pull of a
+run — the pull also runs the plain id query:
 
 ```sql
 SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project
@@ -437,7 +438,11 @@ round trips.
 
 Deleting a work item is not an edit — it stops being listed — so this is what
 catches one moved to the recycle bin, and the rows it no longer names are
-removed along with their links, comments, and history.
+removed along with their links, comments, and history. The list is the size of
+the project, ~35k ids over two pages on a department board, and says only what
+was deleted, which is rare; asking for it every ten minutes rather than every
+minute is what keeps a timer tick to one query, and a recycle-binned work item
+lingers for at most ten minutes — `r` clears it at once.
 
 A configured [sync scope](#--query-how-much-of-the-project-to-sync) is ANDed
 into both queries in parentheses, so the same reconciliation drops a work item
@@ -452,10 +457,20 @@ AND [System.Id] > 0 ORDER BY [System.Id]
 Whatever the changed-since query names is read in batches of 200 from
 `/_apis/wit/workitems` with `$expand=relations` and written in one transaction,
 each work item's own row and outgoing links replaced and everyone else's left
-untouched. The watermark advances only after that batch is committed. When
-nothing changed and nothing was deleted, nothing at all is written: an idle
-project costs exactly two queries a minute, the database's timestamp does not
-move, and no other ticket-tui or agent reading the file reloads for nothing.
+untouched. The watermark lands in the same transaction as the rows it stands
+for, so the two are one commit and one fsync. When nothing changed and nothing
+was deleted, nothing at all is written: an idle project costs one query a
+minute and a second one every ten, the database's timestamp does not move, and
+no other ticket-tui or agent reading the file reloads for nothing.
+
+The connection runs the write-ahead log with `synchronous = NORMAL`, one fsync
+per checkpoint rather than per commit: a commit lost to a power cut is one the
+next pull reads again, because Azure DevOps holds the truth. The inserts a full
+pull repeats tens of thousands of times are prepared once a connection and
+reused. Together they take the write phase of a 34k-item full pull from 1.00 s
+to 0.77 s on an M-series SSD (`bench_replace_all_writes_the_seeded_project`, an
+ignored test in `src/db.rs`, is the stopwatch), and further on a slow disk,
+where the fsyncs were the larger share.
 
 A pull runs in full — every work item, replacing the stored rows wholesale —
 when there is no watermark to start from: a fresh database, a database whose
@@ -552,11 +567,12 @@ Azure DevOps stamps the newest revision's `revisedDate` with `9999-01-01`
 instead of a date, because nothing has revised it yet; that revision's own
 `System.ChangedDate` stands in.
 
-An incremental pull reads both for every work item it found changed, in the
-same transaction that stores the work item itself: something that just moved is
-something somebody is about to look at. A full pull does not — two more
-requests per work item is a price only a handful of changes can pay — so
-whatever it left unread is read lazily instead.
+An incremental pull that found at most ten work items changed reads both for
+every one of them, in the same transaction that stores the work item itself:
+something that just moved is something somebody is about to look at. A pull
+that found more does not, and neither does a full pull — two more requests per
+work item is a price a handful of changes can pay and a busy hour on a
+department board cannot — so whatever they left unread is read lazily instead.
 
 Each row carries `details_rev`, the revision its stored comments and history
 belong to. When the selection rests for 300 ms on a work item whose
