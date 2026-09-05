@@ -79,3 +79,58 @@ fn mouse_pointer_sequences_set_and_reset_link_hover() {
         b"\x1b]22;pointer\x1b\\\x1b]22;col-resize\x1b\\\x1b]22;row-resize\x1b\\\x1b]22;\x1b\\"
     );
 }
+
+#[test]
+fn cmd_start_escapes_shell_metacharacters() {
+    assert_eq!(
+        cmd_escape("https://x/?a=1&b=2^c|d<e>f"),
+        "https://x/?a=1^&b=2^^c^|d^<e^>f"
+    );
+}
+
+#[test]
+fn wsl_hands_the_url_to_windows_first() {
+    let url = Url::parse("https://dev.azure.com/demo/atlas/_build/results?buildId=7&view=results")
+        .unwrap();
+    let native = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let programs = |commands: &[Command]| -> Vec<String> {
+        commands
+            .iter()
+            .map(|command| command.get_program().to_string_lossy().into_owned())
+            .collect()
+    };
+    let args = |command: &Command| -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    };
+
+    let wsl = browser_commands(&url, true);
+    assert_eq!(programs(&wsl), ["cmd.exe", "powershell.exe", native]);
+    assert_eq!(
+        args(&wsl[0]),
+        [
+            "/c",
+            "start",
+            "https://dev.azure.com/demo/atlas/_build/results?buildId=7^&view=results"
+        ],
+        "cmd.exe gets the URL bare, with & escaped so start sees all of it"
+    );
+    assert_eq!(
+        args(&wsl[1]),
+        [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Process -FilePath 'https://dev.azure.com/demo/atlas/_build/results?buildId=7&view=results'"
+        ]
+    );
+    assert_eq!(args(&wsl[2]), [url.as_str()]);
+
+    assert_eq!(programs(&browser_commands(&url, false)), [native]);
+}

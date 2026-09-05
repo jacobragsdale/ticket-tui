@@ -6,6 +6,18 @@ Last updated 2026-09-05. The backlog itself lives in Azure DevOps
 
 ## State of `main`
 
+- **`o` under WSL (2026-09-05, no ticket).** On the VDI `o` opened nothing: the launcher
+  ran `xdg-open` with inherited stdio, and a WSL box has no working `xdg-open` unless
+  `wslu` is installed. `open_in_browser` (`src/run/desktop.rs`) now tries, in order,
+  `cmd.exe /c start <url>` with `^ & | < >` caret-escaped (pipeline run URLs carry `&`),
+  `powershell.exe -NoProfile -NonInteractive -Command Start-Process -FilePath '<url>'`,
+  then `xdg-open`; the clipboard's try-each loop and stdio-nulled runner are shared with
+  it. WSL is `/proc/sys/kernel/osrelease` containing `microsoft`. The chain follows the
+  `webbrowser` and `open` crates rather than adding either. Untested on the VDI — Jacob
+  to confirm. If the status line says both `cmd.exe` and `powershell.exe` failed to
+  start, `appendWindowsPath` is off and their full `/mnt/c/Windows/System32` paths are
+  the next entry; `explorer.exe` was left out because it always exits 1.
+
 - **Performance plan, slice 1 of 11 (2026-09-05): the pipeline watcher.** Jacob's
   eleven-step plan (progressive startup, summaries first, query pipeline off the UI
   thread, cached layout, wakeable event loop, and so on) starts with the two bugs that
