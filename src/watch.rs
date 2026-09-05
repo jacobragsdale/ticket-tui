@@ -41,11 +41,16 @@ pub const QUIET_LOG_CADENCE: Duration = Duration::from_secs(5);
 /// How many empty polls in a row mean a log has gone quiet.
 const QUIET_AFTER: u32 = 2;
 
+/// The most lines one log request asks for. A longer log comes in pages, back
+/// to back, so a 100,000-line log is never one response.
+pub const LOG_PAGE: usize = 5_000;
+
 /// The node whose log is on screen, and how much of it is already held.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LogTarget {
     pub log_id: i64,
-    /// How many lines the screen holds, which is where the next fetch starts.
+    /// Where the next fetch starts: how many lines of the remote log the
+    /// screen has been given, which is not how many it kept.
     pub from_line: usize,
     /// Whether the node is still writing. A finished one is read once, whole.
     pub live: bool,
@@ -295,20 +300,36 @@ impl Watcher {
         match request {
             WatchRequest::TabShowing(showing) => self.tab_showing = *showing,
             WatchRequest::Focus { run_id, node } => {
+                // Log ids count from one in every run, so a log is named by
+                // both.
+                let moved = (self.focus, self.node.map(|held| held.log_id))
+                    != (Some(*run_id), node.map(|node| node.log_id));
                 if self.focus != Some(*run_id) {
                     self.focus = Some(*run_id);
                     // A run just moved onto the screen is read at once rather
-                    // than at the next tick of somebody else's cadence.
+                    // than at the next tick of somebody else's cadence, and
+                    // read afresh: the screen keeps only a few runs' worth, so
+                    // what settled earlier may well have been let go since.
                     self.timeline = Cadence::new(TIMELINE_CADENCE);
+                    self.settled.retain(|run| run != run_id);
+                    self.read_work_items.retain(|run| run != run_id);
                 }
                 // A different node is a different log, read at once; the same
                 // node with more lines held is the same poll going on.
-                let moved = self.node.map(|held| held.log_id) != node.map(|node| node.log_id);
                 if moved {
                     self.log = Cadence::new(LOG_CADENCE);
                     self.quiet_polls = 0;
+                    if let Some(node) = node {
+                        self.settled_logs
+                            .retain(|held| *held != (*run_id, node.log_id));
+                    }
+                    self.node = *node;
+                } else if let (Some(held), Some(node)) = (self.node.as_mut(), node) {
+                    // The screen knows only what this has told it; a page
+                    // fetched since is further on than what it echoes back.
+                    held.from_line = held.from_line.max(node.from_line);
+                    held.live = node.live;
                 }
-                self.node = *node;
             }
             WatchRequest::RefreshApprovals => self.approvals = Cadence::new(APPROVALS_CADENCE),
             WatchRequest::Blur => {
@@ -323,6 +344,40 @@ impl Watcher {
             WatchRequest::Unwatch(run) => self.watched.retain(|held| held != run),
             WatchRequest::Stop => return false,
         }
+        true
+    }
+
+    /// The run whose timeline is worth a request: the one on screen, unless it
+    /// has settled.
+    fn pending_timeline(&self) -> Option<i64> {
+        self.focus.filter(|run| !self.settled.contains(run))
+    }
+
+    /// The log worth a request: the node on screen, unless the whole of it has
+    /// been read.
+    fn pending_log(&self) -> Option<(i64, LogTarget)> {
+        let run = self.focus?;
+        let target = self.node?;
+        (!self.settled_logs.contains(&(run, target.log_id))).then_some((run, target))
+    }
+
+    /// Whether the last response asked to be left alone. If it did, every
+    /// cadence stretches and holds off for as long as it asked, and the round
+    /// stops there: the next request would only be turned away too.
+    fn throttled(&mut self, now: Instant, events: &mut Vec<WatchEvent>) -> bool {
+        let Some(wait) = self.source.throttled_for() else {
+            return false;
+        };
+        for cadence in [
+            &mut self.live,
+            &mut self.timeline,
+            &mut self.log,
+            &mut self.approvals,
+        ] {
+            cadence.stretch();
+            cadence.hold_off(now, wait);
+        }
+        events.push(WatchEvent::Throttled(wait));
         true
     }
 
@@ -364,6 +419,9 @@ impl Watcher {
                 }
             }
             self.live.polled(now);
+            if self.throttled(now, &mut events) {
+                return events;
+            }
         }
         if let Some(run) = self.focus.filter(|run| !self.read_work_items.contains(run)) {
             self.read_work_items.push(run);
@@ -373,8 +431,11 @@ impl Watcher {
                     work_items,
                 });
             }
+            if self.throttled(now, &mut events) {
+                return events;
+            }
         }
-        if let Some(run) = self.focus.filter(|run| !self.settled.contains(run))
+        if let Some(run) = self.pending_timeline()
             && self.timeline.is_due(now)
         {
             match self.source.timeline(run) {
@@ -399,12 +460,11 @@ impl Watcher {
                 }
             }
             self.timeline.polled(now);
+            if self.throttled(now, &mut events) {
+                return events;
+            }
         }
-        if let Some(target) = self.node.filter(|target| {
-            !self
-                .settled_logs
-                .contains(&(self.focus.unwrap_or_default(), target.log_id))
-        }) && let Some(run) = self.focus
+        if let Some((run, target)) = self.pending_log()
             && self.log.is_due(now)
         {
             match self.source.log_lines(run, target.log_id, target.from_line) {
@@ -418,16 +478,28 @@ impl Watcher {
                         self.quiet_polls = 0;
                         self.log = Cadence::new(LOG_CADENCE);
                     }
-                    if !target.live {
+                    // A full page may not be the end: the next is asked for
+                    // at once, from where this one stopped, and a finished
+                    // node's log is settled only by a page that comes back
+                    // short.
+                    let more = lines.len() >= LOG_PAGE;
+                    let finished = !target.live && !more;
+                    if finished {
                         self.settled_logs.push((run, target.log_id));
+                    }
+                    if let Some(node) = self.node.as_mut() {
+                        node.from_line = target.from_line + lines.len();
                     }
                     events.push(WatchEvent::LogLines {
                         run_id: run,
                         log_id: target.log_id,
                         from_line: target.from_line,
                         lines,
-                        finished: !target.live,
+                        finished,
                     });
+                    if !more {
+                        self.log.polled(now);
+                    }
                 }
                 Err(error) => {
                     self.log.stretch();
@@ -435,46 +507,40 @@ impl Watcher {
                         self.failing = true;
                         events.push(WatchEvent::Failed(format!("{error:#}")));
                     }
+                    self.log.polled(now);
                 }
             }
-            self.log.polled(now);
+            if self.throttled(now, &mut events) {
+                return events;
+            }
         }
         if self.approvals.is_due(now) {
             if let Ok(approvals) = self.source.approvals() {
                 events.push(WatchEvent::Approvals(approvals));
             }
             self.approvals.polled(now);
-        }
-        if let Some(wait) = self.source.throttled_for() {
-            self.live.stretch();
-            self.timeline.stretch();
-            self.log.stretch();
-            self.live.hold_off(now, wait);
-            self.timeline.hold_off(now, wait);
-            self.log.hold_off(now, wait);
-            events.push(WatchEvent::Throttled(wait));
+            self.throttled(now, &mut events);
         }
         events
     }
 
     /// How long the loop may block for before something is due. A watcher with
-    /// nothing to watch waits for a request rather than for a clock.
+    /// nothing to watch waits for a request rather than for a clock. Only what
+    /// [`Self::poll`] would actually read counts: a deadline nothing advances
+    /// would have the loop spinning on it.
     #[must_use]
     pub fn until_due(&self, now: Instant) -> Option<Duration> {
         if !self.is_watching() {
             return None;
         }
-        let live = self.live.until_due(now);
-        let timeline = self
-            .focus
-            .filter(|run| !self.settled.contains(run))
-            .map_or(live, |_| self.timeline.until_due(now));
-        let log = self.node.map_or(live, |_| self.log.until_due(now));
-        Some(
-            live.min(timeline)
-                .min(log)
-                .min(self.approvals.until_due(now)),
-        )
+        let mut wait = self.live.until_due(now).min(self.approvals.until_due(now));
+        if self.pending_timeline().is_some() {
+            wait = wait.min(self.timeline.until_due(now));
+        }
+        if self.pending_log().is_some() {
+            wait = wait.min(self.log.until_due(now));
+        }
+        Some(wait)
     }
 }
 
@@ -1017,12 +1083,124 @@ mod tests {
             "the whole log, and it says it will not grow"
         );
 
+        assert!(
+            watcher
+                .until_due(start)
+                .is_some_and(|wait| wait > Duration::ZERO),
+            "and the loop waits for something else rather than spinning on it"
+        );
         watcher.poll(start + Duration::from_secs(30));
         assert_eq!(
             log_reads.lock().unwrap().len(),
             1,
             "a finished node's log is never asked for twice"
         );
+    }
+
+    #[test]
+    fn a_long_log_comes_in_pages_back_to_back() {
+        let Harness {
+            mut watcher,
+            log_reads,
+            log,
+            ..
+        } = watcher();
+        watcher.handle(&WatchRequest::TabShowing(true));
+        *log.lock().unwrap() = (0..LOG_PAGE).map(|line| format!("line {line}")).collect();
+        watcher.handle(&WatchRequest::Focus {
+            run_id: 14,
+            node: Some(LogTarget {
+                log_id: 7,
+                from_line: 0,
+                live: false,
+            }),
+        });
+        let start = Instant::now();
+
+        let events = watcher.poll(start);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                WatchEvent::LogLines { from_line: 0, lines, finished: false, .. }
+                    if lines.len() == LOG_PAGE
+            )),
+            "a full page does not say the log is finished"
+        );
+        assert_eq!(
+            watcher.until_due(start),
+            Some(Duration::ZERO),
+            "and the next page is due at once"
+        );
+
+        // The screen echoes the offset it had before the page landed; the
+        // watcher knows better.
+        watcher.handle(&WatchRequest::Focus {
+            run_id: 14,
+            node: Some(LogTarget {
+                log_id: 7,
+                from_line: 0,
+                live: false,
+            }),
+        });
+        *log.lock().unwrap() = vec!["tail".to_owned()];
+        let events = watcher.poll(start);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                WatchEvent::LogLines { from_line, lines, finished: true, .. }
+                    if *from_line == LOG_PAGE && lines == &["tail".to_owned()]
+            )),
+            "a short page is the end: {events:?}"
+        );
+        assert_eq!(*log_reads.lock().unwrap(), [0, LOG_PAGE]);
+        assert!(
+            watcher
+                .until_due(start)
+                .is_some_and(|wait| wait > Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn moving_back_to_a_run_reads_it_afresh() {
+        let Harness {
+            mut watcher,
+            timelines,
+            finished,
+            log_reads,
+            ..
+        } = watcher();
+        watcher.handle(&WatchRequest::TabShowing(true));
+        *finished.lock().unwrap() = true;
+        let node = Some(LogTarget {
+            log_id: 7,
+            from_line: 0,
+            live: false,
+        });
+        watcher.handle(&WatchRequest::Focus { run_id: 14, node });
+        let start = Instant::now();
+        watcher.poll(start);
+        assert_eq!(*timelines.lock().unwrap(), 1);
+        assert_eq!(log_reads.lock().unwrap().len(), 1);
+
+        // Away to another run, whose log 7 is a different log altogether.
+        watcher.handle(&WatchRequest::Focus { run_id: 15, node });
+        watcher.poll(start + Duration::from_secs(10));
+        assert_eq!(*timelines.lock().unwrap(), 2);
+        assert_eq!(*log_reads.lock().unwrap(), [0, 0], "read from its own top");
+
+        // And back: the screen may have let both go, so both are read again,
+        // the log from wherever the screen says it has got to.
+        watcher.handle(&WatchRequest::Focus {
+            run_id: 14,
+            node: Some(LogTarget {
+                log_id: 7,
+                from_line: 1,
+                live: false,
+            }),
+        });
+        watcher.poll(start + Duration::from_secs(20));
+        assert_eq!(*timelines.lock().unwrap(), 3);
+        assert_eq!(*log_reads.lock().unwrap(), [0, 0, 1]);
     }
 
     #[test]

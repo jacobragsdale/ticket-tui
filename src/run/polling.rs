@@ -289,10 +289,8 @@ pub(super) fn poll_pipelines(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 log_id,
                 from_line,
                 lines,
-                finished,
-            } => app
-                .pipelines
-                .append_log(run_id, log_id, from_line, lines, finished),
+                finished: _,
+            } => app.pipelines.append_log(run_id, log_id, from_line, lines),
             WatchEvent::Throttled(wait) => app.shell.set_watch_state(Some(format!(
                 "holding off {}s — Azure DevOps asked",
                 wait.as_secs()

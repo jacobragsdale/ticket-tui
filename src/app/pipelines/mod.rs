@@ -3,6 +3,8 @@
 //! timeline, the log tail and the watcher that keeps them moving — arrive with
 //! #682 to #684; this is the list the rest of the epic hangs off.
 
+use std::collections::VecDeque;
+
 #[cfg(test)]
 use crossterm::event::KeyModifiers;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -27,6 +29,72 @@ const BRANCH_CACHE_SECONDS: i64 = 600;
 /// The most lines one log is worth keeping in memory. Past this the oldest go
 /// and a line at the top says how many.
 pub(crate) const LOG_LINE_CAP: usize = 20_000;
+
+/// The most bytes every held log may take together. Other logs go first,
+/// oldest first; the one being written to gives up its head only when alone.
+pub(crate) const LOG_BYTE_BUDGET: usize = 16 << 20;
+
+/// What is held of one node's log: a window on its tail, and where in the
+/// remote log that window ends.
+struct HeldLog {
+    run_id: i64,
+    log_id: i64,
+    /// The lines kept, newest last. Once anything has been dropped the first
+    /// is a line saying how much.
+    lines: VecDeque<String>,
+    /// The bytes those lines take, the marker aside.
+    bytes: usize,
+    /// How many lines of the remote log have arrived, which is where the next
+    /// fetch starts. Independent of how many are kept.
+    next_line: usize,
+    /// How many lines have gone past the cap.
+    skipped: usize,
+}
+
+impl HeldLog {
+    fn new(run_id: i64, log_id: i64) -> Self {
+        Self {
+            run_id,
+            log_id,
+            lines: VecDeque::new(),
+            bytes: 0,
+            next_line: 0,
+            skipped: 0,
+        }
+    }
+
+    /// Folds one response in. `from_line` must not be past `next_line`; the
+    /// lines already held from there on are dropped, not doubled.
+    fn extend(&mut self, from_line: usize, lines: Vec<String>) {
+        let end = from_line + lines.len();
+        for line in lines.into_iter().skip(self.next_line - from_line) {
+            self.bytes += line.len();
+            self.lines.push_back(line);
+        }
+        self.next_line = self.next_line.max(end);
+    }
+
+    /// Drops the oldest lines until the log fits within `line_cap` lines and
+    /// `byte_cap` bytes, and says at the top how many have gone. The line
+    /// that says so takes a slot of its own.
+    fn shrink(&mut self, line_cap: usize, byte_cap: usize) {
+        if self.lines.len() <= line_cap && self.bytes <= byte_cap {
+            return;
+        }
+        if self.skipped > 0 {
+            self.lines.pop_front();
+        }
+        while self.lines.len() + 1 > line_cap || self.bytes > byte_cap {
+            let Some(line) = self.lines.pop_front() else {
+                break;
+            };
+            self.bytes -= line.len();
+            self.skipped += 1;
+        }
+        self.lines
+            .push_front(format!("\u{2026} {} earlier lines skipped", self.skipped));
+    }
+}
 use crate::text_input::TextInput;
 
 mod columns;
@@ -101,15 +169,13 @@ pub struct PipelinesScreen {
     timelines: Vec<(i64, Vec<TimelineRecord>)>,
     /// The run the details pane is showing and where its tree cursor is.
     focused: Option<(i64, usize)>,
-    /// The lines held per (run, log), newest last.
-    logs: Vec<(i64, i64, Vec<String>)>,
+    /// The logs held, oldest first.
+    logs: Vec<HeldLog>,
     pub log_scroll: ScrollState,
     /// Whether the log pane is keeping the tail in view.
     log_follow: bool,
     /// Whether the log has the whole details pane.
     log_full: bool,
-    /// Whether the log on screen has stopped growing.
-    log_finished: bool,
     /// The runs being followed whatever tab is showing. They live for the
     /// session only.
     watched: Vec<i64>,
@@ -154,7 +220,6 @@ impl Default for PipelinesScreen {
             log_scroll: ScrollState::default(),
             log_follow: true,
             log_full: false,
-            log_finished: false,
             watched: Vec::new(),
             branch_picker: BranchPicker::default(),
             branch_cache: Vec::new(),
@@ -425,7 +490,7 @@ impl PipelinesScreen {
         let log_id = chosen.log_id?;
         Some(LogTarget {
             log_id,
-            from_line: self.log(run, log_id).len(),
+            from_line: self.held(run, log_id).map_or(0, |held| held.next_line),
             live: chosen.state.is_live(),
         })
     }
@@ -446,66 +511,59 @@ impl PipelinesScreen {
             .map(|record| record.name.clone())
     }
 
-    /// The lines held for one log.
-    #[must_use]
-    pub fn log(&self, run_id: i64, log_id: i64) -> &[String] {
+    fn held(&self, run_id: i64, log_id: i64) -> Option<&HeldLog> {
         self.logs
             .iter()
-            .find(|(held_run, held_log, _)| *held_run == run_id && *held_log == log_id)
-            .map_or(&[], |(_, _, lines)| lines.as_slice())
+            .find(|held| (held.run_id, held.log_id) == (run_id, log_id))
     }
 
-    /// Folds new lines onto the end of a log. A poll that answers from a line
-    /// the screen has already passed is dropped rather than duplicated, which
-    /// is what makes a retried fetch harmless.
-    pub fn append_log(
-        &mut self,
-        run_id: i64,
-        log_id: i64,
-        from_line: usize,
-        lines: Vec<String>,
-        finished: bool,
-    ) {
-        if lines.is_empty() {
-            if finished {
-                self.log_finished = true;
-            }
-            return;
-        }
-        let held = self
+    /// The lines held for one log.
+    #[must_use]
+    pub fn log(&self, run_id: i64, log_id: i64) -> &VecDeque<String> {
+        static EMPTY: VecDeque<String> = VecDeque::new();
+        self.held(run_id, log_id).map_or(&EMPTY, |held| &held.lines)
+    }
+
+    /// Folds one response onto a log. `from_line` is where in the remote log
+    /// it starts; whatever the log already had from there on is skipped, not
+    /// doubled, which is what makes a retried fetch harmless. A response that
+    /// starts past what the log has is dropped: the next fetch fills the gap.
+    pub fn append_log(&mut self, run_id: i64, log_id: i64, from_line: usize, lines: Vec<String>) {
+        let position = self
             .logs
-            .iter_mut()
-            .find(|(held_run, held_log, _)| *held_run == run_id && *held_log == log_id);
-        let held = match held {
-            Some((_, _, held)) => held,
+            .iter()
+            .position(|held| (held.run_id, held.log_id) == (run_id, log_id));
+        let mut index = match position {
+            Some(index) => index,
+            None if lines.is_empty() => return,
             None => {
-                self.logs.push((run_id, log_id, Vec::new()));
-                // Only the log on screen and the one before it are worth
-                // keeping; the rest are a fetch away.
-                if self.logs.len() > 4 {
-                    self.logs.remove(0);
-                }
-                &mut self.logs.last_mut().expect("just pushed").2
+                self.logs.push(HeldLog::new(run_id, log_id));
+                self.logs.len() - 1
             }
         };
-        if from_line > held.len() {
+        let held = &mut self.logs[index];
+        if from_line > held.next_line {
             return;
         }
-        held.truncate(from_line);
-        held.extend(lines);
-        if held.len() > LOG_LINE_CAP {
-            // One more than the overflow, because the line saying what went
-            // takes a place of its own.
-            let skipped = held.len() - LOG_LINE_CAP + 1;
-            held.drain(..skipped);
-            held.insert(0, format!("\u{2026} {skipped} earlier lines skipped"));
+        held.extend(from_line, lines);
+        held.shrink(LOG_LINE_CAP, LOG_BYTE_BUDGET);
+        let count = held.lines.len();
+        // Only the log on screen and a few before it are worth keeping, and
+        // only so many bytes of them together; the rest are a fetch away.
+        while self.logs.len() > 1
+            && (self.logs.len() > 4
+                || self.logs.iter().map(|held| held.bytes).sum::<usize>() > LOG_BYTE_BUDGET)
+        {
+            let oldest = if index == 0 { 1 } else { 0 };
+            self.logs.remove(oldest);
+            if oldest < index {
+                index -= 1;
+            }
         }
-        self.log_finished = finished;
         if self.log_follow {
             let viewport = self.log_scroll.viewport.max(1);
-            self.log_scroll.content = held.len();
-            self.log_scroll
-                .scroll_to(held.len().saturating_sub(viewport));
+            self.log_scroll.content = count;
+            self.log_scroll.scroll_to(count.saturating_sub(viewport));
         }
     }
 

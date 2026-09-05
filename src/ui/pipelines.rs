@@ -725,7 +725,7 @@ fn render_log(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut S
         .map(|target| {
             screen
                 .focused_run()
-                .map(|run| screen.log(run, target.log_id).to_vec())
+                .map(|run| screen.log(run, target.log_id).iter().cloned().collect())
                 .unwrap_or_default()
         })
         .unwrap_or_default();

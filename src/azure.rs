@@ -869,16 +869,21 @@ impl AzureClient {
             log.as_str(),
         ])?;
         url.set_query(Some(&format!(
-            "startLine={start_line}&api-version={API_VERSION}"
+            "startLine={start_line}&endLine={}&api-version={API_VERSION}",
+            start_line + crate::watch::LOG_PAGE
         )));
         let response = self.get(url.as_str())?;
-        Ok(response["value"]
+        let mut lines: Vec<String> = response["value"]
             .as_array()
             .map(Vec::as_slice)
             .unwrap_or_default()
             .iter()
             .filter_map(|line| line.as_str().map(str::to_owned))
-            .collect())
+            .collect();
+        // Whether `endLine` is inclusive is the service's business; the page
+        // is the page either way.
+        lines.truncate(crate::watch::LOG_PAGE);
+        Ok(lines)
     }
 
     /// One run as it stands now, which is what a watched run that has left

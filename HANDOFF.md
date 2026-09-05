@@ -6,6 +6,31 @@ Last updated 2026-09-05. The backlog itself lives in Azure DevOps
 
 ## State of `main`
 
+- **Performance plan, slice 1 of 11 (2026-09-05): the pipeline watcher.** Jacob's
+  eleven-step plan (progressive startup, summaries first, query pipeline off the UI
+  thread, cached layout, wakeable event loop, and so on) starts with the two bugs that
+  reproduced outright. `Watcher::until_due` counted the log cadence for a settled log
+  that `poll` never advanced, so the thread spun on a zero timeout once a finished
+  node's log had been read; `poll` and `until_due` now share `pending_timeline` /
+  `pending_log`, so only what would actually be read has a deadline. And
+  `log_target()` sent the retained line count as the remote offset, so past the
+  20,000-line cap every poll re-fetched the same tail forever; each held log
+  (`HeldLog`) now carries `next_line`, the absolute remote offset, apart from the
+  `VecDeque` of lines it kept, and `append_log` folds overlapping responses in by
+  offset instead of truncating. The "… N earlier lines skipped" line counts
+  cumulatively now (it used to restart at every overflow). Logs come in pages of
+  `LOG_PAGE` (5,000) lines via `startLine`/`endLine`, back to back with no wait
+  between pages, and a finished log is settled only by a short page; the watcher
+  advances its own offset between pages and takes the larger of its own and the
+  screen's. Refocusing a run forgets its settled timeline, work items and log in the
+  watcher, since the screen evicts timelines past 8 and logs past 4 — before, an
+  evicted run came back empty for the rest of the session. Held logs share a 16 MiB
+  budget (`LOG_BYTE_BUDGET`), oldest evicted first. Throttling is checked after every
+  request rather than at the end of the round, and holds the approvals cadence off
+  too. Deliberately skipped: counting cadences from request completion (the fake-clock
+  tests poll on exact boundaries; the loop re-reads the clock before blocking anyway)
+  and the log pane still clones the whole held log per frame (slice 7).
+
 - **The 35k round (Epic #758, 2026-09-05).** Jacob took ticket-tui to a Citrix VDI
   (Windows Terminal, WSL 2, slow core, aggressive AV) against a ~35k-item project and it
   was unusable: every keystroke and mouse hover lagged. Measured with the new bench

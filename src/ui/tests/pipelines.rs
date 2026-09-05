@@ -379,7 +379,6 @@ fn the_log_pane_paints_every_marker_and_says_what_it_is_following() {
             "2026-08-29T10:00:11.1234567Z ##[debug]inner detail".to_owned(),
             "2026-08-29T10:00:12.1234567Z plain output".to_owned(),
         ],
-        false,
     );
     // The tree cursor is on the job, whose log this is.
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -413,7 +412,7 @@ fn scrolling_the_log_leaves_follow_mode_and_end_goes_back_to_it() {
     let mut app = logging_app();
     let run = app.pipelines.focused_run().expect("a run");
     let lines: Vec<String> = (1..=200).map(|line| format!("line {line}")).collect();
-    app.pipelines.append_log(run, 7, 0, lines, false);
+    app.pipelines.append_log(run, 7, 0, lines);
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
@@ -446,20 +445,89 @@ fn a_log_past_the_cap_keeps_the_tail_and_says_how_much_it_dropped() {
     let mut app = logging_app();
     let run = app.pipelines.focused_run().expect("a run");
     let lines: Vec<String> = (1..=20_010).map(|line| format!("line {line}")).collect();
-    app.pipelines.append_log(run, 7, 0, lines, true);
+    app.pipelines.append_log(run, 7, 0, lines);
+    // The tree cursor is on the job, whose log this is.
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
 
     let held = app.pipelines.log(run, 7);
     assert_eq!(held.len(), 20_000, "the cap holds");
-    assert!(
-        held[0].contains("earlier lines skipped"),
-        "and says what went: {}",
-        held[0]
+    assert_eq!(
+        held[0], "\u{2026} 11 earlier lines skipped",
+        "and says what went"
     );
     assert_eq!(
-        held.last().unwrap(),
+        held.back().unwrap(),
         "line 20010",
         "the tail is what is kept"
     );
+    let target = app.pipelines.log_target().expect("the job's log");
+    assert_eq!(
+        (target.log_id, target.from_line),
+        (7, 20_010),
+        "the next fetch starts where the remote log ends, not where the window does"
+    );
+
+    // Another page past the cap: the count at the top is the whole story.
+    let lines: Vec<String> = (20_011..=25_010)
+        .map(|line| format!("line {line}"))
+        .collect();
+    app.pipelines.append_log(run, 7, 20_010, lines);
+    let held = app.pipelines.log(run, 7);
+    assert_eq!(held.len(), 20_000);
+    assert_eq!(held[0], "\u{2026} 5011 earlier lines skipped");
+    assert_eq!(held.back().unwrap(), "line 25010");
+    assert_eq!(
+        app.pipelines.log_target().map(|target| target.from_line),
+        Some(25_010)
+    );
+}
+
+#[test]
+fn a_response_the_log_already_has_part_of_is_folded_in_not_doubled() {
+    let mut app = logging_app();
+    let run = app.pipelines.focused_run().expect("a run");
+    let lines = |range: std::ops::RangeInclusive<usize>| -> Vec<String> {
+        range.map(|line| format!("line {line}")).collect()
+    };
+    app.pipelines.append_log(run, 7, 0, lines(1..=3));
+    // A retry answers from an earlier line than the screen has reached.
+    app.pipelines.append_log(run, 7, 1, lines(2..=4));
+    assert_eq!(
+        app.pipelines
+            .log(run, 7)
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>(),
+        lines(1..=4)
+    );
+    // One that starts past what is held is dropped rather than leaving a hole.
+    app.pipelines.append_log(run, 7, 10, lines(11..=12));
+    assert_eq!(app.pipelines.log(run, 7).len(), 4);
+}
+
+#[test]
+fn held_logs_share_a_byte_budget_and_the_oldest_go_first() {
+    let mut app = logging_app();
+    let run = app.pipelines.focused_run().expect("a run");
+    let megabyte = || "x".repeat(1 << 20);
+    app.pipelines
+        .append_log(run, 7, 0, (0..17).map(|_| megabyte()).collect());
+    let held = app.pipelines.log(run, 7);
+    assert_eq!(
+        held.len(),
+        17,
+        "sixteen lines and the one that says what went"
+    );
+    assert_eq!(held[0], "\u{2026} 1 earlier lines skipped");
+
+    // A second log tips the whole over the budget, so the first one goes.
+    app.pipelines.append_log(run, 8, 0, vec![megabyte()]);
+    assert!(
+        app.pipelines.log(run, 7).is_empty(),
+        "the older log is let go"
+    );
+    assert_eq!(app.pipelines.log(run, 8).len(), 1);
 }
 
 #[test]
