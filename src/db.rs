@@ -379,6 +379,7 @@ impl SqliteTicketRepository {
             artifacts: self.load_artifact_links()?,
             comments: self.load_comments()?,
             history: self.load_history()?,
+            ..Default::default()
         })
     }
 
@@ -1837,6 +1838,7 @@ mod tests {
                 old_value: Some("New".into()),
                 new_value: Some("Active".into()),
             }],
+            ..Default::default()
         };
 
         assert_eq!(repository.replace_all(&tickets, &graph).unwrap(), 2);

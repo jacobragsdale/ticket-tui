@@ -156,6 +156,10 @@ pub struct WorkItemsScreen {
     /// screen on behalf of whichever tab is showing.
     pub palette_tab: TabId,
     tickets: Arc<Vec<Ticket>>,
+    /// Where each work item sits in `tickets`, rebuilt whenever that vector
+    /// grows, shrinks or is replaced. Every lookup by key goes through it: the
+    /// details pane asks for one per family row per frame.
+    by_key: HashMap<TicketKey, usize>,
     visible: Vec<SearchMatch>,
     search: SearchEngine,
     search_generation: u64,
@@ -327,6 +331,7 @@ impl WorkItemsScreen {
         let mut app = Self {
             palette_tab: TabId::WorkItems,
             tickets: Arc::new(prepared.tickets),
+            by_key: HashMap::new(),
             visible: Vec::new(),
             search,
             search_generation: 0,
@@ -401,6 +406,7 @@ impl WorkItemsScreen {
             team_iteration: None,
             classification_requested: false,
         };
+        app.reindex_tickets();
         app.refresh_child_progress();
         app.show_all(shell, None);
         app

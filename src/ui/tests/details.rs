@@ -104,6 +104,7 @@ fn details_render_relationships_history_and_comments() {
                 old_value: Some("New".into()),
                 new_value: Some("Active".into()),
             }],
+            ..Default::default()
         },
     );
 
@@ -984,6 +985,7 @@ fn end_scrolls_past_the_description_to_the_last_comment() {
                 text: "The very last word".into(),
             }],
             history: Vec::new(),
+            ..Default::default()
         },
     );
     app.shell.narrow_details = true;

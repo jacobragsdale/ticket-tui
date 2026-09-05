@@ -125,14 +125,16 @@ fn settling_on_a_work_item_reads_its_details_and_patches_only_its_own_rows() {
     assert_eq!(selected.id, 3, "the newest work item starts selected");
     // Another work item's discussion, which this fetch must not disturb.
     let elsewhere = ticket(1).key;
-    app.work_items.set_workspace_graph(
-        &mut app.shell,
-        TicketGraph {
+    let mut elsewhere_graph = TicketGraph::default();
+    elsewhere_graph.replace_details(
+        &elsewhere,
+        WorkItemDetails {
             comments: vec![comment(1, "Someone else's thread")],
             history: vec![transition(1, "Done")],
-            ..TicketGraph::default()
         },
     );
+    app.work_items
+        .set_workspace_graph(&mut app.shell, elsewhere_graph);
 
     assert!(
         !dispatch_due_details(&mut app, &mut runtime),

@@ -662,6 +662,7 @@ impl WorkItemsScreen {
         let hidden = self.query_would_hide(&ticket);
         let index = self.tickets.len();
         Arc::make_mut(&mut self.tickets).push(ticket);
+        self.reindex_tickets();
         self.search.push_document(index, &self.tickets[index]);
         self.graph.replace_relations_from(&key, relations);
         self.refresh_child_progress();

@@ -3971,6 +3971,7 @@ mod tests {
                 old_value: None,
                 new_value: Some("Active".into()),
             }],
+            ..Default::default()
         };
         let path = watermarked_database(
             &directory,

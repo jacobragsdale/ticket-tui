@@ -1180,6 +1180,7 @@ impl WorkItemsScreen {
             .selected_ticket()
             .is_some_and(|ticket| ticket.key == *key);
         Arc::make_mut(&mut self.tickets).remove(index);
+        self.reindex_tickets();
         self.graph.forget(key);
         self.bookmarks.remove(key);
         self.selected_keys.remove(key);

@@ -223,7 +223,7 @@ impl WorkItemsScreen {
     }
 
     pub fn ticket_by_key(&self, key: &TicketKey) -> Option<&Ticket> {
-        self.tickets.iter().find(|ticket| ticket.key == *key)
+        self.tickets.get(*self.by_key.get(key)?)
     }
 
     #[must_use]
@@ -292,6 +292,7 @@ impl WorkItemsScreen {
             shell.set_repos(prepared.repos.clone());
         }
         self.tickets = Arc::new(prepared.tickets);
+        self.reindex_tickets();
         self.graph = prepared.graph;
         // A pull that has not cached the states yet must not throw away the
         // ones an earlier pull did.
@@ -315,7 +316,19 @@ impl WorkItemsScreen {
     }
 
     pub(super) fn index_of(&self, key: &TicketKey) -> Option<usize> {
-        self.tickets.iter().position(|ticket| ticket.key == *key)
+        self.by_key.get(key).copied()
+    }
+
+    /// Notes where every work item sits. Called wherever the vector is
+    /// replaced or changes length — a row replaced in place keeps its place,
+    /// so `set_ticket` does not pay for this.
+    pub(super) fn reindex_tickets(&mut self) {
+        self.by_key = self
+            .tickets
+            .iter()
+            .enumerate()
+            .map(|(index, ticket)| (ticket.key.clone(), index))
+            .collect();
     }
 
     /// Replaces one work item in place, keeping its search document and its

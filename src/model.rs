@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -1131,7 +1132,7 @@ pub struct HistoryRecord {
     pub new_value: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct TicketGraph {
     pub relations: Vec<RelationRecord>,
     /// What each work item was worked on with: its pull requests, the commits
@@ -1139,6 +1140,39 @@ pub struct TicketGraph {
     pub artifacts: Vec<ArtifactLink>,
     pub comments: Vec<CommentRecord>,
     pub history: Vec<HistoryRecord>,
+    /// Lookups built from the four vectors above the first time the graph is
+    /// asked anything, so a family or a comment list costs a hash rather than a
+    /// scan of every relation in the project.
+    ///
+    /// The vectors are for construction only. Once a graph has been queried,
+    /// change it through the methods on it — every one of them drops this — or
+    /// the answers go stale.
+    pub(crate) index: OnceCell<GraphIndex>,
+}
+
+/// Two graphs are the same when they hold the same rows; whether either has
+/// been asked a question yet is not part of it.
+impl PartialEq for TicketGraph {
+    fn eq(&self, other: &Self) -> bool {
+        self.relations == other.relations
+            && self.artifacts == other.artifacts
+            && self.comments == other.comments
+            && self.history == other.history
+    }
+}
+
+impl Eq for TicketGraph {}
+
+/// Where each work item's rows are, by work item. The family maps hold keys
+/// deduplicated and sorted as the family reads them; the rest hold positions
+/// into the graph's vectors, in vector order.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct GraphIndex {
+    children: HashMap<TicketKey, Vec<TicketKey>>,
+    parents: HashMap<TicketKey, Vec<TicketKey>>,
+    artifacts: HashMap<TicketKey, Vec<usize>>,
+    comments: HashMap<TicketKey, Vec<usize>>,
+    history: HashMap<TicketKey, Vec<usize>>,
 }
 
 /// One work item's discussion and revision history, as a single fetch reads
@@ -1182,6 +1216,64 @@ pub struct FamilyTreeEntry {
 }
 
 impl TicketGraph {
+    /// Where everything is, built once and kept until something moves.
+    fn index(&self) -> &GraphIndex {
+        self.index.get_or_init(|| {
+            let mut index = GraphIndex::default();
+            for relation in &self.relations {
+                let (parent, child) = match relation.kind {
+                    RelationKind::Parent => (&relation.to, &relation.from),
+                    RelationKind::Child => (&relation.from, &relation.to),
+                    _ => continue,
+                };
+                // A work item listed as its own parent is nobody's relative.
+                if parent == child {
+                    continue;
+                }
+                index
+                    .children
+                    .entry(parent.clone())
+                    .or_default()
+                    .push(child.clone());
+                index
+                    .parents
+                    .entry(child.clone())
+                    .or_default()
+                    .push(parent.clone());
+            }
+            for keys in index
+                .children
+                .values_mut()
+                .chain(index.parents.values_mut())
+            {
+                sort_keys(keys);
+                keys.dedup();
+            }
+            for (at, artifact) in self.artifacts.iter().enumerate() {
+                index
+                    .artifacts
+                    .entry(artifact.work_item.clone())
+                    .or_default()
+                    .push(at);
+            }
+            for (at, comment) in self.comments.iter().enumerate() {
+                index
+                    .comments
+                    .entry(comment.ticket.clone())
+                    .or_default()
+                    .push(at);
+            }
+            for (at, entry) in self.history.iter().enumerate() {
+                index
+                    .history
+                    .entry(entry.ticket.clone())
+                    .or_default()
+                    .push(at);
+            }
+            index
+        })
+    }
+
     #[must_use]
     pub fn relations_from(&self, key: &TicketKey) -> Vec<&RelationRecord> {
         self.relations
@@ -1193,6 +1285,7 @@ impl TicketGraph {
     /// Swaps one work item's outgoing links for the set a write brought back,
     /// leaving links from every other work item alone.
     pub fn replace_relations_from(&mut self, key: &TicketKey, relations: Vec<RelationRecord>) {
+        self.index.take();
         self.relations.retain(|relation| relation.from != *key);
         self.relations.extend(relations);
     }
@@ -1203,6 +1296,7 @@ impl TicketGraph {
     /// its children become work items nobody has broken down from — so only
     /// the link is forgotten, never the work item at the other end of it.
     pub fn forget(&mut self, key: &TicketKey) {
+        self.index.take();
         self.relations
             .retain(|relation| relation.from != *key && relation.to != *key);
         self.comments.retain(|comment| comment.ticket != *key);
@@ -1213,6 +1307,7 @@ impl TicketGraph {
     /// back, leaving every other work item's alone. This is what keeps a
     /// details fetch from costing a full reload of the graph.
     pub fn replace_details(&mut self, key: &TicketKey, details: WorkItemDetails) {
+        self.index.take();
         self.comments.retain(|comment| comment.ticket != *key);
         self.history.retain(|entry| entry.ticket != *key);
         self.comments.extend(details.comments);
@@ -1223,10 +1318,11 @@ impl TicketGraph {
     /// listed the links.
     #[must_use]
     pub fn artifacts_for(&self, key: &TicketKey) -> Vec<&ArtifactLink> {
-        self.artifacts
-            .iter()
-            .filter(|artifact| artifact.work_item == *key)
-            .collect()
+        self.index()
+            .artifacts
+            .get(key)
+            .map(|at| at.iter().map(|at| &self.artifacts[*at]).collect())
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -1236,12 +1332,12 @@ impl TicketGraph {
 
     #[must_use]
     pub fn parents_of(&self, key: &TicketKey) -> Vec<TicketKey> {
-        related_keys(self, key, FamilyDirection::Parent)
+        self.index().parents.get(key).cloned().unwrap_or_default()
     }
 
     #[must_use]
     pub fn children_of(&self, key: &TicketKey) -> Vec<TicketKey> {
-        related_keys(self, key, FamilyDirection::Child)
+        self.index().children.get(key).cloned().unwrap_or_default()
     }
 
     /// Every work item under one, however deep: its children, their children,
@@ -1274,6 +1370,7 @@ impl TicketGraph {
     /// the moment a reparent is made optimistically, and again if it is put
     /// back.
     pub fn reparent(&mut self, child: &TicketKey, parent: Option<&TicketKey>) {
+        self.index.take();
         self.relations.retain(|relation| {
             !(relation.from == *child && relation.kind == RelationKind::Parent)
                 && !(relation.to == *child && relation.kind == RelationKind::Child)
@@ -1320,6 +1417,7 @@ impl TicketGraph {
     /// already held under the same id is replaced rather than doubled, which is
     /// what keeps a post that raced a details fetch from reading twice.
     pub fn add_comment(&mut self, comment: CommentRecord) {
+        self.index.take();
         self.comments
             .retain(|held| held.ticket != comment.ticket || held.comment_id != comment.comment_id);
         let at = self
@@ -1336,10 +1434,11 @@ impl TicketGraph {
     #[must_use]
     pub fn comments_for(&self, key: &TicketKey) -> Vec<&CommentRecord> {
         let mut comments: Vec<_> = self
+            .index()
             .comments
-            .iter()
-            .filter(|comment| comment.ticket == *key)
-            .collect();
+            .get(key)
+            .map(|at| at.iter().map(|at| &self.comments[*at]).collect())
+            .unwrap_or_default();
         comments.sort_by(|left, right| {
             right
                 .created_at
@@ -1352,10 +1451,11 @@ impl TicketGraph {
     #[must_use]
     pub fn history_for(&self, key: &TicketKey) -> Vec<&HistoryRecord> {
         let mut history: Vec<_> = self
+            .index()
             .history
-            .iter()
-            .filter(|entry| entry.ticket == *key)
-            .collect();
+            .get(key)
+            .map(|at| at.iter().map(|at| &self.history[*at]).collect())
+            .unwrap_or_default();
         history.sort_by(|left, right| {
             left.revision
                 .cmp(&right.revision)
@@ -1398,54 +1498,6 @@ impl FamilySnapshot {
     pub fn parent(&self) -> Option<&TicketKey> {
         self.ancestors.last()
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FamilyDirection {
-    Parent,
-    Child,
-}
-
-fn related_keys(
-    graph: &TicketGraph,
-    key: &TicketKey,
-    direction: FamilyDirection,
-) -> Vec<TicketKey> {
-    let mut keys = Vec::new();
-    let mut seen = HashSet::new();
-    for relation in &graph.relations {
-        let other = match direction {
-            FamilyDirection::Parent => {
-                if relation.from == *key && relation.kind == RelationKind::Parent {
-                    Some(&relation.to)
-                } else if relation.to == *key && relation.kind == RelationKind::Child {
-                    Some(&relation.from)
-                } else {
-                    None
-                }
-            }
-            FamilyDirection::Child => {
-                if relation.from == *key && relation.kind == RelationKind::Child {
-                    Some(&relation.to)
-                } else if relation.to == *key && relation.kind == RelationKind::Parent {
-                    Some(&relation.from)
-                } else {
-                    None
-                }
-            }
-        };
-        let Some(other) = other else {
-            continue;
-        };
-        if other == key {
-            continue;
-        }
-        if seen.insert(other.clone()) {
-            keys.push(other.clone());
-        }
-    }
-    sort_keys(&mut keys);
-    keys
 }
 
 fn ancestor_chain(graph: &TicketGraph, key: &TicketKey) -> (Vec<TicketKey>, Vec<TicketKey>) {
@@ -1936,6 +1988,109 @@ mod tests {
             graph.relations_from(&key(3)),
             vec![&relation(3, 9, RelationKind::Related)]
         );
+    }
+
+    fn comment_at(id: i64, comment_id: i64, at: &str) -> CommentRecord {
+        CommentRecord {
+            ticket: key(id),
+            comment_id,
+            created_at: ts(at),
+            author: None,
+            text: format!("comment {comment_id}"),
+        }
+    }
+
+    fn transition(id: i64, revision: i64) -> HistoryRecord {
+        HistoryRecord {
+            ticket: key(id),
+            revision,
+            changed_at: ts("2026-01-01T00:00:00Z"),
+            changed_by: None,
+            field_name: "State".into(),
+            old_value: None,
+            new_value: Some("Doing".into()),
+        }
+    }
+
+    /// Every answer read out of the lookups matches the same question asked of
+    /// a graph built from the rows as they now stand. A mutation that forgot to
+    /// drop the lookups would keep answering with the graph as it was.
+    #[test]
+    fn every_mutation_leaves_the_lookups_answering_for_the_rows_as_they_stand() {
+        let mut graph = TicketGraph {
+            relations: vec![
+                relation(2, 1, RelationKind::Parent),
+                relation(1, 3, RelationKind::Child),
+            ],
+            artifacts: vec![ArtifactLink {
+                work_item: key(2),
+                kind: ArtifactKind::Build(7),
+                name: "Integrated in build".into(),
+            }],
+            comments: vec![comment_at(2, 1, "2026-01-01T00:00:00Z")],
+            history: vec![transition(2, 1)],
+            ..TicketGraph::default()
+        };
+
+        let check = |graph: &TicketGraph, what: &str| {
+            let fresh = TicketGraph {
+                relations: graph.relations.clone(),
+                artifacts: graph.artifacts.clone(),
+                comments: graph.comments.clone(),
+                history: graph.history.clone(),
+                ..TicketGraph::default()
+            };
+            for id in 1..=4 {
+                assert_eq!(
+                    graph.children_of(&key(id)),
+                    fresh.children_of(&key(id)),
+                    "{what}"
+                );
+                assert_eq!(
+                    graph.parents_of(&key(id)),
+                    fresh.parents_of(&key(id)),
+                    "{what}"
+                );
+                assert_eq!(
+                    graph.artifacts_for(&key(id)),
+                    fresh.artifacts_for(&key(id)),
+                    "{what}"
+                );
+                assert_eq!(
+                    graph.comments_for(&key(id)),
+                    fresh.comments_for(&key(id)),
+                    "{what}"
+                );
+                assert_eq!(
+                    graph.history_for(&key(id)),
+                    fresh.history_for(&key(id)),
+                    "{what}"
+                );
+            }
+        };
+
+        check(&graph, "as built");
+
+        graph.reparent(&key(2), Some(&key(4)));
+        check(&graph, "after a reparent");
+
+        graph.replace_relations_from(&key(4), vec![relation(4, 3, RelationKind::Child)]);
+        check(&graph, "after relations were replaced");
+
+        graph.replace_details(
+            &key(2),
+            WorkItemDetails {
+                comments: vec![comment_at(2, 5, "2026-02-01T00:00:00Z")],
+                history: vec![transition(2, 2)],
+            },
+        );
+        check(&graph, "after details were replaced");
+
+        graph.add_comment(comment_at(2, 6, "2026-03-01T00:00:00Z"));
+        check(&graph, "after a comment was posted");
+
+        graph.forget(&key(2));
+        check(&graph, "after a work item was forgotten");
     }
 
     fn ids_of(entries: &[FamilyTreeEntry]) -> Vec<i64> {
