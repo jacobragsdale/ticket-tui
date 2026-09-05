@@ -1090,3 +1090,36 @@ fn the_related_section_names_what_the_work_item_was_worked_on_with() {
         "nothing points at what the database does not hold"
     );
 }
+
+#[test]
+fn clicking_a_filtered_family_row_peeks_at_it_and_clicking_back_ends_the_peek() {
+    let mut app = auth_family_app();
+    // A search that keeps the selected row and drops the Task under it.
+    app.work_items.set_query(&mut app.shell, "Login".into());
+    await_search(&mut app);
+    render_text(72, 37, &mut app);
+    assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_002);
+
+    let task = family_row(&app, 10_004).expect("the hidden task's row");
+    click(&mut app, task.x + 8, task.y);
+    assert!(app.work_items.peeking());
+    assert_eq!(
+        app.work_items.detail_ticket().map(|ticket| ticket.key.id),
+        Some(10_004),
+        "the pane follows the row the table cannot show"
+    );
+    assert_eq!(
+        app.work_items.selected_ticket().unwrap().key.id,
+        10_002,
+        "and the table stays where it was"
+    );
+
+    render_text(72, 37, &mut app);
+    let back = family_row(&app, 10_002).expect("the selected row's own line");
+    click(&mut app, back.x + 8, back.y);
+    assert!(!app.work_items.peeking(), "clicking it back ends the peek");
+    assert_eq!(
+        app.work_items.detail_ticket().map(|ticket| ticket.key.id),
+        Some(10_002)
+    );
+}

@@ -777,6 +777,12 @@ impl WorkItemsScreen {
         // Every command opens its overlay centred; clicking a field sets its
         // anchor afterwards, so a picker never inherits the last one's.
         shell.overlay_anchor = OverlayAnchor::Centered;
+        // Commands act on the selected row, so the pane goes back to it first
+        // rather than letting an edit land on a work item nobody is looking at.
+        if self.peeking() {
+            self.clear_peek();
+            self.sync_family_state(shell);
+        }
         match id {
             CommandId::Search => {
                 self.begin_search();

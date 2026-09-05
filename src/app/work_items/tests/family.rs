@@ -224,7 +224,31 @@ fn family_enter_selects_visible_tickets_records_history_once_and_explains_hidden
     );
     assert_eq!(
         app.shell.notification(),
-        Some(("3 is hidden by the current search", NotificationLevel::Info))
+        Some((
+            "3 is hidden by the current search — Esc to go back",
+            NotificationLevel::Info
+        ))
+    );
+    assert!(
+        app.work_items.peeking(),
+        "the details pane follows it anyway"
+    );
+    assert_eq!(
+        app.work_items.detail_ticket().map(|ticket| ticket.key.id),
+        Some(3),
+        "and shows the hidden relative rather than the selected row"
+    );
+
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.work_items.peeking(), "Esc puts the pane back");
+    assert_eq!(
+        app.work_items.detail_ticket().map(|ticket| ticket.key.id),
+        Some(2)
+    );
+    assert_eq!(
+        app.work_items.query(),
+        query,
+        "and leaves the search it never touched"
     );
 }
 

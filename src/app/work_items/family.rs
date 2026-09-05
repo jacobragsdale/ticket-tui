@@ -238,7 +238,7 @@ impl WorkItemsScreen {
 
     #[must_use]
     pub fn selected_family(&self) -> Option<FamilySnapshot> {
-        Some(self.family_of(&self.selected_ticket()?.key))
+        Some(self.family_of(&self.detail_ticket()?.key))
     }
 
     #[must_use]
@@ -249,7 +249,7 @@ impl WorkItemsScreen {
 
     #[must_use]
     pub fn visible_family_tree(&self) -> Vec<FamilyTreeEntry> {
-        self.selected_ticket()
+        self.detail_ticket()
             .map(|ticket| self.graph.visible_family_tree(&ticket.key))
             .unwrap_or_default()
     }
@@ -368,6 +368,16 @@ impl WorkItemsScreen {
     }
 
     pub(super) fn sync_family_state(&mut self, shell: &mut Shell) {
+        // A peek survives a re-sort or a pull, so the pane does not jump back
+        // to the table under a reader; it ends when its work item comes onto
+        // the table or leaves the database.
+        if self
+            .peeked
+            .as_ref()
+            .is_none_or(|key| self.visible_row(key).is_some() || self.ticket_by_key(key).is_none())
+        {
+            self.clear_peek();
+        }
         self.reset_family_cursor();
         if shell.focus == Focus::Family && !self.selected_has_family() {
             shell.focus = Focus::Details;
@@ -375,7 +385,7 @@ impl WorkItemsScreen {
     }
 
     fn reset_family_cursor(&mut self) {
-        self.family_cursor = self.selected_ticket().map(|ticket| ticket.key.clone());
+        self.family_cursor = self.detail_ticket().map(|ticket| ticket.key.clone());
         self.clamp_family_cursor();
     }
 
@@ -414,7 +424,7 @@ impl WorkItemsScreen {
     fn clamp_family_cursor(&mut self) {
         let tree = self.visible_family_tree();
         if tree.is_empty() {
-            if self.selected_ticket().is_none() {
+            if self.detail_ticket().is_none() {
                 self.family_cursor = None;
             }
             return;

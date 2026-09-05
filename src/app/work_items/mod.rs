@@ -184,6 +184,11 @@ pub struct WorkItemsScreen {
     /// scroll itself back into view.
     pub details_family_row: usize,
     pub family_cursor: Option<TicketKey>,
+    /// A relative the family tree walked to that the table cannot show,
+    /// because a filter or the search hides it. The details pane draws it in
+    /// place of the selected row and the table stays where it was, so a tree
+    /// can be read all the way through without the query being undone.
+    peeked: Option<TicketKey>,
     pub help: ScrollState,
     pub sort: ScrollState,
     /// The remembered stale threshold: what the palette last set, and what the
@@ -343,6 +348,7 @@ impl WorkItemsScreen {
             details: ScrollState::default(),
             details_family_row: 0,
             family_cursor: None,
+            peeked: None,
             help: ScrollState::default(),
             sort: ScrollState::default(),
             stale_days: DEFAULT_STALE_DAYS,
@@ -421,6 +427,28 @@ impl WorkItemsScreen {
         let selected = self.table_state.selected()?;
         let entry = self.visible.get(selected)?;
         self.tickets.get(entry.ticket_index)
+    }
+
+    /// What the details pane is showing: the hidden relative being peeked at,
+    /// or the selected row when there is none.
+    #[must_use]
+    pub fn detail_ticket(&self) -> Option<&Ticket> {
+        self.peeked
+            .as_ref()
+            .and_then(|key| self.ticket_by_key(key))
+            .or_else(|| self.selected_ticket())
+    }
+
+    /// Whether the details pane is showing a relative the table is not on.
+    /// A peek is read-only: the editable fields stop offering themselves, and
+    /// any command ends it before it runs.
+    #[must_use]
+    pub fn peeking(&self) -> bool {
+        self.peeked.is_some()
+    }
+
+    pub(super) fn clear_peek(&mut self) {
+        self.peeked = None;
     }
 
     #[must_use]
@@ -598,6 +626,10 @@ impl WorkItemsScreen {
                     return self.open_selected();
                 }
             },
+            KeyCode::Esc if self.peeking() => {
+                self.peeked = None;
+                self.sync_family_state(shell);
+            }
             KeyCode::Esc if !self.query.is_empty() => self.set_query(shell, String::new()),
             KeyCode::Esc if !self.selected_keys.is_empty() => self.selected_keys.clear(),
             _ => {
@@ -730,6 +762,8 @@ impl WorkItemsScreen {
     }
 
     pub fn select_row(&mut self, shell: &mut Shell, row: usize) {
+        // Moving the table is what the details pane follows, so it ends a peek.
+        self.peeked = None;
         if self.visible.is_empty() {
             self.table_state.select(None);
             self.table.offset = 0;
@@ -749,26 +783,33 @@ impl WorkItemsScreen {
     }
 
     fn jump_to_ticket(&mut self, shell: &mut Shell, key: &TicketKey) {
+        // What the pane is already showing, which is the peeked relative when
+        // there is one: clicking the selected row's own line while peeking has
+        // to come back to it rather than read as nothing happening.
         if self
-            .selected_ticket()
+            .detail_ticket()
             .is_some_and(|ticket| ticket.key == *key)
         {
             return;
         }
         let Some(row) = self.visible_row(key) else {
-            if let Some(ticket) = self.ticket_by_key(key) {
-                // The family tree shows finished relatives whether or not the
-                // table does, so say which of the two is in the way.
-                let reason = if self.finished_hidden() && StateCategory::of(&ticket.state).is_done()
-                {
-                    "finished, and finished tickets are hidden"
-                } else {
-                    "hidden by the current search"
-                };
-                shell.set_status(format!("{id} is {reason}", id = key.id));
-            } else {
+            let Some(ticket) = self.ticket_by_key(key) else {
                 shell.set_error(format!("{id} is not in this database", id = key.id));
-            }
+                return;
+            };
+            // The family tree shows relatives the table does not, so reading
+            // one costs a peek rather than the query: the details pane follows
+            // it, the table stays where it was, and Esc comes back.
+            let reason = if self.finished_hidden() && StateCategory::of(&ticket.state).is_done() {
+                "finished, and finished tickets are hidden"
+            } else {
+                "hidden by the current search"
+            };
+            shell.set_status(format!("{id} is {reason} — Esc to go back", id = key.id));
+            self.peeked = Some(key.clone());
+            self.family_cursor = Some(key.clone());
+            self.details.scroll_to(0);
+            shell.focus = Focus::Family;
             return;
         };
         self.record_history(shell);
@@ -777,7 +818,7 @@ impl WorkItemsScreen {
     }
 
     fn open_selected(&self) -> AppAction {
-        self.selected_ticket().map_or(AppAction::None, |ticket| {
+        self.detail_ticket().map_or(AppAction::None, |ticket| {
             AppAction::OpenUrl(ticket.web_url.clone())
         })
     }

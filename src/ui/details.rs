@@ -16,8 +16,15 @@ pub(super) fn render_details(
     // `pane` is everything inside the border — what the wheel scrolls and
     // where the scrollbar's own column is; `inner` is the padded column the
     // text is laid in, one in from each side.
-    let block =
-        focused_block(" Details ", shell.focus.is_details_pane()).padding(Padding::horizontal(1));
+    // A peek says so in the title: the pane is on a relative the table is not,
+    // and nothing in it can be edited until Esc brings it back.
+    let peeking = screen.peeking();
+    let title = if peeking {
+        " Details · peeking (Esc) "
+    } else {
+        " Details "
+    };
+    let block = focused_block(title, shell.focus.is_details_pane()).padding(Padding::horizontal(1));
     let pane = inside_border(area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -29,7 +36,7 @@ pub(super) fn render_details(
         Some(ScrollSurface::Details),
     ));
 
-    let Some(ticket) = screen.selected_ticket().cloned() else {
+    let Some(ticket) = screen.detail_ticket().cloned() else {
         // Nothing scrollable this frame; keep the measured height.
         let viewport = screen.details.viewport;
         screen.details.set_viewport(viewport, 0);
@@ -317,9 +324,11 @@ pub(super) fn render_details(
             ));
         }
     }
-    for (logical, field, x, span_width) in field_hits {
-        if let Some(y) = row_of(logical) {
-            register_edit_field(shell, inner, field, y, x, span_width);
+    if !peeking {
+        for (logical, field, x, span_width) in field_hits {
+            if let Some(y) = row_of(logical) {
+                register_edit_field(shell, inner, field, y, x, span_width);
+            }
         }
     }
     let overflow = line_count > viewport;

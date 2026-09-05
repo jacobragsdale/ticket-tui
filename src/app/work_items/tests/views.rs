@@ -499,7 +499,7 @@ fn a_finished_relative_is_still_in_the_family_tree_of_the_row_that_holds_it() {
     assert_eq!(
         app.shell.notification(),
         Some((
-            "2 is finished, and finished tickets are hidden",
+            "2 is finished, and finished tickets are hidden — Esc to go back",
             NotificationLevel::Info
         )),
         "following one back to the table says which rule is in the way"

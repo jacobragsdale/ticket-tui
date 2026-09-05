@@ -33,8 +33,8 @@ pub(super) fn dispatch_due_pull(app: &mut App, runtime: &mut SyncRuntime) -> boo
     true
 }
 
-/// Asks for the selected work item's comments and revision history once the
-/// selection has settled on it. Nothing goes out while the selection is still
+/// Asks for the work item on show — the selected row, or the relative being
+/// peeked at — for its comments and revision history once it has settled. Nothing goes out while the selection is still
 /// moving, while one request is already out, or for a work item whose stored
 /// details already match the revision on screen.
 pub(super) fn dispatch_due_details(app: &mut App, runtime: &mut SyncRuntime) -> bool {
@@ -43,7 +43,7 @@ pub(super) fn dispatch_due_details(app: &mut App, runtime: &mut SyncRuntime) -> 
     }
     let Some(key) = runtime
         .details
-        .due(app.work_items.selected_ticket(), Instant::now())
+        .due(app.work_items.detail_ticket(), Instant::now())
     else {
         return false;
     };
