@@ -148,7 +148,7 @@ fn a_tab_with_something_waiting_wears_a_badge() {
         (TabId::WorkItems, true, None),
         (TabId::Repos, false, None),
         (TabId::PullRequests, false, Some("3".to_owned())),
-        (TabId::Pipelines, false, Some("◐2".to_owned())),
+        (TabId::Pipelines, false, Some("◐ 2".to_owned())),
     ];
     let mut terminal = Terminal::new(TestBackend::new(130, 3)).unwrap();
     terminal
@@ -160,7 +160,7 @@ fn a_tab_with_something_waiting_wears_a_badge() {
 
     let bar = row_text(&terminal, 0, 130);
     assert!(bar.contains("3 Pull requests 3"), "{bar}");
-    assert!(bar.contains("4 Pipelines ◐2"), "{bar}");
+    assert!(bar.contains("4 Pipelines ◐ 2"), "{bar}");
     assert!(
         shell
             .hit_regions

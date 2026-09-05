@@ -698,13 +698,13 @@ fn a_opens_the_approvals_waiting_and_answers_one_with_a_word() {
 #[test]
 fn the_tab_badge_counts_the_runs_going_and_the_approvals_waiting() {
     let mut app = pipelines_app();
-    assert_eq!(Screen::badge(&app.pipelines), Some("\u{25d0}1".to_owned()));
+    assert_eq!(Screen::badge(&app.pipelines), Some("\u{25d0} 1".to_owned()));
 
     app.pipelines
         .set_approvals(vec![approval("approval-1", "Deploy")]);
     assert_eq!(
         Screen::badge(&app.pipelines),
-        Some("\u{25d0}1 \u{25c7}1".to_owned()),
+        Some("\u{25d0} 1 \u{25c7} 1".to_owned()),
         "both, when both"
     );
 
@@ -714,7 +714,7 @@ fn the_tab_badge_counts_the_runs_going_and_the_approvals_waiting() {
         .set_approvals(vec![approval("approval-2", "Deploy")]);
     assert_eq!(
         Screen::badge(&quiet.pipelines),
-        Some("\u{25c7}1".to_owned())
+        Some("\u{25c7} 1".to_owned())
     );
 }
 

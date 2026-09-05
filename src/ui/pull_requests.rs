@@ -348,12 +348,18 @@ fn pr_cell(row: &PrRow, column: PrColumn, now: Timestamp) -> Cell<'static> {
             row.request.created_by.display_name.clone(),
             plain,
         )),
-        PrColumn::Votes => Cell::from(Line::from(
-            row.vote_glyphs()
-                .into_iter()
-                .map(|(glyph, vote)| Span::styled(glyph, vote_style(vote)))
-                .collect::<Vec<_>>(),
-        )),
+        PrColumn::Votes => {
+            // A space between reviewers: a terminal that draws the vote glyphs
+            // two cells wide would otherwise paint over the next one.
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (glyph, vote) in row.vote_glyphs() {
+                if !spans.is_empty() {
+                    spans.push(Span::raw(" "));
+                }
+                spans.push(Span::styled(glyph, vote_style(vote)));
+            }
+            Cell::from(Line::from(spans))
+        }
         PrColumn::Build => Cell::from(build_line(row)),
         PrColumn::Age => Cell::from(
             Line::styled(

@@ -1160,20 +1160,20 @@ impl Screen for PipelinesScreen {
         }
     }
 
-    /// `◐2` while runs are going, `◇1` while an approval waits, both when
+    /// `◐ 2` while runs are going, `◇ 1` while an approval waits, both when
     /// both.
     fn badge(&self) -> Option<String> {
         let live = crate::model::live_runs(&self.runs);
         let waiting = self.approvals.len();
         let mut badge = String::new();
         if live > 0 {
-            badge.push_str(&format!("\u{25d0}{live}"));
+            badge.push_str(&format!("\u{25d0} {live}"));
         }
         if waiting > 0 {
             if !badge.is_empty() {
                 badge.push(' ');
             }
-            badge.push_str(&format!("\u{25c7}{waiting}"));
+            badge.push_str(&format!("\u{25c7} {waiting}"));
         }
         (!badge.is_empty()).then_some(badge)
     }

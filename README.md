@@ -160,7 +160,7 @@ milliseconds, and nothing at all when there is nothing to say:
 
 ```console
 $ ticket-tui status
-doing 4 · stale 2 · review 3 · rejected 1 · ◐1 · failed 1
+doing 4 · stale 2 · review 3 · rejected 1 · ◐ 1 · failed 1
 ```
 
 ## More

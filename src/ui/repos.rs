@@ -155,7 +155,7 @@ fn count_label(count: usize) -> String {
     }
 }
 
-/// `main ✓` clean · `feat/x *` dirty · `main ↑2 ↓1` · `—` not here.
+/// `main ✓` clean · `feat/x *` dirty · `main ↑ 2 ↓ 1` · `—` not here.
 pub(crate) fn local_line(row: &RepoRow) -> Line<'static> {
     let Some(local) = row.local.as_ref() else {
         return Line::styled("\u{2014}", Style::default().fg(theme().muted));
@@ -177,13 +177,13 @@ pub(crate) fn local_line(row: &RepoRow) -> Line<'static> {
     }
     if local.ahead > 0 {
         spans.push(Span::styled(
-            format!("\u{2191}{}", local.ahead),
+            format!("\u{2191} {}", local.ahead),
             Style::default().fg(theme().state_in_progress),
         ));
     }
     if local.behind > 0 {
         spans.push(Span::styled(
-            format!(" \u{2193}{}", local.behind),
+            format!(" \u{2193} {}", local.behind),
             Style::default().fg(theme().state_in_progress),
         ));
     }

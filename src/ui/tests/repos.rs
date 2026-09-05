@@ -18,7 +18,7 @@ fn the_table_draws_every_repository_with_its_counts_and_local_state() {
         "a dirty one carries the asterisk: {text}"
     );
     assert!(
-        text.contains("\u{2191}1") && text.contains("\u{2193}2"),
+        text.contains("\u{2191} 1") && text.contains("\u{2193} 2"),
         "ahead and behind are counted: {text}"
     );
     assert!(

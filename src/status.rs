@@ -84,7 +84,7 @@ impl Status {
             }
         }
         if self.live_runs > 0 {
-            segments.push(format!("\u{25d0}{}", self.live_runs));
+            segments.push(format!("\u{25d0} {}", self.live_runs));
         }
         if self.failed_runs > 0 {
             segments.push(format!("failed {}", self.failed_runs));
@@ -389,7 +389,7 @@ mod tests {
 
         assert_eq!(
             status.line(),
-            "doing 2 \u{00b7} stale 1 \u{00b7} review 2 \u{00b7} rejected 1 \u{00b7} \u{25d0}1 \
+            "doing 2 \u{00b7} stale 1 \u{00b7} review 2 \u{00b7} rejected 1 \u{00b7} \u{25d0} 1 \
              \u{00b7} failed 1",
             "the counts are the ones the tab bar badges, in tab order"
         );

@@ -733,8 +733,8 @@ pub fn rejected_of_mine(requests: &[PullRequest], me: Option<&str>) -> usize {
         .count()
 }
 
-/// How many runs are going, which is what the Pipelines tab badges `◐N` and
-/// `ticket-tui status` prints as `◐N`.
+/// How many runs are going, which is what the Pipelines tab badges `◐ N` and
+/// `ticket-tui status` prints as `◐ N`.
 #[must_use]
 pub fn live_runs(runs: &[Run]) -> usize {
     runs.iter().filter(|run| run.status.is_live()).count()

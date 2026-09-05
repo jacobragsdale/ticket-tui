@@ -323,7 +323,7 @@ pub trait Screen {
     fn restore(&mut self, _shell: &mut Shell, _session: TabSession) {}
 
     /// What the tab bar draws after this tab's name, when the tab has
-    /// something waiting: `3` pull requests to review, `◐2` runs going.
+    /// something waiting: `3` pull requests to review, `◐ 2` runs going.
     fn badge(&self) -> Option<String> {
         None
     }

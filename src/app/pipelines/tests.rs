@@ -175,7 +175,24 @@ fn a_running_row_reports_the_time_it_has_been_going_and_a_finished_one_its_durat
 #[test]
 fn the_tab_wears_a_badge_while_anything_is_running() {
     let app = pipelines_app();
-    assert_eq!(Screen::badge(&app.pipelines), Some("\u{25d0}1".to_owned()));
+    assert_eq!(Screen::badge(&app.pipelines), Some("\u{25d0} 1".to_owned()));
+
+    let mut both = pipelines_app();
+    both.pipelines.set_approvals(vec![crate::model::Approval {
+        id: "approval-1".to_owned(),
+        pipeline: "ticket-tui CI".to_owned(),
+        run_id: Some(13),
+        build_number: "20260829.13".to_owned(),
+        stage: "Deploy".to_owned(),
+        instructions: String::new(),
+        requested_at: None,
+    }]);
+    assert_eq!(
+        Screen::badge(&both.pipelines),
+        Some("\u{25d0} 1 \u{25c7} 1".to_owned()),
+        "a space after every glyph: a terminal that draws them two cells wide \
+         would paint over the count"
+    );
 
     let mut quiet = App::new(Vec::new());
     let shell = &quiet.shell;
