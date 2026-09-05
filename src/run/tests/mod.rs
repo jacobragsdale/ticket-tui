@@ -7,6 +7,7 @@ mod details;
 mod editor;
 mod edits;
 mod notify;
+mod settle;
 mod startup;
 mod sync;
 

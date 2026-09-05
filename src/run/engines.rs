@@ -179,6 +179,54 @@ pub(super) struct ReloadEngine {
     pub(super) receiver: Option<Receiver<std::result::Result<Snapshot, String>>>,
 }
 
+/// How still the screen has to be before the files that follow it are
+/// written, and how long a screen that never stills can put them off — a
+/// spinner repaints ten times a second and publishes once a second, not ten
+/// times.
+const SETTLE_QUIET: Duration = Duration::from_millis(300);
+const SETTLE_LIMIT: Duration = Duration::from_secs(1);
+
+/// When the files that trail the screen — the agent context and the session —
+/// are owed a write. Writing after every frame costs a `create_dir_all`, a
+/// temp file and a rename per keystroke, which on a VDI with an antivirus
+/// reading every write is most of what a keystroke costs.
+#[derive(Default)]
+pub(super) struct Settle {
+    /// The first frame drawn since the last write, and the last one. Both are
+    /// `None` while nothing is waiting to be written.
+    first: Option<Instant>,
+    last: Option<Instant>,
+}
+
+impl Settle {
+    /// Records a drawn frame.
+    pub(super) fn drew(&mut self, now: Instant) {
+        self.first.get_or_insert(now);
+        self.last = Some(now);
+    }
+
+    /// Whether a write is owed: a frame was drawn since the last one, and
+    /// either the screen has been still for a moment or it has been moving
+    /// long enough that waiting for it to still is waiting forever.
+    pub(super) fn due(&self, now: Instant) -> bool {
+        self.wakeup(now).is_some_and(|left| left.is_zero())
+    }
+
+    /// How long until `due`, so the loop can wake for it. `None` when nothing
+    /// is waiting to be written.
+    pub(super) fn wakeup(&self, now: Instant) -> Option<Duration> {
+        let quiet = SETTLE_QUIET.saturating_sub(now.saturating_duration_since(self.last?));
+        let limit = SETTLE_LIMIT.saturating_sub(now.saturating_duration_since(self.first?));
+        Some(quiet.min(limit))
+    }
+
+    /// The files are written; the clock starts again at the next frame.
+    pub(super) fn wrote(&mut self) {
+        self.first = None;
+        self.last = None;
+    }
+}
+
 pub(super) struct AgentContextPublisher {
     pub(super) path: PathBuf,
     pub(super) last: Option<AgentContext>,

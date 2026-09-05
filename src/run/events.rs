@@ -3,6 +3,17 @@
 
 use super::*;
 
+/// How long queued input may be handled before the screen is painted again.
+/// A key held down on a slow terminal arrives about as fast as it can be
+/// handled, so without a limit the drain never empties and the table scrolls
+/// invisibly until the key comes up.
+const DRAIN_LIMIT: Duration = Duration::from_millis(50);
+
+/// How often the database file's clock is read to notice another process
+/// writing it. It is two `fs::metadata` calls, and on a slow filesystem that
+/// is the difference between a free turn and a costly one.
+const WATCH_INTERVAL: Duration = Duration::from_secs(1);
+
 pub(super) fn run_terminal(
     app: &mut App,
     repository: &mut SqliteTicketRepository,
@@ -14,6 +25,8 @@ pub(super) fn run_terminal(
     let _restore = TerminalRestore;
     let mut reloader = ReloadEngine::default();
     let mut mouse_pointer = MousePointerShape::Default;
+    let mut settle = Settle::default();
+    let mut watched_at: Option<Instant> = None;
     enable_terminal_input()?;
 
     // ponytail: the one instrument this build has. TICKET_TUI_TRACE=<file>
@@ -28,12 +41,14 @@ pub(super) fn run_terminal(
         redraw |= app.work_items.poll_search(&mut app.shell);
         redraw |= poll_reload(app, repository, &mut reloader);
         redraw |= poll_sync(app, repository, runtime);
-        redraw |= poll_watch(app, repository, &mut reloader);
+        if watched_at.is_none_or(|at| at.elapsed() >= WATCH_INTERVAL) {
+            watched_at = Some(Instant::now());
+            redraw |= poll_watch(app, repository, &mut reloader);
+        }
         redraw |= poll_pipelines(app, runtime);
         redraw |= poll_local(app, runtime);
         redraw |= dispatch_due_pull(app, runtime);
         redraw |= dispatch_due_details(app, runtime);
-        redraw |= persist_session(app, repository);
         redraw |= config_watch.poll(app);
         redraw |= app.shell.tick();
         // A spinner has to be repainted to turn. Nothing in flight and
@@ -47,12 +62,21 @@ pub(super) fn run_terminal(
             sync_mouse_pointer(app, &mut mouse_pointer);
             redraw = false;
             drew = at.elapsed();
+            settle.drew(Instant::now());
+        }
+        // The two files that trail the screen are written once it has settled,
+        // not once a frame: holding `j` down a 35k-item table is one write at
+        // the end of the burst rather than one per row.
+        let now = Instant::now();
+        if settle.due(now) {
             let at = Instant::now();
             if let Err(error) = context_publisher.publish(app) {
                 app.shell
                     .set_error(format!("Could not publish agent context: {error:#}"));
                 redraw = true;
             }
+            redraw |= persist_session(app, repository);
+            settle.wrote();
             published = at.elapsed();
         }
 
@@ -67,8 +91,9 @@ pub(super) fn run_terminal(
             // an expiring notification.
             [
                 app.shell.next_wakeup(),
-                runtime.scheduler.time_until_due(Instant::now()),
-                runtime.details.time_until_due(Instant::now()),
+                runtime.scheduler.time_until_due(now),
+                runtime.details.time_until_due(now),
+                settle.wakeup(now),
             ]
             .into_iter()
             .flatten()
@@ -81,31 +106,27 @@ pub(super) fn run_terminal(
             continue;
         }
         let handling = Instant::now();
-        let (action, event_redraw) = match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => (app.handle_key(key), true),
-            Event::Mouse(mouse) => {
-                let update = app.handle_mouse(mouse);
-                (update.action, update.redraw)
+        // Everything already queued is handled before the screen is painted
+        // again: a held key or a burst of mouse moves is one frame, not one
+        // frame each, so input never piles up behind the drawing.
+        loop {
+            let (action, event_redraw) = handle_event(app, event::read()?);
+            redraw |= event_redraw;
+            if handle_action(action, app, runtime, &open_in_browser) {
+                // Something else owned the screen for a while, so nothing
+                // ratatui believes is on it can be trusted, the pointer shape
+                // included — and whatever was typed at the editor is not ours.
+                terminal.clear()?;
+                mouse_pointer = MousePointerShape::Default;
+                redraw = true;
+                break;
             }
-            Event::Paste(text) => {
-                app.handle_paste(&text);
-                (AppAction::None, true)
+            if app.shell.should_quit
+                || handling.elapsed() >= DRAIN_LIMIT
+                || !event::poll(Duration::ZERO)?
+            {
+                break;
             }
-            Event::Resize(_, _) => {
-                app.shell.handle_resize();
-                (AppAction::None, true)
-            }
-            Event::FocusGained | Event::FocusLost | Event::Key(_) => (AppAction::None, false),
-        };
-        if event_redraw {
-            redraw = true;
-        }
-        if handle_action(action, app, runtime, &open_in_browser) {
-            // Something else owned the screen for a while, so nothing ratatui
-            // believes is on it can be trusted, the pointer shape included.
-            terminal.clear()?;
-            mouse_pointer = MousePointerShape::Default;
-            redraw = true;
         }
         trace_turn(
             trace.as_deref(),
@@ -116,6 +137,27 @@ pub(super) fn run_terminal(
         );
     }
     Ok(())
+}
+
+/// One input event, turned into whatever it asked the app to do and whether
+/// the screen has to be repainted for it.
+fn handle_event(app: &mut App, event: Event) -> (AppAction, bool) {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => (app.handle_key(key), true),
+        Event::Mouse(mouse) => {
+            let update = app.handle_mouse(mouse);
+            (update.action, update.redraw)
+        }
+        Event::Paste(text) => {
+            app.handle_paste(&text);
+            (AppAction::None, true)
+        }
+        Event::Resize(_, _) => {
+            app.shell.handle_resize();
+            (AppAction::None, true)
+        }
+        Event::FocusGained | Event::FocusLost | Event::Key(_) => (AppAction::None, false),
+    }
 }
 
 /// ponytail: `TICKET_TUI_TRACE`'s one line per drawn frame or slow loop turn,

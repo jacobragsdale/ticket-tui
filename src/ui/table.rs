@@ -405,20 +405,25 @@ pub(super) fn render_table(
 
     let inner = geometry.inner;
     if count == 0 && inner.height > 2 {
-        let hidden_finished_message = format!(
-            "All {} tickets are finished and hidden \u{2014} click the chip's \u{00d7} or use the palette to show them",
-            screen.hidden_finished(shell)
-        );
+        // Counting the hidden rows is a pass over every ticket, so it happens
+        // on the one branch that says the number and nowhere else.
+        let hidden_finished_message;
         let message = if shell.sync_pending {
             "Syncing with Azure DevOps…"
         } else if shell.reload_pending {
             "Reloading tickets…"
-        } else if !screen.parsed_query().is_active() && screen.hidden_finished(shell) > 0 {
-            // Everything on file is finished and hidden: say so, and how to
-            // see it, rather than claiming the database is empty.
-            &hidden_finished_message
         } else if !screen.parsed_query().is_active() {
-            "No tickets in this database"
+            match screen.hidden_finished(shell) {
+                0 => "No tickets in this database",
+                // Everything on file is finished and hidden: say so, and how
+                // to see it, rather than claiming the database is empty.
+                hidden => {
+                    hidden_finished_message = format!(
+                        "All {hidden} tickets are finished and hidden \u{2014} click the chip's \u{00d7} or use the palette to show them"
+                    );
+                    &hidden_finished_message
+                }
+            }
         } else if screen.search_pending {
             "Searching…"
         } else {

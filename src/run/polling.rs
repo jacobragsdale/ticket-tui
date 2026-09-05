@@ -561,18 +561,25 @@ pub(super) fn poll_watch(
     true
 }
 
+/// Writes the session file when the screen it records has moved. Reports only
+/// whether the screen has to be painted again, which a saved session does not
+/// ask for and the error from a failed save does.
 pub(super) fn persist_session(app: &mut App, repository: &SqliteTicketRepository) -> bool {
     if !app.shell.session_dirty {
         return false;
     }
     let path = session::path_for(repository.path());
     match session::save(&path, &app.snapshot_session()) {
-        Ok(()) => app.shell.session_dirty = false,
-        Err(error) => app
-            .shell
-            .set_error(format!("Could not save session: {error:#}")),
+        Ok(()) => {
+            app.shell.session_dirty = false;
+            false
+        }
+        Err(error) => {
+            app.shell
+                .set_error(format!("Could not save session: {error:#}"));
+            true
+        }
     }
-    true
 }
 
 pub(super) fn poll_reload(
