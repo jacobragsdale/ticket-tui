@@ -316,3 +316,90 @@ fn family_selection_and_cursor_restore_after_reload() {
         vec![1, 2, 3]
     );
 }
+
+/// An Epic over fifteen issues, with twenty-five tasks under the one the table
+/// starts on — enough of both to run past the sibling window and the child cap.
+fn crowded_family_app() -> App {
+    let mut tickets = vec![ticket(1, "Epic", "2026-01-01T00:00:00Z")];
+    tickets.extend((10..25).map(|id| ticket(id, "Issue", "2026-01-02T00:00:00Z")));
+    tickets.extend((100..125).map(|id| ticket(id, "Task", "2026-01-01T00:00:00Z")));
+    // The most recently changed row is the one the table selects.
+    tickets[8].changed_at = crate::timestamp::ts("2026-03-01T00:00:00Z");
+    let mut app = App::new(tickets);
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            relations: (10..25)
+                .map(|id| child_of(id, 1))
+                .chain((100..125).map(|id| child_of(id, 17)))
+                .collect(),
+            ..TicketGraph::default()
+        },
+    );
+    app
+}
+
+fn cursor_id(app: &App) -> Option<i64> {
+    app.work_items.family_cursor.as_ref().map(|key| key.id)
+}
+
+#[test]
+fn the_family_cursor_runs_the_windowed_tree_and_stops_on_its_rows_only() {
+    let mut app = crowded_family_app();
+    assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 17);
+    app.shell.focus = Focus::Family;
+
+    let tree = app.work_items.visible_family_tree();
+    assert_eq!(
+        tree.iter().map(|entry| entry.key.id).collect::<Vec<_>>(),
+        [1, 14, 15, 16, 17]
+            .into_iter()
+            .chain(100..120)
+            .chain([18, 19, 20])
+            .collect::<Vec<_>>(),
+        "the chain above, three siblings either side, twenty children under"
+    );
+    assert_eq!((tree.more_siblings, tree.more_children), (8, 5));
+
+    press(&mut app, KeyCode::Home);
+    assert_eq!(cursor_id(&app), Some(1), "the top of the chain");
+    press(&mut app, KeyCode::End);
+    assert_eq!(
+        cursor_id(&app),
+        Some(20),
+        "the last sibling drawn, never one the window cut"
+    );
+    press(&mut app, KeyCode::Up);
+    assert_eq!(cursor_id(&app), Some(19));
+
+    app.work_items.details.set_viewport(6, 200);
+    press(&mut app, KeyCode::Home);
+    press(&mut app, KeyCode::PageDown);
+    assert_eq!(
+        cursor_id(&app),
+        Some(101),
+        "a page is six rows of the tree, children included"
+    );
+}
+
+#[test]
+fn the_family_cursor_scrolls_to_the_row_the_summary_line_pushed_down() {
+    let mut app = crowded_family_app();
+    app.shell.focus = Focus::Family;
+    let last = app.work_items.visible_family_tree().len() - 1;
+    app.work_items.details.set_viewport(5, 200);
+    // What the renderer records after drawing a `… 5 more children` line
+    // between the last child and the sibling under it.
+    app.work_items.family_rows = (0..=last)
+        .map(|index| if index > 24 { index + 1 } else { index })
+        .collect();
+
+    press(&mut app, KeyCode::End);
+    assert_eq!(cursor_id(&app), Some(20));
+    assert_eq!(
+        app.work_items.details.offset,
+        last + 1 + 1 - 5,
+        "the cursor scrolls to the row it was drawn on, not to its place in \
+         the tree"
+    );
+}

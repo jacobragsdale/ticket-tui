@@ -384,14 +384,14 @@ fn the_family_tree_writes_a_parents_ratio_after_its_title_and_leaves_the_rest_ba
     let text = render_text(60, 30, &mut app);
     assert!(text.contains("Auth rewrite 2/3"), "{text}");
     assert!(text.contains("Session notes 0/1"), "{text}");
-    assert!(text.contains("Validate email"), "{text}");
     assert!(
-        !text.contains("Validate email 0"),
+        !text.contains("Login form 0"),
         "a leaf of the tree trails nothing at all: {text}"
     );
     assert!(
-        !text.contains("Login form 0"),
-        "a closed issue with no children of its own trails nothing either: {text}"
+        !text.contains("Validate email"),
+        "the ratio is what stands in for a grandchild, which is never drawn: \
+         {text}"
     );
 }
 
@@ -933,11 +933,11 @@ fn the_family_cursor_scrolls_itself_back_into_view_below_the_heading() {
         app.work_items.details.offset, 0,
         "a fresh selection starts at the top"
     );
+    let tree_start = app.work_items.family_rows.first().copied().unwrap_or(0);
     assert!(
-        app.work_items.details_family_row >= fold,
+        tree_start >= fold,
         "the heading fills this pane, so the tree starts below the fold: \
-             {} rows down, {fold} visible",
-        app.work_items.details_family_row
+             {tree_start} rows down, {fold} visible"
     );
 
     app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
@@ -1124,4 +1124,117 @@ fn clicking_a_filtered_family_row_peeks_at_it_and_clicking_back_ends_the_peek() 
         app.work_items.detail_ticket().map(|ticket| ticket.key.id),
         Some(10_002)
     );
+}
+
+/// A Feature over fifteen stories, with twenty-five tasks under the one the
+/// table starts on: past the sibling window and past the child cap.
+fn crowded_family_app() -> App {
+    let org = |id| TicketKey {
+        organization: "demo".into(),
+        id,
+    };
+    let parent_of = move |id, parent| RelationRecord {
+        from: org(id),
+        to: org(parent),
+        kind: RelationKind::Parent,
+    };
+    let mut tickets = vec![ticket_at(
+        20_000,
+        "Card vault",
+        "Feature",
+        "Active",
+        "2026-01-01T00:00:00Z",
+    )];
+    tickets.extend((20_001..20_016).map(|id| {
+        ticket_at(
+            id,
+            &format!("Story {id}"),
+            "User Story",
+            "Active",
+            "2026-01-02T00:00:00Z",
+        )
+    }));
+    tickets.extend((20_100..20_125).map(|id| {
+        ticket_at(
+            id,
+            &format!("Task {id}"),
+            "Task",
+            "Active",
+            "2026-01-01T00:00:00Z",
+        )
+    }));
+    // The most recently changed row is the one the table selects.
+    tickets[1].changed_at = crate::timestamp::ts("2026-03-01T00:00:00Z");
+    let mut app = App::new(tickets);
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            relations: (20_001..20_016)
+                .map(|id| parent_of(id, 20_000))
+                .chain((20_100..20_125).map(|id| parent_of(id, 20_001)))
+                .collect(),
+            ..TicketGraph::default()
+        },
+    );
+    app.shell.focus = Focus::Family;
+    app
+}
+
+#[test]
+fn the_family_tree_counts_off_what_the_window_and_the_cap_left_out() {
+    let mut app = crowded_family_app();
+    // Side by side and tall, so the whole section is on screen at once.
+    let text = render_text(150, 60, &mut app);
+    assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 20_001);
+
+    assert!(text.contains("… 5 more children"), "{text}");
+    assert!(text.contains("… 8 more siblings"), "{text}");
+
+    // Each row lands where the renderer recorded it, summary lines and all:
+    // the offset from the tree's own index to the drawn row is the same for
+    // every row, so nothing after a summary line is off by one.
+    let ids: Vec<i64> = app
+        .work_items
+        .visible_family_tree()
+        .iter()
+        .map(|entry| entry.key.id)
+        .collect();
+    assert!(
+        !ids.contains(&20_124) && !ids.contains(&20_015),
+        "what the cap and the window cut is counted, not drawn: {ids:?}"
+    );
+    let drawn: Vec<u16> = ids
+        .iter()
+        .map(|id| {
+            family_row(&app, *id)
+                .expect("every tree row is on screen")
+                .y
+        })
+        .collect();
+    let recorded = app.work_items.family_rows.clone();
+    assert_eq!(recorded.len(), ids.len());
+    let offsets: Vec<usize> = drawn
+        .iter()
+        .zip(&recorded)
+        .map(|(y, row)| usize::from(*y) - row)
+        .collect();
+    assert!(
+        offsets.windows(2).all(|pair| pair[0] == pair[1]),
+        "drawn {drawn:?} against recorded {recorded:?}"
+    );
+    // The two rows that pushed the rest down carry nothing to click.
+    let lines: Vec<&str> = text.lines().collect();
+    for summary in ["… 5 more children", "… 8 more siblings"] {
+        let y = lines
+            .iter()
+            .position(|line| line.contains(summary))
+            .and_then(|y| u16::try_from(y).ok())
+            .expect("the summary line is on screen");
+        assert!(!drawn.contains(&y), "{summary} is nobody's row");
+        let cursor = app.work_items.family_cursor.clone();
+        let x = details_pane(&app).x + 6;
+        click(&mut app, x, y);
+        assert_eq!(app.work_items.family_cursor, cursor, "{summary} is inert");
+        assert!(!app.work_items.peeking(), "{summary} peeks at nothing");
+    }
 }

@@ -30,7 +30,7 @@ use crate::filter::{
 };
 pub use crate::model::Jump;
 use crate::model::{
-    ArtifactLink, CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTreeEntry, HistoryRecord,
+    ArtifactLink, CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTree, HistoryRecord,
     Identity, PullRequest, RelationKind, RelationRecord, Repo, SortDirection, SortField,
     StateCatalog, StateCategory, StateOption, Ticket, TicketGraph, TicketKey, compare_tickets,
     path_leaf, same_text,

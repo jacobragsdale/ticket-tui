@@ -2,6 +2,7 @@ use std::cell::OnceCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::ops::{Deref, Range};
 
 use serde::{Deserialize, Serialize};
 
@@ -1215,6 +1216,36 @@ pub struct FamilyTreeEntry {
     pub is_current: bool,
 }
 
+/// How many siblings are drawn either side of the current one before the rest
+/// become a `… N more siblings` line.
+const SIBLING_WINDOW: usize = 3;
+
+/// How many of the current work item's children are drawn before the rest
+/// become a `… N more children` line.
+const CHILD_CAP: usize = 20;
+
+/// What the details pane draws for one work item's family: the chain above it,
+/// the siblings beside it, and its own children under it, with the counts of
+/// what the window and the cap left out.
+///
+/// It derefs to its rows, so everything that walks the tree — the cursor, the
+/// hit targets — sees a plain slice and knows nothing about the two summary
+/// lines, which are drawn but never landed on.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct FamilyTree {
+    pub entries: Vec<FamilyTreeEntry>,
+    pub more_siblings: usize,
+    pub more_children: usize,
+}
+
+impl Deref for FamilyTree {
+    type Target = [FamilyTreeEntry];
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
 impl TicketGraph {
     /// Where everything is, built once and kept until something moves.
     fn index(&self) -> &GraphIndex {
@@ -1390,26 +1421,90 @@ impl TicketGraph {
         });
     }
 
+    /// The family the details pane draws: the chain above the current work
+    /// item, the siblings beside it, and its own children under it.
+    ///
+    /// Deliberately not the whole hierarchy. A real Epic has thousands of
+    /// descendants, and drawing them all buried the description under a
+    /// section nobody could read and cost more than everything else on the
+    /// screen put together. Sibling subtrees are gone and so are
+    /// grandchildren — each child already says how far its own children have
+    /// got, and selecting one re-roots the pane on it, which is how you get
+    /// further down.
     #[must_use]
-    pub fn visible_family_tree(&self, current: &TicketKey) -> Vec<FamilyTreeEntry> {
-        let (ancestors, _) = ancestor_chain(self, current);
-        let root = ancestors
-            .first()
-            .cloned()
-            .unwrap_or_else(|| current.clone());
-        let mut entries = Vec::new();
-        let mut path = HashSet::new();
-        emit_visible_family(
-            self,
-            current,
-            &root,
-            String::from("  "),
-            &[],
-            &mut path,
-            0,
-            &mut entries,
-        );
-        entries
+    pub fn visible_family_tree(&self, current: &TicketKey) -> FamilyTree {
+        let family = FamilySnapshot::from_graph(self, current);
+        let depth = family.ancestors.len();
+        let mut tree = FamilyTree::default();
+        for (level, ancestor) in family.ancestors.iter().enumerate() {
+            tree.entries.push(FamilyTreeEntry {
+                key: ancestor.clone(),
+                // Each ancestor is the only child drawn of the one above it.
+                prefix: if level == 0 {
+                    String::from("  ")
+                } else {
+                    tree_prefix(&vec![false; level - 1], true)
+                },
+                is_current: false,
+            });
+        }
+
+        // Nothing already drawn overhead is drawn again, which is what keeps a
+        // graph that already holds a cycle to one pass.
+        let overhead: HashSet<&TicketKey> = family.ancestors.iter().collect();
+        let siblings: Vec<&TicketKey> = family
+            .siblings
+            .iter()
+            .filter(|key| !overhead.contains(*key))
+            .collect();
+        let at = siblings
+            .iter()
+            .position(|key| **key == family.current)
+            .unwrap_or(0);
+        let window = sibling_window(at, siblings.len());
+        tree.more_siblings = siblings.len() - window.len();
+
+        let guides = vec![false; depth.saturating_sub(1)];
+        for (offset, sibling) in siblings[window.clone()].iter().enumerate() {
+            // The last row of a level closes it, unless the `… N more` line
+            // below is what closes it instead.
+            let is_last = offset + 1 == window.len() && tree.more_siblings == 0;
+            let is_current = **sibling == family.current;
+            tree.entries.push(FamilyTreeEntry {
+                key: (*sibling).clone(),
+                prefix: if depth == 0 {
+                    String::from("  ")
+                } else {
+                    tree_prefix(&guides, is_last)
+                },
+                is_current,
+            });
+            if !is_current {
+                continue;
+            }
+            let children: Vec<&TicketKey> = family
+                .children
+                .iter()
+                .filter(|key| !overhead.contains(*key) && **key != family.current)
+                .collect();
+            tree.more_children = children.len().saturating_sub(CHILD_CAP);
+            let shown = children.len().min(CHILD_CAP);
+            let mut child_guides = guides.clone();
+            if depth > 0 {
+                child_guides.push(!is_last);
+            }
+            for (index, child) in children.into_iter().take(CHILD_CAP).enumerate() {
+                tree.entries.push(FamilyTreeEntry {
+                    key: child.clone(),
+                    prefix: tree_prefix(
+                        &child_guides,
+                        index + 1 == shown && tree.more_children == 0,
+                    ),
+                    is_current: false,
+                });
+            }
+        }
+        tree
     }
 
     /// Files one comment just posted, so the details pane shows it without
@@ -1533,52 +1628,16 @@ fn sort_keys(keys: &mut [TicketKey]) {
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_visible_family(
-    graph: &TicketGraph,
-    current: &TicketKey,
-    key: &TicketKey,
-    prefix: String,
-    guides: &[bool],
-    path: &mut HashSet<TicketKey>,
-    depth: usize,
-    entries: &mut Vec<FamilyTreeEntry>,
-) {
-    if depth > MAX_ANCESTOR_DEPTH || path.contains(key) {
-        return;
+/// The stretch of siblings drawn around the current one: up to
+/// [`SIBLING_WINDOW`] either side, with the room a short side leaves going to
+/// the other, so the window is the same size wherever in the list it sits.
+fn sibling_window(at: usize, len: usize) -> Range<usize> {
+    if len == 0 {
+        return 0..0;
     }
-
-    entries.push(FamilyTreeEntry {
-        key: key.clone(),
-        prefix,
-        is_current: key == current,
-    });
-    if depth >= MAX_ANCESTOR_DEPTH {
-        return;
-    }
-
-    path.insert(key.clone());
-    let visible_children: Vec<_> = graph
-        .children_of(key)
-        .into_iter()
-        .filter(|child| !path.contains(child))
-        .collect();
-    for (index, child) in visible_children.iter().enumerate() {
-        let is_last = index + 1 == visible_children.len();
-        let mut child_guides = guides.to_vec();
-        child_guides.push(!is_last);
-        emit_visible_family(
-            graph,
-            current,
-            child,
-            tree_prefix(guides, is_last),
-            &child_guides,
-            path,
-            depth + 1,
-            entries,
-        );
-    }
-    path.remove(key);
+    let span = (SIBLING_WINDOW * 2 + 1).min(len);
+    let start = at.saturating_sub(SIBLING_WINDOW).min(len - span);
+    start..start + span
 }
 
 fn tree_prefix(guides: &[bool], is_last: bool) -> String {
@@ -2109,28 +2168,113 @@ mod tests {
     }
 
     #[test]
-    fn fully_expanded_tree_has_stable_connectors_and_key_order() {
+    fn the_tree_draws_the_chain_the_siblings_and_the_children_and_nothing_else() {
         let graph = TicketGraph {
             relations: vec![
                 relation(10, 1, RelationKind::Parent),
                 relation(11, 1, RelationKind::Parent),
-                relation(12, 1, RelationKind::Parent),
+                // What hangs off the sibling of the current work item's
+                // parent, which the pane has no business drawing.
+                relation(100, 10, RelationKind::Parent),
+                relation(110, 11, RelationKind::Parent),
                 relation(111, 11, RelationKind::Parent),
                 relation(112, 11, RelationKind::Parent),
+                relation(1110, 111, RelationKind::Parent),
+                relation(1111, 111, RelationKind::Parent),
+                relation(11100, 1110, RelationKind::Parent),
             ],
             ..TicketGraph::default()
         };
+        let tree = graph.visible_family_tree(&key(111));
         assert_eq!(
-            tree_view(&graph.visible_family_tree(&key(11))),
+            tree_view(&tree),
             vec![
                 (1, "  ", false),
-                (10, "  ├─", false),
-                (11, "  ├─", true),
-                (111, "  │ ├─", false),
-                (112, "  │ └─", false),
-                (12, "  └─", false),
+                (11, "  └─", false),
+                (110, "    ├─", false),
+                (111, "    ├─", true),
+                (1110, "    │ ├─", false),
+                (1111, "    │ └─", false),
+                (112, "    └─", false),
             ],
-            "the current ticket nests among its siblings"
+            "one row per ancestor, the siblings beside, the children under"
+        );
+        assert_eq!((tree.more_siblings, tree.more_children), (0, 0));
+        let ids = ids_of(&tree);
+        assert!(
+            !ids.contains(&10) && !ids.contains(&100),
+            "an uncle and its subtree stay out: {ids:?}"
+        );
+        assert!(!ids.contains(&11100), "and so does a grandchild: {ids:?}");
+    }
+
+    #[test]
+    fn a_current_at_the_root_stands_alone_over_its_children() {
+        let graph = TicketGraph {
+            relations: vec![
+                relation(2, 1, RelationKind::Parent),
+                relation(3, 1, RelationKind::Parent),
+            ],
+            ..TicketGraph::default()
+        };
+        let tree = graph.visible_family_tree(&key(1));
+        assert_eq!(
+            tree_view(&tree),
+            vec![(1, "  ", true), (2, "  ├─", false), (3, "  └─", false)]
+        );
+        assert_eq!((tree.more_siblings, tree.more_children), (0, 0));
+    }
+
+    #[test]
+    fn the_sibling_window_keeps_its_size_wherever_the_current_sits() {
+        let graph = TicketGraph {
+            relations: (100..115)
+                .map(|id| relation(id, 1, RelationKind::Parent))
+                .collect(),
+            ..TicketGraph::default()
+        };
+        // The room a short side leaves goes to the other one, so the window is
+        // seven rows deep at either end of the fifteen as well as in the
+        // middle.
+        for (current, shown) in [
+            (100, (100..107).collect::<Vec<_>>()),
+            (107, (104..111).collect()),
+            (114, (108..115).collect()),
+        ] {
+            let tree = graph.visible_family_tree(&key(current));
+            assert_eq!(
+                ids_of(&tree),
+                std::iter::once(1).chain(shown).collect::<Vec<_>>(),
+                "the window around {current}"
+            );
+            assert_eq!(tree.more_siblings, 8, "and what it left out of {current}");
+        }
+        let tree = graph.visible_family_tree(&key(100));
+        assert_eq!(
+            tree.last().map(|entry| entry.prefix.as_str()),
+            Some("  ├─"),
+            "the `… more siblings` line below is what closes the level"
+        );
+    }
+
+    #[test]
+    fn the_children_stop_at_the_cap_and_say_how_many_are_left() {
+        let graph = TicketGraph {
+            relations: std::iter::once(relation(2, 1, RelationKind::Parent))
+                .chain((100..125).map(|id| relation(id, 2, RelationKind::Parent)))
+                .collect(),
+            ..TicketGraph::default()
+        };
+        let tree = graph.visible_family_tree(&key(2));
+        assert_eq!(
+            ids_of(&tree),
+            vec![1, 2].into_iter().chain(100..120).collect::<Vec<_>>()
+        );
+        assert_eq!(tree.more_children, 5);
+        assert_eq!(
+            tree.last().map(|entry| entry.prefix.as_str()),
+            Some("    ├─"),
+            "the `… more children` line below is what closes the level"
         );
     }
 

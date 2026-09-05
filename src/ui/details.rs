@@ -72,7 +72,7 @@ pub(super) fn render_details(
     // Every click target is a line of the one paragraph, so each is recorded
     // against its logical line and placed once the scroll offset is known.
     let mut field_hits: Vec<(u16, EditableField, u16, u16)> = Vec::new();
-    let mut tree_start: Option<u16> = None;
+    let mut family_lines: Vec<u16> = Vec::new();
 
     lines.push(highlight_line(
         ticket.title.clone(),
@@ -122,20 +122,48 @@ pub(super) fn render_details(
             family_focused,
             width,
         ));
-        for entry in screen.visible_family_tree() {
+        let tree = screen.visible_family_tree();
+        // The current's children are the run right after it drawn one level
+        // deeper; the `… N more children` line closes that run off.
+        let current_at = tree.iter().position(|entry| entry.is_current);
+        let last_child = current_at.and_then(|at| {
+            let depth = tree[at].prefix.chars().count();
+            tree.iter()
+                .enumerate()
+                .skip(at + 1)
+                .take_while(|(_, entry)| entry.prefix.chars().count() > depth)
+                .map(|(index, _)| index)
+                .last()
+        });
+        for (index, entry) in tree.iter().enumerate() {
             let related = screen.ticket_by_key(&entry.key);
             let is_cursor = family_focused && cursor.as_ref() == Some(&entry.key);
             let progress = screen.child_progress(&entry.key);
-            let line = family_tree_line(&entry, related, progress, is_cursor, width);
-            if let Ok(index) = u16::try_from(lines.len()) {
-                tree_start.get_or_insert(index);
-                family_hits.push(FamilyHit {
-                    line: index,
-                    key: entry.key.clone(),
-                    jumpable: related.is_some(),
-                });
-            }
+            let line = family_tree_line(entry, related, progress, is_cursor, width);
+            let at = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+            family_lines.push(at);
+            family_hits.push(FamilyHit {
+                line: at,
+                key: entry.key.clone(),
+                jumpable: related.is_some(),
+            });
             lines.push(line);
+            if tree.more_children > 0 && Some(index) == last_child {
+                lines.push(more_family_line(
+                    &entry.prefix,
+                    tree.more_children,
+                    "children",
+                ));
+            }
+        }
+        if tree.more_siblings > 0
+            && let Some(entry) = current_at.map(|at| &tree[at])
+        {
+            lines.push(more_family_line(
+                &entry.prefix,
+                tree.more_siblings,
+                "siblings",
+            ));
         }
         for parent in &family.extra_parents {
             let related = screen.ticket_by_key(parent);
@@ -261,9 +289,10 @@ pub(super) fn render_details(
     let rows = last_hit.map_or_else(Vec::new, |last| {
         wrapped_row_starts(&lines, width, usize::from(last).saturating_add(1))
     });
-    screen.details_family_row = tree_start
-        .and_then(|line| rows.get(usize::from(line)).copied())
-        .map_or(0, usize::from);
+    screen.family_rows = family_lines
+        .iter()
+        .map(|line| rows.get(usize::from(*line)).copied().map_or(0, usize::from))
+        .collect();
 
     let paragraph = Paragraph::new(Text::from(lines))
         .wrap(Wrap { trim: false })
@@ -458,6 +487,20 @@ pub(super) fn state_glyph_style(base: Style, category: StateCategory) -> Style {
     } else {
         style
     }
+}
+
+/// The muted `… N more` line that closes off a group the sibling window or the
+/// child cap cut short. It stands where the last row of that group stands,
+/// with that row's connector turned into the closing one.
+fn more_family_line(prefix: &str, count: usize, what: &str) -> Line<'static> {
+    let stem: String = prefix
+        .chars()
+        .take(prefix.chars().count().saturating_sub(2))
+        .collect();
+    Line::styled(
+        format!("{stem}└─ … {count} more {what}"),
+        Style::default().fg(theme().muted),
+    )
 }
 
 pub(super) fn family_tree_line(

@@ -479,7 +479,7 @@ fn a_finished_relative_is_still_in_the_family_tree_of_the_row_that_holds_it() {
     let family: Vec<i64> = app
         .work_items
         .visible_family_tree()
-        .into_iter()
+        .iter()
         .map(|entry| entry.key.id)
         .collect();
     assert!(

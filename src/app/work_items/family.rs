@@ -248,7 +248,7 @@ impl WorkItemsScreen {
     }
 
     #[must_use]
-    pub fn visible_family_tree(&self) -> Vec<FamilyTreeEntry> {
+    pub fn visible_family_tree(&self) -> FamilyTree {
         self.detail_ticket()
             .map(|ticket| self.graph.visible_family_tree(&ticket.key))
             .unwrap_or_default()
@@ -472,9 +472,11 @@ impl WorkItemsScreen {
         let Some(index) = tree.iter().position(|entry| entry.key == cursor) else {
             return;
         };
-        // The tree sits below a heading that scrolls with it, so the row it
-        // was last drawn on is where the cursor has to be kept.
-        let line = self.details_family_row.saturating_add(index);
+        // The tree sits below a heading that scrolls with it and a `… N more`
+        // line can sit between its rows, so the row it was last drawn on is
+        // where the cursor has to be kept. Before the first frame there is no
+        // such row, and the position in the tree is the best guess there is.
+        let line = self.family_rows.get(index).copied().unwrap_or(index);
         let viewport = self.details.viewport.max(1);
         if line < self.details.offset {
             self.details.offset = line;

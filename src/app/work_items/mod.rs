@@ -182,11 +182,11 @@ pub struct WorkItemsScreen {
     pub table_state: TableState,
     pub table: ScrollState,
     pub details: ScrollState,
-    /// Which row of the details pane's scrolling content the family tree's
-    /// first row was last drawn on. The heading above it wraps, so only the
-    /// renderer knows where the tree starts, and the family cursor needs it to
-    /// scroll itself back into view.
-    pub details_family_row: usize,
+    /// Which row of the details pane's scrolling content each family row was
+    /// last drawn on. The heading above wraps and the `… N more` lines sit
+    /// between the rows, so only the renderer knows where any of them land,
+    /// and the family cursor needs them to scroll itself back into view.
+    pub family_rows: Vec<usize>,
     pub family_cursor: Option<TicketKey>,
     /// A relative the family tree walked to that the table cannot show,
     /// because a filter or the search hides it. The details pane draws it in
@@ -351,7 +351,7 @@ impl WorkItemsScreen {
             table_state: TableState::default(),
             table: ScrollState::default(),
             details: ScrollState::default(),
-            details_family_row: 0,
+            family_rows: Vec::new(),
             family_cursor: None,
             peeked: None,
             help: ScrollState::default(),

@@ -1890,11 +1890,19 @@ the binary, restart any running ticket-tui.
 
 An edited work item is written to Azure DevOps first and stored from the copy
 that comes back, so these records only ever hold what the server accepted.
-Parent and child links render as an always-expanded family tree in the details
-pane. Click a family row, or press `Enter` on the family cursor, to select that
-ticket in the table. Fuzzy search covers ID, title, assignee, state, type, area,
-iteration, and tags; it intentionally excludes descriptions. Structured
-`field:value` tokens are parsed out of the query before fuzzy matching.
+Parent and child links render as a family tree in the details pane, drawn as
+the chain above, the rows beside, and the rows below: every ancestor up to the
+root, one per line; the siblings at the current work item's own level, windowed
+to three either side of it; and its direct children under it, capped at twenty.
+A `… N more siblings` line closes the level when the window cut some, and a
+`… N more children` line closes the children when the cap did; neither is a
+cursor stop or a click target. Sibling subtrees and grandchildren are never
+drawn — every row already carries how far its own children have got, and
+selecting a row re-roots the tree on it. Click a family row, or press `Enter`
+on the family cursor, to select that ticket in the table. Fuzzy search covers
+ID, title, assignee, state, type, area, iteration, and tags; it intentionally
+excludes descriptions. Structured `field:value` tokens are parsed out of the
+query before fuzzy matching.
 
 The application uses WAL mode and a busy timeout so external SQLite readers can
 query the cache while the TUI is running.
