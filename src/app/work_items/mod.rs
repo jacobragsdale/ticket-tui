@@ -292,10 +292,10 @@ pub struct WorkItemsScreen {
     /// When those trees were last read from Azure DevOps, so a picker opening
     /// on a fresh cache asks for nothing at all.
     classification_fetched_at: Option<Timestamp>,
-    /// The sprint the configured team is in, as the last pull read it out of
-    /// the team's own settings. `None` without a team, and then
+    /// The sprints the configured teams are in, as the last pull read them
+    /// out of the teams' own settings. Empty without a team, and then
     /// `current_iteration` reads the trees' dates instead.
-    team_iteration: Option<String>,
+    team_iterations: Vec<String>,
     /// Whether the trees have been asked for this session, so opening either
     /// picker a second time costs nothing.
     classification_requested: bool,
@@ -403,7 +403,7 @@ impl WorkItemsScreen {
             identities_requested: false,
             classification_nodes: Vec::new(),
             classification_fetched_at: None,
-            team_iteration: None,
+            team_iterations: Vec::new(),
             classification_requested: false,
         };
         app.reindex_tickets();

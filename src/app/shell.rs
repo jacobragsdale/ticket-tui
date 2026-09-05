@@ -466,14 +466,16 @@ impl Shell {
         })
     }
 
-    /// The project the rows come from, and the team when they are one team's
-    /// slice of it, for the status bar to name beside the sync state when the
-    /// row is wide enough for it.
+    /// The project the rows come from, and the teams when they are some
+    /// teams' slice of it, for the status bar to name beside the sync state
+    /// when the row is wide enough for it.
     #[must_use]
     pub fn project_label(&self) -> Option<String> {
-        self.sync_target.as_ref().map(|target| match &target.team {
-            Some(team) => format!("{} · {team}", target.project),
-            None => target.project.clone(),
+        self.sync_target.as_ref().map(|target| {
+            std::iter::once(target.project.as_str())
+                .chain(target.teams.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" · ")
         })
     }
 

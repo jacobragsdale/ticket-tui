@@ -49,14 +49,18 @@ Last updated 2026-09-05. The backlog itself lives in Azure DevOps
 - **The Work items tab opens on Mine** when there is no session file yet
   (#753); a remembered session is restored over it. With a team configured it
   opens on Current sprint instead.
-- **One team of a department board** (2026-09-01): `team` in `config.toml`
-  (or `--team` / `TICKET_TUI_TEAM`) narrows every pull to the team's area
-  paths as Azure DevOps's own team settings list them, restricts the assignee
-  picker to the team, and makes `@current` the team's sprint. The id query is
-  paged at 20,000, so a project of any size lists. The parents a team's rows
-  hang off are pulled in from outside the scope and kept while something in
-  it still hangs off them. `ticket-tui teams` prints the names. See
-  "`team`: one team's slice of a department board" in DESIGN.md.
+- **Some teams of a department board** (2026-09-01, several teams #765 on
+  2026-09-05): `team` in `config.toml` (a name or a list; `--team` repeats,
+  `TICKET_TUI_TEAM` is comma separated) narrows every pull to the teams' area
+  paths as Azure DevOps's own team settings list them, ORed together and still
+  ANDed with `query`, restricts the assignee picker to the teams, and makes
+  `@current` any team's sprint (capture files into the first team's). A team's
+  whole history is inside its areas; `query` is what trims it, and the example
+  config shows how. The id query is paged at 20,000, so a project of any size
+  lists. The parents a team's rows hang off are pulled in from outside the
+  scope and kept while something in it still hangs off them. `ticket-tui
+  teams` prints the names. See "`team`: some teams' slice of a department
+  board" in DESIGN.md.
 - **The ergonomics round is done** (Epic #735, 2026-09-01; Issues #736-#741,
   see "Ergonomics and environment board, 2026-09-01" below): `g` follows the
   link on every tab, `[`/`]` retrace every visit, `+` captures a thought into

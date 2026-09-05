@@ -160,9 +160,9 @@ impl FilterSchema for WorkItemSchema {
             }),
             Sentinel::Nobody => row.assigned_to.is_none(),
             Sentinel::CurrentIteration => context
-                .current_iteration
-                .as_deref()
-                .is_some_and(|iteration| same_text(&row.iteration_path, iteration)),
+                .current_iterations
+                .iter()
+                .any(|iteration| same_text(&row.iteration_path, iteration)),
             Sentinel::Open => !StateCategory::of(&row.state).is_done(),
         }
     }
@@ -459,9 +459,9 @@ pub struct MatchContext {
     pub now: Timestamp,
     /// The display name `@me` stands for, and `None` when nobody is signed in.
     pub me: Option<String>,
-    /// The iteration path `@current` stands for, and `None` when no sprint is
-    /// scheduled around today.
-    pub current_iteration: Option<String>,
+    /// The iteration paths `@current` stands for — one a team, or the one the
+    /// calendar names — and empty when no sprint is scheduled around today.
+    pub current_iterations: Vec<String>,
 }
 
 impl MatchContext {
@@ -478,7 +478,7 @@ impl MatchContext {
         Self {
             now,
             me: None,
-            current_iteration: None,
+            current_iterations: Vec::new(),
         }
     }
 
@@ -489,8 +489,8 @@ impl MatchContext {
     }
 
     #[must_use]
-    pub fn with_current_iteration(mut self, iteration: Option<String>) -> Self {
-        self.current_iteration = iteration;
+    pub fn with_current_iterations(mut self, iterations: Vec<String>) -> Self {
+        self.current_iterations = iterations;
         self
     }
 }
@@ -1538,16 +1538,24 @@ mod tests {
             ..sprint_one.clone()
         };
 
-        let first = MatchContext::at(now).with_current_iteration(Some("Atlas\\Sprint 1".into()));
+        let first = MatchContext::at(now).with_current_iterations(vec!["Atlas\\Sprint 1".into()]);
         assert!(filters.matches_in(&sprint_one, false, &first));
         assert!(!filters.matches_in(&sprint_two, false, &first));
 
         let rolled_over =
-            MatchContext::at(now).with_current_iteration(Some("Atlas\\Sprint 2".into()));
+            MatchContext::at(now).with_current_iterations(vec!["Atlas\\Sprint 2".into()]);
         assert!(!filters.matches_in(&sprint_one, false, &rolled_over));
         assert!(
             filters.matches_in(&sprint_two, false, &rolled_over),
             "the query is unchanged; the sprint under it moved on"
+        );
+
+        let two_teams = MatchContext::at(now)
+            .with_current_iterations(vec!["Atlas\\Sprint 1".into(), "Atlas\\Sprint 2".into()]);
+        assert!(
+            filters.matches_in(&sprint_one, false, &two_teams)
+                && filters.matches_in(&sprint_two, false, &two_teams),
+            "two teams in different sprints are both current"
         );
 
         assert!(

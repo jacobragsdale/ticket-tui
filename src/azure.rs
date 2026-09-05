@@ -98,10 +98,10 @@ pub struct AzureConfig {
     /// large to hold whole — `[System.ChangedDate] > @today-180`, say. `None`
     /// pulls the project entire.
     pub scope: Option<String>,
-    /// The team whose slice of the project this is: its area paths narrow
-    /// every pull, its members fill the assignee picker, and its current
-    /// sprint is what `@current` means. `None` is the whole project.
-    pub team: Option<String>,
+    /// The teams whose slice of the project this is: their area paths narrow
+    /// every pull, their members fill the assignee picker, and their current
+    /// sprints are what `@current` means. Empty is the whole project.
+    pub teams: Vec<String>,
 }
 
 impl AzureConfig {
@@ -116,7 +116,7 @@ impl AzureConfig {
         project: Option<String>,
         code_project: Option<String>,
         scope: Option<String>,
-        team: Option<String>,
+        teams: Vec<String>,
     ) -> Result<Self> {
         let defaults = az_devops_defaults();
         let organization = organization
@@ -140,7 +140,7 @@ impl AzureConfig {
             project,
             code_project,
             scope: non_blank(scope.or_else(|| std::env::var("TICKET_TUI_QUERY").ok())),
-            team: non_blank(team.or_else(|| std::env::var("TICKET_TUI_TEAM").ok())),
+            teams: teams_named(teams, std::env::var("TICKET_TUI_TEAM").ok()),
         })
     }
 
@@ -163,6 +163,22 @@ fn settled_code_project(named: Option<String>, project: &str) -> String {
         .map(|named| named.trim().to_owned())
         .filter(|named| !named.is_empty())
         .unwrap_or_else(|| project.to_owned())
+}
+
+/// The teams named, trimmed and with the blanks dropped; `TICKET_TUI_TEAM`
+/// lists several with commas when nothing else named any.
+fn teams_named(named: Vec<String>, variable: Option<String>) -> Vec<String> {
+    let named = if named.is_empty() {
+        variable
+            .map(|teams| teams.split(',').map(str::to_owned).collect())
+            .unwrap_or_default()
+    } else {
+        named
+    };
+    named
+        .into_iter()
+        .filter_map(|team| non_blank(Some(team)))
+        .collect()
 }
 
 /// A sync scope or a team is whatever the user wrote, trimmed; a blank one is
@@ -298,7 +314,7 @@ pub struct AzureClient {
     /// When the rate-limit budget the last responses reported comes back, for
     /// a budget that is already spent. `None` while there is room to spare.
     throttled_until: Cell<Option<Instant>>,
-    /// The WIQL the configured team's area paths stand for, read once a
+    /// The WIQL the configured teams' area paths stand for, read once a
     /// client: a team's areas change about as often as its name does.
     team_condition: OnceCell<Option<String>>,
 }
@@ -350,9 +366,10 @@ impl AzureClient {
         self.query_work_item_ids(&all_ids_wiql(self.scope_condition()?.as_deref()))
     }
 
-    /// The WIQL condition every pull is narrowed by: the configured team's
-    /// area paths, ANDed with any `query` the file also names, or that query
-    /// alone, or nothing. The team's paths are read once a client.
+    /// The WIQL condition every pull is narrowed by: the configured teams'
+    /// area paths ORed together, ANDed with any `query` the file also names,
+    /// or that query alone, or nothing. The teams' paths are read once a
+    /// client, so two teams never widen a pull to the project.
     pub fn scope_condition(&self) -> Result<Option<String>> {
         let team = match self.team_condition.get() {
             Some(cached) => cached.clone(),
@@ -370,28 +387,36 @@ impl AzureClient {
     }
 
     fn fetch_team_condition(&self) -> Result<Option<String>> {
-        let Some(team) = &self.config.team else {
-            return Ok(None);
-        };
-        let url = self.team_settings_url(team, "teamfieldvalues", &version_query())?;
-        let settings = self.get(&url)?;
-        team_condition(&settings).map(Some).with_context(|| {
-            format!("team '{team}' owns no area paths, so there is nothing to pull")
+        let mut conditions = Vec::new();
+        for team in &self.config.teams {
+            let url = self.team_settings_url(team, "teamfieldvalues", &version_query())?;
+            let settings = self.get(&url)?;
+            conditions.push(team_condition(&settings).with_context(|| {
+                format!("team '{team}' owns no area paths, so there is nothing to pull")
+            })?);
+        }
+        Ok(match conditions.as_slice() {
+            [] => None,
+            [one] => Some(one.clone()),
+            _ => Some(format!("({})", conditions.join(" OR "))),
         })
     }
 
-    /// The sprint the configured team is in right now, as its own settings
-    /// schedule it. `None` without a team, and for a team between sprints.
-    pub fn fetch_team_current_iteration(&self) -> Result<Option<String>> {
-        let Some(team) = &self.config.team else {
-            return Ok(None);
-        };
+    /// The sprints the configured teams are in right now, as their own
+    /// settings schedule them, each once: empty without a team, and for teams
+    /// between sprints.
+    pub fn fetch_team_current_iterations(&self) -> Result<Vec<String>> {
         let query = format!("$timeframe=current&{}", version_query());
-        let response = self.get(&self.team_settings_url(team, "iterations", &query)?)?;
-        Ok(response
-            .pointer("/value/0/path")
-            .and_then(Value::as_str)
-            .map(str::to_owned))
+        let mut sprints: Vec<String> = Vec::new();
+        for team in &self.config.teams {
+            let response = self.get(&self.team_settings_url(team, "iterations", &query)?)?;
+            if let Some(path) = response.pointer("/value/0/path").and_then(Value::as_str)
+                && !sprints.iter().any(|known| known == path)
+            {
+                sprints.push(path.to_owned());
+            }
+        }
+        Ok(sprints)
     }
 
     /// The names of the project's teams, for `ticket-tui teams` to print so
@@ -730,16 +755,18 @@ impl AzureClient {
         Ok(url.into())
     }
 
-    /// Everybody on the configured team, or on every team in the project when
+    /// Everybody on the configured teams, or on every team in the project when
     /// none is configured, so the assignee picker can offer somebody who has no
     /// work item in the database yet. Azure DevOps lists the teams first and
     /// the members of each separately, so the project-wide read is one request
     /// per team plus one. Somebody on two teams is listed once.
     pub fn fetch_team_members(&self) -> Result<Vec<Identity>> {
-        if let Some(team) = &self.config.team {
+        if !self.config.teams.is_empty() {
             let mut found = Vec::new();
-            let members = self.get(&self.teams_url(&[team, "members"])?)?;
-            collect_team_members(&members, &mut found);
+            for team in &self.config.teams {
+                let members = self.get(&self.teams_url(&[team, "members"])?)?;
+                collect_team_members(&members, &mut found);
+            }
             return Ok(found);
         }
         let teams = self.get(&self.teams_url(&[])?)?;
@@ -2627,8 +2654,23 @@ mod tests {
             project: "development".into(),
             code_project: "development".into(),
             scope: None,
-            team: None,
+            teams: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_teams_named_are_the_flag_or_the_variable_with_the_blanks_dropped() {
+        assert_eq!(
+            teams_named(vec![" Payments ".into(), "".into()], Some("ignored".into())),
+            vec!["Payments"],
+            "what was named wins over the variable"
+        );
+        assert_eq!(
+            teams_named(Vec::new(), Some("Payments, Platform".into())),
+            vec!["Payments", "Platform"],
+            "the variable lists several with commas"
+        );
+        assert!(teams_named(Vec::new(), None).is_empty());
     }
 
     /// A client that never reaches the network, for the URLs it builds.

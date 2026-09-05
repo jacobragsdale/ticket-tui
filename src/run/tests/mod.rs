@@ -258,7 +258,7 @@ fn synced_app(path: &Path, source: FakeAzure) -> (App, SqliteTicketRepository, S
             project: "atlas".into(),
             code_project: "atlas".into(),
             scope: None,
-            team: None,
+            teams: Vec::new(),
         }),
         offline_reason: None,
         details: DetailsEngine::default(),

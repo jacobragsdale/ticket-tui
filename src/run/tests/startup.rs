@@ -81,7 +81,7 @@ fn a_database_another_project_filled_is_browsed_rather_than_replaced() {
         project: "atlas".into(),
         code_project: "atlas".into(),
         scope: None,
-        team: None,
+        teams: Vec::new(),
     };
 
     let message = project_mismatch(Some(stored), &config, false)
@@ -145,7 +145,7 @@ fn the_database_overlay_names_the_project_the_timer_and_the_scope() {
         project: "atlas".into(),
         code_project: "atlas".into(),
         scope: None,
-        team: None,
+        teams: Vec::new(),
     };
     assert_eq!(sync_source(&config, 60), "example-org/atlas every 60s");
     assert_eq!(

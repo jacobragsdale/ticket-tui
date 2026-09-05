@@ -68,11 +68,12 @@ pub struct Cli {
     /// defaults to TICKET_TUI_QUERY, then config.toml
     #[arg(long, value_name = "WIQL")]
     pub query: Option<String>,
-    /// The team whose slice of the project to work in: its areas narrow every
-    /// pull, its members fill the assignee picker, and its sprint is what
-    /// `@current` means; defaults to TICKET_TUI_TEAM, then config.toml
-    #[arg(long, global = true, value_name = "TEAM")]
-    pub team: Option<String>,
+    /// A team whose slice of the project to work in, repeatable: their areas
+    /// narrow every pull, their members fill the assignee picker, and their
+    /// sprints are what `@current` means; defaults to TICKET_TUI_TEAM (comma
+    /// separated), then config.toml
+    #[arg(long, global = true, value_name = "TEAM", value_delimiter = ',')]
+    pub team: Vec<String>,
     /// Days a work item may sit untouched before the Changed column flags it
     /// as stale; defaults to TICKET_TUI_STALE_DAYS, then whatever the session
     /// remembers, then 14
@@ -122,7 +123,12 @@ impl Cli {
             file.devops.code_project.as_ref(),
         );
         self.query = settled(self.query, "TICKET_TUI_QUERY", file.devops.query.as_ref());
-        self.team = settled(self.team, "TICKET_TUI_TEAM", file.devops.team.as_ref());
+        if self.team.is_empty() {
+            self.team = match variable("TICKET_TUI_TEAM") {
+                Some(teams) => teams.split(',').map(str::to_owned).collect(),
+                None => file.devops.team.clone(),
+            };
+        }
         self.workspace = self
             .workspace
             .or_else(|| variable("TICKET_TUI_WORKSPACE").map(PathBuf::from))
@@ -714,7 +720,7 @@ fn match_context(
     Ok((
         MatchContext::now()
             .with_me(me)
-            .with_current_iteration(current_iteration),
+            .with_current_iterations(current_iteration.into_iter().collect()),
         tree,
     ))
 }
@@ -740,7 +746,7 @@ fn refuse_unresolvable_sentinels(
     if context.me.is_none() && parsed.filters.contains(FilterField::Assignee, "@me") {
         bail!("no signed-in name to resolve @me; run `ticket-tui sync` once or set TICKET_TUI_ME");
     }
-    if context.current_iteration.is_none()
+    if context.current_iterations.is_empty()
         && parsed.filters.contains(FilterField::Iteration, "@current")
     {
         match tree {
@@ -2603,7 +2609,7 @@ mod tests {
             project: "atlas".into(),
             code_project: "atlas".into(),
             scope: None,
-            team: None,
+            teams: Vec::new(),
         }
     }
 
@@ -2833,6 +2839,7 @@ mod tests {
             "TICKET_TUI_CODE_PROJECT" => Some("env-code".to_owned()),
             "TICKET_TUI_QUERY" => Some("env query".to_owned()),
             "TICKET_TUI_WORKSPACE" => Some("/env/code".to_owned()),
+            "TICKET_TUI_TEAM" => Some("Payments,Platform".to_owned()),
             _ => None,
         };
 
@@ -2852,6 +2859,14 @@ mod tests {
         assert_eq!(flagged.workspace.as_deref(), Some(Path::new("/flag/code")));
         assert_eq!(flagged.project.as_deref(), Some("env-project"));
         assert_eq!(flagged.code_project.as_deref(), Some("env-code"));
+        assert_eq!(
+            flagged.team,
+            vec!["Payments", "Platform"],
+            "the variable lists teams with commas"
+        );
+        let two_flags = Cli::parse_from(["ticket-tui", "--team", "A", "--team", "B"])
+            .with_file_defaults(&file, env);
+        assert_eq!(two_flags.team, vec!["A", "B"], "the flag repeats");
 
         // With neither flag nor variable, every one of them comes from the file.
         let from_file = Cli::parse_from(["ticket-tui"]).with_file_defaults(&file, |_| None);
@@ -3054,7 +3069,7 @@ mod tests {
         let scheduled = select(
             tickets,
             Some("iteration:@current"),
-            &MatchContext::now().with_current_iteration(Some("Atlas\\Sprint 1".into())),
+            &MatchContext::now().with_current_iterations(vec!["Atlas\\Sprint 1".into()]),
             IterationTree::Cached,
         )
         .unwrap();

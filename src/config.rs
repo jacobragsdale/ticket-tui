@@ -10,7 +10,7 @@
 //! project = "ISTO"           # where the work items live
 //! code_project = "Fiquants"  # repos, pull requests and pipelines; left out = project
 //! query = "[System.AreaPath] UNDER 'ISTO\\Team'"   # optional WIQL scope on every pull
-//! # team = "Payments"          # the team whose areas, members and sprint this is
+//! # team = ["Payments", "Platform"]  # the teams whose areas, members and sprints these are
 //! workspace = "~/Development"                      # where clones live
 //!
 //! [theme]
@@ -88,11 +88,11 @@ pub struct DevOps {
     /// One extra WIQL condition ANDed into every pull.
     #[serde(default)]
     pub query: Option<String>,
-    /// The team whose slice of the project this is: its area paths narrow
-    /// every pull, its members fill the assignee picker, and its sprint is
-    /// what `@current` means.
-    #[serde(default)]
-    pub team: Option<String>,
+    /// The teams whose slice of the project this is — one name or a list:
+    /// their area paths narrow every pull, their members fill the assignee
+    /// picker, and their sprints are what `@current` means.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub team: Vec<String>,
     /// Where the Repos tab looks for clones and makes new ones. A leading
     /// `~/` is the home directory.
     #[serde(default)]
@@ -237,6 +237,21 @@ fn expand_home(path: &Path, home: Option<PathBuf>) -> PathBuf {
     }
 }
 
+/// `team = "Payments"` and `team = ["Payments", "Platform"]` both read: one
+/// team is the common case and a list is the same thing said twice.
+fn one_or_many<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(deserializer)? {
+        OneOrMany::One(one) => vec![one],
+        OneOrMany::Many(many) => many,
+    })
+}
+
 /// Reads the file, or the default configuration when there is none.
 pub fn load(path: &Path) -> Result<Config> {
     match std::fs::read_to_string(path) {
@@ -256,9 +271,16 @@ pub fn parse(source: &str) -> Result<Config> {
         ("devops.project", config.devops.project.as_deref()),
         ("devops.code_project", config.devops.code_project.as_deref()),
         ("devops.query", config.devops.query.as_deref()),
-        ("devops.team", config.devops.team.as_deref()),
         ("notify.command", config.notify.command.as_deref()),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        config
+            .devops
+            .team
+            .iter()
+            .map(|team| ("devops.team", Some(team.as_str()))),
+    ) {
         if value.is_some_and(|value| value.trim().is_empty()) {
             bail!("{key} is blank; give it a value or leave it out");
         }
@@ -339,6 +361,22 @@ ansi = ["#0b0d14"]
         assert_eq!(config.devops.project.as_deref(), Some("ISTO"));
         assert_eq!(config.devops.code_project.as_deref(), Some("Fiquants"));
         assert_eq!(config.devops.query.as_deref(), Some("[System.Id] > 1"));
+
+        // One team or a list of them: the same key either way.
+        let one = parse("[devops]\nteam = \"Payments\"\n").unwrap();
+        assert_eq!(one.devops.team, vec!["Payments".to_owned()]);
+        let two = parse("[devops]\nteam = [\"Payments\", \"Platform\"]\n").unwrap();
+        assert_eq!(
+            two.devops.team,
+            vec!["Payments".to_owned(), "Platform".to_owned()]
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                parse("[devops]\nteam = [\"Payments\", \" \"]\n").unwrap_err()
+            ),
+            "devops.team is blank; give it a value or leave it out"
+        );
 
         // Left out is the whole point: an older file, or one that only paints,
         // says nothing about it.

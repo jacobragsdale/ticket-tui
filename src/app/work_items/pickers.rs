@@ -878,22 +878,33 @@ impl WorkItemsScreen {
         self.focus_node(index);
     }
 
-    /// The sprint the team is in, as its own settings say, or — without a
-    /// team — the deepest iteration in the project whose dates contain today
-    /// in UTC. `None` when no iteration is scheduled around today, which
-    /// includes every project whose trees have never been fetched.
+    /// The sprint `@current` files into and the forms default to: the first
+    /// configured team's, as its own settings say, or — without a team — the
+    /// deepest iteration in the project whose dates contain today in UTC.
+    /// `None` when no iteration is scheduled around today, which includes
+    /// every project whose trees have never been fetched.
     #[must_use]
     pub fn current_iteration(&self) -> Option<String> {
-        self.team_iteration.clone().or_else(|| {
-            classification::current_iteration(&self.classification_nodes, Timestamp::now().date())
-                .map(|node| node.path.clone())
-        })
+        self.current_iterations().into_iter().next()
     }
 
-    /// The sprint the configured team is in, read out of the database at
-    /// startup; every pull after that carries it in its snapshot.
-    pub fn set_team_iteration(&mut self, iteration: Option<String>) {
-        self.team_iteration = iteration;
+    /// Every sprint `@current` matches: one a configured team, or the one the
+    /// calendar names without a team.
+    #[must_use]
+    pub fn current_iterations(&self) -> Vec<String> {
+        if !self.team_iterations.is_empty() {
+            return self.team_iterations.clone();
+        }
+        classification::current_iteration(&self.classification_nodes, Timestamp::now().date())
+            .map(|node| node.path.clone())
+            .into_iter()
+            .collect()
+    }
+
+    /// The sprints the configured teams are in, read out of the database at
+    /// startup; every pull after that carries them in its snapshot.
+    pub fn set_team_iterations(&mut self, iterations: Vec<String>) {
+        self.team_iterations = iterations;
     }
 
     /// The rows one picker offers: the cached tree when there is one, and

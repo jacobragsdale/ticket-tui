@@ -47,10 +47,23 @@ pub const PROJECT_KEY: &str = "project";
 /// work items in and narrowing it has to drop the ones now outside.
 pub const SYNC_SCOPE_KEY: &str = "sync_scope";
 
-/// `sync_meta` key holding the iteration path the configured team is in, as
-/// its own settings said on the last pull, and empty without a team or between
-/// sprints. This is what `iteration:@current` means while a team is set.
+/// `sync_meta` key holding the iteration paths the configured teams are in,
+/// one a line, as their own settings said on the last pull, and empty without
+/// a team or between sprints. This is what `iteration:@current` means while a
+/// team is set.
 pub const TEAM_ITERATION_KEY: &str = "team_current_iteration";
+
+/// The sprints [`TEAM_ITERATION_KEY`] holds, as stored: one a line, none for
+/// a value that is missing or empty.
+#[must_use]
+pub fn team_iterations(stored: Option<String>) -> Vec<String> {
+    stored
+        .unwrap_or_default()
+        .lines()
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
 
 /// `sync_meta` key holding the project's GUID, which the pull request policy
 /// and artifact-link endpoints ask for by id rather than by name.

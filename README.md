@@ -103,17 +103,19 @@ left out, they live in the same project, which is what one project in one place
 has always meant. `query` is one WIQL condition ANDed into every pull, and
 `workspace` is where the Repos tab looks for clones, with a leading `~/` read
 as the home directory. `team` is one team of a project that is a whole
-department's board: its area paths narrow every pull, its members are what
-the assignee picker offers, its sprint is what `@current` means, and a fresh
-session opens on Current sprint. `ticket-tui teams` prints the names to
-choose from:
+department's board, or a list of them: their area paths narrow every pull,
+their members are what the assignee picker offers, their sprints are what
+`@current` means, and a fresh session opens on Current sprint. `ticket-tui
+teams` prints the names to choose from. A large team's whole history is still
+inside its areas; `query` is what keeps it out:
 
 ```toml
 [devops]
 org = "myorg"
 project = "ISTO"
 code_project = "Fiquants"
-team = "Payments"
+team = ["Payments", "Platform"]
+query = "[System.State] <> 'Closed' OR [System.ChangedDate] > @today-90"
 ```
 
 `[notify]` is one command, run through `sh -c` when something worth

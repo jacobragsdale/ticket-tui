@@ -251,9 +251,9 @@ impl UndoEntry {
 pub struct SyncTarget {
     pub organization: String,
     pub project: String,
-    /// The team the rows are one slice of, for the status bar to name beside
-    /// the project. `None` for a project pulled whole.
-    pub team: Option<String>,
+    /// The teams the rows are one slice of, for the status bar to name beside
+    /// the project. Empty for a project pulled whole.
+    pub teams: Vec<String>,
     /// Seconds between timer pulls, `0` when `--refresh 0` left the sync key
     /// as the only thing that pulls.
     pub refresh_seconds: u64,

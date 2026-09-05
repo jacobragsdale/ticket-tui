@@ -142,11 +142,9 @@ pub(super) fn run() -> Result<()> {
             .meta(db::CLASSIFICATION_FETCHED_KEY)?
             .and_then(|raw| Timestamp::parse(&raw).ok()),
     );
-    app.work_items.set_team_iteration(
-        repository
-            .meta(db::TEAM_ITERATION_KEY)?
-            .filter(|path| !path.is_empty()),
-    );
+    app.work_items.set_team_iterations(db::team_iterations(
+        repository.meta(db::TEAM_ITERATION_KEY)?,
+    ));
     app.shell.set_me(resolve_me(
         repository.meta(db::ME_DISPLAY_NAME_KEY)?,
         std::env::var("TICKET_TUI_ME").ok(),
@@ -159,7 +157,9 @@ pub(super) fn run() -> Result<()> {
     // A run with no session yet opens on Mine — after `me` is known, so
     // `@me` matches — or, with a team, on its sprint; one that remembers a
     // query, an empty one included, reopens on that instead.
-    let has_team = config.as_ref().is_some_and(|config| config.team.is_some());
+    let has_team = config
+        .as_ref()
+        .is_some_and(|config| !config.teams.is_empty());
     if session_path.exists() {
         match session::load(&session_path) {
             Ok(loaded) => app.restore_session(loaded),
@@ -186,7 +186,7 @@ pub(super) fn run() -> Result<()> {
         .set_sync_target(config.as_ref().map(|config| SyncTarget {
             organization: config.organization.clone(),
             project: config.project.clone(),
-            team: config.team.clone(),
+            teams: config.teams.clone(),
             refresh_seconds: refresh,
         }));
     let mut runtime = SyncRuntime {
@@ -318,8 +318,8 @@ fn sync_source(config: &AzureConfig, refresh: u64) -> String {
     if let Some(scope) = &config.scope {
         source.push_str(&format!(" · scope ({scope})"));
     }
-    if let Some(team) = &config.team {
-        source.push_str(&format!(" · team {team}"));
+    if !config.teams.is_empty() {
+        source.push_str(&format!(" · team {}", config.teams.join(", ")));
     }
     source
 }

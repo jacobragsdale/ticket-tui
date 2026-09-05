@@ -299,7 +299,7 @@ impl WorkItemsScreen {
         if !prepared.states.is_empty() {
             self.state_catalog = prepared.states;
         }
-        self.team_iteration = prepared.team_iteration;
+        self.team_iterations = prepared.team_iterations;
         self.search.replace_documents(prepared.search_documents);
         self.reapply_pending_edits();
         self.refresh_child_progress();

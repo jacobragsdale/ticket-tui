@@ -358,23 +358,31 @@ The `i` overlay's sync line names all of it: the organization and project, the
 refresh interval or `on request` when the timer is off, the scope when one is
 configured, the team when one is, and how the last pull went.
 
-### `team`: one team's slice of a department board
+### `team`: some teams' slice of a department board
 
-A project that is one board for a whole department is narrowed to one team
-with `team` in `config.toml`, `--team`, or `TICKET_TUI_TEAM`; `ticket-tui
-teams` prints the names to choose from, spelled as the project spells them.
-The team is Azure DevOps's own. Its area paths, read once a run from
-`{project}/{team}/_apis/work/teamsettings/teamfieldvalues`, become the pull's
+A project that is one board for a whole department is narrowed to one team or
+several with `team` in `config.toml` (a name or a list of them), `--team`
+(repeatable), or `TICKET_TUI_TEAM` (comma separated); `ticket-tui teams`
+prints the names to choose from, spelled as the project spells them. The
+teams are Azure DevOps's own. Each one's area paths, read once a run from
+`{project}/{team}/_apis/work/teamsettings/teamfieldvalues`, become a
 condition — `UNDER` for a path held with its children, `=` for one held alone,
-ORed in parentheses — ANDed with any `query` written beside it, so the stored
-scope, the full pull a changed team forces, and everything above hold as
-written. Its members are what the assignee picker offers instead of every team
-in the project. Its current sprint, read with every pull from
-`teamsettings/iterations?$timeframe=current` and stored in `sync_meta` as
-`team_current_iteration`, is what `iteration:@current` means and what a quick
-capture files into; the calendar heuristic under [Sprint summary](#sprint-summary)
-answers only without a team. A run with no session yet opens on **Current
-sprint** rather than Mine, and the status bar names the team beside the project.
+ORed in parentheses — the teams' conditions ORed together in turn, and the lot
+ANDed with any `query` written beside it, so the stored scope, the full pull a
+changed team forces, and everything above hold as written: two teams pull two
+teams' areas, never the project. Their members are what the assignee picker
+offers instead of every team in the project. Their current sprints, read with
+every pull from `teamsettings/iterations?$timeframe=current` and stored in
+`sync_meta` as `team_current_iteration` one a line, are what
+`iteration:@current` means — a row in any of them is current — and the first
+team's is what a quick capture files into; the calendar heuristic under
+[Sprint summary](#sprint-summary) answers only without a team. A run with no
+session yet opens on **Current sprint** rather than Mine, and the status bar
+names the teams beside the project.
+
+A team's areas hold its whole history, and a large team has a long one. The
+teams do not trim it; `query` does, the same way it trims a project — for
+example `[System.State] <> 'Closed' OR [System.ChangedDate] > @today-90`.
 
 The parents a team's rows hang off usually live outside its areas. After every
 pull, the parents the batch names that neither it nor the database holds are

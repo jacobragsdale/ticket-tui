@@ -88,7 +88,7 @@ impl WorkItemsScreen {
     pub fn match_context(&self, shell: &Shell) -> MatchContext {
         MatchContext::now()
             .with_me(shell.me.clone())
-            .with_current_iteration(self.current_iteration())
+            .with_current_iterations(self.current_iterations())
     }
 
     #[must_use]

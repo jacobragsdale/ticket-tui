@@ -397,9 +397,9 @@ pub struct Snapshot {
     /// The project's pull requests: every active one, and a window of those
     /// recently closed.
     pub pull_requests: Vec<PullRequest>,
-    /// The sprint the configured team is in, as the pull read it. `None`
+    /// The sprints the configured teams are in, as the pull read them. Empty
     /// without a team, and then `@current` is read off the iteration dates.
-    pub team_iteration: Option<String>,
+    pub team_iterations: Vec<String>,
 }
 
 impl Snapshot {
@@ -420,7 +420,7 @@ impl Snapshot {
             pipelines: Vec::new(),
             runs: Vec::new(),
             pull_requests: Vec::new(),
-            team_iteration: None,
+            team_iterations: Vec::new(),
         }
     }
 
@@ -475,8 +475,8 @@ impl Snapshot {
     }
 
     #[must_use]
-    pub fn with_team_iteration(mut self, team_iteration: Option<String>) -> Self {
-        self.team_iteration = team_iteration;
+    pub fn with_team_iterations(mut self, team_iterations: Vec<String>) -> Self {
+        self.team_iterations = team_iterations;
         self
     }
 
@@ -554,9 +554,9 @@ pub trait WorkItemSource {
     fn fetch_by_ids(&self, _ids: &[i64]) -> Result<SyncBatch> {
         Ok(SyncBatch::default())
     }
-    /// The sprint the configured team is in, and `None` without a team.
-    fn team_current_iteration(&self) -> Result<Option<String>> {
-        Ok(None)
+    /// The sprints the configured teams are in, and none without a team.
+    fn team_current_iterations(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
     }
     /// Display name of the signed-in user, used to mark their own work items.
     fn display_name(&self) -> Result<Option<String>>;
@@ -734,8 +734,8 @@ impl WorkItemSource for AzureClient {
         self.fetch_work_items(ids)
     }
 
-    fn team_current_iteration(&self) -> Result<Option<String>> {
-        self.fetch_team_current_iteration()
+    fn team_current_iterations(&self) -> Result<Vec<String>> {
+        self.fetch_team_current_iterations()
     }
 
     fn repositories(&self) -> Result<(Vec<Repo>, Option<String>)> {
@@ -1727,13 +1727,14 @@ impl Worker {
         }
     }
 
-    /// Reads which sprint the configured team is in and stores it when it
-    /// moved, so `@current` follows the team's calendar rather than the
-    /// project's. Answers whether anything was written. A read that fails
-    /// leaves the stored sprint alone: it is not what the pull is for.
+    /// Reads which sprints the configured teams are in and stores them, one a
+    /// line, when they moved, so `@current` follows the teams' calendars
+    /// rather than the project's. Answers whether anything was written. A
+    /// read that fails leaves the stored sprints alone: they are not what the
+    /// pull is for.
     fn sync_team_sprint(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
-        let sprint = match self.source(events)?.team_current_iteration() {
-            Ok(found) => found.unwrap_or_default(),
+        let sprint = match self.source(events)?.team_current_iterations() {
+            Ok(found) => found.join("\n"),
             Err(error) => return Ok(Self::warn(events, "Team sprint", &error)),
         };
         let repository = self.repository()?;
@@ -1951,15 +1952,13 @@ impl Worker {
         let pipelines = repository.load_pipelines()?;
         let runs = repository.load_runs()?;
         let pull_requests = repository.load_pull_requests()?;
-        let team_iteration = repository
-            .meta(db::TEAM_ITERATION_KEY)?
-            .filter(|path| !path.is_empty());
+        let team_iterations = db::team_iterations(repository.meta(db::TEAM_ITERATION_KEY)?);
         Ok(Snapshot::with_graph(tickets, graph)
             .with_states(states)
             .with_repos(repos)
             .with_pipelines(pipelines, runs)
             .with_pull_requests(pull_requests)
-            .with_team_iteration(team_iteration))
+            .with_team_iterations(team_iterations))
     }
 
     /// The work item types in a batch whose states nobody has read yet, in the
@@ -2277,8 +2276,8 @@ mod tests {
         /// The condition this source derives once connected — a team's areas
         /// — or `None` for one that only knows what it was configured with.
         scope_condition: Option<String>,
-        /// The sprint this source's team is in, or `None` without a team.
-        team_iteration: Option<String>,
+        /// The sprints this source's teams are in, none without a team.
+        team_iterations: Vec<String>,
         /// The work items this source answers a read by id with, whatever the
         /// scope says, and every id list it was asked for, in order.
         parents: Arc<Mutex<Vec<StoredWorkItem>>>,
@@ -2407,12 +2406,10 @@ mod tests {
             }
         }
 
-        /// The sprint this source's team is in.
-        fn in_sprint(self, path: &str) -> Self {
-            Self {
-                team_iteration: Some(path.to_owned()),
-                ..self
-            }
+        /// One more sprint a team of this source is in.
+        fn in_sprint(mut self, path: &str) -> Self {
+            self.team_iterations.push(path.to_owned());
+            self
         }
 
         /// Which project this source pulls, and how much of it.
@@ -2486,8 +2483,8 @@ mod tests {
             Ok(batch)
         }
 
-        fn team_current_iteration(&self) -> Result<Option<String>> {
-            Ok(self.team_iteration.clone())
+        fn team_current_iterations(&self) -> Result<Vec<String>> {
+            Ok(self.team_iterations.clone())
         }
 
         fn list_ids(&self) -> Result<Vec<i64>> {
@@ -4272,7 +4269,8 @@ mod tests {
         ])
         .scoped(Some("[System.ChangedDate] > @today-180"))
         .deriving(derived)
-        .in_sprint("atlas\\Sprint 2");
+        .in_sprint("atlas\\Sprint 2")
+        .in_sprint("atlas\\Platform Sprint 7");
         let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
 
         handle.send(SyncRequest::Pull(PullOrigin::User)).unwrap();
@@ -4280,9 +4278,9 @@ mod tests {
             panic!("expected a pull");
         };
         assert_eq!(
-            snapshot.team_iteration.as_deref(),
-            Some("atlas\\Sprint 2"),
-            "the snapshot carries the team's sprint to the screen"
+            snapshot.team_iterations,
+            vec!["atlas\\Sprint 2", "atlas\\Platform Sprint 7"],
+            "the snapshot carries every team's sprint to the screen"
         );
         assert_eq!(
             stored_meta(&path, db::SYNC_SCOPE_KEY).as_deref(),
@@ -4291,7 +4289,8 @@ mod tests {
         );
         assert_eq!(
             stored_meta(&path, db::TEAM_ITERATION_KEY).as_deref(),
-            Some("atlas\\Sprint 2")
+            Some("atlas\\Sprint 2\natlas\\Platform Sprint 7"),
+            "one sprint a line, so one team reads as it always has"
         );
 
         // The same team and the same sprint: nothing moved, and the pull is
