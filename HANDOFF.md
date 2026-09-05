@@ -1,11 +1,35 @@
 # Where to pick up
 
-Last updated 2026-09-01. The backlog itself lives in Azure DevOps
+Last updated 2026-09-05. The backlog itself lives in Azure DevOps
 (`jacobragsdale/development`); this file is only the pointer into it. Run
 `ticket-tui` and browse the epics for the current state.
 
 ## State of `main`
 
+- **The 35k round (Epic #758, 2026-09-05).** Jacob took ticket-tui to a Citrix VDI
+  (Windows Terminal, WSL 2, slow core, aggressive AV) against a ~35k-item project and it
+  was unusable: every keystroke and mouse hover lagged. Measured with the new bench
+  tooling, every keystroke already cost ~40 ms of draw on an M-series Mac, all of it the
+  selected item's family tree walked from the root down with no index behind it. What
+  landed: `scripts/seed_large_db.py` makes a 34,260-item database in the organization
+  `bench` that the app refuses to sync over, and `TICKET_TUI_TRACE=<file>` logs one line
+  per drawn frame and per slow turn (#759); `TicketGraph` carries a lazily built index and
+  `WorkItemsScreen` a key→row map, so every family and details lookup is a hash (#760);
+  the context and session files are written once the screen has settled (300 ms quiet,
+  or a second of motion), queued input is drained before a frame with a 50 ms bound, the
+  database is stat'ed once a second, and the empty-table message counts hidden rows once
+  (#762); `compare_text` no longer allocates; one space after every glyph that carries a
+  count, because Windows Terminal draws `◐ ◇ ↑ ↓` two cells wide (#763). #761 reshapes the
+  Family section to the chain above, the siblings beside (windowed ±3) and the direct
+  children below (capped at 20) with `… N more` lines. After #761: **Jacob builds on the
+  VDI with `TICKET_TUI_TRACE` before #764** (sync sizing: pragmas, `prepare_cached`,
+  reconcile deletions every 10 min, eager details only for ≤10 changes) goes. Bench after
+  #760 + #762: `j` 9 ms, mouse 8 ms, typing 4 ms, first frame 13 ms, nothing over 30 ms.
+  Deliberately left out, with triggers, in the Epic's description: lazy descriptions,
+  borrowed filter values, `capture_selectable`, parallel first pull, an ASCII glyph mode.
+- **Peeking at a hidden relative** (84088c8, no ticket): walking the family tree onto a
+  relative the table cannot show puts it in the details pane read-only instead of
+  refusing; Esc or moving the table ends it.
 - **The infrastructure tabs were torn out on 2026-09-01.** `main` is Work
   items, Repos, Pull requests and Pipelines, and nothing else. What came out:
   tabs `5`-`8` (AKS, ACR, Key Vault, Environments), the pull request
