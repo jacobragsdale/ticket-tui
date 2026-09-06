@@ -94,6 +94,7 @@ fn details_render_relationships_history_and_comments() {
                 created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
                 author: Some("Avery Chen".into()),
                 text: "Looks good".into(),
+                html: String::new(),
             }],
             history: vec![HistoryRecord {
                 ticket: item.key,
@@ -127,12 +128,16 @@ fn details_render_relationships_history_and_comments() {
         "Planning comes before Description"
     );
     assert!(
-        section("Description") < section("History"),
-        "Description comes before History"
+        section("Description") < section("Acceptance Criteria"),
+        "Description comes before Acceptance Criteria"
     );
     assert!(
-        section("History") < section("Comments"),
-        "History comes before Comments"
+        section("Acceptance Criteria") < section("Comments"),
+        "Acceptance Criteria comes before Comments"
+    );
+    assert!(
+        section("Comments") < section("History"),
+        "Comments come before History"
     );
 }
 
@@ -152,6 +157,7 @@ fn a_comment_just_posted_shows_at_the_head_of_the_discussion() {
                 created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
                 author: Some("Avery Chen".into()),
                 text: "Looks good".into(),
+                html: String::new(),
             }],
             ..TicketGraph::default()
         },
@@ -165,6 +171,7 @@ fn a_comment_just_posted_shows_at_the_head_of_the_discussion() {
             created_at: crate::timestamp::ts("2026-01-04T00:00:00Z"),
             author: Some("Jacob Ragsdale".into()),
             text: "Merged into main".into(),
+            html: String::new(),
         },
     );
 
@@ -980,6 +987,7 @@ fn end_scrolls_past_the_description_to_the_last_comment() {
                 created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
                 author: Some("Avery Chen".into()),
                 text: "The very last word".into(),
+                html: String::new(),
             }],
             history: Vec::new(),
             ..Default::default()

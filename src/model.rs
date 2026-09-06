@@ -35,6 +35,12 @@ pub struct Ticket {
     /// a rich-text editor, so an edit has to hand back HTML rather than the
     /// flattened reading of it.
     pub description_html: String,
+    /// `Microsoft.VSTS.Common.AcceptanceCriteria` rendered as plain text, the
+    /// way `description` is.
+    pub acceptance_criteria: String,
+    /// The same field as Azure DevOps stores it, for the same reason
+    /// `description_html` is kept.
+    pub acceptance_criteria_html: String,
     pub created_at: Timestamp,
     pub changed_at: Timestamp,
     pub web_url: String,
@@ -66,6 +72,8 @@ impl Ticket {
             tags: Vec::new(),
             description: String::new(),
             description_html: String::new(),
+            acceptance_criteria: String::new(),
+            acceptance_criteria_html: String::new(),
             created_at: Timestamp::parse("2026-01-01T00:00:00Z").expect("fixture timestamp"),
             changed_at: Timestamp::parse("2026-01-01T00:00:00Z").expect("fixture timestamp"),
             web_url: format!("https://dev.azure.com/demo/atlas/_workitems/edit/{id}"),
@@ -1110,7 +1118,10 @@ pub struct CommentRecord {
     pub comment_id: i64,
     pub created_at: Timestamp,
     pub author: Option<String>,
+    /// The body flattened to text, which is what the details pane draws.
     pub text: String,
+    /// The body as Azure DevOps stores it, which is what an edit is opened on.
+    pub html: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2051,6 +2062,7 @@ mod tests {
             created_at: ts(at),
             author: None,
             text: format!("comment {comment_id}"),
+            html: String::new(),
         }
     }
 

@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -117,6 +117,8 @@ CREATE TABLE work_items (
     changed_at     TEXT NOT NULL,
     web_url        TEXT NOT NULL,
     details_rev    INTEGER NOT NULL DEFAULT 0,
+    acceptance_criteria TEXT NOT NULL DEFAULT '',
+    acceptance_criteria_html TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (organization, work_item_id)
 );
 CREATE INDEX work_items_changed_idx ON work_items(changed_at);
@@ -146,6 +148,7 @@ CREATE TABLE work_item_comments (
     created_at   TEXT NOT NULL,
     author       TEXT,
     body         TEXT NOT NULL,
+    body_html    TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (organization, work_item_id, comment_id)
 );
 CREATE TABLE work_item_history (
@@ -343,7 +346,8 @@ impl SqliteTicketRepository {
             "SELECT organization, project, work_item_id, revision, work_item_type,
                     title, state, reason, assigned_to, priority, area_path,
                     iteration_path, tags, description, created_at, changed_at, web_url,
-                    details_rev, description_html
+                    details_rev, description_html, acceptance_criteria,
+                    acceptance_criteria_html
              FROM work_items",
         )?;
         let rows = statement.query_map([], |row| {
@@ -375,6 +379,8 @@ impl SqliteTicketRepository {
                     .collect(),
                 description: row.get(13)?,
                 description_html: row.get(18)?,
+                acceptance_criteria: row.get(19)?,
+                acceptance_criteria_html: row.get(20)?,
                 created_at: parse_row_timestamp(created_raw, "created_at", &organization, id)?,
                 changed_at: parse_row_timestamp(changed_raw, "changed_at", &organization, id)?,
                 web_url: row.get(16)?,
@@ -1339,7 +1345,7 @@ impl SqliteTicketRepository {
 
     fn load_comments(&self) -> Result<Vec<CommentRecord>> {
         let mut statement = self.connection.prepare(
-            "SELECT organization, work_item_id, comment_id, created_at, author, body
+            "SELECT organization, work_item_id, comment_id, created_at, author, body, body_html
              FROM work_item_comments",
         )?;
         let rows = statement.query_map([], |row| {
@@ -1355,6 +1361,7 @@ impl SqliteTicketRepository {
                 created_at: parse_row_timestamp(created_raw, "created_at", &organization, id)?,
                 author: row.get(4)?,
                 text: row.get(5)?,
+                html: row.get(6)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1588,9 +1595,9 @@ fn insert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
             organization, project, work_item_id, revision, work_item_type,
             title, state, reason, assigned_to, priority, area_path,
             iteration_path, tags, description, created_at, changed_at, web_url,
-            details_rev, description_html
+            details_rev, description_html, acceptance_criteria, acceptance_criteria_html
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                   ?18, ?19)",
+                   ?18, ?19, ?20, ?21)",
         )?
         .execute(params![
             ticket.key.organization,
@@ -1612,6 +1619,8 @@ fn insert_ticket(transaction: &Transaction<'_>, ticket: &Ticket) -> Result<()> {
             ticket.web_url,
             ticket.details_rev,
             ticket.description_html,
+            ticket.acceptance_criteria,
+            ticket.acceptance_criteria_html,
         ])?;
     Ok(())
 }
@@ -1653,8 +1662,8 @@ fn insert_comment(transaction: &Transaction<'_>, comment: &CommentRecord) -> Res
     transaction
         .prepare_cached(
             "INSERT OR REPLACE INTO work_item_comments
-                (organization, work_item_id, comment_id, created_at, author, body)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (organization, work_item_id, comment_id, created_at, author, body, body_html)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?
         .execute(params![
             comment.ticket.organization,
@@ -1662,7 +1671,8 @@ fn insert_comment(transaction: &Transaction<'_>, comment: &CommentRecord) -> Res
             comment.comment_id,
             comment.created_at.to_rfc3339(),
             comment.author,
-            comment.text
+            comment.text,
+            comment.html
         ])?;
     Ok(())
 }
@@ -1739,6 +1749,8 @@ mod tests {
             tags: vec!["backend".into(), "rust".into()],
             description: "Cached from Azure DevOps.".into(),
             description_html: "<p>Cached from <b>Azure DevOps</b>.</p>".into(),
+            acceptance_criteria: "• Green build".into(),
+            acceptance_criteria_html: "<ul><li>Green build</li></ul>".into(),
             changed_at: ts("2026-02-01T00:00:00Z"),
             web_url: format!("https://dev.azure.com/example-org/atlas/_workitems/edit/{id}"),
             ..Ticket::fixture(id, format!("Ticket {id}"))
@@ -1879,6 +1891,7 @@ mod tests {
                 created_at: ts("2026-02-02T00:00:00Z"),
                 author: Some("Jordan Patel".into()),
                 text: "Looks good".into(),
+                html: "<p>Looks good</p>".into(),
             }],
             history: vec![HistoryRecord {
                 ticket: tickets[0].key.clone(),

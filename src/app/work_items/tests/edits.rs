@@ -709,6 +709,7 @@ fn comment(id: i64, at: &str, text: &str) -> CommentRecord {
         created_at: crate::timestamp::ts(at),
         author: Some("Jacob Ragsdale".into()),
         text: text.into(),
+        html: String::new(),
     }
 }
 

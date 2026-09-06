@@ -120,6 +120,7 @@ fn a_posted_comment_reaches_the_discussion_and_a_refused_one_only_the_toast() {
         created_at: Timestamp::parse("2026-03-04T09:15:00Z").unwrap(),
         author: Some("Jacob Ragsdale".into()),
         text: "Merged into main".into(),
+        html: String::new(),
     };
     let (mut app, mut repository, mut runtime) =
         synced_app(&path, FakeAzure::commenting(stored.clone()));

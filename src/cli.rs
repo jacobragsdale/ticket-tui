@@ -1175,6 +1175,9 @@ struct TicketJson<'a> {
     /// for five hundred descriptions.
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<&'a str>,
+    /// Likewise only on `show`, and only when the work item has any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    acceptance_criteria: Option<&'a str>,
 }
 
 impl<'a> TicketJson<'a> {
@@ -1196,12 +1199,15 @@ impl<'a> TicketJson<'a> {
             changed: ticket.changed_at.to_rfc3339(),
             url: &ticket.web_url,
             description: None,
+            acceptance_criteria: None,
         }
     }
 
     fn detailed(ticket: &'a Ticket) -> Self {
         Self {
             description: Some(&ticket.description),
+            acceptance_criteria: Some(ticket.acceptance_criteria.as_str())
+                .filter(|criteria| !criteria.trim().is_empty()),
             ..Self::row(ticket)
         }
     }
@@ -1243,6 +1249,11 @@ fn describe(ticket: &Ticket) -> String {
     if !ticket.description.trim().is_empty() {
         lines.push(String::new());
         lines.push(ticket.description.trim_end().to_owned());
+    }
+    if !ticket.acceptance_criteria.trim().is_empty() {
+        lines.push(String::new());
+        lines.push("Acceptance criteria".to_owned());
+        lines.push(ticket.acceptance_criteria.trim_end().to_owned());
     }
     lines.join("\n")
 }
@@ -2598,6 +2609,8 @@ mod tests {
             tags: vec!["cli".into()],
             description: "Ship the subcommands.".into(),
             description_html: "<p>Ship the subcommands.</p>".into(),
+            acceptance_criteria: "• Green build".into(),
+            acceptance_criteria_html: "<ul><li>Green build</li></ul>".into(),
             changed_at: ts("2026-02-01T00:00:00Z"),
             ..Ticket::fixture(id, title)
         }
@@ -2754,6 +2767,7 @@ mod tests {
                 created_at: ts("2026-02-02T00:00:00Z"),
                 author: Some("Avery Chen".into()),
                 text: html.to_owned(),
+                html: html.to_owned(),
             })
         }
     }
@@ -3108,11 +3122,20 @@ mod tests {
             rows[0].get("description").is_none(),
             "a list of five hundred rows is no place for five hundred descriptions"
         );
+        assert!(rows[0].get("acceptance_criteria").is_none());
 
         let shown: Value =
             serde_json::from_str(&to_json(&TicketJson::detailed(&ticket)).unwrap()).unwrap();
         assert_eq!(shown["id"], 613);
         assert_eq!(shown["description"], "Ship the subcommands.");
+        assert_eq!(shown["acceptance_criteria"], "• Green build");
+        let bare = Ticket::fixture(1, "Bare");
+        let shown: Value =
+            serde_json::from_str(&to_json(&TicketJson::detailed(&bare)).unwrap()).unwrap();
+        assert!(
+            shown.get("acceptance_criteria").is_none(),
+            "a work item without any carries no key rather than an empty one"
+        );
 
         let unheld = Ticket {
             priority: None,

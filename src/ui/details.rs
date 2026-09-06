@@ -4,9 +4,9 @@
 use super::*;
 
 /// The details pane is one scrolling document: the heading, the family tree,
-/// Planning, Description, History, and Comments are lines of a single
-/// paragraph, so the title scrolls away with everything under it and the
-/// scrollbar measures the whole pane.
+/// Planning, Description, Acceptance Criteria, Comments, and History are lines
+/// of a single paragraph, so the title scrolls away with everything under it
+/// and the scrollbar measures the whole pane.
 pub(super) fn render_details(
     frame: &mut Frame<'_>,
     screen: &mut WorkItemsScreen,
@@ -232,38 +232,26 @@ pub(super) fn render_details(
         lines.push(field_line("Reason", reason));
         lines.push(Line::default());
     }
-    if ticket.description.is_empty() {
-        lines.push(Line::styled(
-            "No description",
-            Style::default().fg(theme().muted),
-        ));
-    } else {
-        lines.extend(
-            ticket
-                .description
-                .lines()
-                .map(|line| Line::from(line.to_owned())),
-        );
-    }
+    lines.extend(body_lines(&ticket.description, "No description"));
 
-    let history = screen.history_for(&ticket.key);
+    lines.push(Line::default());
+    lines.push(section_line("Acceptance Criteria", width));
+    lines.extend(body_lines(
+        &ticket.acceptance_criteria,
+        "No acceptance criteria",
+    ));
+
     let loading_details = screen.details_pending.as_ref() == Some(&ticket.key);
-    if loading_details || !history.is_empty() {
-        let now = OffsetDateTime::now_utc();
+    let comments = screen.comments_for(&ticket.key);
+    if loading_details || !comments.is_empty() {
         lines.push(Line::default());
-        lines.push(section_line("History", width));
+        lines.push(section_line("Comments", width));
         if loading_details {
             lines.push(Line::styled(
                 format!("  {} Loading comments and history", spinner_frame()),
                 Style::default().fg(theme().muted),
             ));
         }
-        lines.extend(history.into_iter().map(|entry| history_line(entry, now)));
-    }
-    let comments = screen.comments_for(&ticket.key);
-    if !comments.is_empty() {
-        lines.push(Line::default());
-        lines.push(section_line("Comments", width));
         for comment in comments {
             let who = comment.author.as_deref().unwrap_or("unknown");
             lines.push(Line::from(format!(
@@ -274,6 +262,13 @@ pub(super) fn render_details(
                 Line::styled(format!("    {line}"), Style::default().fg(theme().body))
             }));
         }
+    }
+    let history = screen.history_for(&ticket.key);
+    if !history.is_empty() {
+        let now = OffsetDateTime::now_utc();
+        lines.push(Line::default());
+        lines.push(section_line("History", width));
+        lines.extend(history.into_iter().map(|entry| history_line(entry, now)));
     }
 
     // Wrapping moves every line under a long one down, so the click targets
@@ -832,6 +827,17 @@ pub(super) fn tags_run_width(tags: &[String]) -> u16 {
         let gap = u16::from(total > 0);
         total.saturating_add(badge).saturating_add(gap)
     })
+}
+
+/// A long-form field's lines, or the muted note that stands where an empty
+/// one would be.
+fn body_lines(text: &str, empty: &'static str) -> Vec<Line<'static>> {
+    if text.is_empty() {
+        return vec![Line::styled(empty, Style::default().fg(theme().muted))];
+    }
+    text.lines()
+        .map(|line| Line::from(line.to_owned()))
+        .collect()
 }
 
 /// One editable value's hit region on a row already on screen, clipped to the

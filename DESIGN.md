@@ -514,6 +514,7 @@ Fields map onto the cache as follows:
 | `tags` | `System.Tags`, split on `;` |
 | `description` | `System.Description` rendered as plain text |
 | `description_html` | `System.Description` exactly as Azure DevOps stores it |
+| `acceptance_criteria`, `acceptance_criteria_html` | `Microsoft.VSTS.Common.AcceptanceCriteria`, both readings, as for the description |
 | `created_at`, `changed_at` | `System.CreatedDate` and `System.ChangedDate` |
 | `web_url` | `https://dev.azure.com/<org>/<project>/_workitems/edit/<id>` |
 
@@ -557,8 +558,9 @@ GET <org>/<project>/_apis/wit/workItems/<id>/comments?api-version=7.1-preview.4
 GET <org>/_apis/wit/workItems/<id>/updates?api-version=7.1
 ```
 
-Comment bodies are rendered from HTML the same way descriptions are, though
-only the text is stored: a comment is read, not edited. Revisions
+Comment bodies are rendered from HTML the same way descriptions are, and like a
+description both readings are kept: the text the pane draws and the markup an
+edit is opened on. Revisions
 keep only the changes a person reads a history for — state, assignee, title,
 iteration, area, priority, tags, and reason — so a revision that moved nothing
 but the revision number, the changed date, the comment count, or the watermark
@@ -1541,8 +1543,8 @@ scrolling body. Its heading — the title, then a badge row reading
 `#600 · [Issue] · ✓ Done · P1 · Jacob Ragsdale` in the colours the table's own
 cells use, then the family breadcrumb, tags, project and revision, child
 progress, and the work-item URL — scrolls away with everything under it, in
-this order: the family tree, Related, Planning, Description, History, and
-Comments. Every field below the badge row reads as a muted label in a column of
+this order: the family tree, Related, Planning, Description, Acceptance
+Criteria, Comments, and History. Every field below the badge row reads as a muted label in a column of
 its own with the value beside it, so the values line up down the pane; a label
 too wide for that column — `Default branch` on the Repos pane — pushes its
 value along instead, behind one space rather than into it. Each
@@ -1837,6 +1839,8 @@ The `work_items` table stores these columns:
 | `area_path`, `iteration_path`, `tags` | Planning metadata |
 | `description` | Detail content, rendered as plain text |
 | `description_html` | The same field as Azure DevOps stores it |
+| `acceptance_criteria` | `Microsoft.VSTS.Common.AcceptanceCriteria`, rendered as plain text |
+| `acceptance_criteria_html` | The same field as Azure DevOps stores it |
 | `created_at`, `changed_at` | UTC RFC 3339 timestamps |
 | `web_url` | HTTPS browser URL for the work item |
 | `details_rev` | Revision whose comments and history are stored, `0` for none |
@@ -1903,7 +1907,7 @@ dropped on the way in. Like `sync_meta` it describes the project's process
 rather than its work items, so a pull leaves it alone; it is rewritten whole
 when the types are read, so a retired type stops being offered.
 
-The database carries `PRAGMA user_version = 17`. Because Azure DevOps is the
+The database carries `PRAGMA user_version = 18`. Because Azure DevOps is the
 record of truth, there are no migrations: a database at any other version has
 its tables dropped and recreated at startup, and a pull runs immediately to
 refill it, whatever `--refresh` says. Deleting the file has the same effect. The

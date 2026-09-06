@@ -2939,6 +2939,7 @@ mod tests {
                 created_at: ts("2026-03-04T00:00:00Z"),
                 author: Some("Avery Chen".into()),
                 text: "Looks good".into(),
+                html: String::new(),
             }],
             history: vec![HistoryRecord {
                 ticket: key.clone(),
@@ -2976,6 +2977,7 @@ mod tests {
             created_at: ts(at),
             author: Some("Jacob Ragsdale".into()),
             text: text.into(),
+            html: String::new(),
         }
     }
 
@@ -4158,6 +4160,7 @@ mod tests {
                 created_at: ts("2026-02-02T00:00:00Z"),
                 author: Some("Avery Chen".into()),
                 text: "Looks good".into(),
+                html: String::new(),
             }],
             history: vec![HistoryRecord {
                 ticket: doomed,

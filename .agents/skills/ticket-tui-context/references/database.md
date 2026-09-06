@@ -79,6 +79,8 @@ Primary key `(organization, work_item_id)`.
 | `area_path`, `iteration_path`, `tags` | Planning metadata; tags are `;`-separated |
 | `description` | The description flattened to plain text — the readable one |
 | `description_html` | The same field as Azure DevOps stores it |
+| `acceptance_criteria` | `Microsoft.VSTS.Common.AcceptanceCriteria` flattened to plain text; empty when the work item has none |
+| `acceptance_criteria_html` | The same field as Azure DevOps stores it |
 | `created_at`, `changed_at` | UTC RFC 3339 timestamps |
 | `web_url` | Browser URL for the work item |
 | `details_rev` | Revision whose comments and history are stored, `0` for none |
@@ -106,8 +108,8 @@ ORDER BY w.work_item_id;
 
 ### `work_item_comments`
 
-`(organization, work_item_id, comment_id)`, with `created_at`, `author`, and
-`body` as flattened text. Only present for work items whose `details_rev` says
+`(organization, work_item_id, comment_id)`, with `created_at`, `author`,
+`body` as flattened text, and `body_html` as Azure DevOps stores it. Only present for work items whose `details_rev` says
 their details have been read — the TUI reads them eagerly for changed items and
 lazily on selection, so a work item nobody has opened has none stored. That is
 absence of data, not absence of comments.

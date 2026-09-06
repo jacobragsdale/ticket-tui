@@ -1,10 +1,25 @@
 # Where to pick up
 
-Last updated 2026-09-05. The backlog itself lives in Azure DevOps
+Last updated 2026-09-06. The backlog itself lives in Azure DevOps
 (`jacobragsdale/development`); this file is only the pointer into it. Run
 `ticket-tui` and browse the epics for the current state.
 
 ## State of `main`
+
+- **Acceptance Criteria and the pane order (2026-09-06, no ticket).** The batch read
+  always carried `Microsoft.VSTS.Common.AcceptanceCriteria`; now `parse_work_item`
+  keeps it as `acceptance_criteria` / `acceptance_criteria_html` on `Ticket` and in
+  `work_items` (schema **18**, which also adds `body_html` to `work_item_comments` so a
+  comment can be reopened for editing later). `FieldEdit::acceptance_criteria` writes,
+  shows and undoes it exactly as a description. The details pane now reads
+  Description, Acceptance Criteria (always a section; `No acceptance criteria` when
+  empty), Comments, History; `show` prints and emits the criteria when there are any.
+  Four `test-drive`-tagged Issues in `jacobragsdale/development` exist to try it on:
+  #766 (full: five criteria, four comments of different shapes), #767 (rich
+  description with a table, numbered criteria), #768 (bare: no criteria, no
+  comments), #769 (twelve comments). Basic's `Issue` type does not list the field,
+  yet Azure DevOps accepted it on create and stores it, so the section is real on
+  this project too. `tag:test-drive` finds them; delete them when done.
 
 - **`o` under WSL (2026-09-05, no ticket).** On the VDI `o` opened nothing: the launcher
   ran `xdg-open` with inherited stdio, and a WSL box has no working `xdg-open` unless

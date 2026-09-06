@@ -2351,6 +2351,11 @@ pub fn parse_work_item(
             .map(|html| html_to_text(&html))
             .unwrap_or_default(),
         description_html: text("System.Description").unwrap_or_default(),
+        acceptance_criteria: text("Microsoft.VSTS.Common.AcceptanceCriteria")
+            .map(|html| html_to_text(&html))
+            .unwrap_or_default(),
+        acceptance_criteria_html: text("Microsoft.VSTS.Common.AcceptanceCriteria")
+            .unwrap_or_default(),
         created_at: timestamp("System.CreatedDate")?,
         changed_at: timestamp("System.ChangedDate")?,
         web_url: config.work_item_url(id),
@@ -2442,12 +2447,11 @@ pub fn parse_comments(page: &Value, key: &TicketKey) -> Vec<CommentRecord> {
 }
 
 fn parse_comment(comment: &Value, key: &TicketKey) -> Option<CommentRecord> {
-    let text = html_to_text(
-        comment
-            .get("text")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-    );
+    let html = comment
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let text = html_to_text(html);
     if text.is_empty() {
         return None;
     }
@@ -2460,6 +2464,7 @@ fn parse_comment(comment: &Value, key: &TicketKey) -> Option<CommentRecord> {
             .and_then(|raw| Timestamp::parse(raw).ok())?,
         author: comment.get("createdBy").and_then(identity_name),
         text,
+        html: html.to_owned(),
     })
 }
 
@@ -2813,6 +2818,7 @@ mod tests {
                 "System.IterationPath": "development\\Sprint 1",
                 "System.Tags": "tech-debt; azure",
                 "System.Description": "<p>First&nbsp;line</p><ul><li>one</li><li>two</li></ul>",
+                "Microsoft.VSTS.Common.AcceptanceCriteria": "<ul><li>Done when green</li></ul>",
                 "System.CreatedDate": "2026-05-16T20:16:20.853Z",
                 "System.ChangedDate": "2026-05-16T20:19:36.133Z"
             },
@@ -2832,6 +2838,11 @@ mod tests {
         assert_eq!(
             ticket.description_html, "<p>First&nbsp;line</p><ul><li>one</li><li>two</li></ul>",
             "the editor gets the document Azure DevOps stored, not the reading of it"
+        );
+        assert_eq!(ticket.acceptance_criteria, "• Done when green");
+        assert_eq!(
+            ticket.acceptance_criteria_html,
+            "<ul><li>Done when green</li></ul>"
         );
         assert_eq!(
             ticket.changed_at,

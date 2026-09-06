@@ -31,6 +31,7 @@ fn comment(id: i64, text: &str) -> CommentRecord {
         created_at: Timestamp::parse("2026-03-04T00:00:00Z").unwrap(),
         author: Some("Avery Chen".into()),
         text: text.into(),
+        html: String::new(),
     }
 }
 

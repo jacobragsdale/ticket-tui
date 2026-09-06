@@ -20,6 +20,7 @@ pub const PRIORITY_FIELD: &str = "Microsoft.VSTS.Common.Priority";
 pub const ITERATION_PATH_FIELD: &str = "System.IterationPath";
 pub const AREA_PATH_FIELD: &str = "System.AreaPath";
 pub const DESCRIPTION_FIELD: &str = "System.Description";
+pub const ACCEPTANCE_CRITERIA_FIELD: &str = "Microsoft.VSTS.Common.AcceptanceCriteria";
 
 /// One JSON Patch operation setting a work-item field. Azure DevOps takes `add`
 /// for a field that is already present as well as for one that is not.
@@ -187,13 +188,24 @@ impl FieldEdit {
     /// pane; an empty document clears the field.
     #[must_use]
     pub fn description(html: &str) -> Self {
+        Self::document(DESCRIPTION_FIELD, "Description", html)
+    }
+
+    /// Rewrite the acceptance criteria, the other long-form field, which is
+    /// written and reported exactly as a description is.
+    #[must_use]
+    pub fn acceptance_criteria(html: &str) -> Self {
+        Self::document(ACCEPTANCE_CRITERIA_FIELD, "Acceptance criteria", html)
+    }
+
+    fn document(field: &str, label: &str, html: &str) -> Self {
         Self {
             shown: Some(if html.trim().is_empty() {
                 String::new()
             } else {
                 "updated".to_owned()
             }),
-            ..Self::new(DESCRIPTION_FIELD, "Description", html)
+            ..Self::new(field, label, html)
         }
     }
 
@@ -224,6 +236,9 @@ impl FieldEdit {
             // because that is how `System.Tags` is emptied in the first place.
             TAGS_FIELD => restore(&before.tags.join("; ")),
             DESCRIPTION_FIELD => Self::description(&before.description_html),
+            ACCEPTANCE_CRITERIA_FIELD => {
+                Self::acceptance_criteria(&before.acceptance_criteria_html)
+            }
             // Only the display name survives on a row, and Azure DevOps
             // resolves that as readily as the sign-in address.
             ASSIGNED_TO_FIELD => match before.assigned_to.as_deref() {
@@ -313,6 +328,11 @@ impl FieldEdit {
                 let html = self.value_string();
                 ticket.description = crate::html::html_to_text(&html);
                 ticket.description_html = html;
+            }
+            ACCEPTANCE_CRITERIA_FIELD => {
+                let html = self.value_string();
+                ticket.acceptance_criteria = crate::html::html_to_text(&html);
+                ticket.acceptance_criteria_html = html;
             }
             TAGS_FIELD => {
                 ticket.tags = text
@@ -511,6 +531,29 @@ mod tests {
             "a field the row does not model waits for the server copy"
         );
         assert_eq!(unknown.summary(), "History → Later");
+    }
+
+    #[test]
+    fn acceptance_criteria_are_written_shown_and_undone_like_a_description() {
+        let edit = FieldEdit::acceptance_criteria("<ul><li>Green build</li></ul>");
+        assert_eq!(
+            edit.patch()[0]["path"],
+            "/fields/Microsoft.VSTS.Common.AcceptanceCriteria"
+        );
+        assert_eq!(edit.summary(), "Acceptance criteria → updated");
+
+        let mut before = ticket();
+        before.acceptance_criteria_html = "<p>Old</p>".into();
+        let mut edited = before.clone();
+        edit.apply(&mut edited);
+        assert_eq!(edited.acceptance_criteria, "• Green build");
+        assert_eq!(
+            edited.acceptance_criteria_html,
+            "<ul><li>Green build</li></ul>"
+        );
+
+        let undo = edit.undoing(&before).expect("a modelled field undoes");
+        assert_eq!(undo.patch()[0]["value"], "<p>Old</p>");
     }
 
     #[test]
