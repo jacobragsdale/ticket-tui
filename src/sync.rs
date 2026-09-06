@@ -145,6 +145,14 @@ pub enum SyncRequest {
         id: i64,
         work_item: i64,
     },
+    /// Link one work item to one branch, making the branch first — at the
+    /// head of `create_from`, a ref as stored — when it is not there yet.
+    LinkBranch {
+        repo_id: String,
+        branch: String,
+        work_item: i64,
+        create_from: Option<String>,
+    },
     /// Record one vote on one pull request, as the signed-in user.
     VotePullRequest { repo_id: String, id: i64, vote: i8 },
     /// Approve or reject one approval, with an optional word about why.
@@ -207,6 +215,9 @@ pub enum SyncEvent {
     /// One work item this session linked to a pull request, as the pull
     /// request and the work item, or why it could not be.
     WorkItemLinked(Result<(i64, i64), String>),
+    /// One work item this session linked to a branch, as the work item, the
+    /// repository and the branch, or why it could not be.
+    BranchLinked(Result<(i64, String, String), String>),
     /// One vote this session recorded — the pull request and the vote — or the
     /// pull request and why it could not be, so the glyph goes back.
     Voted(Result<(i64, i8), (i64, String)>),
@@ -631,6 +642,21 @@ pub trait WorkItemSource {
     ) -> Result<()> {
         Err(anyhow!("this source cannot link work items"))
     }
+    /// Makes one branch at the head of another, named as a ref is stored.
+    fn create_branch(&self, _repo_id: &str, _name: &str, _from_ref: &str) -> Result<()> {
+        Err(anyhow!("this source cannot create branches"))
+    }
+    /// Links one work item to one branch, on the work item, as a pull request
+    /// link is.
+    fn link_branch(
+        &self,
+        _project_id: &str,
+        _repo_id: &str,
+        _branch: &str,
+        _work_item: i64,
+    ) -> Result<()> {
+        Err(anyhow!("this source cannot link branches"))
+    }
     /// The first comment of each thread on one pull request.
     fn pull_request_threads(&self, _repo_id: &str, _id: i64) -> Result<Vec<PrThread>> {
         Ok(Vec::new())
@@ -833,6 +859,20 @@ impl WorkItemSource for AzureClient {
         work_item: i64,
     ) -> Result<()> {
         self.link_pull_request(project_id, repo_id, id, work_item)
+    }
+
+    fn create_branch(&self, repo_id: &str, name: &str, from_ref: &str) -> Result<()> {
+        Self::create_branch(self, repo_id, name, from_ref)
+    }
+
+    fn link_branch(
+        &self,
+        project_id: &str,
+        repo_id: &str,
+        branch: &str,
+        work_item: i64,
+    ) -> Result<()> {
+        Self::link_branch(self, project_id, repo_id, branch, work_item)
     }
 
     fn pull_request_threads(&self, repo_id: &str, id: i64) -> Result<Vec<PrThread>> {
@@ -1119,6 +1159,18 @@ fn work(
                 id,
                 work_item,
             } => SyncEvent::WorkItemLinked(worker.link_work_item(&repo_id, id, work_item, events)),
+            SyncRequest::LinkBranch {
+                repo_id,
+                branch,
+                work_item,
+                create_from,
+            } => SyncEvent::BranchLinked(worker.link_branch(
+                &repo_id,
+                &branch,
+                work_item,
+                create_from.as_deref(),
+                events,
+            )),
             SyncRequest::VotePullRequest { repo_id, id, vote } => {
                 SyncEvent::Voted(worker.vote(&repo_id, id, vote, events))
             }
@@ -1919,18 +1971,47 @@ impl Worker {
         work_item: i64,
         events: &Sender<SyncEvent>,
     ) -> Result<(i64, i64), String> {
-        let project_id = match self
-            .repository()
-            .and_then(|repository| repository.meta(db::PROJECT_ID_KEY))
-        {
-            Ok(Some(project_id)) => project_id,
-            Ok(None) => return Err("The project id is not on file yet; sync first".to_owned()),
-            Err(error) => return Err(format!("{error:#}")),
-        };
+        let project_id = self.project_id()?;
         self.source(events)
             .and_then(|source| source.link_work_item(&project_id, repo_id, id, work_item))
             .map(|()| (id, work_item))
             .map_err(|error| format!("{error:#}"))
+    }
+
+    /// Links one work item to one branch, making the branch first when asked
+    /// to. The link is the same artifact URL a pull request link is, so it
+    /// needs the same project GUID.
+    fn link_branch(
+        &mut self,
+        repo_id: &str,
+        branch: &str,
+        work_item: i64,
+        create_from: Option<&str>,
+        events: &Sender<SyncEvent>,
+    ) -> Result<(i64, String, String), String> {
+        let project_id = self.project_id()?;
+        self.source(events)
+            .and_then(|source| {
+                if let Some(from) = create_from {
+                    source.create_branch(repo_id, branch, from)?;
+                }
+                source.link_branch(&project_id, repo_id, branch, work_item)
+            })
+            .map(|()| (work_item, repo_id.to_owned(), branch.to_owned()))
+            .map_err(|error| format!("{error:#}"))
+    }
+
+    /// The project GUID the last pull recorded when it read the repositories,
+    /// which is what an artifact URL carries.
+    fn project_id(&mut self) -> Result<String, String> {
+        match self
+            .repository()
+            .and_then(|repository| repository.meta(db::PROJECT_ID_KEY))
+        {
+            Ok(Some(project_id)) => Ok(project_id),
+            Ok(None) => Err("The project id is not on file yet; sync first".to_owned()),
+            Err(error) => Err(format!("{error:#}")),
+        }
     }
 
     /// Records one vote, as whoever is signed in. Their own id is read once
@@ -2678,6 +2759,27 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("{project_id} {repo_id} {id} {work_item}"));
+            Ok(())
+        }
+
+        fn create_branch(&self, repo_id: &str, name: &str, from_ref: &str) -> Result<()> {
+            self.pr_links
+                .lock()
+                .unwrap()
+                .push(format!("create {repo_id} {name} from {from_ref}"));
+            Ok(())
+        }
+
+        fn link_branch(
+            &self,
+            project_id: &str,
+            repo_id: &str,
+            branch: &str,
+            work_item: i64,
+        ) -> Result<()> {
+            self.pr_links.lock().unwrap().push(format!(
+                "branch {project_id} {repo_id} {branch} {work_item}"
+            ));
             Ok(())
         }
 
@@ -3798,6 +3900,59 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_link_makes_the_branch_first_only_when_asked_to() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        SqliteTicketRepository::open(&path)
+            .unwrap()
+            .set_meta(db::PROJECT_ID_KEY, "project-guid")
+            .unwrap();
+        let source = FakeSource {
+            pr_links: Arc::new(Mutex::new(Vec::new())),
+            ..FakeSource::with(vec![])
+        };
+        let links = Arc::clone(&source.pr_links);
+        let handle = SyncHandle::spawn(path, Box::new(source)).unwrap();
+
+        handle
+            .send(SyncRequest::LinkBranch {
+                repo_id: "aaa-111".into(),
+                branch: "main".into(),
+                work_item: 613,
+                create_from: None,
+            })
+            .unwrap();
+        let SyncEvent::BranchLinked(result) = next_pr_event(&handle) else {
+            panic!("expected a branch link");
+        };
+        assert_eq!(
+            result.expect("the link was taken"),
+            (613, "aaa-111".to_owned(), "main".to_owned())
+        );
+        handle
+            .send(SyncRequest::LinkBranch {
+                repo_id: "aaa-111".into(),
+                branch: "613-fix".into(),
+                work_item: 613,
+                create_from: Some("refs/heads/main".into()),
+            })
+            .unwrap();
+        let SyncEvent::BranchLinked(result) = next_pr_event(&handle) else {
+            panic!("expected a branch link");
+        };
+        result.expect("the branch was made and the link taken");
+        assert_eq!(
+            *links.lock().unwrap(),
+            vec![
+                "branch project-guid aaa-111 main 613",
+                "create aaa-111 613-fix from refs/heads/main",
+                "branch project-guid aaa-111 613-fix 613",
+            ],
+            "an existing branch is only linked; a new one is made, then linked"
+        );
+    }
+
+    #[test]
     fn a_link_asked_for_before_the_project_id_is_known_comes_back_as_a_refusal() {
         let directory = tempdir().unwrap();
         let path = seeded_database(&directory);
@@ -3822,7 +3977,8 @@ mod tests {
             match next_event(handle) {
                 event @ (SyncEvent::PullRequestUpdated(_)
                 | SyncEvent::PullRequestCommented(_)
-                | SyncEvent::WorkItemLinked(_)) => {
+                | SyncEvent::WorkItemLinked(_)
+                | SyncEvent::BranchLinked(_)) => {
                     return event;
                 }
                 SyncEvent::DisplayName(_) => continue,
@@ -4652,6 +4808,7 @@ mod tests {
                 | SyncEvent::PullRequestUpdated(_)
                 | SyncEvent::PullRequestCommented(_)
                 | SyncEvent::WorkItemLinked(_)
+                | SyncEvent::BranchLinked(_)
                 | SyncEvent::Details(_)
                 | SyncEvent::Identities(_)
                 | SyncEvent::ClassificationNodes(_)

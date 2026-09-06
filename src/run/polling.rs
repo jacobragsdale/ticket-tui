@@ -331,7 +331,20 @@ pub(super) fn poll_sync(
                 Err(refusal) => app.shell.set_error(refusal),
             },
             SyncEvent::WorkItemLinked(result) => match result {
-                Ok((id, work_item)) => app.pull_requests.apply_link(&mut app.shell, id, work_item),
+                Ok((id, work_item)) => {
+                    // The link lives on the work item: the pull booked here is
+                    // what puts it on that work item's Related.
+                    runtime.scheduler.schedule_now(Instant::now());
+                    app.pull_requests.apply_link(&mut app.shell, id, work_item);
+                }
+                Err(refusal) => app.shell.set_error(refusal),
+            },
+            SyncEvent::BranchLinked(result) => match result {
+                Ok((work_item, repo_id, branch)) => {
+                    runtime.scheduler.schedule_now(Instant::now());
+                    app.work_items
+                        .apply_branch_link(&mut app.shell, work_item, &repo_id, &branch);
+                }
                 Err(refusal) => app.shell.set_error(refusal),
             },
             SyncEvent::Voted(result) => match result {

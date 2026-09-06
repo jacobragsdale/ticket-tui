@@ -1,5 +1,24 @@
 //! Linking a work item to a branch of a repository.
 
+use super::*;
+
+impl WorkItemsScreen {
+    /// A branch link Azure DevOps took. The work item's own Related section
+    /// follows at the pull booked for it.
+    pub fn apply_branch_link(
+        &self,
+        shell: &mut Shell,
+        work_item: i64,
+        repo_id: &str,
+        branch: &str,
+    ) {
+        shell.set_status(format!(
+            "#{work_item} linked to {}/{branch}",
+            shell.repo_name(repo_id)
+        ));
+    }
+}
+
 /// The branch a work item's own work goes on when nobody names one:
 /// `{id}-{slug}`, the slug being the title lowercased with every run of
 /// characters that are not ASCII letters or digits made one `-`, at most
