@@ -87,23 +87,33 @@ pub(super) fn start_edit(app: &mut App, runtime: &mut SyncRuntime, request: Edit
     }
 }
 
-/// Hands one comment to the sync worker. Nothing is shown on the work item
-/// until Azure DevOps has stored it, so a worker that is gone only has to say
-/// the comment was not posted.
+/// Hands one comment — a post, or a rewrite of the one `comment_id` names —
+/// to the sync worker. Nothing is shown on the work item until Azure DevOps
+/// has stored it, so a worker that is gone only has to say the comment was
+/// not posted.
 pub(super) fn start_comment(
     app: &mut App,
     runtime: &mut SyncRuntime,
     key: TicketKey,
+    comment_id: Option<i64>,
     text: String,
 ) {
-    let request = SyncRequest::Comment {
-        key: key.clone(),
-        text,
+    let request = match comment_id {
+        Some(comment_id) => SyncRequest::EditComment {
+            key: key.clone(),
+            comment_id,
+            text,
+        },
+        None => SyncRequest::Comment {
+            key: key.clone(),
+            text,
+        },
     };
     match runtime.send(request) {
-        Ok(()) => app
-            .shell
-            .set_status(format!("Posting comment on #{}\u{2026}", key.id)),
+        Ok(()) => app.shell.set_status(match comment_id {
+            Some(_) => format!("Updating comment on #{}\u{2026}", key.id),
+            None => format!("Posting comment on #{}\u{2026}", key.id),
+        }),
         Err(message) => app
             .work_items
             .reject_comment(&mut app.shell, &key, &message),

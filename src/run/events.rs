@@ -313,7 +313,12 @@ pub(super) fn handle_action(
                 app.shell.set_error(refusal);
             }
         }
-        AppAction::Comment { key, text } => start_comment(app, runtime, key, text),
+        AppAction::Comment { key, text } => start_comment(app, runtime, key, None, text),
+        AppAction::EditComment {
+            key,
+            comment_id,
+            text,
+        } => start_comment(app, runtime, key, Some(comment_id), text),
         AppAction::Reparent { key, new_parent } => start_reparent(app, runtime, key, new_parent),
         AppAction::Create {
             work_item_type,

@@ -905,6 +905,15 @@ the app does the same before it does its own work, and `Tab` does it on the
 way to the table. A draft that says nothing new is not kept. A comment that is
 empty or only whitespace is refused with the composer left open on it.
 
+A comment of your own opens the composer too — its body is the click target,
+the author line above it is not — and `Ctrl-S` rewrites it with
+`PATCH /<project>/_apis/wit/workItems/<id>/comments/<commentId>`, the same
+Markdown-made-HTML body as a post and again no revision test. Only a comment's
+author may rewrite it, so only comments under your own name are offered; with
+no name known every comment is, and Azure DevOps refuses the rest. The rewrite
+is not optimistic either: `Updating comment on #613…` while it is out, `Updated
+comment on #613` when the stored copy replaces the one on screen.
+
 A comment is not a field, so it is not a JSON Patch and carries no revision
 test. What was typed is Markdown, converted the way a description is —
 paragraphs, `- ` bullets, `1.` numbers, fenced code, links, `**bold**`, with

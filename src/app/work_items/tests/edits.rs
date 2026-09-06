@@ -942,6 +942,53 @@ fn a_stored_comment_joins_the_discussion_newest_first() {
 }
 
 #[test]
+fn a_rewritten_comment_replaces_the_one_held_and_says_so() {
+    let mut app = edit_app();
+    let key = app.work_items.selected_ticket().unwrap().key.clone();
+    app.work_items.apply_comment(
+        &mut app.shell,
+        comment(9, "2026-03-04T00:00:00Z", "Merged into main"),
+    );
+
+    assert_eq!(
+        app.work_items
+            .edit_comment_on(&mut app.shell, &key, 9, "Merged into main today".into()),
+        AppAction::EditComment {
+            key: key.clone(),
+            comment_id: 9,
+            text: "Merged into main today".into(),
+        }
+    );
+    assert!(app.work_items.comments_pending());
+    assert_eq!(
+        app.work_items
+            .edit_comment_on(&mut app.shell, &key, 9, "again".into()),
+        AppAction::None,
+        "one comment write per work item at a time"
+    );
+
+    app.work_items.apply_comment(
+        &mut app.shell,
+        comment(9, "2026-03-04T00:00:00Z", "Merged into main today"),
+    );
+    assert_eq!(
+        app.work_items
+            .comments_for(&key)
+            .iter()
+            .map(|held| held.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Merged into main today"],
+        "the rewrite stands in for the comment rather than beside it"
+    );
+    let (message, level) = app
+        .shell
+        .notification()
+        .expect("the rewrite reports itself");
+    assert_eq!(message, "Updated comment on #3");
+    assert_eq!(level, NotificationLevel::Info);
+}
+
+#[test]
 fn a_refused_comment_changes_nothing_and_says_why() {
     let mut app = edit_app();
     let key = app.work_items.selected_ticket().unwrap().key.clone();

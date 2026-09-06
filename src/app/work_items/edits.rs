@@ -807,17 +807,43 @@ impl WorkItemsScreen {
         text: String,
     ) -> AppAction {
         let key = key.clone();
-        let refusal = shell.write_refusal().or_else(|| {
-            self.pending_comments
-                .contains(&key)
-                .then(|| "an earlier comment is still in flight".to_owned())
-        });
-        if let Some(reason) = refusal {
+        if let Some(reason) = self.comment_refusal(shell, &key) {
             shell.set_error(format!("#{} comment not posted: {reason}", key.id));
             return AppAction::None;
         }
         self.pending_comments.insert(key.clone());
         AppAction::Comment { key, text }
+    }
+
+    /// Asks for one comment already on a work item to be rewritten, gated as
+    /// a post is: one comment write per work item in flight at a time, and
+    /// nothing shown until Azure DevOps has stored it.
+    pub(super) fn edit_comment_on(
+        &mut self,
+        shell: &mut Shell,
+        key: &TicketKey,
+        comment_id: i64,
+        text: String,
+    ) -> AppAction {
+        let key = key.clone();
+        if let Some(reason) = self.comment_refusal(shell, &key) {
+            shell.set_error(format!("#{} comment not saved: {reason}", key.id));
+            return AppAction::None;
+        }
+        self.pending_comments.insert(key.clone());
+        AppAction::EditComment {
+            key,
+            comment_id,
+            text,
+        }
+    }
+
+    fn comment_refusal(&self, shell: &Shell, key: &TicketKey) -> Option<String> {
+        shell.write_refusal().or_else(|| {
+            self.pending_comments
+                .contains(key)
+                .then(|| "an earlier comment is still in flight".to_owned())
+        })
     }
 
     /// Whether a comment is waiting on Azure DevOps. The database watcher
@@ -833,8 +859,17 @@ impl WorkItemsScreen {
     pub fn apply_comment(&mut self, shell: &mut Shell, comment: CommentRecord) {
         self.pending_comments.remove(&comment.ticket);
         let id = comment.ticket.id;
+        let rewritten = self
+            .graph
+            .comments_for(&comment.ticket)
+            .iter()
+            .any(|held| held.comment_id == comment.comment_id);
         self.graph.add_comment(comment);
-        shell.set_status(format!("Commented on #{id}"));
+        shell.set_status(if rewritten {
+            format!("Updated comment on #{id}")
+        } else {
+            format!("Commented on #{id}")
+        });
     }
 
     /// A comment that never landed. Nothing was shown for it and nothing is

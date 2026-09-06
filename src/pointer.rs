@@ -88,6 +88,9 @@ pub enum ComposeTarget {
     AcceptanceCriteria,
     /// A comment not written yet.
     NewComment,
+    /// A comment already on the work item, by its id — one of yours, since
+    /// only its author may rewrite it.
+    Comment(i64),
 }
 
 /// Where an overlay is placed. Every keyboard-opened picker is `Centered`, the

@@ -40,8 +40,14 @@ Last updated 2026-09-06. The backlog itself lives in Azure DevOps
   and every line above them has to be counted each frame. Comments go out as Markdown
   made HTML (`markdown_to_html` in `try_comment`), so bullets and code work; the
   one-line `PromptField::Comment` is gone. `EditAcceptanceCriteria` is a new Actions
-  menu row and palette command. Description stays on `$EDITOR` for now; editing an
-  existing comment is next.
+  menu row and palette command. The description opens the composer too
+  (`EditDescriptionExternally`, palette only, keeps the `$EDITOR` round trip), and a
+  comment of your own reopens in it: `SyncRequest::EditComment` →
+  `AzureClient::edit_comment` (`PATCH …/comments/{id}`, `7.1-preview.4`), answered
+  as `SyncEvent::Commented`, so `apply_comment` replaces by id and says `Updated
+  comment on #N`. Only comments under `shell.me()` are targets; with no name known,
+  all are. Not built: deleting a comment, unicode-width caret placement, criteria
+  in History or search.
 
 - **`o` under WSL (2026-09-05, no ticket).** On the VDI `o` opened nothing: the launcher
   ran `xdg-open` with inherited stdio, and a WSL box has no working `xdg-open` unless

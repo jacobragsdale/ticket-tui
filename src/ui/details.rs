@@ -2,6 +2,7 @@
 //! tree, its history and its comments.
 
 use super::*;
+use crate::model::same_text;
 use crate::text_input::{WrapLayout, wrap_with_cursor};
 
 /// The details pane is one scrolling document: the heading, the family tree,
@@ -281,18 +282,37 @@ pub(super) fn render_details(
         )],
         composing.as_ref(),
     );
+    // Only its author may rewrite a comment, so only yours open the composer;
+    // with nobody signed in every comment is offered and Azure DevOps refuses
+    // the rest.
+    let me = shell.me();
     for comment in screen.comments_for(&ticket.key) {
         let who = comment.author.as_deref().unwrap_or("unknown");
         lines.push(Line::from(format!(
             "  {who} · {}",
             comment.created_at.exact_utc()
         )));
-        lines.extend(
+        let body: Vec<Line> = comment
+            .text
+            .lines()
+            .map(|line| Line::styled(format!("    {line}"), Style::default().fg(theme().body)))
+            .collect();
+        let mine = me.is_none_or(|me| {
             comment
-                .text
-                .lines()
-                .map(|line| Line::styled(format!("    {line}"), Style::default().fg(theme().body))),
-        );
+                .author
+                .as_deref()
+                .is_some_and(|author| same_text(me, author))
+        });
+        if mine {
+            sections.body(
+                &mut lines,
+                ComposeTarget::Comment(comment.comment_id),
+                body,
+                composing.as_ref(),
+            );
+        } else {
+            lines.extend(body);
+        }
     }
     let history = screen.history_for(&ticket.key);
     if !history.is_empty() {

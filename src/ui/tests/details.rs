@@ -237,6 +237,76 @@ fn the_comment_composer_draws_in_the_pane_and_puts_the_caret_in_it() {
 }
 
 #[test]
+fn only_your_own_comments_open_the_composer_and_save_as_a_rewrite() {
+    let mut app = App::new(vec![ticket()]);
+    app.shell.enable_sync();
+    app.shell.set_me(Some("Jacob Ragsdale".into()));
+    app.work_items.set_table_viewport(1);
+    let item = ticket();
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            comments: vec![
+                CommentRecord {
+                    ticket: item.key.clone(),
+                    comment_id: 1,
+                    created_at: crate::timestamp::ts("2026-01-03T00:00:00Z"),
+                    author: Some("Avery Chen".into()),
+                    text: "Looks good".into(),
+                    html: "<p>Looks good</p>".into(),
+                },
+                CommentRecord {
+                    ticket: item.key.clone(),
+                    comment_id: 2,
+                    created_at: crate::timestamp::ts("2026-01-04T00:00:00Z"),
+                    author: Some("jacob ragsdale".into()),
+                    text: "Merged into main".into(),
+                    html: "<p>Merged into <b>main</b></p>".into(),
+                },
+            ],
+            ..TicketGraph::default()
+        },
+    );
+    render_text(120, 40, &mut app);
+
+    assert!(
+        app.shell
+            .hit_regions
+            .find_target(|target| matches!(
+                target,
+                PointerTarget::Compose(ComposeTarget::Comment(1))
+            ))
+            .is_none(),
+        "somebody else's comment is not yours to rewrite"
+    );
+    let mine = target_rect(&app, |target| {
+        matches!(target, PointerTarget::Compose(ComposeTarget::Comment(2)))
+    });
+    click(&mut app, mine.x + 4, mine.y);
+    assert_eq!(
+        app.work_items.composer.as_ref().map(|composer| composer
+            .input
+            .text()
+            .trim_end()
+            .to_owned()),
+        Some("Merged into **main**".to_owned()),
+        "the composer opens on the comment as Markdown"
+    );
+    for character in " today".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    let action = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    assert_eq!(
+        action,
+        crate::app::AppAction::EditComment {
+            key: item.key,
+            comment_id: 2,
+            text: "Merged into **main** today".into(),
+        }
+    );
+}
+
+#[test]
 fn clicking_a_section_opens_the_composer_and_a_click_elsewhere_keeps_the_draft() {
     let mut app = App::new(vec![ticket()]);
     app.shell.enable_sync();

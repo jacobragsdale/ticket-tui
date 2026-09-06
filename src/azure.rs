@@ -653,6 +653,21 @@ impl AzureClient {
             .with_context(|| format!("Azure DevOps stored no readable comment on work item {id}"))
     }
 
+    /// Rewrites one comment already on a work item, answering with the record
+    /// Azure DevOps stored. The body is rich text like a post's; a comment is
+    /// not a field, so this is a plain `PATCH` of the comment itself with no
+    /// revision test, and only the comment's own author is allowed it.
+    pub fn edit_comment(&self, id: i64, comment_id: i64, html: &str) -> Result<CommentRecord> {
+        let key = TicketKey {
+            organization: self.config.organization.clone(),
+            id,
+        };
+        let edited = self.patch(&self.comment_url(id, comment_id)?, &json!({ "text": html }))?;
+        parse_comment(&edited, &key).with_context(|| {
+            format!("Azure DevOps stored no readable comment {comment_id} on work item {id}")
+        })
+    }
+
     /// Every comment on one work item, following the continuation token the
     /// endpoint answers with while there is another page.
     fn fetch_comments(&self, key: &TicketKey) -> Result<Vec<CommentRecord>> {
@@ -710,6 +725,22 @@ impl AzureClient {
                 query.append_pair("continuationToken", continuation);
             }
         }
+        Ok(url.into())
+    }
+
+    /// One comment of one work item, which is what an edit is sent to.
+    fn comment_url(&self, id: i64, comment_id: i64) -> Result<String> {
+        let mut url = self.api_url(&[
+            self.config.project.as_str(),
+            "_apis",
+            "wit",
+            "workItems",
+            &id.to_string(),
+            "comments",
+            &comment_id.to_string(),
+        ])?;
+        url.query_pairs_mut()
+            .append_pair("api-version", COMMENTS_API_VERSION);
         Ok(url.into())
     }
 
@@ -3072,6 +3103,12 @@ mod tests {
             client.comments_url(613, Some("a b/c")).unwrap(),
             "https://dev.azure.com/demo/my%20project/_apis/wit/workItems/613/comments\
              ?api-version=7.1-preview.4&continuationToken=a+b%2Fc"
+        );
+        assert_eq!(
+            client.comment_url(613, 9).unwrap(),
+            "https://dev.azure.com/demo/my%20project/_apis/wit/workItems/613/comments/9\
+             ?api-version=7.1-preview.4",
+            "an edit names the comment on the same preview version"
         );
         assert_eq!(
             client.updates_url(613, 200).unwrap(),

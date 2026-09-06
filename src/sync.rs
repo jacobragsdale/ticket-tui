@@ -105,6 +105,13 @@ pub enum SyncRequest {
     Pull(PullOrigin),
     /// Write one field of one work item back to Azure DevOps.
     Edit(EditRequest),
+    /// Rewrite one comment already on one work item; `text` is Markdown, as
+    /// a `Comment`'s is.
+    EditComment {
+        key: TicketKey,
+        comment_id: i64,
+        text: String,
+    },
     /// Read one work item's comments and revision history, for a work item
     /// whose stored details are behind the revision on screen.
     Details(TicketKey),
@@ -724,6 +731,12 @@ pub trait WorkItemSource {
     fn post_comment(&self, _id: i64, _html: &str) -> Result<CommentRecord> {
         Err(anyhow!("comments are not supported by this source"))
     }
+    /// Rewrite one comment already on a work item, answering with the record
+    /// the server stored. Only the comment's author may, which the server
+    /// enforces rather than this.
+    fn edit_comment(&self, _id: i64, _comment_id: i64, _html: &str) -> Result<CommentRecord> {
+        Err(anyhow!("editing comments is not supported by this source"))
+    }
     /// How long the responses read since this was last asked want to be left
     /// alone, from the rate-limit budget they reported. Reading it clears it. A
     /// source that reports no budget — every fake, and every response with room
@@ -881,6 +894,10 @@ impl WorkItemSource for AzureClient {
 
     fn post_comment(&self, id: i64, html: &str) -> Result<CommentRecord> {
         AzureClient::post_comment(self, id, html)
+    }
+
+    fn edit_comment(&self, id: i64, comment_id: i64, html: &str) -> Result<CommentRecord> {
+        AzureClient::edit_comment(self, id, comment_id, html)
     }
 
     fn throttled_for(&self) -> Option<Duration> {
@@ -1126,8 +1143,18 @@ fn work(
                 SyncEvent::ClassificationNodes(worker.classification_nodes(events))
             }
             SyncRequest::Comment { key, text } => {
-                SyncEvent::Commented(Box::new(worker.comment(key, &text, events)))
+                SyncEvent::Commented(Box::new(worker.comment(key, None, &text, events)))
             }
+            SyncRequest::EditComment {
+                key,
+                comment_id,
+                text,
+            } => SyncEvent::Commented(Box::new(worker.comment(
+                key,
+                Some(comment_id),
+                &text,
+                events,
+            ))),
             SyncRequest::WorkItemTypes => SyncEvent::WorkItemTypes(worker.work_item_types(events)),
             SyncRequest::Create {
                 work_item_type,
@@ -1422,16 +1449,18 @@ impl Worker {
         members
     }
 
-    /// Posts one comment and stores it, answering with the record Azure DevOps
-    /// kept. Nothing is written locally unless the post landed, so a refusal
-    /// leaves the discussion exactly as it was.
+    /// Posts one comment — or rewrites the one `comment_id` names — and stores
+    /// it, answering with the record Azure DevOps kept. Nothing is written
+    /// locally unless the write landed, so a refusal leaves the discussion
+    /// exactly as it was.
     fn comment(
         &mut self,
         key: TicketKey,
+        comment_id: Option<i64>,
         text: &str,
         events: &Sender<SyncEvent>,
     ) -> Result<CommentRecord, CommentRejection> {
-        self.awaiting_throttle(|worker| worker.try_comment(&key, text, events))
+        self.awaiting_throttle(|worker| worker.try_comment(&key, comment_id, text, events))
             .map_err(|error| CommentRejection {
                 key,
                 message: format!("{error:#}"),
@@ -1444,12 +1473,16 @@ impl Worker {
     fn try_comment(
         &mut self,
         key: &TicketKey,
+        comment_id: Option<i64>,
         text: &str,
         events: &Sender<SyncEvent>,
     ) -> Result<CommentRecord> {
-        let posted = self
-            .source(events)?
-            .post_comment(key.id, &markdown::markdown_to_html(text))?;
+        let html = markdown::markdown_to_html(text);
+        let source = self.source(events)?;
+        let posted = match comment_id {
+            Some(comment_id) => source.edit_comment(key.id, comment_id, &html)?,
+            None => source.post_comment(key.id, &html)?,
+        };
         // The request named the work item, so the row lands on that one
         // whatever the answer says it is about.
         let comment = CommentRecord {
@@ -2781,6 +2814,18 @@ mod tests {
             self.comment
                 .clone()
                 .context("HTTP 403: the work item is read only")
+        }
+
+        /// Recorded beside the posts, under the comment's id rather than the
+        /// work item's.
+        fn edit_comment(&self, _id: i64, comment_id: i64, html: &str) -> Result<CommentRecord> {
+            self.posted
+                .lock()
+                .unwrap()
+                .push((comment_id, html.to_owned()));
+            self.comment
+                .clone()
+                .context("HTTP 403: only the author can edit a comment")
         }
 
         /// Two requests over the wire: one page of comments and one of updates.
@@ -5071,6 +5116,53 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn an_edited_comment_goes_out_as_rich_text_and_replaces_the_stored_one() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource::with(vec![Ok(SyncBatch::default())]).commenting(posted_comment(
+            9,
+            "2026-03-04T09:15:00Z",
+            "fixed: retry",
+        ));
+        let posted = Arc::clone(&source.posted);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+        let key = TicketKey {
+            organization: "demo".into(),
+            id: 1,
+        };
+
+        handle
+            .send(SyncRequest::Comment {
+                key: key.clone(),
+                text: "first take".into(),
+            })
+            .unwrap();
+        commented(&handle).expect("the post was accepted");
+        handle
+            .send(SyncRequest::EditComment {
+                key,
+                comment_id: 9,
+                text: "fixed: retry".into(),
+            })
+            .unwrap();
+        let comment = commented(&handle).expect("the edit was accepted");
+
+        assert_eq!(comment.comment_id, 9);
+        assert_eq!(
+            posted.lock().unwrap()[1],
+            (9, "<p>fixed: retry</p>".to_owned()),
+            "the edit names the comment and sends the Markdown as HTML"
+        );
+        let stored = stored_comments(&path);
+        assert_eq!(
+            stored.len(),
+            1,
+            "the edit replaced the row rather than adding one"
+        );
+        assert_eq!(stored[0].text, "fixed: retry");
     }
 
     #[test]

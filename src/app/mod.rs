@@ -187,6 +187,13 @@ pub enum AppAction {
         key: TicketKey,
         text: String,
     },
+    /// Rewrite one comment already on one work item. Like a post, nothing
+    /// changes on screen until Azure DevOps has stored it.
+    EditComment {
+        key: TicketKey,
+        comment_id: i64,
+        text: String,
+    },
     /// Hand one work item's description to the user's editor. It carries the
     /// markup Azure DevOps stores, because that is what the editor is opened
     /// on and what an edit has to hand back. This is the one action that takes

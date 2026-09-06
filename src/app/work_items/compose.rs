@@ -31,7 +31,9 @@ impl Composer {
     pub fn is_dirty(&self) -> bool {
         match self.target {
             ComposeTarget::NewComment => !self.input.text().trim().is_empty(),
-            ComposeTarget::Description | ComposeTarget::AcceptanceCriteria => {
+            ComposeTarget::Description
+            | ComposeTarget::AcceptanceCriteria
+            | ComposeTarget::Comment(_) => {
                 markdown::saved_markdown(self.input.text())
                     != markdown::saved_markdown(&self.original)
             }
@@ -43,7 +45,9 @@ impl Composer {
     pub const fn hint(&self) -> &'static str {
         match self.target {
             ComposeTarget::NewComment => "Enter newline  Ctrl-S post  Esc keep draft  Ctrl-U clear",
-            ComposeTarget::Description | ComposeTarget::AcceptanceCriteria => {
+            ComposeTarget::Description
+            | ComposeTarget::AcceptanceCriteria
+            | ComposeTarget::Comment(_) => {
                 "Enter newline  Ctrl-S save  Esc keep draft  Ctrl-U clear"
             }
         }
@@ -57,7 +61,7 @@ impl ComposeTarget {
         match self {
             Self::Description => "description",
             Self::AcceptanceCriteria => "acceptance criteria",
-            Self::NewComment => "comment",
+            Self::NewComment | Self::Comment(_) => "comment",
         }
     }
 }
@@ -79,11 +83,25 @@ impl WorkItemsScreen {
                 markdown::description_document(&ticket.acceptance_criteria_html)
             }
             ComposeTarget::NewComment => String::new(),
+            ComposeTarget::Comment(comment_id) => {
+                let Some(comment) = self
+                    .graph
+                    .comments_for(&key)
+                    .into_iter()
+                    .find(|comment| comment.comment_id == comment_id)
+                else {
+                    shell.set_error(format!("#{} has no comment {comment_id} to edit", key.id));
+                    return;
+                };
+                markdown::description_document(&comment.html)
+            }
         };
         if let Some(reason) = shell.write_refusal() {
             let verb = match target {
                 ComposeTarget::NewComment => "posted",
-                ComposeTarget::Description | ComposeTarget::AcceptanceCriteria => "saved",
+                ComposeTarget::Description
+                | ComposeTarget::AcceptanceCriteria
+                | ComposeTarget::Comment(_) => "saved",
             };
             shell.set_error(format!(
                 "#{} {} not {verb}: {reason}",
@@ -169,18 +187,27 @@ impl WorkItemsScreen {
         let key = composer.key.clone();
         let action = match composer.target {
             ComposeTarget::NewComment => self.comment_on(shell, &key, text.trim().to_owned()),
-            ComposeTarget::Description | ComposeTarget::AcceptanceCriteria => {
+            ComposeTarget::Description
+            | ComposeTarget::AcceptanceCriteria
+            | ComposeTarget::Comment(_) => {
                 let saved = markdown::saved_markdown(&text);
                 if saved == markdown::saved_markdown(&composer.original) {
                     shell.set_status(format!("#{} {} unchanged", key.id, composer.target.label()));
                     return AppAction::None;
                 }
-                let html = markdown::markdown_to_html(&saved);
-                let edit = match composer.target {
-                    ComposeTarget::Description => FieldEdit::description(&html),
-                    _ => FieldEdit::acceptance_criteria(&html),
-                };
-                self.edit_ticket(shell, &key, edit)
+                match composer.target {
+                    ComposeTarget::Comment(comment_id) => {
+                        self.edit_comment_on(shell, &key, comment_id, saved)
+                    }
+                    ComposeTarget::Description => {
+                        let html = markdown::markdown_to_html(&saved);
+                        self.edit_ticket(shell, &key, FieldEdit::description(&html))
+                    }
+                    _ => {
+                        let html = markdown::markdown_to_html(&saved);
+                        self.edit_ticket(shell, &key, FieldEdit::acceptance_criteria(&html))
+                    }
+                }
             }
         };
         if action == AppAction::None {
