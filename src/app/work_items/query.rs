@@ -97,6 +97,7 @@ impl WorkItemsScreen {
         MatchContext::now()
             .with_me(shell.me.clone())
             .with_current_iterations(self.current_iterations())
+            .with_repos(self.repos_by_item(shell))
     }
 
     #[must_use]
@@ -208,7 +209,7 @@ impl WorkItemsScreen {
             .or_else(|| self.selected_ticket().map(|ticket| ticket.key.clone()));
         self.visible = result.matches;
         self.apply_filters(shell);
-        self.sort_visible();
+        self.sort_visible(shell);
         self.restore_selection(shell, selected.as_ref());
         self.search_pending = false;
         true
@@ -341,7 +342,7 @@ impl WorkItemsScreen {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.sort_field = field;
         self.sort_direction = direction;
-        self.sort_visible();
+        self.sort_visible(shell);
         self.restore_selection(shell, selected.as_ref());
         shell.session_dirty = true;
     }
@@ -358,7 +359,7 @@ impl WorkItemsScreen {
         }
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         self.search_order = self.search_order.toggled();
-        self.sort_visible();
+        self.sort_visible(shell);
         self.restore_selection(shell, selected.as_ref());
         shell.session_dirty = true;
         shell.set_status(format!("Search order: {}", self.search_order.label()));
@@ -460,7 +461,7 @@ impl WorkItemsScreen {
             })
             .collect();
         self.apply_filters(shell);
-        self.sort_visible();
+        self.sort_visible(shell);
         self.restore_selection(shell, selected);
     }
 
@@ -478,16 +479,24 @@ impl WorkItemsScreen {
         });
     }
 
-    pub(super) fn sort_visible(&mut self) {
+    pub(super) fn sort_visible(&mut self, shell: &Shell) {
         let tickets = Arc::clone(&self.tickets);
         let field = self.sort_field;
         let direction = self.sort_direction;
         let relevance_first =
             !self.fuzzy_query().is_empty() && self.search_order == SearchOrder::Relevance;
-        // Child progress is the one column whose value is not on the work
-        // item, so the index supplies the ordering and `compare_tickets` is
-        // left to break the ties.
+        // Child progress and the repository are the columns whose value is
+        // not on the work item, so the graph supplies the ordering and
+        // `compare_tickets` is left to break the ties.
         let progress = (field == SortField::Progress).then(|| self.child_progress.clone());
+        let repos = (field == SortField::Repo).then(|| self.repos_by_item(shell));
+        let repo_of = |key: &TicketKey| {
+            repos
+                .as_ref()
+                .and_then(|repos| repos.get(&key.id))
+                .and_then(|names| names.first())
+                .map(String::as_str)
+        };
         self.visible.sort_by(|left, right| {
             let relevance = if relevance_first {
                 right.score.cmp(&left.score)
@@ -501,6 +510,17 @@ impl WorkItemsScreen {
                     progress.as_ref().map_or(Ordering::Equal, |progress| {
                         progress.compare(&left.key, &right.key, direction)
                     })
+                })
+                .then_with(|| {
+                    if repos.is_some() {
+                        crate::model::compare_optional_text_last(
+                            repo_of(&left.key),
+                            repo_of(&right.key),
+                            direction,
+                        )
+                    } else {
+                        Ordering::Equal
+                    }
                 })
                 .then_with(|| compare_tickets(left, right, field, direction))
         });

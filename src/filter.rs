@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::model::{StateCategory, Ticket, path_leaf, same_text};
+use crate::model::{ArtifactKind, ArtifactLink, StateCategory, Ticket, path_leaf, same_text};
 use crate::timestamp::Timestamp;
 
 /// What one screen's filter grammar is: the fields it offers, and how to read
@@ -37,8 +37,10 @@ pub trait FilterSchema: Clone + Copy + std::fmt::Debug + Default + Eq + 'static 
     }
 
     /// The values one row carries for a field: usually one, several for a
-    /// field like tags, none for a date.
-    fn values(field: Self::Field, row: &Self::Row) -> Vec<String>;
+    /// field like tags, none for a date. The context is for a value the row
+    /// does not carry itself, such as the repositories a work item is linked
+    /// to.
+    fn values(field: Self::Field, row: &Self::Row, context: &MatchContext) -> Vec<String>;
 
     /// The instant a date field compares against, and `None` for the rest.
     fn date_value(_field: Self::Field, _row: &Self::Row) -> Option<Timestamp> {
@@ -103,7 +105,7 @@ impl FilterSchema for WorkItemSchema {
         field.is_date()
     }
 
-    fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
+    fn values(field: Self::Field, row: &Self::Row, context: &MatchContext) -> Vec<String> {
         match field {
             FilterField::Id => vec![row.key.id.to_string()],
             FilterField::State => vec![row.state.clone()],
@@ -120,6 +122,11 @@ impl FilterSchema for WorkItemSchema {
             FilterField::Area => vec![row.area_path.clone()],
             FilterField::Iteration => vec![row.iteration_path.clone()],
             FilterField::Tags => row.tags.clone(),
+            FilterField::Repo => context
+                .repos_by_item
+                .get(&row.key.id)
+                .cloned()
+                .unwrap_or_default(),
             // Dates are compared rather than enumerated: `field_matches`
             // answers for them before reaching here, and the overlay offers
             // presets.
@@ -181,12 +188,16 @@ pub enum FilterField {
     Area,
     Iteration,
     Tags,
+    /// The repositories the work item is linked to, by name: its branch links
+    /// first, then whatever its pull requests and commits are in. Not on the
+    /// work item itself, so the [`MatchContext`] carries it.
+    Repo,
     Changed,
     Created,
 }
 
 impl FilterField {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Id,
         Self::State,
         Self::Type,
@@ -195,19 +206,21 @@ impl FilterField {
         Self::Area,
         Self::Iteration,
         Self::Tags,
+        Self::Repo,
         Self::Changed,
         Self::Created,
     ];
 
     /// The facet pills the bar offers, most-reached-for first. The bar draws
     /// as many as the width holds and leaves the rest to the Filters overlay.
-    pub const BAR: [Self; 9] = [
+    pub const BAR: [Self; 10] = [
         Self::State,
         Self::Assignee,
         Self::Iteration,
         Self::Type,
         Self::Priority,
         Self::Tags,
+        Self::Repo,
         Self::Area,
         Self::Changed,
         Self::Created,
@@ -216,7 +229,7 @@ impl FilterField {
     /// The fields the Filters overlay lists: every one whose values are worth
     /// offering. `id:` is typed or jumped to, never picked off a list as long
     /// as the database.
-    pub const OVERLAY: [Self; 9] = [
+    pub const OVERLAY: [Self; 10] = [
         Self::State,
         Self::Type,
         Self::Assignee,
@@ -224,6 +237,7 @@ impl FilterField {
         Self::Area,
         Self::Iteration,
         Self::Tags,
+        Self::Repo,
         Self::Changed,
         Self::Created,
     ];
@@ -246,6 +260,7 @@ impl FilterField {
             Self::Area => "area",
             Self::Iteration => "iteration",
             Self::Tags => "tag",
+            Self::Repo => "repo",
             Self::Changed => "changed",
             Self::Created => "created",
         }
@@ -262,6 +277,7 @@ impl FilterField {
             Self::Area => "Area",
             Self::Iteration => "Iteration",
             Self::Tags => "Tags",
+            Self::Repo => "Repo",
             Self::Changed => "Changed",
             Self::Created => "Created",
         }
@@ -278,6 +294,7 @@ impl FilterField {
             "area" => Some(Self::Area),
             "iteration" | "sprint" => Some(Self::Iteration),
             "tag" | "tags" => Some(Self::Tags),
+            "repo" | "repository" => Some(Self::Repo),
             "changed" | "updated" => Some(Self::Changed),
             "created" => Some(Self::Created),
             _ => None,
@@ -462,6 +479,9 @@ pub struct MatchContext {
     /// The iteration paths `@current` stands for — one a team, or the one the
     /// calendar names — and empty when no sprint is scheduled around today.
     pub current_iterations: Vec<String>,
+    /// The repositories each work item is linked to, by name, which
+    /// [`repos_by_item`] reads off the artifact links.
+    pub repos_by_item: BTreeMap<i64, Vec<String>>,
 }
 
 impl MatchContext {
@@ -479,6 +499,7 @@ impl MatchContext {
             now,
             me: None,
             current_iterations: Vec::new(),
+            repos_by_item: BTreeMap::new(),
         }
     }
 
@@ -493,6 +514,41 @@ impl MatchContext {
         self.current_iterations = iterations;
         self
     }
+
+    #[must_use]
+    pub fn with_repos(mut self, repos: BTreeMap<i64, Vec<String>>) -> Self {
+        self.repos_by_item = repos;
+        self
+    }
+}
+
+/// The repositories each work item is linked to, named through `name_of`:
+/// the ones its branches are in first, then the ones its pull requests and
+/// commits are in, each once. This is what `repo:` matches and the Repo
+/// column shows.
+#[must_use]
+pub fn repos_by_item(
+    artifacts: &[ArtifactLink],
+    name_of: impl Fn(&str) -> String,
+) -> BTreeMap<i64, Vec<String>> {
+    let mut repos: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    let branches = artifacts
+        .iter()
+        .filter(|link| matches!(link.kind, ArtifactKind::Branch { .. }));
+    let rest = artifacts
+        .iter()
+        .filter(|link| !matches!(link.kind, ArtifactKind::Branch { .. }));
+    for link in branches.chain(rest) {
+        let Some(repo_id) = link.kind.repo_id() else {
+            continue;
+        };
+        let name = name_of(repo_id);
+        let names = repos.entry(link.work_item.id).or_default();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    repos
 }
 
 /// The `changed:` comparison a stale-item highlight is, written the way the
@@ -770,7 +826,7 @@ pub fn facet_values<S: FilterSchema>(
         if !matches_excluding::<S>(ticket, filters, field, bookmarked(ticket), context) {
             continue;
         }
-        for value in S::values(field, ticket) {
+        for value in S::values(field, ticket, context) {
             *counts.entry(value).or_default() += 1;
         }
     }
@@ -865,7 +921,7 @@ fn field_matches<S: FilterSchema>(
     if let Some(sentinel) = S::sentinel(field, needle) {
         return S::matches_sentinel(field, sentinel, row, context);
     }
-    S::values(field, row)
+    S::values(field, row, context)
         .iter()
         .any(|value| value.eq_ignore_ascii_case(needle) || path_segment_matches(value, needle))
 }
@@ -1171,6 +1227,75 @@ mod tests {
 
         assert!(parsed.filters.matches(&matching, false));
         assert!(!parsed.filters.matches(&other, false));
+    }
+
+    #[test]
+    fn repo_matches_the_repositories_the_context_says_a_work_item_is_linked_to() {
+        use crate::model::TicketKey;
+
+        let key = |id| TicketKey {
+            organization: "demo".into(),
+            id,
+        };
+        let link = |id, kind| ArtifactLink {
+            work_item: key(id),
+            kind,
+            name: String::new(),
+        };
+        let repos = repos_by_item(
+            &[
+                link(
+                    1,
+                    ArtifactKind::PullRequest {
+                        repo_id: "bbb".into(),
+                        id: 7,
+                    },
+                ),
+                link(
+                    1,
+                    ArtifactKind::Branch {
+                        repo_id: "aaa".into(),
+                        name: "1-fix".into(),
+                    },
+                ),
+                link(
+                    1,
+                    ArtifactKind::Commit {
+                        repo_id: "aaa".into(),
+                        sha: "abc".into(),
+                    },
+                ),
+                link(2, ArtifactKind::Build(3)),
+            ],
+            |id| format!("repo-{id}"),
+        );
+        assert_eq!(
+            repos.get(&1).map(Vec::as_slice),
+            Some(["repo-aaa".to_owned(), "repo-bbb".to_owned()].as_slice()),
+            "the branch's repository leads, and a repository is named once"
+        );
+        assert_eq!(repos.get(&2), None, "a build names no repository");
+
+        let context = MatchContext::now().with_repos(repos);
+        let parsed = parse_query::<WorkItemSchema>("repo:Repo-BBB");
+        let linked = ticket("Active", "Bug", None, "rust");
+        let other = Ticket::fixture(2, "Elsewhere");
+        assert!(parsed.filters.matches_in(&linked, false, &context));
+        assert!(!parsed.filters.matches_in(&other, false, &context));
+        let facets = facet_values::<WorkItemSchema>(
+            &[linked, other],
+            &parsed.filters,
+            FilterField::Repo,
+            |_| false,
+            &context,
+        );
+        assert_eq!(
+            facets
+                .iter()
+                .map(|facet| (facet.value.as_str(), facet.count))
+                .collect::<Vec<_>>(),
+            vec![("repo-aaa", 1), ("repo-bbb", 1)]
+        );
     }
 
     #[test]

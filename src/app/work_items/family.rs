@@ -368,7 +368,7 @@ impl WorkItemsScreen {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         let row = self.table_state.selected();
         self.apply_filters(shell);
-        self.sort_visible();
+        self.sort_visible(shell);
         if let Some(row) = row
             && selected
                 .as_ref()

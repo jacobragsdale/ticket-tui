@@ -3,6 +3,8 @@
 //! to make at the head of its default branch.
 
 use super::pickers::fuzzy_contains;
+use std::collections::BTreeMap;
+
 use super::*;
 
 /// The two-step picker `L` opens. `repo` is `None` while the repositories are
@@ -196,6 +198,13 @@ impl WorkItemsScreen {
             self.link_picker.loaded = true;
             self.link_picker.cursor.reset();
         }
+    }
+
+    /// The repositories each work item is linked to, by name, off the graph's
+    /// artifact links: what `repo:` matches and the Repo column shows.
+    #[must_use]
+    pub fn repos_by_item(&self, shell: &Shell) -> BTreeMap<i64, Vec<String>> {
+        crate::filter::repos_by_item(&self.graph.artifacts, |id| shell.repo_name(id))
     }
 
     /// A branch link Azure DevOps took. The work item's own Related section

@@ -337,6 +337,13 @@ pub(super) fn render_table(
     // Everything the rows on screen need, read before the table takes the
     // shell: what a row says about itself is the screen's business, and the
     // list table only asks for cells.
+    // The repositories are only worth naming while a Repo column is showing.
+    let repos = screen
+        .layout
+        .columns
+        .iter()
+        .any(|column| column.visible && column.id == SortField::Repo)
+        .then(|| screen.repos_by_item(shell));
     let rows: Vec<PaintedRow<'_>> = screen
         .visible_tickets()
         .skip(offset)
@@ -348,6 +355,10 @@ pub(super) fn render_table(
             context: RowContext {
                 tone: RowTone::of(&ticket.state),
                 mine: shell.is_mine(ticket),
+                repo: repos
+                    .as_ref()
+                    .and_then(|repos| repos.get(&ticket.key.id))
+                    .and_then(|names| names.first().cloned()),
                 progress: screen.child_progress(&ticket.key),
             },
         })
@@ -369,7 +380,7 @@ pub(super) fn render_table(
                     column,
                     now,
                     density,
-                    row.context,
+                    row.context.clone(),
                     &mut highlighter,
                 )
             },
@@ -477,11 +488,14 @@ impl RowTone {
 /// What a row knows about itself beyond the work item: how strongly it is
 /// painted, whether it is the signed-in user's, and how far its children have
 /// got.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct RowContext {
     tone: RowTone,
     mine: bool,
     progress: Option<ChildProgress>,
+    /// The first repository the work item is linked to, read only while the
+    /// Repo column is showing.
+    repo: Option<String>,
 }
 
 pub(super) fn table_cell(
@@ -496,6 +510,7 @@ pub(super) fn table_cell(
         tone,
         mine,
         progress,
+        repo,
     } = row;
     let plain = tone.apply(Style::default());
     let line = match field {
@@ -548,6 +563,7 @@ pub(super) fn table_cell(
             highlight_searchable(path_leaf(&ticket.iteration_path), plain, highlighter)
         }
         SortField::Tags => Line::from(tag_badge_spans(&ticket.tags, tone, highlighter)),
+        SortField::Repo => Line::from(repo.unwrap_or_default()).style(plain),
         // A work item with no children shows an empty cell rather than `0/0`:
         // there is no progress to report on work that was never broken down.
         SortField::Progress => Line::from(progress.map(ChildProgress::ratio).unwrap_or_default())

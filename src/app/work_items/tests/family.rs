@@ -403,3 +403,50 @@ fn the_family_cursor_scrolls_to_the_row_the_summary_line_pushed_down() {
          the tree"
     );
 }
+
+#[test]
+fn sorting_by_repo_orders_by_the_first_repository_and_leaves_unlinked_rows_last() {
+    use crate::model::{ArtifactKind, ArtifactLink, TicketGraph};
+
+    let mut app = App::new(vec![
+        ticket(1, "Zeta work", "2026-01-03T00:00:00Z"),
+        ticket(2, "Alpha work", "2026-01-02T00:00:00Z"),
+        ticket(3, "Nowhere", "2026-01-01T00:00:00Z"),
+    ]);
+    app.shell.set_repos(vec![
+        crate::app::repos::tests::repo("aaa-111", "alpha", false),
+        crate::app::repos::tests::repo("bbb-222", "zeta", false),
+    ]);
+    let branch = |id, repo_id: &str| ArtifactLink {
+        work_item: family_key(id),
+        kind: ArtifactKind::Branch {
+            repo_id: repo_id.into(),
+            name: format!("{id}-fix"),
+        },
+        name: "Branch".into(),
+    };
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            artifacts: vec![branch(1, "bbb-222"), branch(2, "aaa-111")],
+            ..TicketGraph::default()
+        },
+    );
+
+    let order = |app: &App| -> Vec<i64> {
+        app.work_items
+            .visible_tickets()
+            .map(|ticket| ticket.key.id)
+            .collect()
+    };
+    app.work_items
+        .set_sort(&mut app.shell, SortField::Repo, SortDirection::Ascending);
+    assert_eq!(order(&app), vec![2, 1, 3], "alpha, zeta, then the unlinked");
+    app.work_items
+        .set_sort(&mut app.shell, SortField::Repo, SortDirection::Descending);
+    assert_eq!(
+        order(&app),
+        vec![1, 2, 3],
+        "the unlinked stay last either way"
+    );
+}

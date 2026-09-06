@@ -28,7 +28,7 @@ use crate::classification::{self, NodeKind};
 use crate::config::Config;
 use crate::db::{self, SqliteTicketRepository, default_database_path};
 use crate::edit::{FieldEdit, normalize_tags, revision_test};
-use crate::filter::{FilterField, MatchContext, ParsedQuery, WorkItemSchema, parse_query};
+use crate::filter::{self, FilterField, MatchContext, ParsedQuery, WorkItemSchema, parse_query};
 use crate::local;
 use crate::markdown;
 use crate::model::{
@@ -788,10 +788,19 @@ fn match_context(
     };
     let current_iteration =
         classification::current_iteration(&nodes, today).map(|node| node.path.clone());
+    let graph = repository.load_graph()?;
+    let repos = repository.load_repos()?;
+    let name_of = |id: &str| {
+        repos
+            .iter()
+            .find(|repo| repo.id == id)
+            .map_or_else(|| id.to_owned(), |repo| repo.name.clone())
+    };
     Ok((
         MatchContext::now()
             .with_me(me)
-            .with_current_iterations(current_iteration.into_iter().collect()),
+            .with_current_iterations(current_iteration.into_iter().collect())
+            .with_repos(filter::repos_by_item(&graph.artifacts, name_of)),
         tree,
     ))
 }
@@ -3084,6 +3093,34 @@ mod tests {
         assert_eq!(args.work_item_type, "Issue");
         assert_eq!(args.title, "CLI subcommands");
         assert_eq!(args.parent, Some(613));
+    }
+
+    #[test]
+    fn listing_by_repo_reads_the_repositories_the_context_carries() {
+        let tickets = vec![
+            ticket(1, "Edit dispatcher", "Doing", None),
+            ticket(2, "Sync watermark", "Doing", None),
+        ];
+        let context = MatchContext::now().with_repos(std::collections::BTreeMap::from([(
+            2,
+            vec!["ado-helper".to_owned()],
+        )]));
+
+        let linked = select(
+            tickets,
+            Some("repo:ado-helper"),
+            &context,
+            IterationTree::Cached,
+        )
+        .unwrap();
+
+        assert_eq!(
+            linked
+                .iter()
+                .map(|ticket| ticket.key.id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]

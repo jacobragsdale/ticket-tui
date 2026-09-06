@@ -64,7 +64,7 @@ impl FilterSchema for PipelineSchema {
         }
     }
 
-    fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
+    fn values(field: Self::Field, row: &Self::Row, _context: &MatchContext) -> Vec<String> {
         match field {
             PipelineField::Name => vec![row.pipeline.name.clone()],
             PipelineField::Folder => vec![row.pipeline.folder.clone()],
@@ -151,7 +151,7 @@ impl FilterSchema for RunSchema {
         }
     }
 
-    fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
+    fn values(field: Self::Field, row: &Self::Row, _context: &MatchContext) -> Vec<String> {
         match field {
             RunField::Pipeline => vec![row.pipeline.clone()],
             RunField::Branch => vec![short_branch(&row.run.source_branch)],

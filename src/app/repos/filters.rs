@@ -1,7 +1,7 @@
 //! The Repos tab's filter grammar.
 
 use super::rows::RepoRow;
-use crate::filter::FilterSchema;
+use crate::filter::{FilterSchema, MatchContext};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RepoSchema;
@@ -60,7 +60,7 @@ impl FilterSchema for RepoSchema {
         }
     }
 
-    fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
+    fn values(field: Self::Field, row: &Self::Row, _context: &MatchContext) -> Vec<String> {
         match field {
             RepoField::Name => vec![row.repo.name.clone()],
             RepoField::Branch => vec![row.branch()],

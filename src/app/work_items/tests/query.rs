@@ -26,7 +26,7 @@ fn search_order_switches_between_relevance_and_field_sorting_and_keeps_the_selec
             score: 1,
         },
     ];
-    app.work_items.sort_visible();
+    app.work_items.sort_visible(&app.shell);
     assert_eq!(app.work_items.search_order, SearchOrder::Relevance);
     assert_eq!(
         app.work_items.visible_tickets().next().unwrap().key.id,

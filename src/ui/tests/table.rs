@@ -518,3 +518,50 @@ fn an_edit_that_lands_flashes_its_row_once_and_the_flash_runs_out() {
     app.shell.flash = None;
     assert_eq!(gutter(&mut app), quiet, "and it leaves nothing behind");
 }
+
+#[test]
+fn the_repo_column_is_hidden_until_asked_for_and_names_the_branch_link_repository() {
+    use crate::model::{ArtifactKind, ArtifactLink, TicketGraph};
+
+    let mut app = App::new(vec![ticket()]);
+    let key = app.work_items.tickets()[0].key.clone();
+    app.shell.set_repos(vec![crate::app::repos::tests::repo(
+        "aaa-111",
+        "ado-helper",
+        false,
+    )]);
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            artifacts: vec![ArtifactLink {
+                work_item: key,
+                kind: ArtifactKind::Branch {
+                    repo_id: "aaa-111".into(),
+                    name: "10001-fix".into(),
+                },
+                name: "Branch".into(),
+            }],
+            ..TicketGraph::default()
+        },
+    );
+    let mut terminal = Terminal::new(TestBackend::new(200, 24)).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    assert!(
+        find_buffer_text_in(terminal.backend().buffer(), table_body(&app), "ado-helper").is_none(),
+        "the column opens hidden"
+    );
+
+    let repo = app
+        .work_items
+        .layout
+        .columns
+        .iter()
+        .position(|column| column.id == SortField::Repo)
+        .expect("repo column");
+    ColumnLayout::toggle_visible(&mut app.work_items.layout, repo);
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    assert!(
+        find_buffer_text_in(terminal.backend().buffer(), table_body(&app), "ado-helper").is_some(),
+        "and names the repository once shown"
+    );
+}

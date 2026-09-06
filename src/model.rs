@@ -856,6 +856,10 @@ pub enum SortField {
     Iteration,
     Created,
     Tags,
+    /// The repository the work item is linked to — its branch's, else its
+    /// pull request's or commit's. Like progress it comes from the graph, so
+    /// the table orders it and [`compare_tickets`] breaks the ties.
+    Repo,
     /// Done out of total over a work item's direct children. Unlike every
     /// other field this one is not on the work item: it comes from the graph,
     /// which is why [`compare_tickets`] cannot order it on its own.
@@ -863,7 +867,7 @@ pub enum SortField {
 }
 
 impl SortField {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Changed,
         Self::Priority,
         Self::Id,
@@ -875,6 +879,7 @@ impl SortField {
         Self::Iteration,
         Self::Created,
         Self::Tags,
+        Self::Repo,
         Self::Progress,
     ];
 
@@ -892,6 +897,7 @@ impl SortField {
             Self::Iteration => "Iteration",
             Self::Created => "Created",
             Self::Tags => "Tags",
+            Self::Repo => "Repo",
             Self::Progress => "Progress",
         }
     }
@@ -917,6 +923,7 @@ impl crate::columns::ColumnId for SortField {
             Self::Iteration,
             Self::Created,
             Self::Tags,
+            Self::Repo,
             Self::Progress,
         ]
     }
@@ -934,6 +941,7 @@ impl crate::columns::ColumnId for SortField {
             Self::Iteration => "iteration",
             Self::Created => "created",
             Self::Tags => "tags",
+            Self::Repo => "repo",
             Self::Progress => "progress",
         }
     }
@@ -958,7 +966,7 @@ impl crate::columns::ColumnId for SortField {
             // ships, `[User Story]`.
             Self::Type => 12,
             Self::Assignee => 14,
-            Self::Area | Self::Iteration | Self::Tags => 16,
+            Self::Area | Self::Iteration | Self::Tags | Self::Repo => 16,
         }
     }
 
@@ -1788,10 +1796,10 @@ pub fn compare_tickets(
         SortField::Area => compare_text(&left.area_path, &right.area_path),
         SortField::Iteration => compare_text(&left.iteration_path, &right.iteration_path),
         SortField::Tags => compare_text(&left.tags.join(";"), &right.tags.join(";")),
-        // Child progress lives in the graph rather than on the work item, so
-        // the table orders it before it gets here and this arm only decides
-        // the two rows it could not tell apart.
-        SortField::Progress => Ordering::Equal,
+        // Child progress and the repository live in the graph rather than on
+        // the work item, so the table orders them before it gets here and
+        // these arms only decide the two rows it could not tell apart.
+        SortField::Progress | SortField::Repo => Ordering::Equal,
     };
 
     let directed = if matches!(field, SortField::Priority | SortField::Assignee) {
@@ -1826,7 +1834,7 @@ fn compare_optional_last<T: Ord>(
     }
 }
 
-fn compare_optional_text_last(
+pub fn compare_optional_text_last(
     left: Option<&str>,
     right: Option<&str>,
     direction: SortDirection,

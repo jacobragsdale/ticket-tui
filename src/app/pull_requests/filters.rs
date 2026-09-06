@@ -95,7 +95,7 @@ impl FilterSchema for PrSchema {
         }
     }
 
-    fn values(field: Self::Field, row: &Self::Row) -> Vec<String> {
+    fn values(field: Self::Field, row: &Self::Row, _context: &MatchContext) -> Vec<String> {
         match field {
             PrField::Repo => vec![row.repo.clone()],
             PrField::Author => vec![row.request.created_by.display_name.clone()],
