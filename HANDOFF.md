@@ -6,6 +6,50 @@ Last updated 2026-09-06. The backlog itself lives in Azure DevOps
 
 ## State of `main`
 
+- **Work items linked to repositories (2026-09-06, no ticket).** The stored truth is
+  Azure DevOps's own Branch artifact link, `vstfs:///Git/Ref/{project}%2F{repo}%2FGB{branch}`
+  with a slash inside the branch name also `%2F` (checked live: Azure DevOps stores
+  exactly that spelling), read as `ArtifactKind::Branch` and written by
+  `AzureClient::link_branch` beside `link_pull_request`; both share
+  `artifact_link_document`, whose duplicate check now compares what the URL points at
+  rather than its spelling. `AzureClient::create_branch` reads the head of the exact
+  ref (the `refs` filter is a prefix match) and posts the new ref. Schema is **19** so
+  a cache from before, which dropped `Git/Ref` links at parse time, repulls. On the
+  work items tab `L` (`CommandId::LinkBranch`, `src/app/work_items/link.rs`) opens a
+  two-step picker — the repositories, then the chosen one's branches under a query
+  that opens as `{id}-{slug}` — and `Enter` links an existing branch or makes a new
+  name at the head of the default branch, never while the branches are still being
+  read; `SyncRequest::LinkBranch` → `SyncEvent::BranchLinked`, and a link that lands
+  (branch or the PR tab's `L`) books a pull for the next loop turn so Related follows
+  in seconds. `ticket-tui link <WI> <REPO> [BRANCH]` is the CLI twin and `show` now
+  prints a Related block. A work item's repositories are read off its artifact links
+  (branch first, then PR/commit) into `MatchContext::repos_by_item`, which
+  `FilterSchema::values` now receives: `repo:name` matches and facets on the tab and
+  in `list`, and `SortField::Repo` is a hidden-by-default column ordered from the same
+  map. `g` on a work item falls through to its branch's repository. The Repos tab
+  counts and lists the open work items linked to each repository (`repo_work_items`
+  in `src/app/repos/rows.rs`, shared with `ticket-tui repos`): an Items column, a
+  Work items section between Open against it and Pipelines, ` #715` after the branch
+  on the Local line when the clone is on a linked branch, and `g` now goes pull
+  request → work items → pipeline, so a repository with tickets but no PR lands on
+  `id:… id:…` rather than its pipeline. Column widths moved: Default branch 18 → 14,
+  Local 20 → 24. Drive-by: × on the PR tab's modals now closes them. **Not built**:
+  unlinking (still the web UI), checking the new branch out locally, inferring PR ↔
+  work item from branch names, a branch-name template. **Live** (2026-09-06): the CLI
+  linked #766 to `pr-checkout-smoke/766-test-drive-full-details-pane` (created) and
+  `ado-helper/test/766-slashes` (created) and #767 to `ado-helper/main`. The TUI was
+  driven with a pty/pyte harness at 170×45: on #768, `L` listed the four repositories,
+  `rust` + `Enter` opened `Branch in rust-game` with `Enter makes 768-test-drive-bare
+  at the head of main`, `Enter` made and linked it, and Related read `Branch
+  768-test-drive-bare  in rust-game` within eight seconds; a second `L` →
+  `development`, query cleared, `main` typed → `› main` → `Enter` linked the existing
+  branch; `g` landed on the rust-game row (Items 1, `[Go to work items]`, the Work
+  items section reading `#768  Test drive: bare  · 768-test-drive-bare`) and `g`
+  there came back to `id:768`; `repo:rust-game` listed #768 with a `Repo:rust-game`
+  pill. A saved session appends the new Items column after Local rather than after
+  PRs, which is how any new column joins a stored layout. The branches and links are
+  still in the sandbox; #769 is untouched.
+
 - **Acceptance Criteria and the pane order (2026-09-06, no ticket).** The batch read
   always carried `Microsoft.VSTS.Common.AcceptanceCriteria`; now `parse_work_item`
   keeps it as `acceptance_criteria` / `acceptance_criteria_html` on `Ticket` and in
