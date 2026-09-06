@@ -32,6 +32,7 @@ impl WorkItemsScreen {
             ScrollSurface::TagPicker => self.tag_picker.cursor.scroll,
             ScrollSurface::AssigneePicker => self.assignee_picker.cursor.scroll,
             ScrollSurface::ParentPicker => self.parent_picker.cursor.scroll,
+            ScrollSurface::LinkPicker => self.link_picker.cursor.scroll,
             ScrollSurface::NodePicker => self.node_picker.cursor.scroll,
             ScrollSurface::TypePicker => self.type_picker.cursor.scroll,
             ScrollSurface::Form => self.form_scroll,
@@ -59,6 +60,7 @@ impl WorkItemsScreen {
             ScrollSurface::TagPicker => &mut self.tag_picker.cursor.scroll,
             ScrollSurface::AssigneePicker => &mut self.assignee_picker.cursor.scroll,
             ScrollSurface::ParentPicker => &mut self.parent_picker.cursor.scroll,
+            ScrollSurface::LinkPicker => &mut self.link_picker.cursor.scroll,
             ScrollSurface::NodePicker => &mut self.node_picker.cursor.scroll,
             ScrollSurface::TypePicker => &mut self.type_picker.cursor.scroll,
             ScrollSurface::Form => &mut self.form_scroll,
@@ -223,6 +225,13 @@ impl WorkItemsScreen {
             PointerTarget::ParentQuery => {
                 self.place_caret(shell, TextEditor::Parent, column, row);
             }
+            PointerTarget::LinkOption { index } => {
+                self.link_picker.cursor.focus(index);
+                return self.choose_link(shell, index);
+            }
+            PointerTarget::LinkQuery => {
+                self.place_caret(shell, TextEditor::Link, column, row);
+            }
             PointerTarget::NodeOption { index } => {
                 self.node_picker.cursor.focus(index);
                 return self.choose_node(shell, index);
@@ -386,6 +395,7 @@ impl WorkItemsScreen {
                 | TextEditor::Assignee
                 | TextEditor::Node
                 | TextEditor::Parent
+                | TextEditor::Link
                 | TextEditor::Capture
                 | TextEditor::Form => SelectableSurface::Overlay,
             })
@@ -418,6 +428,7 @@ impl WorkItemsScreen {
             }
             TextEditor::Assignee => self.assignee_picker.query.set_cursor(index),
             TextEditor::Parent => self.parent_picker.query.set_cursor(index),
+            TextEditor::Link => self.link_picker.query.set_cursor(index),
             TextEditor::Node => self.node_picker.query.set_cursor(index),
             TextEditor::Form => {
                 if let Some(field) = self.focused_form_field_mut() {

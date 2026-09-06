@@ -359,6 +359,97 @@ pub(super) fn render_parent_picker(
     );
 }
 
+/// The link picker: the repositories, then the chosen one's branches under a
+/// query that starts as the branch name offered. While the branches are still
+/// being read the list says so, and a name none of them has says what `Enter`
+/// would make.
+pub(super) fn render_link_picker(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
+    let matches = screen.link_matches();
+    let picker = &screen.link_picker;
+    let muted = Style::default().fg(theme().muted);
+    let selected = picker.cursor.index;
+    let typed = picker.query.text().trim().to_owned();
+    let (title, placeholder) = match picker.chosen() {
+        None => (
+            format!(
+                " Link #{} to a branch ",
+                picker.item.as_ref().map_or(0, |key| key.id)
+            ),
+            "Filter repositories\u{2026}",
+        ),
+        Some(repo) => (format!(" Branch in {} ", repo.name), "Branch name\u{2026}"),
+    };
+    let rows: Vec<Line> = if picker.repo.is_some() && !picker.loaded {
+        vec![Line::from(Span::styled(
+            "  Reading branches\u{2026}",
+            muted,
+        ))]
+    } else if matches.is_empty() {
+        let text = match picker.chosen() {
+            None => "  No repository matches".to_owned(),
+            Some(_) if typed.is_empty() => "  Type a branch name".to_owned(),
+            Some(repo) => match repo.default_branch.as_deref() {
+                Some(from) => format!(
+                    "  Enter makes {typed} at the head of {}",
+                    from.strip_prefix("refs/heads/").unwrap_or(from)
+                ),
+                None => format!("  {} has no default branch to branch from", repo.name),
+            },
+        };
+        vec![Line::from(Span::styled(text, muted))]
+    } else {
+        matches
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let marker = if index == selected { "\u{203a}" } else { " " };
+                Line::from(vec![
+                    Span::raw(format!("{marker} ")),
+                    Span::styled(name.clone(), Style::default().fg(theme().text)),
+                ])
+            })
+            .collect()
+    };
+    let (text, cursor) = (picker.query.text().to_owned(), picker.query.cursor());
+    let height = u16::try_from(rows.len().saturating_add(3))
+        .unwrap_or(u16::MAX)
+        .clamp(5, 18);
+    let width = overlay_width(shell.overlay_anchor, &rows, 64, frame.area());
+    let area = overlay_area(frame.area(), shell.overlay_anchor, width, height);
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, &title);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
+    render_query_field(
+        frame,
+        shell,
+        chunks[0],
+        &text,
+        cursor,
+        placeholder,
+        PointerTarget::LinkQuery,
+    );
+    render_list_overlay(
+        frame,
+        screen,
+        shell,
+        ListOverlay {
+            area: chunks[1],
+            surface: ScrollSurface::LinkPicker,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: false,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::LinkOption { index },
+            decorate: None,
+        },
+    );
+}
+
 /// The iteration or area picker: the project's tree as indented rows, the leaf
 /// of each named and the rest of the path implied by the indent, with the node
 /// the work item sits in already marked and under the cursor. An iteration row

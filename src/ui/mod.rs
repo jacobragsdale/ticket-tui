@@ -53,8 +53,8 @@ use overlays::{
 use panes::{PaneNames, PanePair, render_inner_split, render_workspace};
 use pickers::{
     render_assignee_picker, render_delete_confirm, render_edit_menu, render_form,
-    render_node_picker, render_parent_picker, render_priority_picker, render_prompt,
-    render_state_picker, render_tag_picker, render_type_picker,
+    render_link_picker, render_node_picker, render_parent_picker, render_priority_picker,
+    render_prompt, render_state_picker, render_tag_picker, render_type_picker,
 };
 use table::{
     RowTone, child_progress_line, highlight_line, highlight_searchable, priority_style,
@@ -352,6 +352,7 @@ fn render_pass(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, shell: &mut 
         WorkItemMode::Prompt => render_prompt(frame, screen, shell),
         WorkItemMode::AssigneePicker => render_assignee_picker(frame, screen, shell),
         WorkItemMode::ParentPicker => render_parent_picker(frame, screen, shell),
+        WorkItemMode::LinkPicker => render_link_picker(frame, screen, shell),
         WorkItemMode::NodePicker => render_node_picker(frame, screen, shell),
         WorkItemMode::Form => render_form(frame, screen, shell),
         WorkItemMode::TypePicker => render_type_picker(frame, screen, shell),

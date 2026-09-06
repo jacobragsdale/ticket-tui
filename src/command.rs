@@ -65,6 +65,8 @@ pub enum CommandId {
     AutoCompletePr,
     CommentPr,
     LinkWorkItem,
+    /// `L` on Work items: a repository, then a branch, linked to the work item.
+    LinkBranch,
     ToggleClosedPrs,
     /// `g`: whatever the row under the cursor points at, worked out per tab.
     Follow,
@@ -225,6 +227,13 @@ pub const COMMANDS: &[Command] = &[
         title: "Change state",
         keys: &[key('S')],
         help: "Move the work item",
+        scope: Scope::Tabs(&[TabId::WorkItems]),
+    },
+    Command {
+        id: CommandId::LinkBranch,
+        title: "Link a branch",
+        keys: &[key('L')],
+        help: "A repository, then a branch \u{2014} or a new one",
         scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {

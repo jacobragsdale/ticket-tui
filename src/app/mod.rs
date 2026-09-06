@@ -119,6 +119,14 @@ pub enum AppAction {
         id: i64,
         work_item: i64,
     },
+    /// Link one work item to one branch, made first at the head of
+    /// `create_from` when that names a ref.
+    LinkBranch {
+        repo_id: String,
+        branch: String,
+        work_item: i64,
+        create_from: Option<String>,
+    },
     /// Record one vote on one pull request, as the signed-in user.
     VotePullRequest {
         repo_id: String,

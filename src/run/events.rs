@@ -274,6 +274,21 @@ pub(super) fn handle_action(
                 app.shell.set_error(refusal);
             }
         }
+        AppAction::LinkBranch {
+            repo_id,
+            branch,
+            work_item,
+            create_from,
+        } => {
+            if let Err(refusal) = runtime.send(SyncRequest::LinkBranch {
+                repo_id,
+                branch,
+                work_item,
+                create_from,
+            }) {
+                app.shell.set_error(refusal);
+            }
+        }
         AppAction::VotePullRequest { repo_id, id, vote } => {
             if let Err(refusal) = runtime.send(SyncRequest::VotePullRequest { repo_id, id, vote }) {
                 app.pull_requests

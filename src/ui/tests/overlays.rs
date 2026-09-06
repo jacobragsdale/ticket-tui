@@ -242,6 +242,7 @@ fn every_overlay_paints_over_the_panes_behind_it() {
         WorkItemMode::Prompt,
         WorkItemMode::AssigneePicker,
         WorkItemMode::ParentPicker,
+        WorkItemMode::LinkPicker,
         WorkItemMode::NodePicker,
         WorkItemMode::Form,
         WorkItemMode::TypePicker,

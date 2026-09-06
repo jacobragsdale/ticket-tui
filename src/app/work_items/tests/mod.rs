@@ -15,6 +15,7 @@ mod deletes;
 mod edits;
 mod family;
 mod forms;
+mod link;
 mod pickers;
 mod pointer;
 mod query;

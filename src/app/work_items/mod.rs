@@ -12,7 +12,7 @@ use edits::{BulkEdit, PendingEdit, UndoEntry};
 pub use edits::{DeleteConfirm, EditMenu, EditScope, PromptField, SyncTarget, TextPrompt};
 pub use family::{ChildProgress, ChildProgressIndex};
 pub use forms::{FormField, FormFieldId, FormFieldKind, FormKind, FormOverlay, FormPicker};
-pub use link::branch_name;
+pub use link::{LinkPicker, branch_name};
 pub use pickers::{
     AssigneeCandidate, AssigneePicker, NodePicker, NodeRow, ParentCandidate, ParentPicker,
     PriorityPicker, StatePicker, TagPicker, TypePicker,
@@ -64,6 +64,9 @@ pub enum WorkItemMode {
     TypePicker,
     /// The work items the selected one can be filed under, filtered by typing.
     ParentPicker,
+    /// A repository, then one of its branches, for the selected work item to
+    /// be linked to.
+    LinkPicker,
     /// The last word before a work item goes to the recycle bin.
     ConfirmDelete,
 }
@@ -226,6 +229,7 @@ pub struct WorkItemsScreen {
     pub tag_picker: TagPicker,
     pub assignee_picker: AssigneePicker,
     pub parent_picker: ParentPicker,
+    pub link_picker: LinkPicker,
     pub node_picker: NodePicker,
     pub type_picker: TypePicker,
     /// The title being typed into the quick capture row, empty while it is
@@ -392,6 +396,7 @@ impl WorkItemsScreen {
             tag_picker: TagPicker::default(),
             assignee_picker: AssigneePicker::default(),
             parent_picker: ParentPicker::default(),
+            link_picker: LinkPicker::default(),
             node_picker: NodePicker::default(),
             prompt: None,
             composer: None,
@@ -536,6 +541,9 @@ impl WorkItemsScreen {
             WorkItemMode::ParentPicker => {
                 "Type to filter  \u{2191}\u{2193} select  Enter file under  Esc cancel"
             }
+            WorkItemMode::LinkPicker => {
+                "Type to filter  \u{2191}\u{2193} select  Enter choose  Esc back"
+            }
             WorkItemMode::TypePicker => "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel",
             WorkItemMode::Form => {
                 "\u{2191}\u{2193}/Tab fields  Enter picker  Ctrl-S create  Esc cancel"
@@ -608,6 +616,7 @@ impl WorkItemsScreen {
             WorkItemMode::Compose => self.handle_compose_key(shell, key),
             WorkItemMode::AssigneePicker => self.handle_assignee_picker_key(shell, key),
             WorkItemMode::ParentPicker => self.handle_parent_picker_key(shell, key),
+            WorkItemMode::LinkPicker => self.handle_link_picker_key(shell, key),
             WorkItemMode::NodePicker => self.handle_node_picker_key(shell, key),
             WorkItemMode::Form => self.handle_form_key(shell, key),
             WorkItemMode::Capture => self.handle_capture_key(shell, key),
@@ -885,6 +894,7 @@ const fn mode_name(mode: WorkItemMode) -> &'static str {
         WorkItemMode::Capture => "capture",
         WorkItemMode::TypePicker => "type-picker",
         WorkItemMode::ParentPicker => "parent-picker",
+        WorkItemMode::LinkPicker => "link-picker",
         WorkItemMode::ConfirmDelete => "confirm-delete",
     }
 }

@@ -269,6 +269,7 @@ impl WorkItemsScreen {
             Some(TextEditor::Capture) => self.capture.paste(pasted, false),
             Some(TextEditor::Assignee) => self.assignee_picker.query.paste(pasted, false),
             Some(TextEditor::Parent) => self.parent_picker.query.paste(pasted, false),
+            Some(TextEditor::Link) => self.link_picker.query.paste(pasted, false),
             Some(TextEditor::Node) => self.node_picker.query.paste(pasted, false),
             None => {}
         }
@@ -328,6 +329,7 @@ impl WorkItemsScreen {
             WorkItemMode::Compose => Some(TextEditor::Compose),
             WorkItemMode::AssigneePicker => Some(TextEditor::Assignee),
             WorkItemMode::ParentPicker => Some(TextEditor::Parent),
+            WorkItemMode::LinkPicker => Some(TextEditor::Link),
             WorkItemMode::NodePicker => Some(TextEditor::Node),
             WorkItemMode::Form => Some(TextEditor::Form),
             WorkItemMode::Capture => Some(TextEditor::Capture),
@@ -853,6 +855,10 @@ impl WorkItemsScreen {
             }
             CommandId::ChangeState => {
                 self.open_state_picker(shell);
+                AppAction::None
+            }
+            CommandId::LinkBranch => {
+                self.open_link_picker(shell);
                 AppAction::None
             }
             CommandId::EditTitle => {

@@ -843,3 +843,40 @@ fn a_dropdown_opens_below_a_field_above_a_low_one_and_centred_when_neither_fits(
         44
     );
 }
+
+#[test]
+fn the_link_picker_lists_repositories_then_the_branches_of_the_chosen_one() {
+    let mut app = App::new(vec![ticket_at(
+        715,
+        "Fix the thing",
+        "Issue",
+        "To Do",
+        "2026-03-05T00:00:00Z",
+    )]);
+    app.shell.set_repos(vec![crate::app::repos::tests::repo(
+        "aaa-111",
+        "ticket-tui",
+        false,
+    )]);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE));
+    let text = render_text(90, 24, &mut app);
+    assert!(text.contains("Link #715 to a branch"), "{text}");
+    assert!(text.contains("\u{203a} ticket-tui"), "{text}");
+
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let text = render_text(90, 24, &mut app);
+    assert!(text.contains("Branch in ticket-tui"), "{text}");
+    assert!(
+        text.contains("715-fix-the-thing"),
+        "the offered name: {text}"
+    );
+    assert!(text.contains("Reading branches"), "{text}");
+
+    app.work_items.set_branches("aaa-111", &["main".into()]);
+    let text = render_text(90, 24, &mut app);
+    assert!(
+        text.contains("Enter makes 715-fix-the-thing at the head of main"),
+        "{text}"
+    );
+}

@@ -362,6 +362,7 @@ pub(super) fn poll_sync(
                 Err(refusal) => app.shell.set_error(refusal),
             },
             SyncEvent::Branches { repo_id, branches } => {
+                app.work_items.set_branches(&repo_id, &branches);
                 app.pipelines.set_branches(&repo_id, branches);
             }
             // A run this session started, cancelled or retried. It is not

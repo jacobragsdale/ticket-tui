@@ -40,6 +40,7 @@ pub enum ScrollSurface {
     NodePicker,
     TypePicker,
     ParentPicker,
+    LinkPicker,
     /// The field list of an open form.
     Form,
 }
@@ -58,6 +59,8 @@ pub enum TextEditor {
     Assignee,
     /// The parent picker's filter field.
     Parent,
+    /// The link picker's filter field: a repository name, then a branch.
+    Link,
     /// The iteration or area picker's filter field.
     Node,
     /// The focused text field of an open form.
@@ -248,6 +251,12 @@ pub enum PointerTarget {
     },
     /// The filter field of the parent picker.
     ParentQuery,
+    /// One repository or branch in the link picker.
+    LinkOption {
+        index: usize,
+    },
+    /// The filter field of the link picker.
+    LinkQuery,
     /// One field of an open form, which focusing is what clicking it does.
     FormField {
         index: usize,
