@@ -1122,7 +1122,8 @@ pub(super) fn history_line(entry: &HistoryRecord, now: OffsetDateTime) -> Line<'
 /// A pull request or a build the database holds is named and underlined; one
 /// it does not hold reads as its number alone, in the muted style, because
 /// nothing here can show it. A commit is never a jump — there is no commit
-/// screen — so it reads as its short sha and the repository it is in.
+/// screen — so it reads as its short sha and the repository it is in. A branch
+/// jumps to its repository's row when the repository is on file.
 fn artifact_line(artifact: &ArtifactLink, shell: &Shell) -> (Line<'static>, Option<Jump>) {
     let muted = Style::default().fg(theme().muted);
     let link = Style::default()
@@ -1182,6 +1183,30 @@ fn artifact_line(artifact: &ArtifactLink, shell: &Shell) -> (Line<'static>, Opti
             ]),
             None,
         ),
+        ArtifactKind::Branch { repo_id, name } => {
+            if shell.repos().iter().any(|repo| repo.id == *repo_id) {
+                let repo = shell.repo_name(repo_id);
+                (
+                    terminate_underline(Line::from(vec![
+                        label("Branch".to_owned()),
+                        Span::styled(name.clone(), link),
+                        Span::styled(format!("  in {repo}"), muted),
+                    ])),
+                    Some(Jump::Repo(repo)),
+                )
+            } else {
+                (
+                    Line::from(vec![
+                        label("Branch".to_owned()),
+                        Span::styled(
+                            format!("{name}  in a repository not in this database"),
+                            muted,
+                        ),
+                    ]),
+                    None,
+                )
+            }
+        }
     }
 }
 

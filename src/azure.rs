@@ -2631,11 +2631,13 @@ fn trimmed(identity: &Value, field: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// What one `vstfs:///` artifact URL points at. The three shapes Azure DevOps
+/// What one `vstfs:///` artifact URL points at. The four shapes Azure DevOps
 /// writes are `vstfs:///Git/PullRequestId/{project}%2F{repo}%2F{id}`,
-/// `vstfs:///Git/Commit/{project}%2F{repo}%2F{sha}` and
+/// `vstfs:///Git/Commit/{project}%2F{repo}%2F{sha}`,
+/// `vstfs:///Git/Ref/{project}%2F{repo}%2FGB{branch}` and
 /// `vstfs:///Build/Build/{id}`; anything else — a wiki page, a test result, a
-/// storyboard — is not something this app can show, so it is left out.
+/// storyboard, a `GT` tag ref — is not something this app can show, so it is
+/// left out.
 fn artifact_kind(url: &str) -> Option<ArtifactKind> {
     let rest = url.strip_prefix("vstfs:///")?;
     let (tool, rest) = rest.split_once('/')?;
@@ -2664,6 +2666,19 @@ fn artifact_kind(url: &str) -> Option<ArtifactKind> {
             Some(ArtifactKind::Commit {
                 repo_id: repo_id.clone(),
                 sha: sha.clone(),
+            })
+        }
+        ("Git", "Ref") => {
+            // A branch name carries its own slashes, encoded like the
+            // separators, so the tail is one name once it is joined back.
+            let [_project, repo_id, rest @ ..] = parts.as_slice() else {
+                return None;
+            };
+            let name = rest.join("/");
+            let name = name.strip_prefix("GB")?;
+            (!name.is_empty()).then(|| ArtifactKind::Branch {
+                repo_id: repo_id.clone(),
+                name: name.to_owned(),
             })
         }
         ("Build", "Build") => Some(ArtifactKind::Build(parts.first()?.parse().ok()?)),
@@ -3819,6 +3834,27 @@ mod tests {
             }),
             "and sometimes not at all"
         );
+        assert_eq!(
+            artifact_kind("vstfs:///Git/Ref/atlas%2Faaa-111%2FGBfeature%2Fx"),
+            Some(ArtifactKind::Branch {
+                repo_id: "aaa-111".to_owned(),
+                name: "feature/x".to_owned(),
+            }),
+            "a branch keeps the slashes of its own name"
+        );
+        assert_eq!(
+            artifact_kind("vstfs:///Git/Ref/atlas/aaa-111/GBmain"),
+            Some(ArtifactKind::Branch {
+                repo_id: "aaa-111".to_owned(),
+                name: "main".to_owned(),
+            })
+        );
+        assert_eq!(
+            artifact_kind("vstfs:///Git/Ref/atlas%2Faaa-111%2FGTv1"),
+            None,
+            "a tag is not a branch"
+        );
+        assert_eq!(artifact_kind("vstfs:///Git/Ref/atlas%2Faaa-111%2FGB"), None);
         assert_eq!(artifact_kind("vstfs:///Build/Build/nine"), None);
         assert_eq!(artifact_kind("vstfs:///Git/PullRequestId/atlas%2F7"), None);
         assert_eq!(artifact_kind("https://dev.azure.com/demo"), None);

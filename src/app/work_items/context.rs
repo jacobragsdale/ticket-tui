@@ -143,6 +143,9 @@ impl WorkItemsScreen {
                     ArtifactKind::Build(id) => shell.run_label(*id).is_some(),
                     // Nothing in this app shows a commit.
                     ArtifactKind::Commit { .. } => false,
+                    ArtifactKind::Branch { repo_id, .. } => {
+                        shell.repos().iter().any(|repo| repo.id == *repo_id)
+                    }
                 },
             })
             .collect()

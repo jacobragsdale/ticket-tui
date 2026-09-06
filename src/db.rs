@@ -15,7 +15,7 @@ use crate::model::{
 };
 use crate::timestamp::Timestamp;
 
-const SCHEMA_VERSION: i64 = 18;
+const SCHEMA_VERSION: i64 = 19;
 
 /// `sync_meta` key holding the display name of the signed-in Azure DevOps user.
 pub const ME_DISPLAY_NAME_KEY: &str = "me_display_name";
@@ -1821,6 +1821,14 @@ mod tests {
                 work_item: key.clone(),
                 kind: ArtifactKind::Build(14),
                 name: "Integrated in build".into(),
+            },
+            ArtifactLink {
+                work_item: key.clone(),
+                kind: ArtifactKind::Branch {
+                    repo_id: "aaa-111".into(),
+                    name: "feature/x".into(),
+                },
+                name: "Branch".into(),
             },
         ]
     }

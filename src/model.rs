@@ -1048,9 +1048,21 @@ pub struct ArtifactLink {
 /// GUID the repos table holds, so a link resolves to a name without a request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ArtifactKind {
-    PullRequest { repo_id: String, id: i64 },
-    Commit { repo_id: String, sha: String },
+    PullRequest {
+        repo_id: String,
+        id: i64,
+    },
+    Commit {
+        repo_id: String,
+        sha: String,
+    },
     Build(i64),
+    /// A branch, named without its `refs/heads/` prefix. It is what pins a work
+    /// item to a repository before any pull request exists.
+    Branch {
+        repo_id: String,
+        name: String,
+    },
 }
 
 impl ArtifactKind {
@@ -1061,6 +1073,7 @@ impl ArtifactKind {
             Self::PullRequest { .. } => "Pull request",
             Self::Commit { .. } => "Commit",
             Self::Build(_) => "Build",
+            Self::Branch { .. } => "Branch",
         }
     }
 
@@ -1071,6 +1084,7 @@ impl ArtifactKind {
             Self::PullRequest { .. } => "pull_request",
             Self::Commit { .. } => "commit",
             Self::Build(_) => "build",
+            Self::Branch { .. } => "branch",
         }
     }
 
@@ -1078,18 +1092,21 @@ impl ArtifactKind {
     #[must_use]
     pub fn repo_id(&self) -> Option<&str> {
         match self {
-            Self::PullRequest { repo_id, .. } | Self::Commit { repo_id, .. } => Some(repo_id),
+            Self::PullRequest { repo_id, .. }
+            | Self::Commit { repo_id, .. }
+            | Self::Branch { repo_id, .. } => Some(repo_id),
             Self::Build(_) => None,
         }
     }
 
-    /// A commit is named by its sha and the other two by a number, so one
-    /// column stores either.
+    /// A commit is named by its sha, a branch by its name and the other two by
+    /// a number, so one column stores any of them.
     #[must_use]
     pub fn target(&self) -> String {
         match self {
             Self::PullRequest { id, .. } | Self::Build(id) => id.to_string(),
             Self::Commit { sha, .. } => sha.clone(),
+            Self::Branch { name, .. } => name.clone(),
         }
     }
 
@@ -1107,6 +1124,10 @@ impl ArtifactKind {
                 sha: target.to_owned(),
             }),
             "build" => Some(Self::Build(target.parse().ok()?)),
+            "branch" => Some(Self::Branch {
+                repo_id: repo_id.to_owned(),
+                name: target.to_owned(),
+            }),
             _ => None,
         }
     }
