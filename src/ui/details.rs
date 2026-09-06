@@ -233,8 +233,6 @@ pub(super) fn render_details(
         lines.push(field_line("Reason", reason));
         lines.push(Line::default());
     }
-    lines.extend(body_lines(&ticket.description, "No description"));
-
     // The composer, when it is open on this work item: its rows stand where
     // the section it edits would be, wrapped here — a column short of the
     // pane, so no row ever re-wraps — so every row is one screen row and the
@@ -250,6 +248,12 @@ pub(super) fn render_details(
             follow: composer.follow_cursor,
         });
     let mut sections = ComposeSections::default();
+    sections.body(
+        &mut lines,
+        ComposeTarget::Description,
+        body_lines(&ticket.description, "No description"),
+        composing.as_ref(),
+    );
 
     lines.push(Line::default());
     lines.push(section_line("Acceptance Criteria", width));

@@ -875,7 +875,11 @@ impl WorkItemsScreen {
                 AppAction::None
             }
             CommandId::RemoveParent => self.remove_parent(shell),
-            CommandId::EditDescription => self.edit_description(shell),
+            CommandId::EditDescription => {
+                self.open_composer(shell, ComposeTarget::Description);
+                AppAction::None
+            }
+            CommandId::EditDescriptionExternally => self.edit_description(shell),
             CommandId::UndoEdit => self.undo_last_edit(shell),
             CommandId::EditAcceptanceCriteria => {
                 self.open_composer(shell, ComposeTarget::AcceptanceCriteria);

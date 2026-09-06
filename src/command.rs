@@ -21,6 +21,8 @@ pub enum CommandId {
     SetParent,
     RemoveParent,
     EditDescription,
+    /// The description in `$VISUAL`/`$EDITOR`/`vi` rather than the composer.
+    EditDescriptionExternally,
     EditAcceptanceCriteria,
     AddComment,
     NewWorkItem,
@@ -418,7 +420,14 @@ pub const COMMANDS: &[Command] = &[
         id: CommandId::EditDescription,
         title: "Edit description",
         keys: &[],
-        help: "Opens your $EDITOR",
+        help: "Type it where it is read",
+        scope: Scope::Tabs(&[TabId::WorkItems]),
+    },
+    Command {
+        id: CommandId::EditDescriptionExternally,
+        title: "Edit description in $EDITOR",
+        keys: &[],
+        help: "Opens your $VISUAL or $EDITOR",
         scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {

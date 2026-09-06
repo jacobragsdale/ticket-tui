@@ -649,12 +649,18 @@ fn the_description_row_hands_the_raw_html_to_the_editor() {
     app.work_items.set_table_viewport(3);
     let key = app.work_items.selected_ticket().unwrap().key.clone();
 
-    press(&mut app, KeyCode::Char('e'));
-    for _ in 0..menu_row(&app, CommandId::EditDescription) {
-        press(&mut app, KeyCode::Down);
-    }
-    let action = press(&mut app, KeyCode::Enter);
+    open_menu(&mut app, CommandId::EditDescription);
+    assert_eq!(app.work_items.mode, WorkItemMode::Compose);
+    assert_eq!(
+        composer_text(&app),
+        "Hand it to `$EDITOR`.",
+        "the composer opens on the description as Markdown"
+    );
+    press(&mut app, KeyCode::Esc);
 
+    let action = app
+        .work_items
+        .run_command(&mut app.shell, CommandId::EditDescriptionExternally);
     assert_eq!(
         action,
         AppAction::EditDescription {

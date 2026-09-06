@@ -674,8 +674,9 @@ it — one click, not two — and `Enter` does the same for the value under the
 pointer while the details pane is focused, with the link line still opening the
 work item. The keyboard opens the same editors centred, and both paths run the
 same command and write the same edit; only the placement differs. The
-description is the exception: it is long-form, so no dropdown could hold it and
-it is reached from the Actions menu or the palette instead.
+long-form fields — the description, the acceptance criteria, and a comment —
+open no dropdown: a click opens the composer where they are read, described
+under **Acceptance criteria** below.
 
 `e` opens the Actions menu, which lists the fields that can be changed; `S`
 (capital, because `s` is the sort menu) skips it and opens the state picker
@@ -781,9 +782,12 @@ nothing at all. Before anything is cached, and whenever the trees cannot be
 read, both pickers list the distinct iteration and area paths the work items in
 the database already carry, which is every sprint actually in use.
 
-**Description** is the one long-form field, so it is the one edit that does not
-happen in the TUI at all: it hands the description to your own editor and takes
-the terminal back when you are done. The editor is `$VISUAL`, then `$EDITOR`,
+**Description** opens the composer, from its Actions menu row, `Edit
+description` in the palette, or a click on the description itself, and saves
+`System.Description` the way the acceptance criteria are saved below. `Edit
+description in $EDITOR`, in the palette only, is the other way: it hands the
+description to your own editor and takes the terminal back when you are done.
+The editor is `$VISUAL`, then `$EDITOR`,
 then `vi`; the variable is split on whitespace, so `EDITOR="code --wait"` runs
 `code --wait <file>`. The TUI leaves the alternate screen, gives mouse capture
 and bracketed paste back, and writes the description to `ticket-613.md` in a
@@ -881,7 +885,7 @@ parent link — no reader ever sees the work item in two families or in none.
 pane's own editor, which stands where the section is read rather than in an
 overlay. Clicking the acceptance criteria — or the `No acceptance criteria`
 line when there are none — opens it on them, prefilled as Markdown the way the
-description editor is, notice line and all; clicking `Add a comment…` under
+`$EDITOR` file is, notice line and all; clicking `Add a comment…` under
 the Comments heading opens it empty, because there is nothing to edit, only
 something to say. `Enter` with the details pane focused does the same for the
 section under the pointer, and the Actions menu rows and the palette's `Edit
@@ -1522,7 +1526,7 @@ anything on tab `1`.
 | Palette → Toggle row density | Compact or comfortable table rows; no key of its own |
 | Palette → Toggle search order | Relevance-first or strict field ordering during search |
 | `e` → Title/Priority/Tags/Iteration/Area | Edit the title, priority, tags, iteration, or area; also `Edit title`, `Edit priority`, `Edit tags`, `Change iteration`, `Change area`, and `Change assignee` in the palette |
-| `e` → Description | Edit the description in `$VISUAL`/`$EDITOR`/`vi` as Markdown; also `Edit description` in the palette |
+| `e` → Description | Edit the description in the details pane; also `Edit description` in the palette, or click it. `Edit description in $EDITOR` in the palette hands it to `$VISUAL`/`$EDITOR`/`vi` as Markdown instead |
 | `e` → Acceptance criteria | Edit the acceptance criteria in the details pane; also `Edit acceptance criteria` in the palette, or click them |
 | `e` → Add comment | Write a comment in the details pane — `Enter` newline, `Ctrl-S` post, `Esc` keep the draft; also `Add comment` in the palette, or click `Add a comment…` |
 | `n` | Open the new work item form; `↑`/`↓` or `Tab` moves between fields, `Enter` opens a field's picker, `Ctrl-S` creates, `Esc` keeps the draft |

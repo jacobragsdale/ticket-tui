@@ -84,6 +84,7 @@ pub enum EditableField {
 /// which section, or which comment.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ComposeTarget {
+    Description,
     AcceptanceCriteria,
     /// A comment not written yet.
     NewComment,
