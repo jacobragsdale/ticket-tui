@@ -180,9 +180,8 @@ pub(super) struct UndoStep {
     edit: FieldEdit,
 }
 
-/// Everything one press of `u` takes back. An ordinary edit is one work item;
-/// a bulk change over the checked rows is all of them under a single entry, so
-/// `u` puts the whole change back rather than unpicking it a row at a time.
+/// Everything one press of `u` takes back: the work items one dispatch
+/// changed, under a single entry.
 #[derive(Clone, Debug)]
 pub(super) struct UndoEntry {
     /// The dispatch these came from, so a bulk change's work items gather here
@@ -1021,8 +1020,8 @@ impl WorkItemsScreen {
     /// next row down — the one about to move up into its place, so deleting a
     /// run of rows reads as working down the list — and the row above only
     /// when there is nothing below. Rows already on their way to the recycle
-    /// bin are passed over, so a checked-set delete never parks the cursor on
-    /// a row that is about to go too.
+    /// bin are passed over, so the cursor never parks on a row that is about
+    /// to go too.
     fn next_after_removal(&self, key: &TicketKey) -> Option<TicketKey> {
         let selected = self.selected_ticket().map(|ticket| ticket.key.clone());
         if selected.as_ref().is_some_and(|held| held != key) {

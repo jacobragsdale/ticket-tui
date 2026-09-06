@@ -355,12 +355,6 @@ impl WorkItemsScreen {
     /// `S`, and the Actions menu's State row: the states this work item's type
     /// allows, with the one it is in already under the cursor. The list is
     /// whatever is cached or already in the database, so this never waits.
-    ///
-    /// With two or more rows checked the picker moves all of them, and says so
-    /// in its title. The states it offers are still the selected row's type's,
-    /// which is the only type it could ask about; a state another checked work
-    /// item's type does not allow is refused by Azure DevOps and named in the
-    /// summary.
     pub(super) fn open_state_picker(&mut self, shell: &mut Shell) {
         let scope = self.edit_scope();
         let Some(ticket) = self.selected_ticket() else {
@@ -422,9 +416,7 @@ impl WorkItemsScreen {
     /// Confirms one state. Choosing the state the work item is already in
     /// closes the picker and writes nothing; anything else takes the ordinary
     /// write-through path, so the row changes at once and reverts if Azure
-    /// DevOps refuses the transition. A picker opened over the checked rows
-    /// moves every one of them, so the state the row under the cursor is in is
-    /// a change to make there rather than a no-op.
+    /// DevOps refuses the transition.
     pub(super) fn choose_state(&mut self, shell: &mut Shell, index: usize) -> AppAction {
         let Some(option) = self.state_picker.options.get(index).cloned() else {
             self.mode = WorkItemMode::Browse;
@@ -683,8 +675,7 @@ impl WorkItemsScreen {
     /// whoever holds the work item under the cursor. The list is built from
     /// what is already in memory, so the picker opens at once; the project's
     /// teams are asked for the first time it is opened and merged in when they
-    /// arrive. With two or more rows checked it reassigns all of them, and
-    /// says so in its title.
+    /// arrive.
     pub(super) fn open_assignee_picker(&mut self, shell: &mut Shell) -> AppAction {
         let scope = self.edit_scope();
         let Some(ticket) = self.selected_ticket() else {
@@ -769,9 +760,7 @@ impl WorkItemsScreen {
 
     /// Confirms one candidate. Whoever holds the work item already is a no-op,
     /// and `Unassigned` takes the field off it rather than writing an empty
-    /// identity, so the Assignee cell empties. A picker opened over the checked
-    /// rows reassigns every one of them, so whoever holds the row under the
-    /// cursor is a change to make to the rest rather than a no-op.
+    /// identity, so the Assignee cell empties.
     pub(super) fn choose_assignee(&mut self, shell: &mut Shell, index: usize) -> AppAction {
         let scope = self.assignee_picker.scope;
         let Some(candidate) = self.assignee_matches().get(index).cloned() else {
@@ -1074,18 +1063,8 @@ impl WorkItemsScreen {
     /// come out of what is already in memory, so the picker opens at once; the
     /// trees are asked for the first time either picker is opened on a cache
     /// that is empty or over an hour old, and merged in when they arrive.
-    ///
-    /// Iteration is the one of the two worth making in bulk — a sprint ends
-    /// and its leftovers move on together — so with two or more rows checked
-    /// it moves all of them and says so in its title. Area stays on the row
-    /// under the cursor.
     pub(super) fn open_node_picker(&mut self, shell: &mut Shell, kind: NodeKind) -> AppAction {
-        let scope = match kind {
-            NodeKind::Iteration => self.edit_scope(),
-            NodeKind::Area => {
-                EditScope::Ticket(self.selected_ticket().map_or(0, |ticket| ticket.key.id))
-            }
-        };
+        let scope = self.edit_scope();
         let Some(ticket) = self.selected_ticket() else {
             shell.set_error("No work item is selected");
             return AppAction::None;
@@ -1181,10 +1160,7 @@ impl WorkItemsScreen {
 
     /// Confirms one node. The node the work item already sits in is a no-op;
     /// anything else writes the full backslash path to `System.IterationPath`
-    /// or `System.AreaPath`, and the table column goes on showing the leaf. An
-    /// iteration picker opened over the checked rows moves every one of them,
-    /// so the sprint the row under the cursor is in is a change to make to the
-    /// rest rather than a no-op.
+    /// or `System.AreaPath`, and the table column goes on showing the leaf.
     pub(super) fn choose_node(&mut self, shell: &mut Shell, index: usize) -> AppAction {
         let scope = self.node_picker.scope;
         let Some(row) = self.node_matches().get(index).cloned() else {
