@@ -42,7 +42,7 @@ mod tests;
 pub mod theme;
 mod widgets;
 
-use details::{assigned_to_me_style, field_label, field_line, render_details, state_glyph};
+use details::{assigned_to_me_style, field_label, field_line, render_details};
 use overlays::{
     ListOverlay, bar_fields, column_rows, link_line, overlay_line, overlay_row, overlay_row_width,
     pill_style, render_chips, render_column_overlay, render_facet_bar, render_facet_menu,
@@ -376,12 +376,12 @@ fn render_search(
         shell,
         SearchRow {
             area,
-            text: screen.query(),
+            text: screen.search_text(),
             cursor: screen.query_cursor(),
             placeholder: "Type / to search, or pick a filter from the bar below",
             active: screen.mode == WorkItemMode::Search,
             pending: screen.search_pending,
-            clearable: true,
+            clearable: !screen.query().is_empty(),
             trailer: String::new(),
             layer: PointerLayer::Base,
             selectable: SelectableSurface::Search,

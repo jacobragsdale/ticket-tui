@@ -321,7 +321,7 @@ pub(super) fn render_search_row(frame: &mut Frame<'_>, shell: &mut Shell, row: S
         Rect::new(area.x, area.y, 1, 1),
     );
 
-    let clear = u16::from(clearable && !text.is_empty() && area.width > 8) * 3;
+    let clear = u16::from(clearable && area.width > 8) * 3;
     // The breadcrumb only fits where it leaves the query most of the row.
     let trailer_width = u16::try_from(trailer.chars().count())
         .unwrap_or(u16::MAX)

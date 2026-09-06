@@ -404,7 +404,6 @@ fn the_progress_column_is_hidden_until_the_column_overlay_shows_it() {
         SortField::State,
         SortField::Type,
         SortField::Priority,
-        SortField::Changed,
         SortField::Assignee,
     ] {
         let index = column_index(&app, field);
@@ -491,8 +490,6 @@ fn details_render_family_tree_without_other_links() {
     assert!(text.contains("current"));
     assert!(text.contains("├─"));
     assert!(text.contains("└─"));
-    assert!(text.contains('✓'), "closed family rows carry a check");
-    assert!(text.contains('○'), "open family rows carry a circle");
     assert!(!text.contains("Links"));
     assert!(!text.contains("Related"));
     assert!(!text.contains("10005"));

@@ -155,7 +155,7 @@ fn the_stale_view_leaves_out_finished_work_and_puts_the_quietest_row_first() {
 
     app.work_items.apply_view_at(&mut app.shell, row);
 
-    assert_eq!(app.work_items.query(), "changed:>14d state:@open");
+    assert_eq!(app.work_items.query(), "state:@open changed:>14d");
     assert_eq!(
         (app.work_items.sort_field, app.work_items.sort_direction),
         (SortField::Changed, SortDirection::Ascending),

@@ -904,7 +904,6 @@ impl crate::columns::ColumnId for SortField {
             Self::State,
             Self::Type,
             Self::Priority,
-            Self::Changed,
             Self::Assignee,
             Self::Area,
             Self::Iteration,
@@ -946,9 +945,7 @@ impl crate::columns::ColumnId for SortField {
             Self::Priority => 4,
             Self::Id => 7,
             Self::Progress => 9,
-            Self::Changed | Self::Created => 10,
-            // Two more than the word needs: the state's glyph goes in front.
-            Self::State => 12,
+            Self::Changed | Self::Created | Self::State => 10,
             // Wide enough for the badge around the longest type Azure DevOps
             // ships, `[User Story]`.
             Self::Type => 12,
@@ -960,13 +957,7 @@ impl crate::columns::ColumnId for SortField {
     fn default_visible(self) -> bool {
         matches!(
             self,
-            Self::Id
-                | Self::Title
-                | Self::State
-                | Self::Type
-                | Self::Priority
-                | Self::Changed
-                | Self::Assignee
+            Self::Id | Self::Title | Self::State | Self::Type | Self::Priority | Self::Assignee
         )
     }
 

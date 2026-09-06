@@ -57,7 +57,7 @@ fn pasting_fills_the_search_editor_and_escape_clears_the_query() {
     let mut app = App::new(vec![ticket(1, "Search", "2026-01-01T00:00:00Z")]);
     app.work_items.mode = WorkItemMode::Search;
     app.handle_paste("search\n");
-    assert_eq!(app.work_items.query(), "search ");
+    assert_eq!(app.work_items.search_text(), "search ");
     assert_eq!(app.work_items.query_cursor(), 7);
     app.work_items.mode = WorkItemMode::Browse;
 
@@ -293,4 +293,68 @@ fn a_fresh_run_opens_on_mine_and_a_remembered_session_is_restored_over_it() {
     };
     app.work_items.restore(&mut app.shell, remembered, None);
     assert_eq!(app.work_items.query(), "state:doing");
+}
+
+#[test]
+fn a_pill_filters_the_table_and_leaves_the_search_box_clear() {
+    let mut app = App::new(vec![
+        ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+        ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+    ]);
+    app.work_items.mode = WorkItemMode::Search;
+    app.handle_paste("alp");
+    app.work_items
+        .toggle_filter(&mut app.shell, FilterField::State, "Active");
+
+    assert_eq!(app.work_items.search_text(), "alp", "the typed text stays");
+    assert_eq!(app.work_items.query(), "state:Active alp");
+    assert_eq!(
+        app.work_items
+            .filter_tokens()
+            .iter()
+            .map(FilterToken::chip_label)
+            .collect::<Vec<_>>(),
+        vec!["state:Active"]
+    );
+
+    app.work_items
+        .set_query(&mut app.shell, "type:Issue beta".into());
+    assert_eq!(
+        app.work_items.search_text(),
+        "beta",
+        "a query set whole splits into pills and text"
+    );
+    assert_eq!(app.work_items.query(), "type:Issue beta");
+
+    app.work_items.mode = WorkItemMode::Browse;
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(
+        app.work_items.query().is_empty(),
+        "Esc clears the pills too"
+    );
+}
+
+#[test]
+fn a_header_click_sorts_one_way_then_the_other_then_not_at_all() {
+    let mut app = App::new(vec![ticket(1, "Alpha", "2026-01-01T00:00:00Z")]);
+    let sort = |app: &App| (app.work_items.sort_field, app.work_items.sort_direction);
+
+    app.work_items.toggle_sort(&mut app.shell, SortField::Title);
+    assert_eq!(sort(&app), (SortField::Title, SortDirection::Ascending));
+    app.work_items.toggle_sort(&mut app.shell, SortField::Title);
+    assert_eq!(sort(&app), (SortField::Title, SortDirection::Descending));
+    app.work_items.toggle_sort(&mut app.shell, SortField::Title);
+    assert_eq!(
+        sort(&app),
+        (SortField::Changed, SortDirection::Descending),
+        "the third click takes the sort off the column"
+    );
+
+    app.work_items
+        .toggle_sort(&mut app.shell, SortField::Priority);
+    assert_eq!(
+        sort(&app),
+        (SortField::Priority, SortDirection::Descending),
+        "a column whose first direction is descending starts there"
+    );
 }

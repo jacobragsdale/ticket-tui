@@ -363,7 +363,7 @@ impl WorkItemsScreen {
         }
         let view = NamedView {
             name: name.clone(),
-            query: self.query.text().to_owned(),
+            query: self.query(),
             sort_field: self.sort_field.key().to_owned(),
             sort_direction: self.sort_direction,
             search_order: self.search_order,

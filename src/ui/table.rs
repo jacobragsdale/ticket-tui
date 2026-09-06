@@ -326,7 +326,6 @@ pub(super) fn render_table(
     let now = OffsetDateTime::now_utc();
     // The same instant the relative labels read against, so a row's age and
     // whether it is flagged for that age are decided by one clock.
-    let table_now = Timestamp::from_offset_date_time(now);
     let density = screen.row_density;
     let row_height = density.row_height();
     let geometry = table_geometry(area, row_height);
@@ -350,7 +349,6 @@ pub(super) fn render_table(
                 tone: RowTone::of(&ticket.state),
                 mine: shell.is_mine(ticket),
                 progress: screen.child_progress(&ticket.key),
-                stale: screen.stale_age_days_at(ticket, table_now).is_some(),
             },
         })
         .collect();
@@ -477,14 +475,13 @@ impl RowTone {
 }
 
 /// What a row knows about itself beyond the work item: how strongly it is
-/// painted, whether it is the signed-in user's, how far its children have got,
-/// and whether it has sat untouched past the stale threshold.
+/// painted, whether it is the signed-in user's, and how far its children have
+/// got.
 #[derive(Clone, Copy)]
 pub(super) struct RowContext {
     tone: RowTone,
     mine: bool,
     progress: Option<ChildProgress>,
-    stale: bool,
 }
 
 pub(super) fn table_cell(
@@ -499,7 +496,6 @@ pub(super) fn table_cell(
         tone,
         mine,
         progress,
-        stale,
     } = row;
     let plain = tone.apply(Style::default());
     let line = match field {
@@ -518,20 +514,12 @@ pub(super) fn table_cell(
             ))
         }
         // Finished rows recede whole: the state cell fades with the rest of
-        // the row rather than staying bright against muted neighbours. The
-        // glyph in front of the word is the family tree's, so one state reads
-        // the same in both, and it says which state this is under NO_COLOR,
-        // where the colour cannot.
-        SortField::State => {
-            let style = tone.apply(state_style(&ticket.state));
-            let mut line = highlight_searchable(&ticket.state, style, highlighter);
-            let glyph = state_glyph(StateCategory::of(&ticket.state));
-            if !glyph.is_empty() {
-                line.spans
-                    .insert(0, Span::styled(format!("{glyph} "), style));
-            }
-            line
-        }
+        // the row rather than staying bright against muted neighbours.
+        SortField::State => highlight_searchable(
+            &ticket.state,
+            tone.apply(state_style(&ticket.state)),
+            highlighter,
+        ),
         SortField::Assignee => match ticket.assigned_to.as_deref() {
             Some(name) if mine => {
                 highlight_searchable(name, tone.apply(assigned_to_me_style()), highlighter)
@@ -550,7 +538,7 @@ pub(super) fn table_cell(
         .style(tone.apply(priority_style(ticket.priority))),
         SortField::Changed => Line::from(ticket.changed_at.relative_to(now))
             .right_aligned()
-            .style(changed_style(plain, stale)),
+            .style(plain),
         SortField::Created => Line::from(ticket.created_at.relative_to(now))
             .right_aligned()
             .style(plain),
@@ -809,24 +797,6 @@ pub(super) fn progress_style(plain: Style, progress: Option<ChildProgress>) -> S
         return plain
             .fg(state_color(StateCategory::Completed))
             .add_modifier(Modifier::BOLD);
-    }
-    plain
-}
-
-/// The Changed column's styling. Work nobody has touched past the stale
-/// threshold goes warning-coloured and bold; bold is what carries it under
-/// NO_COLOR, where the palette is all `Reset`.
-///
-/// Nothing else paints this cell, so the row's own tone is the only styling to
-/// rank against, and staleness wins it — but the two can never actually meet:
-/// [`RowTone::Muted`] is the finished rows, and a finished work item is never
-/// stale however long it has sat.
-pub(super) fn changed_style(plain: Style, stale: bool) -> Style {
-    if stale {
-        return plain
-            .fg(theme().warning)
-            .add_modifier(Modifier::BOLD)
-            .remove_modifier(Modifier::DIM);
     }
     plain
 }

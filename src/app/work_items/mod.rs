@@ -166,6 +166,9 @@ pub struct WorkItemsScreen {
     pending_selection: Option<TicketKey>,
     pub search_pending: bool,
     query: TextInput,
+    /// The filters the pills hold, kept out of the search box so the box
+    /// is free for searching within them.
+    filters: FilterSet<WorkItemSchema>,
     search_history: Vec<String>,
     search_history_index: Option<usize>,
     search_history_draft: String,
@@ -337,6 +340,7 @@ impl WorkItemsScreen {
             pending_selection: None,
             search_pending: false,
             query: TextInput::default(),
+            filters: FilterSet::default(),
             search_history: Vec::new(),
             search_history_index: None,
             search_history_draft: String::new(),
@@ -633,7 +637,7 @@ impl WorkItemsScreen {
                 self.peeked = None;
                 self.sync_family_state(shell);
             }
-            KeyCode::Esc if !self.query.is_empty() => self.set_query(shell, String::new()),
+            KeyCode::Esc if !self.query().is_empty() => self.set_query(shell, String::new()),
             _ => {
                 if let Some(id) = command_for_key(key, TabId::WorkItems) {
                     return self.run_command(shell, id);

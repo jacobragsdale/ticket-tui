@@ -43,8 +43,16 @@ pub struct PaletteState {
 }
 
 impl WorkItemsScreen {
+    /// The pills and the search box together, as the one query string the
+    /// session file, a saved view and the agent context carry.
     #[must_use]
-    pub fn query(&self) -> &str {
+    pub fn query(&self) -> String {
+        format_query(&self.filters, self.query.text())
+    }
+
+    /// What the search box itself holds: the typed text, without the pills.
+    #[must_use]
+    pub fn search_text(&self) -> &str {
         self.query.text()
     }
 
@@ -55,7 +63,7 @@ impl WorkItemsScreen {
 
     #[must_use]
     pub fn parsed_query(&self) -> ParsedQuery<WorkItemSchema> {
-        parse_query::<WorkItemSchema>(self.query.text())
+        parse_query::<WorkItemSchema>(&self.query())
     }
 
     /// The filters the table actually applies: the query's own, and while
@@ -206,12 +214,28 @@ impl WorkItemsScreen {
         true
     }
 
+    /// Replaces the whole query: its filters become the pills, and only the
+    /// free text goes in the search box, so the box stays clear for searching
+    /// within them.
     pub fn set_query(&mut self, shell: &mut Shell, query: String) {
-        if self.query.text() == query {
+        let parsed = parse_query::<WorkItemSchema>(&query);
+        if self.filters == parsed.filters && self.query.text() == parsed.fuzzy {
             self.query.move_end();
             return;
         }
-        self.query.set_text(query);
+        self.filters = parsed.filters;
+        self.query.set_text(parsed.fuzzy);
+        self.after_query_edit(shell);
+    }
+
+    /// Replaces the typed text alone, leaving the pills as they are: what
+    /// recalling a search from the history does.
+    fn set_search_text(&mut self, shell: &mut Shell, text: String) {
+        if self.query.text() == text {
+            self.query.move_end();
+            return;
+        }
+        self.query.set_text(text);
         self.after_query_edit(shell);
     }
 
@@ -331,16 +355,24 @@ impl WorkItemsScreen {
         shell.set_status(format!("Search order: {}", self.search_order.label()));
     }
 
+    /// A header click: the column's own first direction, then the other, and
+    /// a third click takes the sort off the column again, back to the default
+    /// order.
     pub fn toggle_sort(&mut self, shell: &mut Shell, field: SortField) {
-        let direction = if self.sort_field == field {
-            self.sort_direction.toggled()
-        } else if matches!(
+        let first = if matches!(
             field,
             SortField::Changed | SortField::Priority | SortField::Created
         ) {
             SortDirection::Descending
         } else {
             SortDirection::Ascending
+        };
+        let (field, direction) = if self.sort_field != field {
+            (field, first)
+        } else if self.sort_direction == first {
+            (field, first.toggled())
+        } else {
+            (SortField::default(), SortDirection::default())
         };
         self.set_sort(shell, field, direction);
     }
@@ -384,7 +416,7 @@ impl WorkItemsScreen {
         }
         let draft = self.search_history_draft.clone();
         let query = self.search_history[target].clone();
-        self.set_query(shell, query);
+        self.set_search_text(shell, query);
         self.search_history_draft = draft;
         self.search_history_index = Some(target);
     }
@@ -397,11 +429,11 @@ impl WorkItemsScreen {
         if index + 1 < self.search_history.len() {
             let target = index + 1;
             let query = self.search_history[target].clone();
-            self.set_query(shell, query);
+            self.set_search_text(shell, query);
             self.search_history_draft = draft;
             self.search_history_index = Some(target);
         } else {
-            self.set_query(shell, draft);
+            self.set_search_text(shell, draft);
             self.search_history_index = None;
         }
     }

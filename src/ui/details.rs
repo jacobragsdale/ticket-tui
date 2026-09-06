@@ -59,7 +59,7 @@ pub(super) fn render_details(
     let width = inner.width;
     let cursor = screen.family_cursor.clone();
     let family_focused = shell.focus == Focus::Family;
-    let mut highlighter = QueryHighlighter::new(screen.query());
+    let mut highlighter = QueryHighlighter::new(&screen.query());
     let title_style = Style::default()
         .fg(theme().text)
         .add_modifier(Modifier::BOLD);
@@ -465,30 +465,6 @@ pub(super) fn family_connector(prefix: &str) -> String {
     }
 }
 
-/// A one-character state marker for the family tree, where there is no room to
-/// spell the state out.
-pub(super) const fn state_glyph(category: StateCategory) -> &'static str {
-    match category {
-        StateCategory::Proposed => "\u{25cb}",
-        StateCategory::InProgress => "\u{25d0}",
-        StateCategory::Resolved => "\u{25cf}",
-        StateCategory::Completed => "\u{2713}",
-        StateCategory::Removed => "\u{2717}",
-        StateCategory::Unknown => "",
-    }
-}
-
-/// Colour the glyph like the table's State cell; monochrome leans on weight.
-pub(super) fn state_glyph_style(base: Style, category: StateCategory) -> Style {
-    let color = state_color(category);
-    let style = base.fg(color).remove_modifier(Modifier::UNDERLINED);
-    if color == Color::Reset {
-        style.add_modifier(Modifier::BOLD)
-    } else {
-        style
-    }
-}
-
 /// The muted `… N more` line that closes off a group the sibling window or the
 /// child cap cut short. It stands where the last row of that group stands,
 /// with that row's connector turned into the closing one.
@@ -514,7 +490,6 @@ pub(super) fn family_tree_line(
     let id = entry.key.id.to_string();
     let type_label = ticket.map_or("?", |ticket| ticket.work_item_type.as_str());
     let title = ticket.map_or("missing ticket", |ticket| ticket.title.as_str());
-    let category = ticket.map(|ticket| StateCategory::of(&ticket.state));
     // A parent says how far its own children have got; a leaf trails nothing.
     let trailer = format!(
         "{}{}",
@@ -525,7 +500,6 @@ pub(super) fn family_tree_line(
         usize::from(width),
         &format!("{connector}{id}"),
         type_label,
-        category.map_or("", state_glyph),
         title,
         &trailer,
     );
@@ -549,43 +523,12 @@ pub(super) fn family_tree_line(
         })
         .remove_modifier(Modifier::UNDERLINED);
     let head_len = connector.chars().count() + id.chars().count();
-    let mut spans = vec![Span::styled(connector, base), Span::styled(id, id_style)];
-    if let Some(at) = packed.glyph_at {
-        let lead: String = packed
-            .text
-            .chars()
-            .skip(head_len)
-            .take(at.saturating_sub(head_len))
-            .collect();
-        let glyph: String = packed.text.chars().skip(at).take(1).collect();
-        let tail: String = packed.text.chars().skip(at + 1).collect();
-        spans.push(Span::styled(lead, rest_style));
-        spans.push(Span::styled(
-            glyph,
-            state_glyph_style(base, category.unwrap_or(StateCategory::Unknown)),
-        ));
-        spans.push(Span::styled(tail, rest_style));
-    } else {
-        let rest: String = packed.text.chars().skip(head_len).collect();
-        spans.push(Span::styled(rest, rest_style));
-    }
-    Line::from(spans)
-}
-
-/// A family row packed to its width, with the char offset of the state glyph
-/// when one survived the fit.
-pub(super) struct PackedFamilyRow {
-    text: String,
-    glyph_at: Option<usize>,
-}
-
-impl PackedFamilyRow {
-    fn plain(text: String) -> Self {
-        Self {
-            text,
-            glyph_at: None,
-        }
-    }
+    let rest: String = packed.chars().skip(head_len).collect();
+    Line::from(vec![
+        Span::styled(connector, base),
+        Span::styled(id, id_style),
+        Span::styled(rest, rest_style),
+    ])
 }
 
 /// Packs one family row into `width`. The trailer is what follows the title —
@@ -595,69 +538,57 @@ pub(super) fn pack_family_row(
     width: usize,
     head: &str,
     type_label: &str,
-    glyph: &str,
     title: &str,
     trailer: &str,
-) -> PackedFamilyRow {
-    let assemble = |include_type: bool, include_glyph: bool, include_current: bool, title: &str| {
+) -> String {
+    let assemble = |include_type: bool, include_current: bool, title: &str| {
         let mut text = head.to_owned();
         if include_type {
             text.push_str("  ");
             text.push_str(type_label);
         }
-        let mut glyph_at = None;
-        if include_glyph && !glyph.is_empty() {
-            text.push_str("  ");
-            glyph_at = Some(text.chars().count());
-            text.push_str(glyph);
-        }
         if !title.is_empty() {
-            text.push_str(if glyph_at.is_some() { " " } else { "  " });
+            text.push_str("  ");
             text.push_str(title);
         }
         if include_current {
             text.push_str(trailer);
         }
-        PackedFamilyRow { text, glyph_at }
+        text
     };
     let include_current = !trailer.is_empty();
-    let fit = |row: PackedFamilyRow| (row.text.chars().count() <= width).then_some(row);
+    let fit = |row: String| (row.chars().count() <= width).then_some(row);
     let budget = |include_type: bool, include_current: bool| {
         width.saturating_sub(
-            assemble(include_type, false, include_current, "")
-                .text
+            assemble(include_type, include_current, "")
                 .chars()
                 .count()
                 .saturating_add(2),
         )
     };
-    if let Some(row) = fit(assemble(true, true, include_current, title)) {
+    if let Some(row) = fit(assemble(true, include_current, title)) {
         return row;
     }
     // Shed one thing at a time so the connector and id always survive: the
-    // glyph goes before the title is truncated, then the type, then the
-    // trailer.
-    if let Some(row) = fit(assemble(true, false, include_current, title)) {
-        return row;
-    }
+    // title is truncated, then the type goes, then the trailer.
     for (with_type, with_current) in [
         (true, include_current),
         (false, include_current),
         (false, false),
     ] {
         let truncated = take_chars(title, budget(with_type, with_current));
-        if let Some(row) = fit(assemble(with_type, false, with_current, &truncated)) {
+        if let Some(row) = fit(assemble(with_type, with_current, &truncated)) {
             return row;
         }
     }
-    let without_title = assemble(false, false, false, "");
-    if without_title.text.chars().count() <= width {
+    let without_title = assemble(false, false, "");
+    if without_title.chars().count() <= width {
         return without_title;
     }
     if head.chars().count() <= width {
-        return PackedFamilyRow::plain(head.to_owned());
+        return head.to_owned();
     }
-    PackedFamilyRow::plain(take_chars(head, width))
+    take_chars(head, width)
 }
 
 pub(super) fn family_breadcrumb_line(
@@ -762,10 +693,6 @@ pub(super) fn ticket_badge_line(
         highlighter,
     ));
     spans.push(dot());
-    spans.push(Span::styled(
-        format!("{} ", state_glyph(StateCategory::of(&ticket.state))),
-        state,
-    ));
     spans.extend(highlight_searchable(&ticket.state, state, highlighter).spans);
     spans.push(dot());
     spans.push(Span::styled(
@@ -842,15 +769,13 @@ pub(super) fn columns(text: &str) -> u16 {
 pub(super) fn metadata_field_spans(ticket: &Ticket, has_family: bool) -> Vec<FieldSpan> {
     let separator = columns(" \u{b7} ");
     let state = &ticket.state;
-    let glyph = columns(state_glyph(StateCategory::of(state))).saturating_add(1);
-    // Along the badge row: `#600 · [Issue] · ✓ Done · P1 · Jacob Ragsdale`.
+    // Along the badge row: `#600 · [Issue] · Done · P1 · Jacob Ragsdale`.
     let state_x = columns("#")
         .saturating_add(columns(&ticket.key.id.to_string()))
         .saturating_add(separator)
         .saturating_add(columns(&ticket.work_item_type))
         .saturating_add(2)
-        .saturating_add(separator)
-        .saturating_add(glyph);
+        .saturating_add(separator);
     let priority = priority_badge(ticket.priority);
     let priority_x = state_x
         .saturating_add(columns(state))

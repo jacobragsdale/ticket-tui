@@ -52,7 +52,7 @@ impl WorkItemsScreen {
             .into(),
             active_view: self.active_view.clone(),
             search: SearchContext {
-                query: self.query.text().to_owned(),
+                query: self.query(),
                 fuzzy_text: parsed.fuzzy,
                 filters: parsed
                     .filters

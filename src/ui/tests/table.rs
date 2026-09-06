@@ -227,70 +227,6 @@ fn painted_column_cell(
 }
 
 #[test]
-fn the_changed_cell_flags_work_left_untouched_and_never_finished_work() {
-    // Dated far enough back that the fortnight is crossed whenever this
-    // runs, so the assertions do not depend on the wall clock.
-    let now = OffsetDateTime::now_utc();
-    let touched = |id, title, ago: Duration| Ticket {
-        changed_at: Timestamp::from_offset_date_time(now - ago),
-        ..ticket_at(id, title, "Issue", "To Do", "2026-01-01T00:00:00Z")
-    };
-    let mut app = App::new(vec![
-        // The top row carries the selection, whose own bold would drown
-        // out the flag, so nothing is asked of it.
-        touched(10_001, "Selected", Duration::from_secs(60)),
-        touched(10_002, "Fresh", Duration::from_secs(3600)),
-        ticket_at(
-            10_003,
-            "Neglected",
-            "Issue",
-            "To Do",
-            "2020-01-02T00:00:00Z",
-        ),
-        ticket_at(10_004, "Finished", "Issue", "Done", "2020-01-01T00:00:00Z"),
-    ]);
-    // The finished row is the point of the last two assertions, and the
-    // table leaves finished work out until asked, so ask.
-    app.work_items.set_show_finished(&mut app.shell, true);
-
-    // Wide enough that the table still has room for the Changed column.
-    let mut terminal = Terminal::new(TestBackend::new(150, 20)).unwrap();
-    terminal.draw(|frame| render(frame, &mut app)).unwrap();
-    let column = header_rect(&app, SortField::Changed);
-    let body = table_body(&app);
-    let cell = |row: u16| painted_column_cell(&terminal, column, body.y + row);
-
-    // Newest first, so the two recent rows lead and the old ones follow.
-    let (fresh_fg, fresh_modifier) = cell(1);
-    let (stale_fg, stale_modifier) = cell(2);
-    let (done_fg, done_modifier) = cell(3);
-
-    assert_eq!(
-        stale_fg,
-        theme().warning,
-        "work nobody has touched in years should be flagged"
-    );
-    assert!(
-        stale_modifier.contains(Modifier::BOLD),
-        "bold carries the flag where NO_COLOR leaves no palette"
-    );
-    assert_ne!(
-        (fresh_fg, fresh_modifier.contains(Modifier::BOLD)),
-        (stale_fg, true),
-        "a row touched today is not flagged"
-    );
-    assert_ne!(
-        (done_fg, done_modifier.contains(Modifier::BOLD)),
-        (stale_fg, true),
-        "a finished row is never flagged, however long it has sat"
-    );
-    assert!(
-        done_modifier.contains(Modifier::DIM) || done_fg == theme().muted,
-        "and it still recedes with the rest of its row"
-    );
-}
-
-#[test]
 fn tag_colours_are_stable_and_shared_by_the_table_and_details() {
     assert_eq!(tag_color("tech-debt"), tag_color("TECH-DEBT"));
     assert_eq!(tag_color("Rust"), tag_color("rust"));
@@ -504,7 +440,7 @@ fn the_scrollbar_gets_a_column_of_its_own_rather_than_the_last_cell() {
             .is_some(),
         "the list overflows, so there is a scrollbar over the last column"
     );
-    let column = header_rect(&app, SortField::Changed);
+    let column = header_rect(&app, SortField::Assignee);
     let body = table_body(&app);
     let buffer = terminal.backend().buffer();
     let cell: String = (column.x..column.x.saturating_add(column.width))
@@ -512,8 +448,8 @@ fn the_scrollbar_gets_a_column_of_its_own_rather_than_the_last_cell() {
         .collect();
     assert_eq!(
         cell.trim(),
-        "1d",
-        "the age keeps its unit: the scrollbar is painted beside the cells, not over them"
+        "Avery Chen",
+        "the name keeps its last letter: the scrollbar is painted beside the cells, not over them"
     );
 }
 
