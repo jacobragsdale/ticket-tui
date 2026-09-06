@@ -42,7 +42,6 @@ impl EditScope {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PromptField {
     Title,
-    Tags,
     /// A new comment on the work item, which starts empty rather than
     /// prefilled: there is nothing to edit, only something to say.
     Comment,
@@ -54,7 +53,6 @@ impl PromptField {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Title => "Title",
-            Self::Tags => "Tags",
             Self::Comment => "Comment",
         }
     }
@@ -75,14 +73,13 @@ impl PromptField {
     pub const fn hint(self) -> &'static str {
         match self {
             Self::Title => "Type a title  Enter save  Esc cancel",
-            Self::Tags => "Semicolon separated  Enter save  Esc cancel",
             Self::Comment => "Type a comment  Enter post  Esc cancel",
         }
     }
 }
 
 /// A single-line field editor, prefilled with what the work item says now. The
-/// Title and Tags rows of the Actions menu both open one.
+/// Title row of the Actions menu opens one, and so does a comment.
 #[derive(Clone, Debug)]
 pub struct TextPrompt {
     pub field: PromptField,
@@ -711,9 +708,9 @@ impl WorkItemsScreen {
         ));
     }
 
-    /// The Actions menu's Title and Tags rows: a single-line field prefilled with
-    /// what the work item says now, edited with the same keys as the
-    /// named-view editor.
+    /// The Actions menu's Title row: a single-line field prefilled with what
+    /// the work item says now, edited with the same keys as the named-view
+    /// editor.
     pub(super) fn open_prompt(&mut self, shell: &mut Shell, field: PromptField) {
         let Some(ticket) = self.selected_ticket() else {
             shell.set_error("No work item is selected");
@@ -721,7 +718,6 @@ impl WorkItemsScreen {
         };
         let original = match field {
             PromptField::Title => ticket.title.clone(),
-            PromptField::Tags => ticket.tags.join("; "),
             PromptField::Comment => String::new(),
         };
         let id = ticket.key.id;
@@ -754,8 +750,8 @@ impl WorkItemsScreen {
 
     /// Saves what the prompt holds. A title is trimmed, and one that is empty
     /// or only whitespace is refused here rather than sent, with the prompt
-    /// left open on it. A tag list is normalised. Text that comes back to what
-    /// the work item already says closes the prompt without a write.
+    /// left open on it. Text that comes back to what the work item already
+    /// says closes the prompt without a write.
     pub(super) fn submit_prompt(&mut self, shell: &mut Shell) -> AppAction {
         let Some(prompt) = self.prompt.as_ref() else {
             self.mode = WorkItemMode::Browse;
@@ -763,22 +759,14 @@ impl WorkItemsScreen {
         };
         let field = prompt.field;
         let original = prompt.original.trim().to_owned();
-        let edited = match field {
-            PromptField::Title | PromptField::Comment => prompt.input.text().trim().to_owned(),
-            PromptField::Tags => normalize_tags(prompt.input.text()),
-        };
+        let edited = prompt.input.text().trim().to_owned();
         if edited.is_empty() {
-            match field {
-                PromptField::Title => {
-                    shell.set_error(format!("#{} title cannot be empty", prompt.id));
-                    return AppAction::None;
-                }
-                PromptField::Comment => {
-                    shell.set_error(format!("#{} comment cannot be empty", prompt.id));
-                    return AppAction::None;
-                }
-                PromptField::Tags => {}
-            }
+            shell.set_error(format!(
+                "#{} {} cannot be empty",
+                prompt.id,
+                field.label().to_lowercase()
+            ));
+            return AppAction::None;
         }
         self.close_prompt();
         if field != PromptField::Comment && edited == original {
@@ -786,7 +774,6 @@ impl WorkItemsScreen {
         }
         match field {
             PromptField::Title => self.edit_selected(shell, FieldEdit::title(&edited)),
-            PromptField::Tags => self.edit_selected(shell, FieldEdit::tags(&edited)),
             PromptField::Comment => self.comment_selected(shell, edited),
         }
     }

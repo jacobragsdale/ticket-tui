@@ -621,7 +621,7 @@ fn clicking_a_field_opens_its_editor_anchored_under_the_value() {
         (EditableField::State, WorkItemMode::StatePicker),
         (EditableField::Assignee, WorkItemMode::AssigneePicker),
         (EditableField::Priority, WorkItemMode::PriorityPicker),
-        (EditableField::Tags, WorkItemMode::Prompt),
+        (EditableField::Tags, WorkItemMode::TagPicker),
         (EditableField::Area, WorkItemMode::NodePicker),
         (EditableField::Iteration, WorkItemMode::NodePicker),
     ] {

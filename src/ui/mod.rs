@@ -12,8 +12,8 @@ use time::OffsetDateTime;
 
 use crate::app::{
     App, ChildProgress, DividerOrientation, Focus, FormOverlay, HitRegions, NotificationLevel,
-    PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PaneSeam, PaneSplit, PromptField, RowDensity, Screen,
-    SearchOrder, Shell, SyncStatus, TabId, UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
+    PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PaneSeam, PaneSplit, RowDensity, Screen, SearchOrder,
+    Shell, SyncStatus, TabId, UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
 };
 use crate::command::{COMMANDS, Command, Scope, key_label_for};
 use crate::filter::{FacetTarget, FilterField, WorkItemSchema};
@@ -54,12 +54,12 @@ use panes::{PaneNames, PanePair, render_inner_split, render_workspace};
 use pickers::{
     render_assignee_picker, render_delete_confirm, render_edit_menu, render_form,
     render_node_picker, render_parent_picker, render_priority_picker, render_prompt,
-    render_state_picker, render_type_picker,
+    render_state_picker, render_tag_picker, render_type_picker,
 };
 use table::{
     RowTone, child_progress_line, highlight_line, highlight_searchable, priority_style,
     render_table, search_match_style, state_category_style, state_color, state_style,
-    tag_badge_spans, type_badge_spans,
+    tag_badge_spans, tag_color, type_badge_spans,
 };
 pub use theme::{Theme, ThemeChoice, chosen_theme, set_theme, theme};
 use widgets::{
@@ -348,6 +348,7 @@ fn render_pass(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, shell: &mut 
         WorkItemMode::Edit => render_edit_menu(frame, screen, shell),
         WorkItemMode::StatePicker => render_state_picker(frame, screen, shell),
         WorkItemMode::PriorityPicker => render_priority_picker(frame, screen, shell),
+        WorkItemMode::TagPicker => render_tag_picker(frame, screen, shell),
         WorkItemMode::Prompt => render_prompt(frame, screen, shell),
         WorkItemMode::AssigneePicker => render_assignee_picker(frame, screen, shell),
         WorkItemMode::ParentPicker => render_parent_picker(frame, screen, shell),
@@ -485,6 +486,7 @@ fn anchored_overlay(screen: &WorkItemsScreen, shell: &Shell) -> bool {
             screen.mode,
             WorkItemMode::StatePicker
                 | WorkItemMode::PriorityPicker
+                | WorkItemMode::TagPicker
                 | WorkItemMode::AssigneePicker
                 | WorkItemMode::NodePicker
                 | WorkItemMode::Prompt

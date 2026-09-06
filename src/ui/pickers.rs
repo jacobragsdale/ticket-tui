@@ -99,6 +99,58 @@ pub(super) fn render_state_picker(
     );
 }
 
+/// The tag picker: every tag in use, in the colour its badge wears, with the
+/// ones the work item carries marked.
+pub(super) fn render_tag_picker(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
+    let options = screen.tag_picker.options.clone();
+    let current = screen.tag_picker.current.clone();
+    let height = u16::try_from(options.len().saturating_add(2))
+        .unwrap_or(u16::MAX)
+        .clamp(3, 16);
+    let selected = screen.tag_picker.cursor.index;
+    let rows: Vec<Line> = options
+        .iter()
+        .enumerate()
+        .map(|(index, tag)| {
+            let marker = if index == selected { "\u{203a}" } else { " " };
+            let here = if current.iter().any(|held| held.eq_ignore_ascii_case(tag)) {
+                "\u{2022}"
+            } else {
+                " "
+            };
+            Line::from(vec![
+                Span::raw(format!("{marker}{here} ")),
+                Span::styled(tag.clone(), Style::default().fg(tag_color(tag))),
+            ])
+        })
+        .collect();
+    let width = overlay_width(shell.overlay_anchor, &rows, 40, frame.area());
+    let area = overlay_area(frame.area(), shell.overlay_anchor, width, height);
+    let title = format!(" Tags \u{b7} #{} ", screen.tag_picker.id);
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, &title);
+    render_list_overlay(
+        frame,
+        screen,
+        shell,
+        ListOverlay {
+            area: inner,
+            surface: ScrollSurface::TagPicker,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: true,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::TagOption { index },
+            decorate: None,
+        },
+    );
+}
+
 /// The priority picker: 1 to 4 in the colours the Pri column uses, then a
 /// `Clear` row that takes the field off the work item, with the priority it
 /// already has marked and under the cursor.
@@ -449,9 +501,8 @@ pub(super) fn render_prompt(
         .saturating_add(u16::try_from(cursor).unwrap_or(u16::MAX))
         .min(editable.x.saturating_add(editable.width.saturating_sub(1)));
     frame.set_cursor_position((cursor_x, editable.y));
-    // A title has to say something and so does a comment; a tag list is allowed
-    // to end up empty, which clears the tags.
-    let savable = field == PromptField::Tags || !text.trim().is_empty();
+    // A title has to say something, and so does a comment.
+    let savable = !text.trim().is_empty();
     render_control(
         frame,
         shell,

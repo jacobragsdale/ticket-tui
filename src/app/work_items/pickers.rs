@@ -1,7 +1,23 @@
-//! The overlays that pick a value: state, priority, assignee, parent,
+//! The overlays that pick a value: state, priority, tags, assignee, parent,
 //! classification node and work item type.
 
+use std::collections::BTreeMap;
+
 use super::*;
+
+/// The tag picker: every tag the database knows, with the ones the work item
+/// carries marked. `Enter` puts the tag under the cursor on the work item, or
+/// takes it off again.
+#[derive(Clone, Debug, Default)]
+pub struct TagPicker {
+    /// Where the cursor is and how far the list is scrolled.
+    pub cursor: ListCursor,
+    pub options: Vec<String>,
+    /// The tags the work item carries already, which the rows mark.
+    pub current: Vec<String>,
+    /// The work item the picker was opened for, shown in its title.
+    pub id: i64,
+}
 
 /// The state picker, built when it opens so it never reads the network.
 #[derive(Clone, Debug, Default)]
@@ -419,6 +435,96 @@ impl WorkItemsScreen {
             return AppAction::None;
         }
         self.edit_selected(shell, FieldEdit::state(&option.name))
+    }
+
+    /// Every tag on any work item in the database, in one spelling apiece and
+    /// sorted without regard to case: what the Tags pill offers, and all the
+    /// picker will put on a row.
+    fn known_tags(&self) -> Vec<String> {
+        let mut tags: BTreeMap<String, String> = BTreeMap::new();
+        for tag in self.tickets.iter().flat_map(|ticket| ticket.tags.iter()) {
+            tags.entry(tag.to_lowercase())
+                .or_insert_with(|| tag.clone());
+        }
+        tags.into_values().collect()
+    }
+
+    /// The Actions menu's Tags row, and a click on the tags in the details
+    /// pane: the tags already in use, with the ones this work item carries
+    /// marked and the first of them under the cursor. A tag nobody has used
+    /// yet is not offered.
+    pub(super) fn open_tag_picker(&mut self, shell: &mut Shell) {
+        let Some(ticket) = self.selected_ticket() else {
+            shell.set_error("No work item is selected");
+            return;
+        };
+        let current = ticket.tags.clone();
+        let id = ticket.key.id;
+        let options = self.known_tags();
+        if options.is_empty() {
+            shell.set_error("No tags are in use yet");
+            return;
+        }
+        let index = options
+            .iter()
+            .position(|tag| current.iter().any(|held| held.eq_ignore_ascii_case(tag)))
+            .unwrap_or_default();
+        self.tag_picker = TagPicker {
+            options,
+            cursor: ListCursor {
+                index,
+                scroll: ScrollState::default(),
+            },
+            current,
+            id,
+        };
+        self.tag_picker.cursor.focus(index);
+        self.mode = WorkItemMode::TagPicker;
+    }
+
+    pub(super) fn handle_tag_picker_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        let last = self.tag_picker.options.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc => self.mode = WorkItemMode::Browse,
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.focus_tag(self.tag_picker.cursor.index.saturating_sub(1));
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.focus_tag((self.tag_picker.cursor.index + 1).min(last));
+            }
+            KeyCode::PageUp => self.focus_tag(self.tag_picker.cursor.index.saturating_sub(5)),
+            KeyCode::PageDown => self.focus_tag((self.tag_picker.cursor.index + 5).min(last)),
+            KeyCode::Home => self.focus_tag(0),
+            KeyCode::End => self.focus_tag(last),
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                return self.choose_tag(shell, self.tag_picker.cursor.index);
+            }
+            _ => {}
+        }
+        AppAction::None
+    }
+
+    fn focus_tag(&mut self, index: usize) {
+        self.tag_picker.cursor.focus(index);
+    }
+
+    /// Toggles one tag on the work item and closes the picker. The list goes
+    /// out the ordinary write-through way, as the normalised `a; b; c` every
+    /// tag edit is written as.
+    pub(super) fn choose_tag(&mut self, shell: &mut Shell, index: usize) -> AppAction {
+        let Some(tag) = self.tag_picker.options.get(index).cloned() else {
+            self.mode = WorkItemMode::Browse;
+            return AppAction::None;
+        };
+        self.mode = WorkItemMode::Browse;
+        let mut tags = self.tag_picker.current.clone();
+        match tags.iter().position(|held| held.eq_ignore_ascii_case(&tag)) {
+            Some(held) => {
+                tags.remove(held);
+            }
+            None => tags.push(tag),
+        }
+        self.edit_selected(shell, FieldEdit::tags(&normalize_tags(&tags.join("; "))))
     }
 
     /// The Actions menu's Priority row: 1 to 4 and a `Clear` row, with the

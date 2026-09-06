@@ -29,6 +29,7 @@ impl WorkItemsScreen {
             ScrollSurface::EditMenu => self.edit_menu.scroll,
             ScrollSurface::StatePicker => self.state_picker.cursor.scroll,
             ScrollSurface::PriorityPicker => self.priority_picker.cursor.scroll,
+            ScrollSurface::TagPicker => self.tag_picker.cursor.scroll,
             ScrollSurface::AssigneePicker => self.assignee_picker.cursor.scroll,
             ScrollSurface::ParentPicker => self.parent_picker.cursor.scroll,
             ScrollSurface::NodePicker => self.node_picker.cursor.scroll,
@@ -55,6 +56,7 @@ impl WorkItemsScreen {
             ScrollSurface::EditMenu => &mut self.edit_menu.scroll,
             ScrollSurface::StatePicker => &mut self.state_picker.cursor.scroll,
             ScrollSurface::PriorityPicker => &mut self.priority_picker.cursor.scroll,
+            ScrollSurface::TagPicker => &mut self.tag_picker.cursor.scroll,
             ScrollSurface::AssigneePicker => &mut self.assignee_picker.cursor.scroll,
             ScrollSurface::ParentPicker => &mut self.parent_picker.cursor.scroll,
             ScrollSurface::NodePicker => &mut self.node_picker.cursor.scroll,
@@ -189,6 +191,10 @@ impl WorkItemsScreen {
             PointerTarget::PriorityOption { index } => {
                 self.priority_picker.cursor.focus(index);
                 return self.choose_priority(shell, index);
+            }
+            PointerTarget::TagOption { index } => {
+                self.tag_picker.cursor.focus(index);
+                return self.choose_tag(shell, index);
             }
             PointerTarget::AssigneeOption { index } => {
                 self.assignee_picker.cursor.focus(index);

@@ -13,7 +13,7 @@ pub use family::{ChildProgress, ChildProgressIndex};
 pub use forms::{FormField, FormFieldId, FormFieldKind, FormKind, FormOverlay, FormPicker};
 pub use pickers::{
     AssigneeCandidate, AssigneePicker, NodePicker, NodeRow, ParentCandidate, ParentPicker,
-    PriorityPicker, StatePicker, TypePicker,
+    PriorityPicker, StatePicker, TagPicker, TypePicker,
 };
 pub use query::{ColumnOverlay, FacetBar, FilterOverlay, PaletteState, SortDraft};
 use views::builtin_named;
@@ -41,7 +41,9 @@ pub enum WorkItemMode {
     StatePicker,
     /// The priorities the selected work item can be given, `Clear` included.
     PriorityPicker,
-    /// A single-line field editor, for the Title and Tags rows of the Actions menu.
+    /// The tags in use, each put on or taken off the selected work item.
+    TagPicker,
+    /// A single-line field editor, for the Title row of the Actions menu.
     Prompt,
     /// The people the selected work item can be assigned to, filtered by typing.
     AssigneePicker,
@@ -216,6 +218,7 @@ pub struct WorkItemsScreen {
     pub edit_menu: EditMenu,
     pub state_picker: StatePicker,
     pub priority_picker: PriorityPicker,
+    pub tag_picker: TagPicker,
     pub assignee_picker: AssigneePicker,
     pub parent_picker: ParentPicker,
     pub node_picker: NodePicker,
@@ -374,6 +377,7 @@ impl WorkItemsScreen {
             edit_menu: EditMenu::default(),
             state_picker: StatePicker::default(),
             priority_picker: PriorityPicker::default(),
+            tag_picker: TagPicker::default(),
             assignee_picker: AssigneePicker::default(),
             parent_picker: ParentPicker::default(),
             node_picker: NodePicker::default(),
@@ -500,6 +504,7 @@ impl WorkItemsScreen {
             WorkItemMode::StatePicker | WorkItemMode::PriorityPicker => {
                 "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel"
             }
+            WorkItemMode::TagPicker => "\u{2191}\u{2193}/jk choose  Enter add/remove  Esc cancel",
             WorkItemMode::Prompt => self
                 .prompt
                 .as_ref()
@@ -580,6 +585,7 @@ impl WorkItemsScreen {
             WorkItemMode::Edit => self.handle_edit_menu_key(shell, key),
             WorkItemMode::StatePicker => self.handle_state_picker_key(shell, key),
             WorkItemMode::PriorityPicker => self.handle_priority_picker_key(shell, key),
+            WorkItemMode::TagPicker => self.handle_tag_picker_key(shell, key),
             WorkItemMode::Prompt => self.handle_prompt_key(shell, key),
             WorkItemMode::AssigneePicker => self.handle_assignee_picker_key(shell, key),
             WorkItemMode::ParentPicker => self.handle_parent_picker_key(shell, key),
@@ -846,6 +852,7 @@ const fn mode_name(mode: WorkItemMode) -> &'static str {
         WorkItemMode::Edit => "edit",
         WorkItemMode::StatePicker => "state-picker",
         WorkItemMode::PriorityPicker => "priority-picker",
+        WorkItemMode::TagPicker => "tag-picker",
         WorkItemMode::Prompt => "prompt",
         WorkItemMode::AssigneePicker => "assignee-picker",
         WorkItemMode::NodePicker => "node-picker",

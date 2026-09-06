@@ -35,6 +35,7 @@ pub enum ScrollSurface {
     EditMenu,
     StatePicker,
     PriorityPicker,
+    TagPicker,
     AssigneePicker,
     NodePicker,
     TypePicker,
@@ -48,8 +49,8 @@ pub enum TextEditor {
     Search,
     Palette,
     ViewName,
-    /// The single-line field editor the Actions menu opens for a title or a tag
-    /// list.
+    /// The single-line field editor the Actions menu opens for a title, or a
+    /// comment.
     Prompt,
     /// The assignee picker's filter field.
     Assignee,
@@ -194,6 +195,10 @@ pub enum PointerTarget {
     },
     /// One priority in the priority picker, `Clear` included.
     PriorityOption {
+        index: usize,
+    },
+    /// One tag in the tag picker.
+    TagOption {
         index: usize,
     },
     /// One person in the assignee picker, `Unassigned` included.

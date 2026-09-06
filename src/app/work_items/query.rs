@@ -857,7 +857,7 @@ impl WorkItemsScreen {
                 AppAction::None
             }
             CommandId::EditTags => {
-                self.open_prompt(shell, PromptField::Tags);
+                self.open_tag_picker(shell);
                 AppAction::None
             }
             CommandId::EditAssignee => self.open_assignee_picker(shell),

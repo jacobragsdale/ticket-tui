@@ -375,7 +375,7 @@ pub const COMMANDS: &[Command] = &[
         id: CommandId::EditTags,
         title: "Edit tags",
         keys: &[],
-        help: "Semicolon separated",
+        help: "Add or remove one of the tags in use",
         scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {

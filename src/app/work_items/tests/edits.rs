@@ -573,20 +573,33 @@ fn an_empty_title_is_refused_locally_and_an_unchanged_one_writes_nothing() {
 }
 
 #[test]
-fn the_tags_prompt_trims_deduplicates_and_rejoins_what_it_saves() {
-    let mut app = edit_app();
+fn the_tag_picker_offers_the_tags_in_use_and_puts_one_on_or_takes_one_off() {
+    let mut alpha = ticket(1, "Alpha", "2026-01-01T00:00:00Z");
+    alpha.tags = vec!["TUI".into()];
+    let mut gamma = ticket(3, "Gamma", "2026-03-01T00:00:00Z");
+    gamma.tags = vec!["rust".into()];
+    let mut app = App::new(vec![
+        alpha,
+        ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+        gamma,
+    ]);
+    app.shell.enable_sync();
 
     open_editor(&mut app, 3);
-    assert_eq!(app.work_items.mode, WorkItemMode::Prompt);
+    assert_eq!(app.work_items.mode, WorkItemMode::TagPicker);
     assert_eq!(
-        prompt_text(&app),
-        "rust",
-        "the prompt opens on the tags held"
+        app.work_items.tag_picker.options,
+        vec!["rust".to_owned(), "TUI".to_owned()],
+        "every tag in use, once, in case-blind order"
+    );
+    assert_eq!(
+        app.work_items.tag_picker.cursor.index, 0,
+        "the cursor opens on a tag the work item holds"
     );
 
-    type_over(&mut app, "rust; Rust ;; tui");
+    press(&mut app, KeyCode::Down);
     let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
-        panic!("a new tag list should dispatch an edit");
+        panic!("choosing a tag the work item lacks should dispatch an edit");
     };
     let request = only(requests);
     assert_eq!(
@@ -596,29 +609,29 @@ fn the_tags_prompt_trims_deduplicates_and_rejoins_what_it_saves() {
             serde_json::json!({
                 "op": "add",
                 "path": "/fields/System.Tags",
-                "value": "rust; tui",
+                "value": "rust; TUI",
             }),
         ]
     );
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(
         app.work_items
             .selected_ticket()
             .map(|ticket| ticket.tags.clone()),
-        Some(vec!["rust".to_owned(), "tui".to_owned()]),
-        "the Tags cell shows the normalised list at once"
+        Some(vec!["rust".to_owned(), "TUI".to_owned()]),
+        "the row carries the tag at once"
     );
-}
-
-#[test]
-fn a_tag_list_that_normalises_to_what_is_there_writes_nothing() {
-    let mut app = edit_app();
+    accept(&mut app, &request);
 
     open_editor(&mut app, 3);
-    type_over(&mut app, "  rust ;; RUST ");
-    assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
-    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
-    assert!(!app.work_items.edits_pending());
-    assert_eq!(app.shell.notification(), None);
+    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+        panic!("choosing a tag the work item holds should take it off");
+    };
+    assert_eq!(
+        only(requests).document()[1]["value"],
+        "TUI",
+        "the tag under the cursor comes off and the rest stay"
+    );
 }
 
 #[test]
