@@ -809,7 +809,8 @@ fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
         // One key, a different neighbour on each tab, so the palette says
         // which one it would go to from here.
         CommandId::Follow => match tab {
-            TabId::WorkItems | TabId::Repos | TabId::Pipelines => "Go to pull request",
+            TabId::WorkItems => "Go to pull request or repository",
+            TabId::Repos | TabId::Pipelines => "Go to pull request",
             TabId::PullRequests => "Go to work items",
         },
         _ => return command,
@@ -1123,7 +1124,10 @@ mod tests {
                 .find(|command| command.id == CommandId::Follow)
                 .map(|command| command.title)
         };
-        assert_eq!(title(TabId::WorkItems), Some("Go to pull request"));
+        assert_eq!(
+            title(TabId::WorkItems),
+            Some("Go to pull request or repository")
+        );
         assert_eq!(title(TabId::Repos), Some("Go to pull request"));
         assert_eq!(title(TabId::PullRequests), Some("Go to work items"));
         assert_eq!(title(TabId::Pipelines), Some("Go to pull request"));

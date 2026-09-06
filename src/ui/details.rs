@@ -1198,10 +1198,7 @@ fn artifact_line(artifact: &ArtifactLink, shell: &Shell) -> (Line<'static>, Opti
                 (
                     Line::from(vec![
                         label("Branch".to_owned()),
-                        Span::styled(
-                            format!("{name}  in a repository not in this database"),
-                            muted,
-                        ),
+                        Span::styled(format!("{name}  not in this database"), muted),
                     ]),
                     None,
                 )

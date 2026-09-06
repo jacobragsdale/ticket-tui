@@ -180,9 +180,17 @@ fn the_context_lists_what_the_selected_work_item_was_worked_on_with() {
                     name: "Pull Request".into(),
                 },
                 ArtifactLink {
-                    work_item: key,
+                    work_item: key.clone(),
                     kind: ArtifactKind::Build(14),
                     name: "Integrated in build".into(),
+                },
+                ArtifactLink {
+                    work_item: key,
+                    kind: ArtifactKind::Branch {
+                        repo_id: "aaa-111".into(),
+                        name: "1-alpha".into(),
+                    },
+                    name: "Branch".into(),
                 },
             ],
             ..TicketGraph::default()
@@ -192,7 +200,11 @@ fn the_context_lists_what_the_selected_work_item_was_worked_on_with() {
     let context = app.agent_context().work_items;
     let related = &context.selected_ticket.as_ref().unwrap().related;
 
-    assert_eq!(related.len(), 2);
+    assert_eq!(related.len(), 3);
+    assert_eq!(related[2].kind, "branch");
+    assert_eq!(related[2].target, "1-alpha");
+    assert_eq!(related[2].repo.as_deref(), Some("atlas"));
+    assert!(related[2].in_database, "the repository is on file");
     assert_eq!(related[0].kind, "pull_request");
     assert_eq!(related[0].target, "42");
     assert_eq!(related[0].repo.as_deref(), Some("atlas"));

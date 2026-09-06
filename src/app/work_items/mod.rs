@@ -983,7 +983,8 @@ impl Screen for WorkItemsScreen {
     }
 
     /// What carried the work item: the newest pull request still open on it,
-    /// else the newest of any status, else the newest build it went out in.
+    /// else the newest of any status, else the newest build it went out in,
+    /// else the repository its branch is in.
     fn follow_target(&self, shell: &Shell) -> Result<(Jump, &'static str), String> {
         let ticket = self
             .selected_ticket()
@@ -1013,15 +1014,32 @@ impl Screen for WorkItemsScreen {
                 "pull request",
             ));
         }
-        artifacts
+        if let Some(id) = artifacts
             .iter()
             .filter_map(|link| match link.kind {
                 crate::model::ArtifactKind::Build(id) if shell.run_label(id).is_some() => Some(id),
                 _ => None,
             })
             .max()
-            .map(|id| (Jump::Run(id), "run"))
-            .ok_or_else(|| format!("#{} has no linked pull request or build", ticket.key.id))
+        {
+            return Ok((Jump::Run(id), "run"));
+        }
+        artifacts
+            .iter()
+            .find_map(|link| match &link.kind {
+                crate::model::ArtifactKind::Branch { repo_id, .. }
+                    if shell.repos().iter().any(|repo| repo.id == *repo_id) =>
+                {
+                    Some((Jump::Repo(shell.repo_name(repo_id)), "repository"))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                format!(
+                    "#{} has no linked pull request, build or branch",
+                    ticket.key.id
+                )
+            })
     }
 
     fn here(&self, _shell: &Shell) -> Option<Jump> {

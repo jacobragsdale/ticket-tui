@@ -1205,12 +1205,20 @@ fn the_related_section_names_what_the_work_item_was_worked_on_with() {
                     repo_id: "aaa-111".into(),
                     id: 99,
                 }),
+                artifact(ArtifactKind::Branch {
+                    repo_id: "aaa-111".into(),
+                    name: "feature/x".into(),
+                }),
+                artifact(ArtifactKind::Branch {
+                    repo_id: "zzz-999".into(),
+                    name: "x".into(),
+                }),
             ],
             ..TicketGraph::default()
         },
     );
 
-    let text = render_text(120, 44, &mut app);
+    let text = render_text(120, 46, &mut app);
 
     assert!(text.contains("Related"), "{text}");
     assert!(text.contains("!42  Split the files"), "{text}");
@@ -1224,6 +1232,11 @@ fn the_related_section_names_what_the_work_item_was_worked_on_with() {
         text.contains("!99  not in this database"),
         "and one nothing here holds says so rather than pretending: {text}"
     );
+    assert!(
+        text.contains("Branch") && text.contains("feature/x  in ticket-tui"),
+        "a branch is its name and where it is: {text}"
+    );
+    assert!(text.contains("x  not in this database"), "{text}");
 
     // The pull request and the build follow; the commit and the missing one
     // are not click targets at all.
@@ -1240,11 +1253,12 @@ fn the_related_section_names_what_the_work_item_was_worked_on_with() {
         id: 42
     }));
     assert!(follows(Jump::Run(14)));
+    assert!(follows(Jump::Repo("ticket-tui".to_owned())));
     assert!(
         !follows(Jump::PullRequest {
             repo: "ticket-tui".to_owned(),
             id: 99
-        }),
+        }) && !follows(Jump::Repo("zzz-999".to_owned())),
         "nothing points at what the database does not hold"
     );
 }

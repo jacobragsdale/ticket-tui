@@ -458,7 +458,46 @@ fn a_work_item_with_nothing_linked_says_so_rather_than_going_nowhere() {
     assert_eq!(app.tab, TabId::WorkItems);
     assert_eq!(
         app.shell.notification().map(|(text, _)| text),
-        Some("#10001 has no linked pull request or build")
+        Some("#10001 has no linked pull request, build or branch")
+    );
+}
+
+#[test]
+fn g_on_a_work_item_with_only_a_branch_lands_on_its_repository() {
+    use crate::model::{ArtifactKind, ArtifactLink, TicketGraph};
+
+    let mut app = App::new(vec![ticket()]);
+    let key = app.work_items.tickets()[0].key.clone();
+    app.shell.set_repos(vec![
+        crate::app::repos::tests::repo("aaa-111", "ticket-tui", false),
+        crate::app::repos::tests::repo("bbb-222", "ado-helper", false),
+    ]);
+    app.repos.set_repos(&app.shell);
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            artifacts: vec![ArtifactLink {
+                work_item: key,
+                kind: ArtifactKind::Branch {
+                    repo_id: "bbb-222".into(),
+                    name: "10001-fix".into(),
+                },
+                name: "Branch".to_owned(),
+            }],
+            ..TicketGraph::default()
+        },
+    );
+    render_text(120, 40, &mut app);
+
+    press(&mut app, KeyCode::Char('g'));
+
+    assert_eq!(app.tab, TabId::Repos);
+    assert_eq!(
+        app.repos
+            .selected(&app.shell)
+            .map(|row| row.repo.name)
+            .as_deref(),
+        Some("ado-helper")
     );
 }
 
