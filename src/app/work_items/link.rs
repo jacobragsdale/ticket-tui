@@ -207,6 +207,13 @@ impl WorkItemsScreen {
         crate::filter::repos_by_item(&self.graph.artifacts, |id| shell.repo_name(id))
     }
 
+    /// Every artifact link the graph holds, for the Repos tab to count and
+    /// list the work items linked to each repository.
+    #[must_use]
+    pub fn artifacts(&self) -> &[ArtifactLink] {
+        &self.graph.artifacts
+    }
+
     /// A branch link Azure DevOps took. The work item's own Related section
     /// follows at the pull booked for it.
     pub fn apply_branch_link(

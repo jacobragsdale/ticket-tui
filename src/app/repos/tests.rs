@@ -1,3 +1,4 @@
+use crate::app::repos::RepoWorkItem;
 use crate::app::{App, TabId};
 use crate::local::LocalRequest;
 use crate::model::{GitJob, LocalRepo, Repo};
@@ -31,7 +32,7 @@ pub(crate) fn local(branch: &str, dirty: bool, ahead: u32, behind: u32) -> Local
 /// An app whose Repos tab holds three: one cloned and clean, one cloned and
 /// dirty, and one nobody has here — plus a disabled one.
 pub(crate) fn repos_app() -> App {
-    let mut app = App::new(Vec::new());
+    let mut app = App::new(vec![crate::model::Ticket::fixture(613, "Fix the thing")]);
     app.shell.set_repos(vec![
         repo("aaa-111", "ticket-tui", false),
         repo("bbb-222", "skillbook", false),
@@ -51,6 +52,16 @@ pub(crate) fn repos_app() -> App {
             ("aaa-111".to_owned(), 12, "Tab bar".to_owned()),
         ],
         vec![("aaa-111".to_owned(), 1, "ticket-tui CI".to_owned(), None)],
+        // #613 has its branch in skillbook, which is the branch the clone is on.
+        vec![RepoWorkItem {
+            repo_id: "bbb-222".to_owned(),
+            key: crate::model::TicketKey {
+                organization: "demo".into(),
+                id: 613,
+            },
+            title: "Fix the thing".to_owned(),
+            branch: Some("feature/x".to_owned()),
+        }],
     );
     app.select_tab(TabId::Repos);
     app
@@ -68,9 +79,20 @@ fn the_table_lists_every_repository_with_what_is_open_against_it() {
         .expect("the repository");
     assert_eq!(ticket_tui.pull_requests, 2);
     assert_eq!(ticket_tui.pipelines, 1);
+    assert_eq!(ticket_tui.work_items, 0);
     assert_eq!(
         ticket_tui.local.as_ref().map(|local| local.branch.clone()),
         Some("main".to_owned())
+    );
+    let skillbook = rows
+        .iter()
+        .find(|row| row.repo.name == "skillbook")
+        .expect("the repository");
+    assert_eq!(skillbook.work_items, 1);
+    assert_eq!(
+        skillbook.branch_item,
+        Some(613),
+        "the clone is on #613's branch"
     );
     assert_eq!(
         rows.iter()
@@ -453,15 +475,22 @@ fn g_goes_to_the_newest_pull_request_open_on_the_repository() {
         Some(12)
     );
 
-    // Nothing is open on this one and nothing builds it, so the key says so
-    // and stays put.
+    // With no pull request, the work items linked to it are where g goes.
     app.select_tab(TabId::Repos);
     focus(&mut app, "skillbook");
+    go(&mut app);
+    assert_eq!(app.tab, TabId::WorkItems);
+    assert_eq!(app.work_items.query(), "id:613");
+
+    // Nothing is open on this one, nothing is linked and nothing builds it,
+    // so the key says so and stays put.
+    app.select_tab(TabId::Repos);
+    focus(&mut app, "home-server");
     assert_eq!(go(&mut app), crate::app::AppAction::None);
     assert_eq!(app.tab, TabId::Repos);
     assert_eq!(
         app.shell.notification().map(|(text, _)| text),
-        Some("No open pull request or pipeline on skillbook")
+        Some("No open pull request, work item or pipeline on home-server")
     );
 }
 
@@ -563,13 +592,13 @@ fn g_falls_through_to_the_pipeline_when_nothing_is_open() {
         Some("nightly".to_owned())
     );
 
-    // One with neither still says so and stays put.
+    // One with none of the three still says so and stays put.
     app.history_back();
-    focus(&mut app, "skillbook");
+    focus(&mut app, "home-server");
     assert_eq!(go(&mut app), crate::app::AppAction::None);
     assert_eq!(app.tab, TabId::Repos);
     assert_eq!(
         app.shell.notification().map(|(text, _)| text),
-        Some("No open pull request or pipeline on skillbook")
+        Some("No open pull request, work item or pipeline on home-server")
     );
 }

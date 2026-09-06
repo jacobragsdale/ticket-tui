@@ -420,16 +420,17 @@ mod tests {
                 RepoColumn::Name,
                 RepoColumn::DefaultBranch,
                 RepoColumn::PullRequests,
+                RepoColumn::WorkItems,
                 RepoColumn::Pipelines,
                 RepoColumn::Local,
             ],
         );
 
-        let local = 4;
+        let local = 5;
         layout.resize(local, 2);
         let stored = layout.to_session_columns();
         assert_eq!(stored[0].id, "name");
-        assert_eq!(stored[local].width, 22);
+        assert_eq!(stored[local].width, 26);
 
         let restored = TableLayout::<RepoColumn>::from_session_columns(&stored);
         assert_eq!(restored, layout, "the file round-trips through the keys");

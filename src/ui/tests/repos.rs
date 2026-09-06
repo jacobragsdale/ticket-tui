@@ -5,7 +5,9 @@ use crate::app::repos::tests::{crossed_app, repos_app};
 #[test]
 fn the_table_draws_every_repository_with_its_counts_and_local_state() {
     let mut app = repos_app();
-    let text = render_text(150, 24, &mut app);
+    // Wide enough for the Local column to hold a clone that is dirty, ahead,
+    // behind and on a work item's branch all at once.
+    let text = render_text(170, 24, &mut app);
 
     assert!(pane_reads(&text, "Repos", "4"), "{text}");
     assert!(text.contains("ticket-tui"), "{text}");
@@ -14,8 +16,8 @@ fn the_table_draws_every_repository_with_its_counts_and_local_state() {
         "a clean clone reads as a tick: {text}"
     );
     assert!(
-        text.contains("feature/x *"),
-        "a dirty one carries the asterisk: {text}"
+        text.contains("feature/x #613 *"),
+        "a dirty one carries the asterisk, after the work item its branch belongs to: {text}"
     );
     assert!(
         text.contains("\u{2191} 1") && text.contains("\u{2193} 2"),
@@ -271,4 +273,29 @@ fn the_buttons_are_where_they_are_painted_even_when_the_path_wraps() {
             "{label}: and covers it: {wanted:?} vs {painted:?}"
         );
     }
+}
+
+#[test]
+fn the_details_pane_lists_the_work_items_linked_to_the_repository() {
+    let mut app = repos_app();
+    // The rows read in name order: archived, home-server, skillbook, ticket-tui.
+    app.repos.cursor.focus(2);
+    let text = render_text(170, 44, &mut app);
+
+    // The section rules, not the tab bar's or the header's words.
+    let section = text
+        .find("\u{2500} Work items")
+        .expect("the work items' section");
+    let item = text
+        .find("#613  Fix the thing  \u{00b7} feature/x")
+        .expect("the work item, with its branch");
+    let pipelines = text[section..]
+        .find("\u{2500} Pipelines")
+        .map(|at| section + at)
+        .expect("the pipelines' section");
+    assert!(section < item && item < pipelines, "{text}");
+
+    app.repos.cursor.focus(3);
+    let text = render_text(170, 44, &mut app);
+    assert!(text.contains("None linked"), "{text}");
 }

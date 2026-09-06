@@ -118,6 +118,9 @@ fn repo_cell(row: &RepoRow, column: RepoColumn) -> Cell<'static> {
         RepoColumn::PullRequests => {
             Cell::from(Line::styled(count_label(row.pull_requests), plain).right_aligned())
         }
+        RepoColumn::WorkItems => {
+            Cell::from(Line::styled(count_label(row.work_items), plain).right_aligned())
+        }
         RepoColumn::Pipelines => Cell::from(pipelines_line(row, plain)),
         RepoColumn::Local => Cell::from(local_line(row)),
     }
@@ -167,6 +170,13 @@ pub(crate) fn local_line(row: &RepoRow) -> Line<'static> {
         );
     }
     let mut spans = vec![Span::raw(local.branch.clone()), Span::raw(" ")];
+    // A clone on a work item's branch says whose work it is on.
+    if let Some(id) = row.branch_item {
+        spans.push(Span::styled(
+            format!("#{id} "),
+            Style::default().fg(theme().accent),
+        ));
+    }
     if local.dirty {
         spans.push(Span::styled("*", Style::default().fg(theme().warning)));
     } else if local.ahead == 0 && local.behind == 0 {
@@ -323,6 +333,24 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
         ));
     }
     for (index, label) in requests {
+        reference_rows.push((index, lines.len()));
+        lines.push(reference_line(label, cursor == Some(index)));
+    }
+    lines.push(Line::from(""));
+    lines.push(section_line("Work items", inner.width));
+    let items: Vec<(usize, &String)> = jumps
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, jump))| matches!(jump, Jump::WorkItem(_)))
+        .map(|(index, (label, _))| (index, label))
+        .collect();
+    if items.is_empty() {
+        lines.push(Line::styled(
+            "  None linked",
+            Style::default().fg(theme().muted),
+        ));
+    }
+    for (index, label) in items {
         reference_rows.push((index, lines.len()));
         lines.push(reference_line(label, cursor == Some(index)));
     }

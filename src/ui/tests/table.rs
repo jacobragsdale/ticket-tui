@@ -331,9 +331,9 @@ fn underlines_mark_search_matches_and_stop_after_the_id_digits() {
 #[test]
 fn the_list_table_draws_another_screens_columns_and_sorts_by_their_keys() {
     let repositories = [
-        ["ticket-tui", "main", "1", "2", "cloned"],
-        ["skillbook", "main", "3", "0", "cloned"],
-        ["home-server", "develop", "12", "1", "—"],
+        ["ticket-tui", "main", "1", "0", "2", "cloned"],
+        ["skillbook", "main", "3", "0", "0", "cloned"],
+        ["home-server", "develop", "12", "0", "1", "—"],
     ];
     let layout = TableLayout::<RepoColumn>::default();
     let mut shell = Shell::default();
@@ -345,8 +345,9 @@ fn the_list_table_draws_another_screens_columns_and_sorts_by_their_keys() {
                     RepoColumn::Name => 0,
                     RepoColumn::DefaultBranch => 1,
                     RepoColumn::PullRequests => 2,
-                    RepoColumn::Pipelines => 3,
-                    RepoColumn::Local => 4,
+                    RepoColumn::WorkItems => 3,
+                    RepoColumn::Pipelines => 4,
+                    RepoColumn::Local => 5,
                 };
                 Cell::from(repositories[row][index])
             };

@@ -819,7 +819,8 @@ fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
         // which one it would go to from here.
         CommandId::Follow => match tab {
             TabId::WorkItems => "Go to pull request or repository",
-            TabId::Repos | TabId::Pipelines => "Go to pull request",
+            TabId::Repos => "Go to pull request or work items",
+            TabId::Pipelines => "Go to pull request",
             TabId::PullRequests => "Go to work items",
         },
         _ => return command,
@@ -1137,7 +1138,10 @@ mod tests {
             title(TabId::WorkItems),
             Some("Go to pull request or repository")
         );
-        assert_eq!(title(TabId::Repos), Some("Go to pull request"));
+        assert_eq!(
+            title(TabId::Repos),
+            Some("Go to pull request or work items")
+        );
         assert_eq!(title(TabId::PullRequests), Some("Go to work items"));
         assert_eq!(title(TabId::Pipelines), Some("Go to pull request"));
     }

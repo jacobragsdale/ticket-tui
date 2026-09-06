@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::app::pipelines::RunSchema;
 use crate::app::pipelines::rows::{RunRow, duration_label, run_glyph, short_branch};
 use crate::app::pull_requests::{PrRow, PrSchema};
-use crate::app::repos::{RepoRow, RepoSchema};
+use crate::app::repos::{RepoRow, RepoSchema, RepoWorkItem, repo_work_items};
 use crate::app::work_items::branch_name;
 use crate::azure::{self, AzureClient, AzureConfig};
 use crate::classification::{self, NodeKind};
@@ -1429,6 +1429,9 @@ struct RepoJson<'a> {
     default_branch: String,
     is_disabled: bool,
     pull_requests: usize,
+    work_items: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch_work_item: Option<i64>,
     pipelines: usize,
     web_url: &'a str,
     remote_url: &'a str,
@@ -1455,6 +1458,8 @@ impl<'a> From<&'a RepoRow> for RepoJson<'a> {
             default_branch: row.branch(),
             is_disabled: row.repo.is_disabled,
             pull_requests: row.pull_requests,
+            work_items: row.work_items,
+            branch_work_item: row.branch_item,
             pipelines: row.pipelines,
             web_url: &row.repo.web_url,
             remote_url: &row.repo.remote_url,
@@ -1593,6 +1598,7 @@ fn run_repos(cli: &Cli, database: &Path, command: &ReposCommand) -> Result<()> {
     let repos = repository.load_repos()?;
     let requests = repository.load_pull_requests()?;
     let pipelines = repository.load_pipelines()?;
+    let linked = repo_work_items(&repository.load_graph()?.artifacts, &repository.load_all()?);
     let local = local::workspace_root(cli.workspace.clone())
         .map(|workspace| {
             local::scan(
@@ -1610,22 +1616,27 @@ fn run_repos(cli: &Cli, database: &Path, command: &ReposCommand) -> Result<()> {
         .unwrap_or_default();
     let rows: Vec<RepoRow> = repos
         .iter()
-        .map(|repo| RepoRow {
-            local: local
+        .map(|repo| {
+            let local = local
                 .iter()
                 .find(|(id, _)| *id == repo.id)
-                .map(|(_, found)| found.clone()),
-            pull_requests: requests
-                .iter()
-                .filter(|request| request.repo_id == repo.id && !request.status.is_closed())
-                .count(),
-            pipelines: pipelines
-                .iter()
-                .filter(|pipeline| pipeline.repo_id.as_deref() == Some(repo.id.as_str()))
-                .count(),
-            // The printed table has no build column; the glyph is the tab's.
-            build: None,
-            repo: repo.clone(),
+                .map(|(_, found)| found.clone());
+            RepoRow {
+                pull_requests: requests
+                    .iter()
+                    .filter(|request| request.repo_id == repo.id && !request.status.is_closed())
+                    .count(),
+                pipelines: pipelines
+                    .iter()
+                    .filter(|pipeline| pipeline.repo_id.as_deref() == Some(repo.id.as_str()))
+                    .count(),
+                work_items: linked.iter().filter(|item| item.repo_id == repo.id).count(),
+                branch_item: crate::app::repos::branch_item(&linked, &repo.id, local.as_ref()),
+                // The printed table has no build column; the glyph is the tab's.
+                build: None,
+                local,
+                repo: repo.clone(),
+            }
         })
         .collect();
     match command {
@@ -1642,10 +1653,14 @@ fn run_repos(cli: &Cli, database: &Path, command: &ReposCommand) -> Result<()> {
                 .into_iter()
                 .find(|row| same_text(&row.repo.name, name))
                 .with_context(|| format!("no repository called {name} is in the database"))?;
+            let linked: Vec<&RepoWorkItem> = linked
+                .iter()
+                .filter(|item| item.repo_id == row.repo.id)
+                .collect();
             emit(&if *json {
                 to_json(&RepoJson::from(&row))?
             } else {
-                describe_repo(&row)
+                describe_repo(&row, &linked)
             });
         }
     }
@@ -1677,6 +1692,7 @@ fn tabulate_repos(rows: &[RepoRow]) -> String {
                 row.repo.name.clone(),
                 row.branch(),
                 row.pull_requests.to_string(),
+                row.work_items.to_string(),
                 row.pipelines.to_string(),
                 local_words(row),
             ]
@@ -1692,6 +1708,9 @@ fn local_words(row: &RepoRow) -> String {
         return "—".to_owned();
     };
     let mut state = local.branch.clone();
+    if let Some(id) = row.branch_item {
+        state.push_str(&format!(" #{id}"));
+    }
     if local.dirty {
         state.push_str(" dirty");
     }
@@ -1704,12 +1723,13 @@ fn local_words(row: &RepoRow) -> String {
     state
 }
 
-fn describe_repo(row: &RepoRow) -> String {
+fn describe_repo(row: &RepoRow, linked: &[&RepoWorkItem]) -> String {
     let mut lines = vec![
         format!("{} ({})", row.repo.name, row.repo.project),
         String::new(),
         format!("Default branch  {}", row.branch()),
         format!("Pull requests   {}", row.pull_requests),
+        format!("Work items      {}", row.work_items),
         format!("Pipelines       {}", row.pipelines),
         format!("Web             {}", row.repo.web_url),
         format!("HTTPS           {}", row.repo.remote_url),
@@ -1726,6 +1746,16 @@ fn describe_repo(row: &RepoRow) -> String {
             lines.push(format!("Origin          {}", local.origin));
         }
         None => lines.push("Local           not on this machine".to_owned()),
+    }
+    if !linked.is_empty() {
+        lines.push(String::new());
+        lines.push("Work items".to_owned());
+        for item in linked {
+            lines.push(match &item.branch {
+                Some(branch) => format!("  #{}  {}  ({branch})", item.key.id, item.title),
+                None => format!("  #{}  {}", item.key.id, item.title),
+            });
+        }
     }
     lines.join("\n")
 }
@@ -4104,16 +4134,32 @@ mod tests {
             repo: repository.load_repos().unwrap().remove(0),
             local: None,
             pull_requests: 1,
+            work_items: 1,
+            branch_item: None,
             pipelines: 0,
             build: None,
         };
         let table = tabulate_repos(std::slice::from_ref(&row));
         assert!(
-            table.starts_with("ticket-tui  main  1  0  \u{2014}"),
+            table.starts_with("ticket-tui  main  1  1  0  \u{2014}"),
             "{table}"
         );
-        let text = describe_repo(&row);
+        let linked = RepoWorkItem {
+            repo_id: row.repo.id.clone(),
+            key: TicketKey {
+                organization: "demo".into(),
+                id: 613,
+            },
+            title: "Fix the thing".into(),
+            branch: Some("613-fix-the-thing".into()),
+        };
+        let text = describe_repo(&row, &[&linked]);
         assert!(text.contains("Pull requests   1"), "{text}");
+        assert!(text.contains("Work items      1"), "{text}");
+        assert!(
+            text.ends_with("Work items\n  #613  Fix the thing  (613-fix-the-thing)"),
+            "{text}"
+        );
         assert!(text.contains("git@ssh.dev.azure.com"), "{text}");
         assert!(text.contains("not on this machine"), "{text}");
         let json = serde_json::to_value(RepoJson::from(&row)).unwrap();

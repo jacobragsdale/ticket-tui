@@ -729,6 +729,10 @@ impl App {
                     })
                 })
                 .collect(),
+            crate::app::repos::repo_work_items(
+                self.work_items.artifacts(),
+                self.work_items.tickets(),
+            ),
         );
     }
 

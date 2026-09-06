@@ -25,7 +25,7 @@ pub(crate) mod tests;
 
 pub use columns::RepoColumn;
 pub use filters::{RepoField, RepoSchema};
-pub use rows::RepoRow;
+pub use rows::{RepoRow, RepoWorkItem, branch_item, repo_work_items};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RepoMode {
@@ -46,6 +46,9 @@ pub struct ReposScreen {
     /// glyph and the pane's lines read.
     pull_requests: Vec<(String, i64, String)>,
     pipelines: Vec<(String, i64, String, Option<Run>)>,
+    /// The open work items linked to each repository.
+    work_items: Vec<RepoWorkItem>,
+    work_item_counts: Vec<(String, usize)>,
     pub mode: RepoMode,
     query: TextInput,
     pub layout: TableLayout<RepoColumn>,
@@ -71,6 +74,8 @@ impl Default for ReposScreen {
             pipeline_counts: Vec::new(),
             pull_requests: Vec::new(),
             pipelines: Vec::new(),
+            work_items: Vec::new(),
+            work_item_counts: Vec::new(),
             mode: RepoMode::Browse,
             query: TextInput::default(),
             layout: TableLayout::default(),
@@ -97,17 +102,20 @@ impl ReposScreen {
         }
     }
 
-    /// The pull requests and pipelines each repository has, from the snapshot
-    /// the other tabs are drawing.
+    /// The pull requests, pipelines and open work items each repository has,
+    /// from the snapshot the other tabs are drawing.
     pub fn set_related(
         &mut self,
         pull_requests: Vec<(String, i64, String)>,
         pipelines: Vec<(String, i64, String, Option<Run>)>,
+        work_items: Vec<RepoWorkItem>,
     ) {
         self.pull_request_counts = counts(pull_requests.iter().map(|(repo_id, ..)| repo_id));
         self.pipeline_counts = counts(pipelines.iter().map(|(repo_id, ..)| repo_id));
+        self.work_item_counts = counts(work_items.iter().map(|item| &item.repo_id));
         self.pull_requests = pull_requests;
         self.pipelines = pipelines;
+        self.work_items = work_items;
     }
 
     /// What git has started or finished doing to one repository. The busy
@@ -216,12 +224,17 @@ impl ReposScreen {
     fn rows(&self) -> Vec<RepoRow> {
         self.repos
             .iter()
-            .map(|repo| RepoRow {
-                local: self.local_with_job(&repo.id),
-                pull_requests: count_for(&self.pull_request_counts, &repo.id),
-                pipelines: count_for(&self.pipeline_counts, &repo.id),
-                build: self.build_of(&repo.id),
-                repo: repo.clone(),
+            .map(|repo| {
+                let local = self.local_with_job(&repo.id);
+                RepoRow {
+                    pull_requests: count_for(&self.pull_request_counts, &repo.id),
+                    pipelines: count_for(&self.pipeline_counts, &repo.id),
+                    work_items: count_for(&self.work_item_counts, &repo.id),
+                    branch_item: rows::branch_item(&self.work_items, &repo.id, local.as_ref()),
+                    build: self.build_of(&repo.id),
+                    local,
+                    repo: repo.clone(),
+                }
             })
             .collect()
     }
@@ -244,7 +257,8 @@ impl ReposScreen {
     }
 
     /// Where the details pane's references point: the repository's active pull
-    /// requests and the pipelines that build it.
+    /// requests, the open work items linked to it, and the pipelines that
+    /// build it.
     #[must_use]
     pub fn jumps(&self, shell: &Shell) -> Vec<(String, Jump)> {
         let Some(row) = self.selected(shell) else {
@@ -260,6 +274,16 @@ impl ReposScreen {
                         id: *id,
                     },
                 ));
+            }
+        }
+        for item in &self.work_items {
+            if item.repo_id == row.repo.id {
+                // The branch says which of them has code going, and where.
+                let label = item.branch.as_ref().map_or_else(
+                    || format!("#{}  {}", item.key.id, item.title),
+                    |branch| format!("#{}  {}  \u{00b7} {branch}", item.key.id, item.title),
+                );
+                jumps.push((label, Jump::WorkItem(item.key.clone())));
             }
         }
         for (repo_id, id, name, last_run) in &self.pipelines {
@@ -710,7 +734,8 @@ impl Screen for ReposScreen {
     /// held here: `set_related` only keeps what is still open. With nothing
     /// open, the pipeline that builds it — the one that ran most recently,
     /// else the first by name — because that is the other place a repository
-    /// leads to and it is one keypress away.
+    /// leads to and it is one keypress away. Between the two, the open work
+    /// items linked to it, as one filtered list.
     fn follow_target(&self, shell: &Shell) -> Result<(Jump, &'static str), String> {
         let row = self
             .selected(shell)
@@ -730,6 +755,15 @@ impl Screen for ReposScreen {
                 "pull request",
             ));
         }
+        let ids: Vec<i64> = self
+            .work_items
+            .iter()
+            .filter(|item| item.repo_id == row.repo.id)
+            .map(|item| item.key.id)
+            .collect();
+        if !ids.is_empty() {
+            return Ok((Jump::WorkItems(ids), "work items"));
+        }
         self.pipelines
             .iter()
             .filter(|(repo_id, ..)| *repo_id == row.repo.id)
@@ -743,7 +777,12 @@ impl Screen for ReposScreen {
                 },
             )
             .map(|(_, id, ..)| (Jump::Pipeline(*id), "pipeline"))
-            .ok_or_else(|| format!("No open pull request or pipeline on {}", row.repo.name))
+            .ok_or_else(|| {
+                format!(
+                    "No open pull request, work item or pipeline on {}",
+                    row.repo.name
+                )
+            })
     }
 
     fn here(&self, shell: &Shell) -> Option<Jump> {

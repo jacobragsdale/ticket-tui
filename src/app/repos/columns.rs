@@ -10,6 +10,7 @@ pub enum RepoColumn {
     Name,
     DefaultBranch,
     PullRequests,
+    WorkItems,
     Pipelines,
     Local,
 }
@@ -20,6 +21,7 @@ impl ColumnId for RepoColumn {
             Self::Name,
             Self::DefaultBranch,
             Self::PullRequests,
+            Self::WorkItems,
             Self::Pipelines,
             Self::Local,
         ]
@@ -30,6 +32,7 @@ impl ColumnId for RepoColumn {
             Self::Name => "name",
             Self::DefaultBranch => "branch",
             Self::PullRequests => "prs",
+            Self::WorkItems => "workitems",
             Self::Pipelines => "pipelines",
             Self::Local => "local",
         }
@@ -40,6 +43,8 @@ impl ColumnId for RepoColumn {
             Self::Name => "Name",
             Self::DefaultBranch => "Default branch",
             Self::PullRequests => "PRs",
+            // Short, so the Local column still fits beside it at 150 columns.
+            Self::WorkItems => "Items",
             Self::Pipelines => "Pipelines",
             Self::Local => "Local",
         }
@@ -48,9 +53,12 @@ impl ColumnId for RepoColumn {
     fn default_width(self) -> u16 {
         match self {
             Self::Name => 0,
-            Self::DefaultBranch => 18,
+            // Branch names are short; the Local column, which also names the
+            // work item a clone is on, is where the width goes.
+            Self::DefaultBranch => 14,
             Self::PullRequests | Self::Pipelines => 10,
-            Self::Local => 20,
+            Self::WorkItems => 7,
+            Self::Local => 24,
         }
     }
 
@@ -59,7 +67,7 @@ impl ColumnId for RepoColumn {
     }
 
     fn right_aligned(self) -> bool {
-        matches!(self, Self::PullRequests | Self::Pipelines)
+        matches!(self, Self::PullRequests | Self::WorkItems | Self::Pipelines)
     }
 
     fn pinned(self) -> bool {
@@ -88,6 +96,7 @@ pub(super) fn compare(left: &RepoRow, right: &RepoRow, column: RepoColumn) -> Or
             .to_lowercase()
             .cmp(&right.branch().to_lowercase()),
         RepoColumn::PullRequests => left.pull_requests.cmp(&right.pull_requests),
+        RepoColumn::WorkItems => left.work_items.cmp(&right.work_items),
         RepoColumn::Pipelines => left.pipelines.cmp(&right.pipelines),
         // Cloned first, then whatever is not here: what you can act on leads.
         RepoColumn::Local => left.local.is_none().cmp(&right.local.is_none()),
