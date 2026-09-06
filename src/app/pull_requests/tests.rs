@@ -1,6 +1,7 @@
 use crate::app::pull_requests::PrMode;
-use crate::app::{App, AppAction, TabId};
+use crate::app::{App, AppAction, Screen, TabId};
 use crate::model::{Identity, PrBuild, PrReviewer, PrStatus, PullRequest, Repo};
+use crate::pointer::PointerTarget;
 use crate::timestamp::ts;
 use crossterm::event::KeyCode;
 
@@ -506,6 +507,13 @@ fn esc_leaves_the_work_item_picker_without_linking_anything() {
     assert_eq!(app.pull_requests.mode, PrMode::Browse);
     let row = app.pull_requests.selected(&app.shell).expect("a row");
     assert_eq!(row.request.work_items, vec![10_001], "nothing was linked");
+
+    // The frame's × does the same.
+    press(&mut app, KeyCode::Char('L'));
+    assert_eq!(app.pull_requests.mode, PrMode::WorkItemPicker);
+    app.pull_requests
+        .activate_target(&mut app.shell, PointerTarget::CloseOverlay, 0, 0);
+    assert_eq!(app.pull_requests.mode, PrMode::Browse);
 }
 
 #[test]

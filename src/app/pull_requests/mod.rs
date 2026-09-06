@@ -950,6 +950,9 @@ impl Screen for PullRequestsScreen {
         _row: u16,
     ) -> AppAction {
         match target {
+            PointerTarget::CloseOverlay | PointerTarget::DismissOverlay => {
+                self.close_overlay(shell);
+            }
             PointerTarget::TableRow { index } => {
                 if index < self.visible(shell).len() {
                     self.cursor.focus(index);

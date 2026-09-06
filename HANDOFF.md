@@ -200,11 +200,11 @@ Last updated 2026-09-06. The backlog itself lives in Azure DevOps
   dispatches an agent: gather -> prompt -> launch, one worded verb per tab).
   #752 (tab 9 Artifacts) is superseded by the teardown.
 - The gate is `cargo fmt --check`, `cargo clippy --all-targets --all-features
-  -D warnings`, `cargo test --all-targets` (634 lib + 34 bin tests, one ignored stopwatch) and
+  -D warnings`, `cargo test --all-targets` (653 lib + 35 bin tests, one ignored stopwatch) and
   `cargo build --release`, with the test run repeated under `NO_COLOR=1`,
   `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` - the theme
   matrix, which is real because `Theme::from_env` reads the variable.
-- Database schema is `PRAGMA user_version = 17`; the agent context file is
+- Database schema is `PRAGMA user_version = 19`; the agent context file is
   schema 4, which dropped the five infra blocks schema 3 carried. A schema bump
   drops and rebuilds rather than migrating, so the first launch of a build that
   raises it does one full pull automatically - and a running `ticket-tui`
