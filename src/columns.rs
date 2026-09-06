@@ -9,9 +9,8 @@ use crate::session::SessionColumn;
 /// not the row under the cursor is on screen.
 pub const SELECTION_WIDTH: u16 = 2;
 
-/// The gutter the check and bookmark markers sit in, on the tables that have
-/// one.
-pub const MARKER_WIDTH: u16 = 4;
+/// The gutter the bookmark marker sits in, on the tables that have one.
+pub const MARKER_WIDTH: u16 = 1;
 
 /// The scrollbar's own column, at the right edge of every list table. It is
 /// reserved whether or not the list overflows, so a table does not shuffle

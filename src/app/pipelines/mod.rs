@@ -1017,15 +1017,7 @@ impl Screen for PipelinesScreen {
                     }
                 }
             }
-            // The gutter of a row: its left half moves the cursor, and the
-            // marker itself is the watch, which is what it paints.
-            PointerTarget::ToggleRowSelect { index } => {
-                let count = self.row_count(shell);
-                if index < count {
-                    self.cursor_mut().focus(index);
-                    self.sync_focus(shell);
-                }
-            }
+            // The gutter of a row is the watch marker, which is what it paints.
             PointerTarget::ToggleBookmark { index } => {
                 let count = self.row_count(shell);
                 if index < count {

@@ -267,68 +267,6 @@ fn finishing_the_selected_work_item_takes_it_off_the_table_once_the_write_lands(
 }
 
 #[test]
-fn a_bulk_change_writes_every_checked_work_item_and_reports_itself_once() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("tickets.sqlite3");
-    let stored: Vec<Ticket> = [2, 3]
-        .into_iter()
-        .map(|id| Ticket {
-            state: "Done".into(),
-            revision: 9,
-            ..ticket(id)
-        })
-        .collect();
-    let (mut app, mut repository, mut runtime) =
-        synced_app(&path, FakeAzure::storing_each(stored.clone()));
-
-    // Space checks the row under the cursor: #3, then #2 below it.
-    for _ in 0..2 {
-        app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    }
-    let action = app
-        .work_items
-        .edit_checked(&mut app.shell, FieldEdit::state("Done"));
-    assert!(
-        matches!(&action, AppAction::Edit(requests) if requests.len() == 2),
-        "one request a checked row, got {action:?}"
-    );
-    handle_action(action, &mut app, &mut runtime, &failing_opener);
-    await_edit(&mut app, &mut repository, &mut runtime);
-
-    for copy in &stored {
-        assert_eq!(
-            app.work_items.ticket_by_key(&copy.key),
-            Some(copy),
-            "every checked work item carries the copy Azure DevOps stored"
-        );
-    }
-    assert_eq!(
-        app.work_items
-            .ticket_by_key(&ticket(1).key)
-            .map(|ticket| ticket.state.clone()),
-        Some("Active".to_owned()),
-        "the row that was never checked is untouched"
-    );
-    assert_eq!(
-        app.shell.notification().map(|(message, _)| message),
-        Some("Updated 2 tickets · State → Done"),
-        "one summary, not one toast a work item"
-    );
-    assert_eq!(
-        SqliteTicketRepository::open_existing(&path)
-            .unwrap()
-            .load_all()
-            .unwrap()
-            .iter()
-            .filter(|ticket| ticket.state == "Done")
-            .count(),
-        2,
-        "the worker wrote both rows it was told to write"
-    );
-}
-
-#[test]
 fn a_conflicting_edit_puts_the_row_back_and_pulls_the_latest_copy() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("tickets.sqlite3");

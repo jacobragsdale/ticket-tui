@@ -107,12 +107,6 @@ impl WorkItemsScreen {
                     self.toggle_bookmark(shell);
                 }
             }
-            PointerTarget::ToggleRowSelect { index } => {
-                if index < self.visible.len() {
-                    self.select_row(shell, index);
-                    self.toggle_row_selection();
-                }
-            }
             PointerTarget::SortHeader(key) => {
                 if let Some(field) = SortField::from_key(key) {
                     self.toggle_sort(shell, field);

@@ -376,9 +376,9 @@ fn render_run_table(
 /// item wears one.
 fn watch_marker(watched: bool) -> Line<'static> {
     if watched {
-        Line::styled(" \u{25c9}", Style::default().fg(theme().accent))
+        Line::styled("\u{25c9}", Style::default().fg(theme().accent))
     } else {
-        Line::from("  ")
+        Line::from(" ")
     }
 }
 

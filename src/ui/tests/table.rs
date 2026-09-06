@@ -473,7 +473,7 @@ fn the_list_table_draws_another_screens_columns_and_sorts_by_their_keys() {
     assert!(
         shell
             .hit_regions
-            .find_target(|target| matches!(target, PointerTarget::ToggleRowSelect { .. }))
+            .find_target(|target| matches!(target, PointerTarget::ToggleBookmark { .. }))
             .is_none(),
         "a screen without markers gets no gutter targets"
     );
@@ -561,7 +561,7 @@ fn an_edit_that_lands_flashes_its_row_once_and_the_flash_runs_out() {
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
         let body = table_body(app);
-        let cell = &terminal.backend().buffer()[(body.x + 3, body.y + 1)];
+        let cell = &terminal.backend().buffer()[(body.x + 2, body.y + 1)];
         (cell.fg, cell.modifier)
     };
     let quiet = gutter(&mut app);

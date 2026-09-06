@@ -909,19 +909,6 @@ impl WorkItemsScreen {
             }
             CommandId::ExportJson => self.export_with("json", export::export_json),
             CommandId::ExportCsv => self.export_with("csv", export::export_csv),
-            CommandId::SelectAll => {
-                self.selected_keys = self
-                    .visible_tickets()
-                    .map(|ticket| ticket.key.clone())
-                    .collect();
-                shell.set_status(format!("Selected {} tickets", self.selected_keys.len()));
-                AppAction::None
-            }
-            CommandId::ClearSelection => {
-                self.selected_keys.clear();
-                shell.set_status("Cleared selection");
-                AppAction::None
-            }
             // Where this run has been is the shell's, not one screen's: the
             // walk can cross tabs.
             CommandId::HistoryBack => AppAction::HistoryBack,

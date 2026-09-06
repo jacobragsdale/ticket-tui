@@ -92,8 +92,7 @@ pub(super) fn render_help_popup(
         Line::from("  Home/End        First/last ticket, family row, or line"),
         Line::from("  Tab             Toggle tickets / details focus"),
         Line::from("  Enter           Select family cursor, or open from details"),
-        Line::from("  Space           Toggle ticket multi-select"),
-        Line::from("  Esc             Clear active search or selection"),
+        Line::from("  Esc             Clear active search"),
         Line::from(""),
         Line::styled(
             "Search and filters",

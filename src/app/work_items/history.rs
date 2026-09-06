@@ -1,5 +1,4 @@
-//! Bookmarks, the checked set, copy and export, the visit history and the
-//! session file.
+//! Bookmarks, copy and export, the visit history and the session file.
 
 use super::*;
 use crate::columns::ColumnId;
@@ -8,11 +7,6 @@ impl WorkItemsScreen {
     #[must_use]
     pub fn is_bookmarked(&self, key: &TicketKey) -> bool {
         self.bookmarks.contains(key)
-    }
-
-    #[must_use]
-    pub fn is_row_selected(&self, key: &TicketKey) -> bool {
-        self.selected_keys.contains(key)
     }
 
     pub(super) fn toggle_bookmark(&mut self, shell: &mut Shell) {
@@ -37,23 +31,8 @@ impl WorkItemsScreen {
         }
     }
 
-    pub(super) fn toggle_row_selection(&mut self) {
-        let Some(key) = self.selected_ticket().map(|ticket| ticket.key.clone()) else {
-            return;
-        };
-        if !self.selected_keys.remove(&key) {
-            self.selected_keys.insert(key);
-        }
-    }
-
     fn export_targets(&self) -> Vec<&Ticket> {
-        if self.selected_keys.is_empty() {
-            return self.selected_ticket().into_iter().collect();
-        }
-        self.tickets()
-            .iter()
-            .filter(|ticket| self.selected_keys.contains(&ticket.key))
-            .collect()
+        self.selected_ticket().into_iter().collect()
     }
 
     pub(super) fn copy_with(

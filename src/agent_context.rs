@@ -57,7 +57,6 @@ pub struct WorkItemsContext {
     pub sort: SortContext,
     pub tickets: TicketsContext,
     pub selected_ticket: Option<TicketContext>,
-    pub checked_tickets: Vec<TicketContext>,
     pub family_cursor: Option<TicketReference>,
     pub details_scroll_line: u16,
     /// Where `g` would go from the row under the cursor on this tab, or
@@ -326,11 +325,10 @@ pub struct TicketContext {
     pub tags: Vec<String>,
     pub web_url: String,
     pub bookmarked: bool,
-    pub checked: bool,
     /// What the work item was worked on with: its pull requests, the commits
     /// that named it, the builds it went out in. Carried on the selected work
-    /// item only — the checked ones are a list, not a reading — and left out
-    /// of the document entirely when there is nothing to say.
+    /// item only, and left out of the document entirely when there is nothing
+    /// to say.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub related: Vec<ArtifactContext>,
 }
@@ -467,7 +465,6 @@ mod tests {
                     visible_rows: Vec::new(),
                 },
                 selected_ticket: None,
-                checked_tickets: Vec::new(),
                 family_cursor: None,
                 details_scroll_line: 0,
             },

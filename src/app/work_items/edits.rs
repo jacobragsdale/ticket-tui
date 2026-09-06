@@ -11,17 +11,11 @@ pub struct EditMenu {
 }
 
 /// What an editor is about to change: the one work item under the cursor, or
-/// every checked row at once. Two or more checked rows make a bulk change of
-/// the state picker, the assignee picker, and the iteration tree — the edits
-/// sprint hygiene means making ten at a time. Every other editor stays on the
-/// row under the cursor, because the same title or the same description on ten
-/// work items is never what was meant.
+/// one field of a form.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EditScope {
     /// One work item, named by its id.
     Ticket(i64),
-    /// Every checked row, counted.
-    Checked(usize),
     /// One field of an open form, which is not a work item at all: the choice
     /// is written back into the form and nothing is sent anywhere.
     Form(FormFieldId),
@@ -34,23 +28,13 @@ impl Default for EditScope {
 }
 
 impl EditScope {
-    /// What an overlay title calls the scope, so a bulk change is never made
-    /// by accident: `#613`, or `5 tickets`.
+    /// What an overlay title calls the scope: `#613`, or `the form`.
     #[must_use]
     pub fn label(self) -> String {
         match self {
             Self::Ticket(id) => format!("#{id}"),
-            Self::Checked(count) => format!("{count} tickets"),
             Self::Form(_) => "the form".to_owned(),
         }
-    }
-
-    /// Whether the editor acts on the checked rows rather than on the one
-    /// under the cursor. The value the row under the cursor already carries is
-    /// only a no-op for the second: the others may well be somewhere else.
-    #[must_use]
-    pub const fn is_bulk(self) -> bool {
-        matches!(self, Self::Checked(_))
     }
 }
 
@@ -117,27 +101,21 @@ pub struct TextPrompt {
 /// work item and nothing under it, so an Epic with eight issues leaves eight
 /// issues hanging under nothing — which is the moment somebody wants to be
 /// told, before the delete rather than after it.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeleteConfirm {
-    /// The work items the confirm covers, in the order the table holds them.
-    pub keys: Vec<TicketKey>,
-    /// The id and title of the one work item, for a delete of a single row.
-    /// `None` for a checked set, which is counted rather than named.
-    pub subject: Option<(i64, String)>,
-    /// The direct children the work items have between them, which the delete
-    /// leaves behind rather than taking with it.
+    /// The work item the confirm covers.
+    pub key: TicketKey,
+    pub title: String,
+    /// The direct children the work item has, which the delete leaves behind
+    /// rather than taking with it.
     pub children: usize,
 }
 
 impl DeleteConfirm {
-    /// What the overlay asks, in a line: the work item by id and title, or the
-    /// checked rows by count.
+    /// What the overlay asks, in a line: the work item by id and title.
     #[must_use]
     pub fn question(&self) -> String {
-        match &self.subject {
-            Some((id, title)) => format!("Delete #{id} {title}?"),
-            None => format!("Delete {} tickets?", self.keys.len()),
-        }
+        format!("Delete #{} {}?", self.key.id, self.title)
     }
 
     /// What the delete leaves behind, or nothing at all when it leaves nothing.
@@ -148,18 +126,13 @@ impl DeleteConfirm {
         if self.children == 0 {
             return None;
         }
-        let whose = if self.subject.is_some() {
-            "Its"
-        } else {
-            "Their"
-        };
         let (children, verb) = if self.children == 1 {
             ("1 child".to_owned(), "is")
         } else {
             (format!("{} children", self.children), "are")
         };
         Some(format!(
-            "{whose} {children} {verb} not deleted \u{2014} left with no parent."
+            "Its {children} {verb} not deleted \u{2014} left with no parent."
         ))
     }
 }
@@ -259,50 +232,14 @@ pub struct SyncTarget {
     pub refresh_seconds: u64,
 }
 
-/// How a change of several work items reads once the last answer is in. A
-/// bulk change counts what landed; an undo of one says what it took back
-/// instead, which the count would only get in the way of.
-#[derive(Clone, Debug)]
-pub(super) enum BulkHeadline {
-    /// The change as a notification says it, such as `State → Doing`, with the
-    /// tally put in front of it.
-    Changed(String),
-    /// The whole line an undo says for itself.
-    Undone(String),
-    /// A set of work items sent to the recycle bin, which has nothing to say
-    /// for itself beyond how many went.
-    Deleted,
-}
-
-impl BulkHeadline {
-    /// The line for a change every work item took.
-    fn all_landed(&self, updated: usize) -> String {
-        match self {
-            Self::Changed(summary) => format!("Updated {updated} tickets · {summary}"),
-            Self::Undone(line) => line.clone(),
-            Self::Deleted => format!("Deleted {updated} tickets"),
-        }
-    }
-
-    /// What the tally of a change that did not land everywhere leads with.
-    const fn verb(&self) -> &'static str {
-        match self {
-            Self::Changed(_) => "Updated",
-            Self::Undone(_) => "Undid",
-            Self::Deleted => "Deleted",
-        }
-    }
-}
-
-/// One change asked of several work items at once, and what has come back of
+/// One undo asked of several work items at once, and what has come back of
 /// it. Each edit is its own request with its own revision test, so they land
-/// one at a time; this counts the answers so the change speaks once, when the
-/// last of them is in, rather than once a row. An undo of a bulk change is
-/// gathered the same way, so it too is never left half done in silence.
+/// one at a time; this counts the answers so the undo speaks once, when the
+/// last of them is in, rather than once a row.
 #[derive(Clone, Debug)]
 pub(super) struct BulkEdit {
-    /// What the whole change says for itself once every answer is in.
-    headline: BulkHeadline,
+    /// What the whole undo says for itself once every answer is in.
+    headline: String,
     /// How many work items it was asked of, answered or not.
     total: usize,
     /// How many of them Azure DevOps accepted.
@@ -334,7 +271,7 @@ impl BulkEdit {
     /// and which work items did not.
     fn notification(&self) -> String {
         if self.failures.is_empty() {
-            return self.headline.all_landed(self.updated);
+            return self.headline.clone();
         }
         let mut named: Vec<String> = self
             .failures
@@ -347,8 +284,7 @@ impl BulkEdit {
             named.push(format!("+{unnamed} more"));
         }
         format!(
-            "{} {} of {} · {}",
-            self.headline.verb(),
+            "Undid {} of {} · {}",
             self.updated,
             self.total,
             named.join(" · ")
@@ -385,55 +321,6 @@ impl WorkItemsScreen {
                 AppAction::None
             }
         }
-    }
-
-    /// [`Self::edit_selected`] for every checked row, which is what the state
-    /// picker, the assignee picker, and the iteration tree do when two or more
-    /// rows are checked. Each work item gets its own request, its own revision
-    /// test, and its own optimistic row; a refusal reverts only the row it
-    /// names, and the answers are gathered into one summary rather than a
-    /// notification apiece. Anything less than two checked rows is not a bulk
-    /// change at all and goes the ordinary way.
-    pub fn edit_checked(&mut self, shell: &mut Shell, edit: FieldEdit) -> AppAction {
-        let targets = self.checked_keys();
-        if targets.len() < 2 {
-            return self.edit_selected(shell, edit);
-        }
-        let mut requests = Vec::new();
-        let mut failures = Vec::new();
-        // One number for the whole change, so `u` puts every row of it back at
-        // once rather than a row a press.
-        let group = self.next_undo_group();
-        for key in targets {
-            // The picker's no-op rule, applied a row at a time: a work item
-            // already carrying the value is left alone rather than written to.
-            if !self.would_change(&key, &edit) {
-                continue;
-            }
-            match self.begin_edit(shell, &key, edit.clone(), UndoRole::Undoable(group)) {
-                Ok(request) => requests.push(request),
-                Err(reason) => failures.push(format!("#{} failed: {reason}", key.id)),
-            }
-        }
-        let total = requests.len() + failures.len();
-        if total == 0 {
-            shell.set_status(format!("Nothing to change · {}", edit.summary()));
-            return AppAction::None;
-        }
-        let bulk = BulkEdit {
-            headline: BulkHeadline::Changed(edit.summary()),
-            total,
-            updated: 0,
-            failures,
-            outstanding: requests.iter().map(|request| request.key.clone()).collect(),
-        };
-        if bulk.outstanding.is_empty() {
-            // Nothing could even be asked, so the whole change is already told.
-            shell.set_error(bulk.notification());
-            return AppAction::None;
-        }
-        self.bulk_edits.push(bulk);
-        AppAction::Edit(requests)
     }
 
     /// Starts one edit: the row takes the change at once, the copy it had is
@@ -474,40 +361,10 @@ impl WorkItemsScreen {
         Ok(request)
     }
 
-    /// The checked rows, in the order the table holds them, so a bulk change
-    /// goes out the way it reads on screen.
-    fn checked_keys(&self) -> Vec<TicketKey> {
-        if self.selected_keys.is_empty() {
-            return Vec::new();
-        }
-        self.tickets
-            .iter()
-            .filter(|ticket| self.selected_keys.contains(&ticket.key))
-            .map(|ticket| ticket.key.clone())
-            .collect()
-    }
-
-    /// Whether an edit would leave a work item any different from how it reads
-    /// now, which is how a bulk change knows what it has nothing to do to.
-    fn would_change(&self, key: &TicketKey, edit: &FieldEdit) -> bool {
-        self.index_of(key).is_some_and(|index| {
-            let mut changed = self.tickets[index].clone();
-            edit.apply(&mut changed);
-            changed != self.tickets[index]
-        })
-    }
-
-    /// What an editor that can act on several rows is about to change, which
-    /// is what its title says: every checked row when two or more are checked,
-    /// and the row under the cursor otherwise.
+    /// The row under the cursor, which is what an editor's title names.
     #[must_use]
     pub(super) fn edit_scope(&self) -> EditScope {
-        let checked = self.checked_keys().len();
-        if checked >= 2 {
-            EditScope::Checked(checked)
-        } else {
-            EditScope::Ticket(self.selected_ticket().map_or(0, |ticket| ticket.key.id))
-        }
+        EditScope::Ticket(self.selected_ticket().map_or(0, |ticket| ticket.key.id))
     }
 
     /// Whether an edit is waiting on Azure DevOps. The database watcher stands
@@ -613,7 +470,7 @@ impl WorkItemsScreen {
             }
         }
         let bulk = BulkEdit {
-            headline: BulkHeadline::Undone(headline),
+            headline,
             total: requests.len() + failures.len(),
             updated: 0,
             failures,
@@ -1027,49 +884,25 @@ impl WorkItemsScreen {
     /// palette. There is no key bound to it: every other editor is a keypress
     /// away because the worst it can do is a value somebody types over, and
     /// this one takes the work item off the board.
-    ///
-    /// The confirmation is opened over every checked row when two or more are
-    /// checked, and over the row under the cursor otherwise — the rule the
-    /// bulk editors already follow.
     pub(super) fn open_delete_confirm(&mut self, shell: &mut Shell) {
         if let Some(reason) = shell.write_refusal() {
             shell.set_error(reason);
             return;
         }
-        let checked = self.checked_keys();
-        let keys = if checked.len() >= 2 {
-            checked
-        } else {
-            self.selected_ticket()
-                .map(|ticket| ticket.key.clone())
-                .into_iter()
-                .collect()
-        };
-        if keys.is_empty() {
+        let Some(ticket) = self.selected_ticket() else {
             shell.set_error("No work item is selected");
             return;
-        }
-        if keys.iter().any(|key| self.pending_deletes.contains(key)) {
+        };
+        let key = ticket.key.clone();
+        let title = ticket.title.clone();
+        if self.pending_deletes.contains(&key) {
             shell.set_error("That work item is already being deleted");
             return;
         }
-        // A child going the same way is not an orphan, so a delete of a parent
-        // and its children together warns about neither.
-        let doomed: HashSet<TicketKey> = keys.iter().cloned().collect();
-        let children = keys
-            .iter()
-            .flat_map(|key| self.graph.children_of(key))
-            .filter(|child| !doomed.contains(child))
-            .count();
-        let subject = match keys.as_slice() {
-            [key] => self
-                .ticket_by_key(key)
-                .map(|ticket| (ticket.key.id, ticket.title.clone())),
-            _ => None,
-        };
+        let children = self.graph.children_of(&key).len();
         self.delete_confirm = Some(DeleteConfirm {
-            keys,
-            subject,
+            key,
+            title,
             children,
         });
         self.mode = WorkItemMode::ConfirmDelete;
@@ -1094,34 +927,17 @@ impl WorkItemsScreen {
         }
     }
 
-    /// Sends the confirmed work items to the recycle bin, one request each,
-    /// which the worker takes in the order the table holds them. Nothing leaves
-    /// the table here: a row is dropped when Azure DevOps says the work item is
+    /// Sends the confirmed work item to the recycle bin. Nothing leaves the
+    /// table here: the row is dropped when Azure DevOps says the work item is
     /// gone, so a refusal leaves it exactly where it was.
     pub fn confirm_delete(&mut self, shell: &mut Shell) -> AppAction {
         self.mode = WorkItemMode::Browse;
         let Some(confirm) = self.delete_confirm.take() else {
             return AppAction::None;
         };
-        let keys = confirm.keys;
-        match keys.as_slice() {
-            [] => return AppAction::None,
-            [key] => shell.set_status(format!("Deleting #{}\u{2026}", key.id)),
-            keys => {
-                // The same tracker a bulk edit uses, so a checked-set delete
-                // speaks once when the last answer is in rather than once a row.
-                self.bulk_edits.push(BulkEdit {
-                    headline: BulkHeadline::Deleted,
-                    total: keys.len(),
-                    updated: 0,
-                    failures: Vec::new(),
-                    outstanding: keys.iter().cloned().collect(),
-                });
-                shell.set_status(format!("Deleting {} tickets\u{2026}", keys.len()));
-            }
-        }
-        self.pending_deletes.extend(keys.iter().cloned());
-        AppAction::Delete(keys)
+        shell.set_status(format!("Deleting #{}\u{2026}", confirm.key.id));
+        self.pending_deletes.insert(confirm.key.clone());
+        AppAction::Delete(vec![confirm.key])
     }
 
     /// Closes the confirmation without deleting anything. Nothing was written
@@ -1183,7 +999,6 @@ impl WorkItemsScreen {
         self.reindex_tickets();
         self.graph.forget(key);
         self.bookmarks.remove(key);
-        self.selected_keys.remove(key);
         self.pending_edits.remove(key);
         self.pending_comments.remove(key);
         shell.forget_jump(&Jump::WorkItem(key.clone()));

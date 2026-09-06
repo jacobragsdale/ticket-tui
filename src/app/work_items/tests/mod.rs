@@ -97,7 +97,7 @@ fn view_row(app: &App, name: &str) -> usize {
 }
 
 #[test]
-fn bookmarks_multi_select_and_copy_use_selected_tickets() {
+fn bookmarks_and_copy_use_the_selected_ticket() {
     let mut app = App::new(vec![
         ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
         ticket(2, "Beta", "2026-02-01T00:00:00Z"),
@@ -108,16 +108,14 @@ fn bookmarks_multi_select_and_copy_use_selected_tickets() {
             .is_bookmarked(&app.work_items.selected_ticket().unwrap().key)
     );
 
-    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
     app.work_items.select_row(&mut app.shell, 1);
-    app.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
     let action = app
         .work_items
         .copy_with(CopiedContent::Id, export::copy_ids);
     assert_eq!(
         action,
         AppAction::Copy {
-            text: "1\n2\n".into(),
+            text: "1\n".into(),
             content: CopiedContent::Id,
         }
     );
@@ -252,20 +250,6 @@ fn edit_request(app: &mut App, edit: FieldEdit) -> EditRequest {
 fn only(requests: Vec<EditRequest>) -> EditRequest {
     assert_eq!(requests.len(), 1, "one work item, one request");
     requests.into_iter().next().expect("the request is there")
-}
-
-/// Checks every row the app holds, which is what turns the pickers into
-/// bulk changes.
-fn check_all(app: &mut App) {
-    for key in app
-        .work_items
-        .tickets()
-        .iter()
-        .map(|ticket| ticket.key.clone())
-        .collect::<Vec<_>>()
-    {
-        app.work_items.selected_keys.insert(key);
-    }
 }
 
 /// The work item as Azure DevOps hands it back: the field written, and the

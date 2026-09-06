@@ -12,7 +12,6 @@ fn agent_context_describes_the_live_ticket_workspace() {
     app.work_items.set_table_viewport(2);
     app.work_items
         .set_query(&mut app.shell, "state:Active".into());
-    app.work_items.toggle_row_selection();
     app.shell.focus = Focus::Details;
     app.work_items.mode = WorkItemMode::Filter;
     app.work_items.active_view = Some("Active work".into());
@@ -30,9 +29,6 @@ fn agent_context_describes_the_live_ticket_workspace() {
     assert_eq!(context.tickets.matching_count, 3);
     assert_eq!(context.tickets.visible_rows.len(), 2);
     assert_eq!(context.selected_ticket.as_ref().unwrap().id, 3);
-    assert!(context.selected_ticket.as_ref().unwrap().checked);
-    assert_eq!(context.checked_tickets.len(), 1);
-    assert_eq!(context.checked_tickets[0].id, 3);
 
     let mut mine = app.work_items.tickets()[0].clone();
     mine.assigned_to = Some("  avery CHEN ".into());
@@ -207,13 +203,6 @@ fn the_context_lists_what_the_selected_work_item_was_worked_on_with() {
     assert!(
         !related[1].in_database,
         "and what it cannot: no run 14 is on file"
-    );
-    assert!(
-        context
-            .checked_tickets
-            .iter()
-            .all(|ticket| ticket.related.is_empty()),
-        "the list of checked work items stays a list"
     );
 }
 

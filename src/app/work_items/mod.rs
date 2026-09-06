@@ -240,7 +240,6 @@ pub struct WorkItemsScreen {
     /// The open single-line field editor, if there is one.
     pub prompt: Option<TextPrompt>,
     bookmarks: HashSet<TicketKey>,
-    selected_keys: HashSet<TicketKey>,
     views: Vec<NamedView>,
     pub active_view: Option<String>,
     graph: TicketGraph,
@@ -376,7 +375,6 @@ impl WorkItemsScreen {
             node_picker: NodePicker::default(),
             prompt: None,
             bookmarks: HashSet::new(),
-            selected_keys: HashSet::new(),
             views: Vec::new(),
             active_view: None,
             graph: prepared.graph,
@@ -592,7 +590,6 @@ impl WorkItemsScreen {
     fn handle_browse_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
         // Navigation keys depend on the focused pane; everything else is a command.
         match key.code {
-            KeyCode::Char(' ') if shell.focus != Focus::Family => self.toggle_row_selection(),
             KeyCode::Tab => shell.toggle_focus(),
             KeyCode::Down | KeyCode::Char('j') => self.move_focused(shell, 1),
             KeyCode::Up | KeyCode::Char('k') => self.move_focused(shell, -1),
@@ -637,7 +634,6 @@ impl WorkItemsScreen {
                 self.sync_family_state(shell);
             }
             KeyCode::Esc if !self.query.is_empty() => self.set_query(shell, String::new()),
-            KeyCode::Esc if !self.selected_keys.is_empty() => self.selected_keys.clear(),
             _ => {
                 if let Some(id) = command_for_key(key, TabId::WorkItems) {
                     return self.run_command(shell, id);

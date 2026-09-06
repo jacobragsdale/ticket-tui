@@ -578,7 +578,7 @@ fn the_edit_menu_and_the_state_picker_render_their_rows_and_state_colours() {
 }
 
 #[test]
-fn a_picker_over_checked_rows_counts_them_in_its_title() {
+fn a_picker_names_the_row_under_the_cursor_in_its_title() {
     let mut app = App::new(vec![
         ticket_at(
             10_001,
@@ -606,23 +606,11 @@ fn a_picker_over_checked_rows_counts_them_in_its_title() {
     );
     app.work_items.set_state_catalog(catalog);
 
-    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
     let single = render_text(80, 20, &mut app);
     assert!(
         single.contains("State \u{b7} #10001"),
-        "one row is named by its id: {single}"
-    );
-    app.handle_key(key(KeyCode::Esc));
-
-    app.handle_key(key(KeyCode::Char(' ')));
-    app.handle_key(key(KeyCode::Down));
-    app.handle_key(key(KeyCode::Char(' ')));
-    app.handle_key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT));
-    let bulk = render_text(80, 20, &mut app);
-    assert!(
-        bulk.contains("State \u{b7} 2 tickets"),
-        "the scope of a bulk change is unmistakable: {bulk}"
+        "the row is named by its id: {single}"
     );
 }
 

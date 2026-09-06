@@ -116,7 +116,6 @@ def validate_ticket(value: object, field: str) -> None:
     for index, tag in enumerate(tags):
         text(tag, f"{field}.tags[{index}]")
     boolean(ticket.get("bookmarked"), f"{field}.bookmarked")
-    boolean(ticket.get("checked"), f"{field}.checked")
 
 
 def validate_sync(value: object) -> None:
@@ -195,10 +194,6 @@ def validate_work_items(data: dict[str, object]) -> None:
     selected = data.get("selected_ticket")
     if selected is not None:
         validate_ticket(selected, "work_items.selected_ticket")
-    checked = object_list(data.get("checked_tickets"))
-    for index, value in enumerate(checked):
-        validate_ticket(value, f"work_items.checked_tickets[{index}]")
-
     family_cursor = data.get("family_cursor")
     if family_cursor is not None:
         cursor = object_mapping(family_cursor)
@@ -326,13 +321,6 @@ def print_work_items(data: dict[str, object]) -> None:
                     f"  - {link.get('kind', '?')} {link.get('target', '?')}"
                     f"{' in ' + str(link['repo']) if link.get('repo') else ''}{held}"
                 )
-
-    checked = object_list(data.get("checked_tickets"))
-    print(f"Checked ({len(checked)}):")
-    for ticket in checked:
-        print(f"  - {ticket_label(ticket)}")
-    if not checked:
-        print("  (none)")
 
     selected = object_mapping(selected_value) if selected_value is not None else {}
     print(f"Visible rows ({len(rows)}):")

@@ -39,17 +39,6 @@ impl WorkItemsScreen {
             .take(self.table.viewport)
             .map(|ticket| self.ticket_context(ticket))
             .collect();
-        // In table order, whatever order the keys came out of the set in.
-        let mut checked: Vec<_> = self
-            .selected_keys
-            .iter()
-            .filter_map(|key| self.index_of(key))
-            .collect();
-        checked.sort_unstable();
-        let checked_tickets = checked
-            .into_iter()
-            .map(|index| self.ticket_context(&self.tickets()[index]))
-            .collect();
         WorkItemsContext {
             // Where `g` goes from here is `App`'s to work out.
             follow: None,
@@ -91,7 +80,6 @@ impl WorkItemsScreen {
                 related: self.artifact_contexts(&ticket.key, shell),
                 ..self.ticket_context(ticket)
             }),
-            checked_tickets,
             family_cursor: self.family_cursor.as_ref().map(|key| TicketReference {
                 organization: key.organization.clone(),
                 id: key.id,
@@ -136,7 +124,6 @@ impl WorkItemsScreen {
             tags: ticket.tags.clone(),
             web_url: ticket.web_url.clone(),
             bookmarked: self.bookmarks.contains(&ticket.key),
-            checked: self.selected_keys.contains(&ticket.key),
             related: Vec::new(),
         }
     }

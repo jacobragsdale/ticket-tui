@@ -272,13 +272,13 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
     let (x, y) = app
         .shell
         .hit_regions
-        .find_target(|target| matches!(target, PointerTarget::ToggleRowSelect { index: 0 }))
+        .find_target(|target| matches!(target, PointerTarget::ToggleBookmark { index: 0 }))
         .map(|region| (region.rect.x, region.rect.y))
-        .expect("row checkbox");
+        .expect("row bookmark marker");
     click(&mut app, x, y);
     assert!(
         app.work_items
-            .is_row_selected(&app.work_items.selected_ticket().unwrap().key)
+            .is_bookmarked(&app.work_items.selected_ticket().unwrap().key)
     );
 }
 

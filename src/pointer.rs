@@ -132,9 +132,6 @@ pub enum PointerTarget {
     ToggleBookmark {
         index: usize,
     },
-    ToggleRowSelect {
-        index: usize,
-    },
     /// A column header, carrying the column's key rather than a work-item
     /// sort field: every screen's table sorts through the same target and
     /// resolves the key against its own columns.

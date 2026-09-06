@@ -415,10 +415,10 @@ impl WorkItemsScreen {
             return AppAction::None;
         };
         self.mode = WorkItemMode::Browse;
-        if !self.state_picker.scope.is_bulk() && option.name == self.state_picker.current {
+        if option.name == self.state_picker.current {
             return AppAction::None;
         }
-        self.edit_checked(shell, FieldEdit::state(&option.name))
+        self.edit_selected(shell, FieldEdit::state(&option.name))
     }
 
     /// The Actions menu's Priority row: 1 to 4 and a `Clear` row, with the
@@ -684,15 +684,13 @@ impl WorkItemsScreen {
             return AppAction::None;
         }
         self.mode = WorkItemMode::Browse;
-        if !self.assignee_picker.scope.is_bulk()
-            && candidate.is_current(self.assignee_picker.current.as_deref())
-        {
+        if candidate.is_current(self.assignee_picker.current.as_deref()) {
             return AppAction::None;
         }
         if candidate.unassigned {
-            return self.edit_checked(shell, FieldEdit::unassign());
+            return self.edit_selected(shell, FieldEdit::unassign());
         }
-        self.edit_checked(
+        self.edit_selected(
             shell,
             FieldEdit::assignee(&candidate.display, candidate.unique.as_deref()),
         )
@@ -1092,11 +1090,11 @@ impl WorkItemsScreen {
             return AppAction::None;
         }
         self.mode = WorkItemMode::Browse;
-        if !self.node_picker.scope.is_bulk() && row.path == self.node_picker.current {
+        if row.path == self.node_picker.current {
             return AppAction::None;
         }
         match self.node_picker.kind {
-            NodeKind::Iteration => self.edit_checked(shell, FieldEdit::iteration(&row.path)),
+            NodeKind::Iteration => self.edit_selected(shell, FieldEdit::iteration(&row.path)),
             NodeKind::Area => self.edit_selected(shell, FieldEdit::area(&row.path)),
         }
     }

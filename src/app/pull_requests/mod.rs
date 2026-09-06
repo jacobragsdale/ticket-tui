@@ -950,7 +950,7 @@ impl Screen for PullRequestsScreen {
         _row: u16,
     ) -> AppAction {
         match target {
-            PointerTarget::TableRow { index } | PointerTarget::ToggleRowSelect { index } => {
+            PointerTarget::TableRow { index } => {
                 if index < self.visible(shell).len() {
                     self.cursor.focus(index);
                 }

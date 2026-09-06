@@ -56,9 +56,9 @@ pub(crate) struct TableSpec<'a, C: ColumnId> {
     pub layer: PointerLayer,
     pub scroll: ScrollSurface,
     pub selectable: SelectableSurface,
-    /// The gutter cell a row opens with — the check and bookmark markers on
-    /// work items. A screen that passes none gets neither the column nor the
-    /// two targets that go with it.
+    /// The gutter cell a row opens with — the bookmark marker on work items.
+    /// A screen that passes none gets neither the column nor the target that
+    /// goes with it.
     pub marker: Option<&'a dyn Fn(usize) -> Line<'static>>,
     /// One cell, by row and column. Called only for the rows on screen.
     pub cell: &'a mut dyn FnMut(usize, C) -> Cell<'static>,
@@ -248,14 +248,7 @@ pub(crate) fn render_list_table<C: ColumnId>(
             && let Some(gutter) = header_columns.first()
         {
             shell.hit_regions.push(region(
-                Rect::new(gutter.x, y, 3, 1),
-                PointerTarget::ToggleRowSelect { index: logical },
-                spec.layer,
-                None,
-                None,
-            ));
-            shell.hit_regions.push(region(
-                Rect::new(gutter.x.saturating_add(3), y, 1, 1),
+                Rect::new(gutter.x, y, MARKER_WIDTH, 1),
                 PointerTarget::ToggleBookmark { index: logical },
                 spec.layer,
                 None,
@@ -351,7 +344,6 @@ pub(super) fn render_table(
         .take(geometry.visible_rows)
         .map(|ticket| PaintedRow {
             ticket,
-            checked: screen.is_row_selected(&ticket.key),
             bookmarked: screen.is_bookmarked(&ticket.key),
             flashing: shell.flashing_row(&ticket.key),
             context: RowContext {
@@ -367,7 +359,7 @@ pub(super) fn render_table(
     let marker = |index: usize| {
         rows.get(index.saturating_sub(offset))
             .map_or_else(Line::default, |row| {
-                row_marker_line(row.checked, row.bookmarked, row.flashing)
+                row_marker_line(row.bookmarked, row.flashing)
             })
     };
     let mut cell = |index: usize, column: SortField| {
@@ -446,7 +438,6 @@ pub(super) fn render_table(
 /// One row of the work item table, as the list table asks for it.
 struct PaintedRow<'a> {
     ticket: &'a Ticket,
-    checked: bool,
     bookmarked: bool,
     /// Whether an edit of this row has just landed or just been taken back.
     flashing: bool,
@@ -840,8 +831,7 @@ pub(super) fn changed_style(plain: Style, stale: bool) -> Style {
     plain
 }
 
-pub(super) fn row_marker_line(checked: bool, bookmarked: bool, flashing: bool) -> Line<'static> {
-    let check = if checked { "[x]" } else { "[ ]" };
+pub(super) fn row_marker_line(bookmarked: bool, flashing: bool) -> Line<'static> {
     let star = if bookmarked { "*" } else { " " };
     // An edit that has just landed, or just been taken back, leaves the row's
     // gutter in the accent for a couple of frames: a row several away from
@@ -853,15 +843,14 @@ pub(super) fn row_marker_line(checked: bool, bookmarked: bool, flashing: bool) -
     } else {
         Style::default()
     };
-    Line::from(vec![
-        Span::styled(check, gutter),
-        Span::styled(
-            star,
-            if bookmarked {
-                gutter.fg(theme().accent).add_modifier(Modifier::BOLD)
-            } else {
-                gutter.fg(theme().muted)
-            },
-        ),
-    ])
+    Line::from(Span::styled(
+        star,
+        if bookmarked {
+            gutter.fg(theme().accent).add_modifier(Modifier::BOLD)
+        } else if flashing {
+            gutter
+        } else {
+            gutter.fg(theme().muted)
+        },
+    ))
 }

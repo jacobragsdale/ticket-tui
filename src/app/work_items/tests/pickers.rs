@@ -617,58 +617,6 @@ fn the_assignee_picker_lists_nobody_then_me_then_the_database_and_starts_on_the_
 }
 
 #[test]
-fn checking_several_rows_hands_all_of_them_to_whoever_the_picker_names() {
-    let mut app = assignee_app();
-    check_all(&mut app);
-
-    press(&mut app, KeyCode::Char('a'));
-    assert_eq!(
-        app.work_items.assignee_picker.scope,
-        EditScope::Checked(3),
-        "reassigning a departing engineer's work is one change, not three"
-    );
-    press(&mut app, KeyCode::Up);
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
-        panic!("choosing somebody should reassign every checked row");
-    };
-
-    assert_eq!(
-        requests
-            .iter()
-            .map(|request| request.key.id)
-            .collect::<Vec<_>>(),
-        [1, 2, 3]
-    );
-    for request in &requests {
-        assert_eq!(request.edit.summary(), "Assignee \u{2192} Jacob Ragsdale");
-    }
-    assert!(
-        app.work_items
-            .tickets()
-            .iter()
-            .all(|ticket| ticket.assigned_to.as_deref() == Some("Jacob Ragsdale")),
-        "every row shows its new owner at once"
-    );
-
-    // Whoever holds the row under the cursor is a change worth making to
-    // the others, so it is no longer the no-op it is for a single row.
-    let mut app = assignee_app();
-    check_all(&mut app);
-    press(&mut app, KeyCode::Char('a'));
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
-        panic!("the other checked rows are held by somebody else");
-    };
-    assert_eq!(
-        requests
-            .iter()
-            .map(|request| request.key.id)
-            .collect::<Vec<_>>(),
-        [1, 2],
-        "#3 already holds it, so it is passed over rather than rewritten"
-    );
-}
-
-#[test]
 fn typing_filters_the_assignee_picker_and_enter_assigns_who_is_left() {
     let mut app = assignee_app();
     app.work_items.set_identities(vec![Identity::new(
@@ -1028,51 +976,6 @@ fn choosing_the_node_the_work_item_is_already_in_writes_nothing() {
     assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert!(!app.work_items.edits_pending());
-}
-
-#[test]
-fn checking_several_rows_moves_them_all_to_the_sprint_chosen_but_not_to_an_area() {
-    let mut app = node_app();
-    check_all(&mut app);
-
-    open_nodes(&mut app, NodeKind::Iteration);
-    assert_eq!(
-        app.work_items.node_picker.scope,
-        EditScope::Checked(3),
-        "a sprint's leftovers move on together"
-    );
-    press(&mut app, KeyCode::Up);
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
-        panic!("choosing a sprint should move every checked row");
-    };
-    assert_eq!(
-        requests
-            .iter()
-            .map(|request| request.key.id)
-            .collect::<Vec<_>>(),
-        [1, 2, 3]
-    );
-    assert!(
-        app.work_items
-            .tickets()
-            .iter()
-            .all(|ticket| ticket.iteration_path == "development\\Sprint 1"),
-        "every row carries the full path at once"
-    );
-
-    let mut app = node_app();
-    check_all(&mut app);
-    open_nodes(&mut app, NodeKind::Area);
-    assert_eq!(
-        app.work_items.node_picker.scope,
-        EditScope::Ticket(3),
-        "the area tree stays on the row under the cursor"
-    );
-    press(&mut app, KeyCode::Up);
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
-        panic!("choosing another area should dispatch an edit");
-    };
-    assert_eq!(only(requests).key.id, 3);
 }
 
 #[test]

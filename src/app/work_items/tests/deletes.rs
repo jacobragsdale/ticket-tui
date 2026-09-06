@@ -63,7 +63,7 @@ fn the_delete_confirmation_names_the_work_item_and_the_children_it_leaves_behind
         .delete_confirm
         .clone()
         .expect("the Actions menu row opens the confirmation");
-    assert_eq!(confirm.keys, vec![family_key(1)]);
+    assert_eq!(confirm.key, family_key(1));
     assert_eq!(confirm.question(), "Delete #1 Auth rewrite?");
     assert_eq!(
         confirm.children, 2,
@@ -230,75 +230,6 @@ fn a_refused_delete_says_so_and_leaves_the_row_on_the_table() {
             NotificationLevel::Error
         ))
     );
-}
-
-#[test]
-fn a_checked_set_deletes_one_at_a_time_and_speaks_once_at_the_end() {
-    let mut app = deleting_app();
-    app.work_items.select_row(&mut app.shell, 1);
-    press(&mut app, KeyCode::Char(' '));
-    app.work_items.select_row(&mut app.shell, 2);
-    press(&mut app, KeyCode::Char(' '));
-
-    open_delete_menu(&mut app);
-    let confirm = app
-        .work_items
-        .delete_confirm
-        .clone()
-        .expect("the confirmation is open");
-    assert_eq!(confirm.question(), "Delete 2 tickets?");
-    assert_eq!(
-        confirm.orphans().as_deref(),
-        Some("Their 1 child is not deleted \u{2014} left with no parent."),
-        "the checked rows are counted together, and so is the work under them"
-    );
-
-    let action = press(&mut app, KeyCode::Char('d'));
-    assert_eq!(
-        action,
-        AppAction::Delete(vec![family_key(2), family_key(3)]),
-        "one request each, in the order the table holds them"
-    );
-
-    app.work_items.apply_deleted(&mut app.shell, &family_key(2));
-    assert_eq!(
-        app.shell.notification().map(|(message, _)| message),
-        Some("Deleting 2 tickets\u{2026}"),
-        "the first answer says nothing of its own"
-    );
-
-    app.work_items.apply_deleted(&mut app.shell, &family_key(3));
-
-    assert_eq!(rows_of(&app), [1, 4]);
-    assert_eq!(
-        app.shell.notification(),
-        Some(("Deleted 2 tickets", NotificationLevel::Info)),
-        "the whole change speaks once, when the last answer is in"
-    );
-}
-
-#[test]
-fn a_checked_set_that_only_partly_lands_counts_what_went_and_names_what_stayed() {
-    let mut app = deleting_app();
-    app.work_items.select_row(&mut app.shell, 1);
-    press(&mut app, KeyCode::Char(' '));
-    app.work_items.select_row(&mut app.shell, 2);
-    press(&mut app, KeyCode::Char(' '));
-    open_delete_menu(&mut app);
-    press(&mut app, KeyCode::Char('d'));
-
-    app.work_items.apply_deleted(&mut app.shell, &family_key(2));
-    app.work_items
-        .reject_delete(&mut app.shell, &family_key(3), "it is locked");
-
-    assert_eq!(
-        app.shell.notification(),
-        Some((
-            "Deleted 1 of 2 \u{b7} #3 failed: it is locked",
-            NotificationLevel::Error
-        ))
-    );
-    assert_eq!(rows_of(&app), [1, 3, 4], "the one that was refused stays");
 }
 
 #[test]
