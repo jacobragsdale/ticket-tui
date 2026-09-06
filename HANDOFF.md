@@ -47,7 +47,15 @@ Last updated 2026-09-06. The backlog itself lives in Azure DevOps
   as `SyncEvent::Commented`, so `apply_comment` replaces by id and says `Updated
   comment on #N`. Only comments under `shell.me()` are targets; with no name known,
   all are. Not built: deleting a comment, unicode-width caret placement, criteria
-  in History or search.
+  in History or search. **Verified live** on 2026-09-06 with a pty/pyte harness against
+  the test-drive tickets: a two-line comment with a `- ` bullet posted to #766 as
+  `<p>…</p><ul><li>…</li></ul>`, a click on its body reopened it and `Ctrl-S` sent the
+  PATCH (the `(edited)` suffix came back from REST), two criteria saved on #768 (Azure
+  DevOps stores them with its own spacing, `<li>Green build </li>`), `Esc` kept a draft
+  on #769 and reopening restored it, and #767's description opened with the
+  rich-formatting notice, `**bold span**` and the table as `Column | Value` rows. On the
+  34k bench database with `TICKET_TUI_TRACE`, typing forty lines into the composer one
+  key per frame drew 1,640 of ~1,660 frames in 1 ms, the slowest in 13 ms.
 
 - **`o` under WSL (2026-09-05, no ticket).** On the VDI `o` opened nothing: the launcher
   ran `xdg-open` with inherited stdio, and a WSL box has no working `xdg-open` unless
