@@ -315,17 +315,27 @@ impl SqliteTicketRepository {
     pub fn open_existing(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let connection = connect(&path)?;
-        let version = schema_version(&connection)?;
+        let repository = Self {
+            connection,
+            path,
+            schema_rebuilt: false,
+        };
+        repository.assert_current_schema()?;
+        Ok(repository)
+    }
+
+    /// Whether the file is still at this build's schema. A newer build that
+    /// opened the same file since has rebuilt it, and a write from this one
+    /// would leave the columns it does not know empty — so the sync worker
+    /// asks before every write, not only when its connection opened.
+    pub fn assert_current_schema(&self) -> Result<()> {
+        let version = schema_version(&self.connection)?;
         if version != SCHEMA_VERSION {
             bail!(
                 "ticket cache schema is version {version} but this build expects {SCHEMA_VERSION}; restart ticket-tui"
             );
         }
-        Ok(Self {
-            connection,
-            path,
-            schema_rebuilt: false,
-        })
+        Ok(())
     }
 
     /// Whether [`Self::open`] dropped and recreated the tables because the file
@@ -2112,10 +2122,20 @@ mod tests {
             1
         );
 
+        // A connection opened before a newer build rebuilt the file notices
+        // on its next write, not only at open: its inserts name only the
+        // columns it knows, and a row it wrote would carry the rest empty.
+        let open_since_before = SqliteTicketRepository::open_existing(&path).unwrap();
+        assert!(open_since_before.assert_current_schema().is_ok());
         Connection::open(&path)
             .unwrap()
             .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
             .unwrap();
+        let stale = format!(
+            "{:#}",
+            open_since_before.assert_current_schema().unwrap_err()
+        );
+        assert!(stale.contains("restart ticket-tui"), "{stale}");
         let error = format!(
             "{:#}",
             SqliteTicketRepository::open_existing(&path).unwrap_err()

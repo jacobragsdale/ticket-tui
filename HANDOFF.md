@@ -21,6 +21,15 @@ Last updated 2026-09-06. The backlog itself lives in Azure DevOps
   yet Azure DevOps accepted it on create and stores it, so the section is real on
   this project too. `tag:test-drive` finds them; delete them when done.
 
+- **A stale instance wrote empty criteria (2026-09-06).** Jacob added criteria to #758
+  in the browser and the pane showed none: a `ticket-tui` from the day before the
+  schema bump was still running with its 60 s timer, its worker's connection had
+  opened on schema 17 and was never asked again, and its `INSERT OR REPLACE` names only
+  the columns it knows — so it stored revision 4 of #758 with `acceptance_criteria`
+  empty and moved the watermark past it. `Worker::repository()` now calls
+  `assert_current_schema` before every write, so the old build would have failed its
+  pull with `restart ticket-tui` instead. The repair was `ticket-tui sync --full`.
+
 - **The composer (2026-09-06, no ticket).** Acceptance criteria and new comments are
   typed in the details pane where they are read, not in an overlay or `$EDITOR`.
   `TextInput` learnt newlines: `insert_newline`, `paste_block`, `move_up`/`move_down`

@@ -1945,8 +1945,11 @@ its tables dropped and recreated at startup, and a pull runs immediately to
 refill it, whatever `--refresh` says. Deleting the file has the same effect. The
 sync worker and background reloads instead open the database without touching
 its schema and report the version mismatch, ending in `restart ticket-tui`, so a
-running instance can never empty a database a newer build owns. After upgrading
-the binary, restart any running ticket-tui.
+running instance can never empty a database a newer build owns. The worker
+checks the version again before every write, so an instance left running from
+before a bump stops writing the moment a newer build has rebuilt the file —
+its inserts name only the columns it knows, and a row it wrote would carry the
+new ones empty. After upgrading the binary, restart any running ticket-tui.
 
 An edited work item is written to Azure DevOps first and stored from the copy
 that comes back, so these records only ever hold what the server accepted.

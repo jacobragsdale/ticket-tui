@@ -2131,10 +2131,15 @@ impl Worker {
         if self.repository.is_none() {
             self.repository = Some(SqliteTicketRepository::open_existing(&self.database)?);
         }
-        Ok(self
+        let repository = self
             .repository
             .as_mut()
-            .expect("the database was just opened"))
+            .expect("the database was just opened");
+        // A newer build may have rebuilt the file since this connection
+        // opened; a row written from here would carry none of its new
+        // columns, so the check is made on every write rather than once.
+        repository.assert_current_schema()?;
+        Ok(repository)
     }
 }
 
