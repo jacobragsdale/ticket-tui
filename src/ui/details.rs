@@ -2,6 +2,7 @@
 //! tree, its history and its comments.
 
 use super::*;
+use crate::text_input::{WrapLayout, wrap_with_cursor};
 
 /// The details pane is one scrolling document: the heading, the family tree,
 /// Planning, Description, Acceptance Criteria, Comments, and History are lines
@@ -234,34 +235,60 @@ pub(super) fn render_details(
     }
     lines.extend(body_lines(&ticket.description, "No description"));
 
+    // The composer, when it is open on this work item: its rows stand where
+    // the section it edits would be, wrapped here — a column short of the
+    // pane, so no row ever re-wraps — so every row is one screen row and the
+    // caret's cell is known.
+    let wrap_width = usize::from(width.saturating_sub(1).max(1));
+    let composing = screen
+        .composer
+        .as_ref()
+        .filter(|composer| composer.key == ticket.key)
+        .map(|composer| Composing {
+            target: composer.target,
+            layout: wrap_with_cursor(composer.input.text(), composer.input.cursor(), wrap_width),
+            follow: composer.follow_cursor,
+        });
+    let mut sections = ComposeSections::default();
+
     lines.push(Line::default());
     lines.push(section_line("Acceptance Criteria", width));
-    lines.extend(body_lines(
-        &ticket.acceptance_criteria,
-        "No acceptance criteria",
-    ));
+    sections.body(
+        &mut lines,
+        ComposeTarget::AcceptanceCriteria,
+        body_lines(&ticket.acceptance_criteria, "No acceptance criteria"),
+        composing.as_ref(),
+    );
 
-    let loading_details = screen.details_pending.as_ref() == Some(&ticket.key);
-    let comments = screen.comments_for(&ticket.key);
-    if loading_details || !comments.is_empty() {
-        lines.push(Line::default());
-        lines.push(section_line("Comments", width));
-        if loading_details {
-            lines.push(Line::styled(
-                format!("  {} Loading comments and history", spinner_frame()),
-                Style::default().fg(theme().muted),
-            ));
-        }
-        for comment in comments {
-            let who = comment.author.as_deref().unwrap_or("unknown");
-            lines.push(Line::from(format!(
-                "  {who} · {}",
-                comment.created_at.exact_utc()
-            )));
-            lines.extend(comment.text.lines().map(|line| {
-                Line::styled(format!("    {line}"), Style::default().fg(theme().body))
-            }));
-        }
+    lines.push(Line::default());
+    lines.push(section_line("Comments", width));
+    if screen.details_pending.as_ref() == Some(&ticket.key) {
+        lines.push(Line::styled(
+            format!("  {} Loading comments and history", spinner_frame()),
+            Style::default().fg(theme().muted),
+        ));
+    }
+    sections.body(
+        &mut lines,
+        ComposeTarget::NewComment,
+        vec![Line::styled(
+            "  Add a comment…",
+            Style::default().fg(theme().muted),
+        )],
+        composing.as_ref(),
+    );
+    for comment in screen.comments_for(&ticket.key) {
+        let who = comment.author.as_deref().unwrap_or("unknown");
+        lines.push(Line::from(format!(
+            "  {who} · {}",
+            comment.created_at.exact_utc()
+        )));
+        lines.extend(
+            comment
+                .text
+                .lines()
+                .map(|line| Line::styled(format!("    {line}"), Style::default().fg(theme().body))),
+        );
     }
     let history = screen.history_for(&ticket.key);
     if !history.is_empty() {
@@ -272,7 +299,10 @@ pub(super) fn render_details(
     }
 
     // Wrapping moves every line under a long one down, so the click targets
-    // are placed on the rows the paragraph actually draws them on.
+    // are placed on the rows the paragraph actually draws them on. The
+    // sections the composer opens on sit at the foot of the document, so
+    // while any is a target every line is measured — cheaply: only a line
+    // wider than the pane is laid out to find its height.
     let last_hit = field_hits
         .iter()
         .map(|(line, ..)| *line)
@@ -281,9 +311,12 @@ pub(super) fn render_details(
         .chain(artifact_links.iter().map(|(line, _)| *line))
         .chain(url_line)
         .max();
-    let rows = last_hit.map_or_else(Vec::new, |last| {
-        wrapped_row_starts(&lines, width, usize::from(last).saturating_add(1))
-    });
+    let upto = if peeking && composing.is_none() {
+        last_hit.map_or(0, |last| usize::from(last).saturating_add(1))
+    } else {
+        lines.len()
+    };
+    let rows = wrapped_row_starts(&lines, width, upto);
     screen.family_rows = family_lines
         .iter()
         .map(|line| rows.get(usize::from(*line)).copied().map_or(0, usize::from))
@@ -295,6 +328,28 @@ pub(super) fn render_details(
     let line_count = paragraph.line_count(width);
     let viewport = usize::from(inner.height);
     screen.details.set_viewport(viewport, line_count);
+    // The composer's caret: the row the composer starts on, plus the row the
+    // caret is on within it. The frame after a key brings it into view; the
+    // wheel is free to scroll away from it in between.
+    let caret = sections
+        .composer_first
+        .zip(composing.as_ref())
+        .map(|(first, composing)| {
+            let start = rows.get(usize::from(first)).copied().unwrap_or(0);
+            (
+                usize::from(start) + composing.layout.cursor.0,
+                composing.layout.cursor.1,
+            )
+        });
+    if let Some((row, _)) = caret
+        && composing.as_ref().is_some_and(|composing| composing.follow)
+    {
+        screen.details.ensure_visible(row);
+    }
+    if let Some(composer) = screen.composer.as_mut() {
+        composer.width = u16::try_from(wrap_width).unwrap_or(u16::MAX);
+        composer.follow_cursor = false;
+    }
     let scroll = screen.details.offset;
     let scroll_rows = u16::try_from(scroll).unwrap_or(u16::MAX);
     frame.render_widget(paragraph.scroll((scroll_rows, 0)), inner);
@@ -303,6 +358,41 @@ pub(super) fn render_details(
         let row = rows.get(usize::from(logical)).copied()?;
         visible_row_y(inner, row, scroll_rows)
     };
+    // The composer's rows: the surface ground under each, so the editor reads
+    // as a field; a target on each that puts the caret where a click lands;
+    // and the caret itself, in its cell.
+    if let (Some(first), Some(composing)) = (sections.composer_first, composing.as_ref()) {
+        let first_row = rows.get(usize::from(first)).copied().unwrap_or(0);
+        for index in 0..composing.layout.rows.len() {
+            let Some(y) = u16::try_from(index).ok().and_then(|index| {
+                visible_row_y(inner, first_row.saturating_add(index), scroll_rows)
+            }) else {
+                continue;
+            };
+            let buffer = frame.buffer_mut();
+            for x in inner.x..inner.x.saturating_add(inner.width) {
+                buffer[(x, y)].set_style(Style::default().bg(theme().surface));
+            }
+            shell.hit_regions.push(region(
+                Rect::new(inner.x, y, inner.width, 1),
+                PointerTarget::ComposerRow { row: index },
+                PointerLayer::Base,
+                Some(SelectableSurface::Details),
+                Some(ScrollSurface::Details),
+            ));
+        }
+        if let Some((row, column)) = caret
+            && let Some(y) = u16::try_from(row)
+                .ok()
+                .and_then(|row| visible_row_y(inner, row, scroll_rows))
+        {
+            let x = inner
+                .x
+                .saturating_add(u16::try_from(column).unwrap_or(u16::MAX))
+                .min(inner.x.saturating_add(inner.width.saturating_sub(1)));
+            frame.set_cursor_position((x, y));
+        }
+    }
     if let Some(y) = url_line.and_then(row_of) {
         shell.hit_regions.push(region(
             Rect::new(inner.x, y, inner.width, 1),
@@ -354,6 +444,30 @@ pub(super) fn render_details(
                 register_edit_field(shell, inner, field, y, x, span_width);
             }
         }
+        // Every row a section's body takes opens the composer on it.
+        let row_end = |logical: u16| -> u16 {
+            rows.get(usize::from(logical).saturating_add(1))
+                .copied()
+                .unwrap_or_else(|| u16::try_from(line_count).unwrap_or(u16::MAX))
+        };
+        for (first, count, target) in &sections.targets {
+            for logical in *first..first.saturating_add(*count) {
+                let Some(start) = rows.get(usize::from(logical)).copied() else {
+                    break;
+                };
+                for row in start..row_end(logical) {
+                    if let Some(y) = visible_row_y(inner, row, scroll_rows) {
+                        shell.hit_regions.push(region(
+                            Rect::new(inner.x, y, inner.width, 1),
+                            PointerTarget::Compose(*target),
+                            PointerLayer::Base,
+                            Some(SelectableSurface::Details),
+                            Some(ScrollSurface::Details),
+                        ));
+                    }
+                }
+            }
+        }
     }
     let overflow = line_count > viewport;
     if overflow {
@@ -383,13 +497,67 @@ pub(super) fn wrapped_row_starts(lines: &[Line<'_>], width: u16, upto: usize) ->
     let mut row = 0u16;
     for line in lines.iter().take(upto) {
         starts.push(row);
-        let height = Paragraph::new(line.clone())
-            .wrap(Wrap { trim: false })
-            .line_count(width)
-            .max(1);
+        // A line that fits takes one row; only a wider one is laid out.
+        let height = if line.width() <= usize::from(width) {
+            1
+        } else {
+            Paragraph::new(line.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(width)
+                .max(1)
+        };
         row = row.saturating_add(u16::try_from(height).unwrap_or(u16::MAX));
     }
     starts
+}
+
+/// The composer as this frame draws it: which section it stands in, its rows
+/// wrapped to the pane, and whether the pane scrolls to the caret.
+struct Composing {
+    target: ComposeTarget,
+    layout: WrapLayout,
+    follow: bool,
+}
+
+/// Where the sections the composer can open on landed in the document: each
+/// as its first logical line and how many it took, and the composer's own
+/// first line when it is open in one of them.
+#[derive(Default)]
+struct ComposeSections {
+    targets: Vec<(u16, u16, ComposeTarget)>,
+    composer_first: Option<u16>,
+}
+
+impl ComposeSections {
+    /// One section's body: the composer's rows when it is open there, the
+    /// body itself otherwise, either recorded for the click targets.
+    fn body<'a>(
+        &mut self,
+        lines: &mut Vec<Line<'a>>,
+        target: ComposeTarget,
+        body: Vec<Line<'a>>,
+        composing: Option<&Composing>,
+    ) {
+        let first = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+        match composing.filter(|composing| composing.target == target) {
+            Some(composing) => {
+                self.composer_first = Some(first);
+                let style = Style::default().fg(theme().text);
+                lines.extend(
+                    composing
+                        .layout
+                        .rows
+                        .iter()
+                        .map(|(_, text)| Line::styled(text.clone(), style)),
+                );
+            }
+            None => {
+                self.targets
+                    .push((first, u16::try_from(body.len()).unwrap_or(u16::MAX), target));
+                lines.extend(body);
+            }
+        }
+    }
 }
 
 pub(super) struct FamilyHit {

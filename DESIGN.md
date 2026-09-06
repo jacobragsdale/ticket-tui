@@ -696,11 +696,11 @@ on a database that has never reached Azure DevOps.
 
 The Actions menu's remaining rows are the edits that would otherwise mean opening a
 browser. Title, Priority, Tags, Iteration, Area, Set parent, Remove parent,
-Description, and Add comment have no key of their own; they are reached through
-`e`, or by name in the command palette as `Edit title`, `Edit priority`,
-`Edit tags`, `Change iteration`, `Change area`, `Set parent…`,
-`Remove parent`, `Edit description`, and `Add comment`. Assignee is reached the
-same way, and also directly with `a`.
+Description, Acceptance criteria, and Add comment have no key of their own;
+they are reached through `e`, or by name in the command palette as `Edit
+title`, `Edit priority`, `Edit tags`, `Change iteration`, `Change area`, `Set
+parent…`, `Remove parent`, `Edit description`, `Edit acceptance criteria`, and
+`Add comment`. Assignee is reached the same way, and also directly with `a`.
 
 **Title** opens a one-line field prefilled with the title, edited with the same
 keys as the named-view editor — `←`/`→`, `Home`/`End`, `Ctrl-W`, `Ctrl-U`, and
@@ -877,26 +877,44 @@ Azure DevOps answers a move with the moved work item alone, so the child link
 the old parent still held is cleared in the same transaction that writes the new
 parent link — no reader ever sees the work item in two families or in none.
 
-**Add comment** is the last Actions menu row, and `Add comment` in the palette. It
-opens a one-line box — empty, because there is nothing to edit, only something
-to say — titled `Comment on #613` and edited with the same keys as the other
-prompts. `Enter` posts, `Esc` changes nothing, and a comment that is empty or
-only whitespace is refused here rather than sent, with the box left open on it.
-One line is the whole of it: long-form comments still belong in the browser.
+**Acceptance criteria** and **Add comment** open the composer: the details
+pane's own editor, which stands where the section is read rather than in an
+overlay. Clicking the acceptance criteria — or the `No acceptance criteria`
+line when there are none — opens it on them, prefilled as Markdown the way the
+description editor is, notice line and all; clicking `Add a comment…` under
+the Comments heading opens it empty, because there is nothing to edit, only
+something to say. `Enter` with the details pane focused does the same for the
+section under the pointer, and the Actions menu rows and the palette's `Edit
+acceptance criteria` and `Add comment` open it from the keyboard, scrolling
+the pane to it.
+
+In the composer `Enter` is a newline, `↑`/`↓` move by wrapped row, a click on
+one of its rows puts the caret there, a paste keeps its line breaks, and the
+one-line keys — `←`/`→`, `Home`/`End`, `Ctrl-W`, `Ctrl-U` — work as they do
+in every prompt. `Ctrl-S` saves: the acceptance criteria go down the path
+above as `Microsoft.VSTS.Common.AcceptanceCriteria`, converted from Markdown
+like a description and shown before the network answers, and criteria saved
+back as they were close without a write. `Esc` closes the composer and keeps
+the draft — per work item and section, in memory for the session — so the
+same section opened again starts where it stopped; a click anywhere else in
+the app does the same before it does its own work, and `Tab` does it on the
+way to the table. A draft that says nothing new is not kept. A comment that is
+empty or only whitespace is refused with the composer left open on it.
 
 A comment is not a field, so it is not a JSON Patch and carries no revision
-test. What was typed is escaped — `&`, `<`, and `>`, the three characters that
-would otherwise be read as markup — wrapped in a paragraph, and sent as
+test. What was typed is Markdown, converted the way a description is —
+paragraphs, `- ` bullets, `1.` numbers, fenced code, links, `**bold**`, with
+`&`, `<`, and `>` escaped — and sent as
 `POST /<project>/_apis/wit/workItems/<id>/comments` with a body of
-`{"text": "<p>merged into main</p>"}`.
+`{"text": "<p>merged into main</p>"}`. The `comment` subcommand is unchanged.
 
 It is also the one write that is not optimistic. A comment has no id, date, or
 author until Azure DevOps gives it one, and a line that turned out never to have
 been posted is worse than a moment's wait, so nothing appears until the server
 answers. The status line reads `Posting comment on #613…` while it is out and
 `Commented on #613` when it lands, at which point the comment is written to
-`work_item_comments` on its own and appears at the foot of the details pane's
-Comments section. A refusal writes nothing at all and says so:
+`work_item_comments` on its own and appears at the head of the details pane's
+Comments section, newest first. A refusal writes nothing at all and says so:
 `#613 comment not posted: HTTP 403: the work item is read only`. One comment
 per work item is in flight at a time; a second says `an earlier comment is
 still in flight`.
@@ -1505,7 +1523,8 @@ anything on tab `1`.
 | Palette → Toggle search order | Relevance-first or strict field ordering during search |
 | `e` → Title/Priority/Tags/Iteration/Area | Edit the title, priority, tags, iteration, or area; also `Edit title`, `Edit priority`, `Edit tags`, `Change iteration`, `Change area`, and `Change assignee` in the palette |
 | `e` → Description | Edit the description in `$VISUAL`/`$EDITOR`/`vi` as Markdown; also `Edit description` in the palette |
-| `e` → Add comment | Leave a one-line comment on the selected work item; also `Add comment` in the palette |
+| `e` → Acceptance criteria | Edit the acceptance criteria in the details pane; also `Edit acceptance criteria` in the palette, or click them |
+| `e` → Add comment | Write a comment in the details pane — `Enter` newline, `Ctrl-S` post, `Esc` keep the draft; also `Add comment` in the palette, or click `Add a comment…` |
 | `n` | Open the new work item form; `↑`/`↓` or `Tab` moves between fields, `Enter` opens a field's picker, `Ctrl-S` creates, `Esc` keeps the draft |
 | `N` | Open the same form as a child of the selected work item: the type it breaks down into, the parent fixed, the area and iteration inherited; also `New child` in the Actions menu and the palette |
 | `+` | Quick capture, on every tab: one row, a title, `Enter`. Everything else is defaulted rather than asked — `Issue`, you, the current sprint, tagged `inbox` — and nothing moves; `Esc` leaves nothing behind |

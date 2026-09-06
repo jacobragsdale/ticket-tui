@@ -22,8 +22,8 @@ use crate::model::{
     SortDirection, SortField, StateCategory, Ticket, TicketKey, path_leaf,
 };
 use crate::pointer::{
-    EditableField, OverlayAnchor, PointerLayer, PointerTarget, ScrollMetrics, ScrollState,
-    ScrollSurface, SelectableSnapshot, SelectableSurface, ThumbGeometry, region,
+    ComposeTarget, EditableField, OverlayAnchor, PointerLayer, PointerTarget, ScrollMetrics,
+    ScrollState, ScrollSurface, SelectableSnapshot, SelectableSurface, ThumbGeometry, region,
 };
 use crate::search::QueryHighlighter;
 use crate::sprint::{SummaryRow, SummaryRowKind};
@@ -356,7 +356,11 @@ fn render_pass(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, shell: &mut 
         WorkItemMode::Form => render_form(frame, screen, shell),
         WorkItemMode::TypePicker => render_type_picker(frame, screen, shell),
         WorkItemMode::ConfirmDelete => render_delete_confirm(frame, screen, shell),
-        WorkItemMode::Browse | WorkItemMode::Search | WorkItemMode::Capture => {}
+        // The composer is drawn by the details pane, where it is typed.
+        WorkItemMode::Browse
+        | WorkItemMode::Search
+        | WorkItemMode::Capture
+        | WorkItemMode::Compose => {}
     }
 }
 
@@ -436,7 +440,10 @@ fn modal_layer(screen: &WorkItemsScreen) -> PointerLayer {
 fn current_layer(screen: &WorkItemsScreen) -> PointerLayer {
     match screen.mode {
         WorkItemMode::Facets => PointerLayer::Popup,
-        WorkItemMode::Browse | WorkItemMode::Search | WorkItemMode::Capture => PointerLayer::Base,
+        WorkItemMode::Browse
+        | WorkItemMode::Search
+        | WorkItemMode::Capture
+        | WorkItemMode::Compose => PointerLayer::Base,
         _ => PointerLayer::Modal,
     }
 }

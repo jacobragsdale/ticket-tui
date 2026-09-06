@@ -42,9 +42,6 @@ impl EditScope {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PromptField {
     Title,
-    /// A new comment on the work item, which starts empty rather than
-    /// prefilled: there is nothing to edit, only something to say.
-    Comment,
 }
 
 impl PromptField {
@@ -53,19 +50,14 @@ impl PromptField {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Title => "Title",
-            Self::Comment => "Comment",
         }
     }
 
     /// What the prompt's frame says, which always names the work item it is
-    /// for. A comment is left on a work item rather than in a field of it, so
-    /// it reads that way.
+    /// for.
     #[must_use]
     pub fn title(self, id: i64) -> String {
-        match self {
-            Self::Comment => format!("Comment on #{id}"),
-            other => format!("{} \u{b7} #{id}", other.label()),
-        }
+        format!("{} \u{b7} #{id}", self.label())
     }
 
     /// What the footer says while the prompt is open.
@@ -73,13 +65,12 @@ impl PromptField {
     pub const fn hint(self) -> &'static str {
         match self {
             Self::Title => "Type a title  Enter save  Esc cancel",
-            Self::Comment => "Type a comment  Enter post  Esc cancel",
         }
     }
 }
 
 /// A single-line field editor, prefilled with what the work item says now. The
-/// Title row of the Actions menu opens one, and so does a comment.
+/// Title row of the Actions menu opens one.
 #[derive(Clone, Debug)]
 pub struct TextPrompt {
     pub field: PromptField,
@@ -717,7 +708,6 @@ impl WorkItemsScreen {
         };
         let original = match field {
             PromptField::Title => ticket.title.clone(),
-            PromptField::Comment => String::new(),
         };
         let id = ticket.key.id;
         self.prompt = Some(TextPrompt {
@@ -768,12 +758,11 @@ impl WorkItemsScreen {
             return AppAction::None;
         }
         self.close_prompt();
-        if field != PromptField::Comment && edited == original {
+        if edited == original {
             return AppAction::None;
         }
         match field {
             PromptField::Title => self.edit_selected(shell, FieldEdit::title(&edited)),
-            PromptField::Comment => self.comment_selected(shell, edited),
         }
     }
 
@@ -806,6 +795,18 @@ impl WorkItemsScreen {
             shell.set_error("No work item is selected");
             return AppAction::None;
         };
+        self.comment_on(shell, &key, text)
+    }
+
+    /// Asks for a comment to be left on one work item, the way
+    /// [`Self::comment_selected`] asks for the selected one.
+    pub(super) fn comment_on(
+        &mut self,
+        shell: &mut Shell,
+        key: &TicketKey,
+        text: String,
+    ) -> AppAction {
+        let key = key.clone();
         let refusal = shell.write_refusal().or_else(|| {
             self.pending_comments
                 .contains(&key)

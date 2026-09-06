@@ -450,6 +450,7 @@ fn the_edit_menu_lists_the_field_editors_and_opens_the_one_chosen() {
             "Area",
             "Set parent\u{2026}",
             "Description",
+            "Acceptance criteria",
             "Add comment",
             "New child",
             "Delete work item\u{2026}"
@@ -688,13 +689,25 @@ fn an_offline_run_refuses_the_description_before_the_editor_opens() {
     assert!(!app.work_items.edits_pending());
 }
 
-/// The Actions menu row that opens the comment box, found by the command it
-/// runs so adding a field editor above it moves nothing here.
-fn comment_row() -> usize {
-    EDIT_MENU
-        .iter()
-        .position(|entry| entry.command == CommandId::AddComment)
-        .expect("the Actions menu offers a comment row")
+/// Opens one Actions menu row by the command it runs.
+fn open_menu(app: &mut App, command: CommandId) {
+    let row = menu_row(app, command);
+    open_editor(app, row);
+}
+
+/// `Ctrl-S`, which saves what the composer holds.
+fn save(app: &mut App) -> AppAction {
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+}
+
+fn composer_text(app: &App) -> String {
+    app.work_items
+        .composer
+        .as_ref()
+        .expect("a composer should be open")
+        .input
+        .text()
+        .to_owned()
 }
 
 /// One comment as Azure DevOps hands it back, already carrying the id,
@@ -714,40 +727,37 @@ fn comment(id: i64, at: &str, text: &str) -> CommentRecord {
 }
 
 #[test]
-fn the_comment_prompt_opens_empty_and_posts_what_was_typed() {
+fn the_comment_composer_opens_empty_and_posts_what_was_typed() {
     let mut app = edit_app();
 
-    open_editor(&mut app, comment_row());
-    assert_eq!(app.work_items.mode, WorkItemMode::Prompt);
+    open_menu(&mut app, CommandId::AddComment);
+    assert_eq!(app.work_items.mode, WorkItemMode::Compose);
+    let composer = app
+        .work_items
+        .composer
+        .as_ref()
+        .expect("a composer should be open");
+    assert_eq!(composer.target, ComposeTarget::NewComment);
     assert_eq!(
-        prompt_text(&app),
+        composer.input.text(),
         "",
         "there is nothing to edit, only to say"
     );
-    let prompt = app
-        .work_items
-        .prompt
-        .as_ref()
-        .expect("a prompt should be open");
-    assert_eq!(prompt.field, PromptField::Comment);
-    assert_eq!(
-        prompt.field.title(prompt.id),
-        "Comment on #3",
-        "the prompt names the work item it is about"
-    );
 
-    type_over(&mut app, "  Merged into main  ");
-    let action = press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "  Merged into main");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "- retry the build  ");
+    let action = save(&mut app);
     assert_eq!(
         action,
         AppAction::Comment {
             key: app.work_items.selected_ticket().unwrap().key.clone(),
-            text: "Merged into main".into(),
+            text: "Merged into main\n- retry the build".into(),
         },
-        "the comment is trimmed before it is sent"
+        "the comment is trimmed before it is sent, its line break kept"
     );
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
-    assert!(app.work_items.prompt.is_none());
+    assert!(app.work_items.composer.is_none());
     assert!(
         app.work_items.comments_pending(),
         "the post is waiting on Azure DevOps"
@@ -774,16 +784,17 @@ fn the_comment_prompt_opens_empty_and_posts_what_was_typed() {
 }
 
 #[test]
-fn a_blank_comment_is_refused_locally_and_leaves_the_prompt_open() {
+fn a_blank_comment_is_refused_locally_and_leaves_the_composer_open() {
     let mut app = edit_app();
 
-    open_editor(&mut app, comment_row());
-    type_over(&mut app, "   ");
-    assert_eq!(press(&mut app, KeyCode::Enter), AppAction::None);
+    open_menu(&mut app, CommandId::AddComment);
+    type_text(&mut app, "   ");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(save(&mut app), AppAction::None);
     assert_eq!(
         app.work_items.mode,
-        WorkItemMode::Prompt,
-        "a blank comment leaves the prompt open to fix"
+        WorkItemMode::Compose,
+        "a blank comment leaves the composer open to fix"
     );
     assert!(!app.work_items.comments_pending(), "nothing was sent");
     let (message, level) = app.shell.notification().expect("a refusal is reported");
@@ -792,7 +803,89 @@ fn a_blank_comment_is_refused_locally_and_leaves_the_prompt_open() {
 
     press(&mut app, KeyCode::Esc);
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
-    assert!(app.work_items.prompt.is_none());
+    assert!(app.work_items.composer.is_none());
+    open_menu(&mut app, CommandId::AddComment);
+    assert_eq!(
+        composer_text(&app),
+        "",
+        "blank text is not a draft worth keeping"
+    );
+}
+
+#[test]
+fn esc_keeps_a_comment_draft_until_it_is_posted() {
+    let mut app = edit_app();
+
+    open_menu(&mut app, CommandId::AddComment);
+    type_text(&mut app, "half a thought");
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    let (message, level) = app
+        .shell
+        .notification()
+        .expect("the draft says it was kept");
+    assert_eq!(message, "Draft kept on #3");
+    assert_eq!(level, NotificationLevel::Info);
+
+    open_menu(&mut app, CommandId::AddComment);
+    assert_eq!(
+        composer_text(&app),
+        "half a thought",
+        "the draft comes back"
+    );
+    assert!(
+        matches!(save(&mut app), AppAction::Comment { .. }),
+        "and posts as it stands"
+    );
+    open_menu(&mut app, CommandId::AddComment);
+    assert_eq!(composer_text(&app), "", "posting clears the draft");
+}
+
+#[test]
+fn acceptance_criteria_save_as_html_and_unchanged_ones_close_quietly() {
+    let mut app = edit_app();
+
+    open_menu(&mut app, CommandId::EditAcceptanceCriteria);
+    assert_eq!(app.work_items.mode, WorkItemMode::Compose);
+    assert_eq!(
+        app.work_items.composer.as_ref().unwrap().target,
+        ComposeTarget::AcceptanceCriteria
+    );
+    assert_eq!(
+        save(&mut app),
+        AppAction::None,
+        "criteria saved back as they were are nothing to write"
+    );
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    let (message, level) = app.shell.notification().expect("and it says so");
+    assert_eq!(message, "#3 acceptance criteria unchanged");
+    assert_eq!(level, NotificationLevel::Info);
+
+    open_menu(&mut app, CommandId::EditAcceptanceCriteria);
+    type_text(&mut app, "- Green build");
+    press(&mut app, KeyCode::Enter);
+    type_text(&mut app, "- Docs updated");
+    let AppAction::Edit(requests) = save(&mut app) else {
+        panic!("new criteria should dispatch an edit");
+    };
+    let request = only(requests);
+    assert_eq!(request.key.id, 3);
+    assert_eq!(
+        request.document()[1],
+        serde_json::json!({
+            "op": "add",
+            "path": "/fields/Microsoft.VSTS.Common.AcceptanceCriteria",
+            "value": "<ul><li>Green build</li><li>Docs updated</li></ul>",
+        }),
+        "the Markdown goes out as the HTML Azure DevOps stores"
+    );
+    assert_eq!(
+        app.work_items
+            .selected_ticket()
+            .map(|ticket| ticket.acceptance_criteria.as_str()),
+        Some("• Green build\n• Docs updated"),
+        "the pane reads the new criteria without waiting for Azure DevOps"
+    );
 }
 
 #[test]

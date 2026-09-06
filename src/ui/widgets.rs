@@ -811,8 +811,12 @@ pub(super) fn paint_hover(frame: &mut Frame<'_>, shell: &Shell) {
         return;
     }
     // An editable value underlines rather than inverts, the way a link does,
-    // and a modifier says so under NO_COLOR too.
-    if matches!(target, PointerTarget::EditField { .. }) {
+    // and a modifier says so under NO_COLOR too. A section the composer
+    // opens on underlines the same way, one row at a time.
+    if matches!(
+        target,
+        PointerTarget::EditField { .. } | PointerTarget::Compose(_)
+    ) {
         let rect = region.rect;
         let buffer = frame.buffer_mut();
         for y in rect.y..rect.y.saturating_add(rect.height) {

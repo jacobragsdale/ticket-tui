@@ -70,7 +70,7 @@ offline, browsing whatever the database already holds.
 | `1`–`4` | Work items, Repos, Pull requests, Pipelines |
 | `/` | Live fuzzy search — `state:active`, `assignee:@me`, `id:642` |
 | `p` / `:` | The command palette: every action the tab can take |
-| `e` | The Actions menu — edit title, state, assignee, tags, description |
+| `e` | The Actions menu — edit title, state, assignee, tags, description, acceptance criteria, comment |
 | `n` / `N` | New work item, or a new child of the selected one |
 | `+` | Quick capture, on every tab: one row, a title, `Enter` — an Issue on you, in the current sprint, tagged `inbox` |
 | `r` | Sync now, without waiting for the timer |

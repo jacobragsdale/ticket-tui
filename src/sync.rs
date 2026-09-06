@@ -17,6 +17,7 @@ use crate::azure::{self, AzureClient, AzureConfig, SyncBatch};
 use crate::classification::ClassificationNode;
 use crate::db::{self, SqliteTicketRepository};
 use crate::edit::{EditApplied, EditRejection, EditRequest};
+use crate::markdown;
 use crate::model::{
     CommentRecord, CompletionOptions, DetailsUpdate, Identity, Pipeline, PrBuild, PrThread,
     PullRequest, RelationKind, RelationRecord, Repo, Run, StateCatalog, StateOption,
@@ -1448,7 +1449,7 @@ impl Worker {
     ) -> Result<CommentRecord> {
         let posted = self
             .source(events)?
-            .post_comment(key.id, &azure::comment_html(text))?;
+            .post_comment(key.id, &markdown::markdown_to_html(text))?;
         // The request named the work item, so the row lands on that one
         // whatever the answer says it is about.
         let comment = CommentRecord {
@@ -5090,7 +5091,7 @@ mod tests {
                     organization: "demo".into(),
                     id: 1,
                 },
-                text: "blocked on <auth>".into(),
+                text: "blocked on <auth>\n\n- retry".into(),
             })
             .unwrap();
         let comment = commented(&handle).expect("the post was accepted");
@@ -5099,8 +5100,11 @@ mod tests {
         assert_eq!(comment.ticket.id, 1);
         assert_eq!(
             posted.lock().unwrap().clone(),
-            vec![(1, "<p>blocked on &lt;auth&gt;</p>".to_owned())],
-            "what was typed goes out escaped, in a paragraph"
+            vec![(
+                1,
+                "<p>blocked on &lt;auth&gt;</p><ul><li>retry</li></ul>".to_owned()
+            )],
+            "what was typed goes out as Markdown made HTML, escaped"
         );
 
         let stored = stored_comments(&path);

@@ -21,6 +21,7 @@ pub enum CommandId {
     SetParent,
     RemoveParent,
     EditDescription,
+    EditAcceptanceCriteria,
     AddComment,
     NewWorkItem,
     NewChild,
@@ -421,10 +422,17 @@ pub const COMMANDS: &[Command] = &[
         scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
+        id: CommandId::EditAcceptanceCriteria,
+        title: "Edit acceptance criteria",
+        keys: &[],
+        help: "Type them where they are read",
+        scope: Scope::Tabs(&[TabId::WorkItems]),
+    },
+    Command {
         id: CommandId::AddComment,
         title: "Add comment",
         keys: &[],
-        help: "One line on the discussion",
+        help: "Write it where it is read",
         scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
@@ -708,6 +716,10 @@ pub const EDIT_MENU: &[EditMenuEntry] = &[
     EditMenuEntry {
         label: "Description",
         command: CommandId::EditDescription,
+    },
+    EditMenuEntry {
+        label: "Acceptance criteria",
+        command: CommandId::EditAcceptanceCriteria,
     },
     EditMenuEntry {
         label: "Add comment",

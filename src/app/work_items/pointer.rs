@@ -72,6 +72,19 @@ impl WorkItemsScreen {
         column: u16,
         row: u16,
     ) -> AppAction {
+        // A click anywhere but on the composer's own rows, or the scrollbar
+        // beside them, leaves the composer with its draft kept before the
+        // click does whatever else it does.
+        if self.mode == WorkItemMode::Compose
+            && !matches!(
+                target,
+                PointerTarget::ComposerRow { .. }
+                    | PointerTarget::ScrollbarTrack { .. }
+                    | PointerTarget::ScrollbarThumb { .. }
+            )
+        {
+            self.close_composer(shell);
+        }
         match target {
             PointerTarget::SearchField => {
                 self.begin_search();
@@ -241,6 +254,16 @@ impl WorkItemsScreen {
                 self.choose_work_item_type(index);
             }
             PointerTarget::EditField { field } => return self.open_field_editor(shell, field),
+            PointerTarget::Compose(target) => {
+                shell.focus = Focus::Details;
+                self.open_composer(shell, target);
+            }
+            PointerTarget::ComposerRow { row } => {
+                let left = shell
+                    .hovered_region()
+                    .map_or(column, |region| region.rect.x);
+                self.place_composer_caret(row, column.saturating_sub(left));
+            }
             // The tab bar is the shell's: `App::handle_mouse` acts on a tab
             // before the click reaches a screen.
             // The work items screen draws no tree the pointer can pick a row
@@ -356,6 +379,7 @@ impl WorkItemsScreen {
             .hit_regions
             .selectable(match editor {
                 TextEditor::Search => SelectableSurface::Search,
+                TextEditor::Compose => SelectableSurface::Details,
                 TextEditor::Palette
                 | TextEditor::ViewName
                 | TextEditor::Prompt
@@ -401,6 +425,9 @@ impl WorkItemsScreen {
                 }
             }
             TextEditor::Capture => self.capture.set_cursor(index),
+            // The composer's rows are their own targets, placed by row and
+            // column rather than through the text snapshot.
+            TextEditor::Compose => {}
         }
     }
 }

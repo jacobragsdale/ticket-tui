@@ -37,11 +37,13 @@ use crate::model::{
 };
 pub use crate::model::{RowDensity, SearchOrder};
 use crate::notify::PrMarks;
+pub use crate::pointer::{
+    ComposeTarget, EditableField, HitRegions, OverlayAnchor, PaneSplit, PointerTarget,
+};
 use crate::pointer::{
     DragKind, PointerState, ScrollState, ScrollSurface, SelectableSurface, TextEditor, TextPos,
     TextSelection,
 };
-pub use crate::pointer::{EditableField, HitRegions, OverlayAnchor, PaneSplit, PointerTarget};
 use crate::search::{SearchEngine, SearchMatch};
 use crate::session::{NamedView, Session, TabSession};
 use crate::sprint::{self, SprintSummary, SummaryRow, SummaryRowKind};

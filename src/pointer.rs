@@ -49,9 +49,11 @@ pub enum TextEditor {
     Search,
     Palette,
     ViewName,
-    /// The single-line field editor the Actions menu opens for a title, or a
-    /// comment.
+    /// The single-line field editor the Actions menu opens for a title.
     Prompt,
+    /// The composer, typed into where a long-form section of the details
+    /// pane is read.
+    Compose,
     /// The assignee picker's filter field.
     Assignee,
     /// The parent picker's filter field.
@@ -76,6 +78,15 @@ pub enum EditableField {
     Tags,
     Iteration,
     Area,
+}
+
+/// One long-form thing on the details pane the composer edits in place:
+/// which section, or which comment.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ComposeTarget {
+    AcceptanceCriteria,
+    /// A comment not written yet.
+    NewComment,
 }
 
 /// Where an overlay is placed. Every keyboard-opened picker is `Centered`, the
@@ -251,6 +262,14 @@ pub enum PointerTarget {
     /// dropdown anchored under it.
     EditField {
         field: EditableField,
+    },
+    /// A long-form section of the details pane — the acceptance criteria, or
+    /// the line that starts a new comment — which opens the composer on it.
+    Compose(ComposeTarget),
+    /// One wrapped row of the open composer, which puts the caret where it
+    /// was clicked.
+    ComposerRow {
+        row: usize,
     },
     /// Everything outside an anchored dropdown, which closes it without a
     /// change rather than activating whatever sits underneath.

@@ -188,29 +188,110 @@ fn a_comment_just_posted_shows_at_the_head_of_the_discussion() {
 }
 
 #[test]
-fn the_comment_prompt_opens_empty_and_names_the_work_item() {
+fn the_comment_composer_draws_in_the_pane_and_puts_the_caret_in_it() {
     let mut app = App::new(vec![ticket()]);
     app.shell.enable_sync();
     app.work_items.set_table_viewport(1);
     app.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
     let row = crate::command::EDIT_MENU
         .iter()
-        .position(|entry| entry.command == crate::command::CommandId::AddComment)
+        .position(|entry| entry.command == CommandId::AddComment)
         .expect("the Actions menu offers a comment row");
     for _ in 0..row {
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.work_items.mode, WorkItemMode::Prompt);
+    assert_eq!(app.work_items.mode, WorkItemMode::Compose);
 
-    let prompt = render_text(80, 20, &mut app);
-    assert!(prompt.contains("Comment on #10001"), "{prompt}");
-    assert!(prompt.contains("Comment:"), "{prompt}");
-    assert!(prompt.contains(" Save "), "{prompt}");
-    assert!(prompt.contains(" Cancel "), "{prompt}");
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let pane = details_pane(&app);
+    let caret = terminal
+        .get_cursor_position()
+        .expect("the composer places the caret");
     assert!(
-        prompt.contains("Enter post"),
-        "the footer explains the prompt: {prompt}"
+        pane.x <= caret.x
+            && caret.x < pane.x + pane.width
+            && pane.y <= caret.y
+            && caret.y < pane.y + pane.height,
+        "the caret is inside the details pane: {caret:?} in {pane:?}"
+    );
+    let text = render_text(120, 40, &mut app);
+    assert!(
+        text.contains("Ctrl-S post"),
+        "the footer explains the composer: {text}"
+    );
+    assert!(
+        !text.contains("Add a comment"),
+        "the composer stands where the add line was: {text}"
+    );
+
+    for character in "typed".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let moved = terminal.get_cursor_position().unwrap();
+    assert_eq!(moved.x, caret.x + 5, "the caret follows what is typed");
+    assert_eq!(moved.y, caret.y);
+    assert!(render_text(120, 40, &mut app).contains("typed"));
+}
+
+#[test]
+fn clicking_a_section_opens_the_composer_and_a_click_elsewhere_keeps_the_draft() {
+    let mut app = App::new(vec![ticket()]);
+    app.shell.enable_sync();
+    app.work_items.set_table_viewport(1);
+    render_text(120, 40, &mut app);
+
+    let add = target_rect(&app, |target| {
+        matches!(target, PointerTarget::Compose(ComposeTarget::NewComment))
+    });
+    click(&mut app, add.x + 2, add.y);
+    assert_eq!(app.work_items.mode, WorkItemMode::Compose);
+    assert_eq!(app.shell.focus, Focus::Details);
+    for character in "draft".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    render_text(120, 40, &mut app);
+
+    let body = table_body(&app);
+    click(&mut app, body.x + 2, body.y);
+    assert_eq!(
+        app.work_items.mode,
+        WorkItemMode::Browse,
+        "a click elsewhere leaves the composer"
+    );
+    assert!(app.work_items.composer.is_none());
+    render_text(120, 40, &mut app);
+    let add = target_rect(&app, |target| {
+        matches!(target, PointerTarget::Compose(ComposeTarget::NewComment))
+    });
+    click(&mut app, add.x + 2, add.y);
+    assert_eq!(
+        app.work_items
+            .composer
+            .as_ref()
+            .map(|composer| composer.input.text()),
+        Some("draft"),
+        "the draft comes back"
+    );
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    render_text(120, 40, &mut app);
+    let criteria = target_rect(&app, |target| {
+        matches!(
+            target,
+            PointerTarget::Compose(ComposeTarget::AcceptanceCriteria)
+        )
+    });
+    click(&mut app, criteria.x + 2, criteria.y);
+    assert_eq!(
+        app.work_items
+            .composer
+            .as_ref()
+            .map(|composer| composer.target),
+        Some(ComposeTarget::AcceptanceCriteria),
+        "the placeholder opens the criteria for writing"
     );
 }
 

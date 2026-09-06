@@ -7,6 +7,7 @@ use crate::columns::ColumnLayout;
 
 use super::*;
 
+pub use compose::Composer;
 use edits::{BulkEdit, PendingEdit, UndoEntry};
 pub use edits::{DeleteConfirm, EditMenu, EditScope, PromptField, SyncTarget, TextPrompt};
 pub use family::{ChildProgress, ChildProgressIndex};
@@ -45,6 +46,9 @@ pub enum WorkItemMode {
     TagPicker,
     /// A single-line field editor, for the Title row of the Actions menu.
     Prompt,
+    /// The composer, typing into a section of the details pane where it is
+    /// read: the acceptance criteria, or a new comment.
+    Compose,
     /// The people the selected work item can be assigned to, filtered by typing.
     AssigneePicker,
     /// The iteration or area tree the selected work item can be moved into,
@@ -245,6 +249,13 @@ pub struct WorkItemsScreen {
     pub delete_confirm: Option<DeleteConfirm>,
     /// The open single-line field editor, if there is one.
     pub prompt: Option<TextPrompt>,
+    /// The open composer, if there is one: the details pane's own editor for
+    /// the acceptance criteria and a comment.
+    pub composer: Option<Composer>,
+    /// What `Esc` left in a composer, by work item and section, so opening
+    /// the same one again starts where it stopped. Memory only, like the form
+    /// draft.
+    drafts: HashMap<(TicketKey, ComposeTarget), String>,
     bookmarks: HashSet<TicketKey>,
     views: Vec<NamedView>,
     pub active_view: Option<String>,
@@ -382,6 +393,8 @@ impl WorkItemsScreen {
             parent_picker: ParentPicker::default(),
             node_picker: NodePicker::default(),
             prompt: None,
+            composer: None,
+            drafts: HashMap::new(),
             bookmarks: HashSet::new(),
             views: Vec::new(),
             active_view: None,
@@ -509,6 +522,10 @@ impl WorkItemsScreen {
                 .prompt
                 .as_ref()
                 .map_or("Enter save  Esc cancel", |prompt| prompt.field.hint()),
+            WorkItemMode::Compose => self
+                .composer
+                .as_ref()
+                .map_or("Ctrl-S save  Esc keep draft", Composer::hint),
             WorkItemMode::AssigneePicker => {
                 "Type to filter  \u{2191}\u{2193} select  Enter assign  Esc cancel"
             }
@@ -587,6 +604,7 @@ impl WorkItemsScreen {
             WorkItemMode::PriorityPicker => self.handle_priority_picker_key(shell, key),
             WorkItemMode::TagPicker => self.handle_tag_picker_key(shell, key),
             WorkItemMode::Prompt => self.handle_prompt_key(shell, key),
+            WorkItemMode::Compose => self.handle_compose_key(shell, key),
             WorkItemMode::AssigneePicker => self.handle_assignee_picker_key(shell, key),
             WorkItemMode::ParentPicker => self.handle_parent_picker_key(shell, key),
             WorkItemMode::NodePicker => self.handle_node_picker_key(shell, key),
@@ -634,6 +652,10 @@ impl WorkItemsScreen {
                     // work item in the browser.
                     if let Some(field) = self.pointed_edit_field(shell) {
                         return self.open_field_editor(shell, field);
+                    }
+                    if let Some(target) = self.pointed_compose_target(shell) {
+                        self.open_composer(shell, target);
+                        return AppAction::None;
                     }
                     self.record_history(shell);
                     return self.open_selected();
@@ -727,6 +749,7 @@ impl WorkItemsScreen {
                 self.views_overlay.naming = None;
             }
             WorkItemMode::Prompt => self.close_prompt(),
+            WorkItemMode::Compose => self.close_composer(shell),
             WorkItemMode::Form => self.cancel_form(),
             WorkItemMode::Capture => self.cancel_capture(),
             WorkItemMode::ConfirmDelete => self.cancel_delete(),
@@ -854,6 +877,7 @@ const fn mode_name(mode: WorkItemMode) -> &'static str {
         WorkItemMode::PriorityPicker => "priority-picker",
         WorkItemMode::TagPicker => "tag-picker",
         WorkItemMode::Prompt => "prompt",
+        WorkItemMode::Compose => "compose",
         WorkItemMode::AssigneePicker => "assignee-picker",
         WorkItemMode::NodePicker => "node-picker",
         WorkItemMode::Form => "form",
@@ -904,6 +928,7 @@ pub(crate) fn clamp_pos_to_snapshot(
     Some(TextPos { line, col })
 }
 
+mod compose;
 mod context;
 mod edits;
 mod family;

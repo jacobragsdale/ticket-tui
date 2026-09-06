@@ -21,6 +21,28 @@ Last updated 2026-09-06. The backlog itself lives in Azure DevOps
   yet Azure DevOps accepted it on create and stores it, so the section is real on
   this project too. `tag:test-drive` finds them; delete them when done.
 
+- **The composer (2026-09-06, no ticket).** Acceptance criteria and new comments are
+  typed in the details pane where they are read, not in an overlay or `$EDITOR`.
+  `TextInput` learnt newlines: `insert_newline`, `paste_block`, `move_up`/`move_down`
+  by wrapped row, and `wrap_with_cursor` (`src/text_input.rs`), which lays a text out
+  at a width and says which cell the caret is in — a character is one cell, so wide
+  glyphs would misplace it (the `ponytail:` note). `WorkItemMode::Compose` +
+  `Composer` (`src/app/work_items/compose.rs`) own the state; mode-first key routing
+  means every key is text, `Enter` a newline, `Ctrl-S` save/post, `Esc`/`Tab` close
+  keeping a draft per (work item, section) in `drafts`, restored on reopen and
+  cleared on save. The pane draws the composer's rows a column short of its width so
+  the paragraph never re-wraps them, paints the surface ground under them, registers
+  `PointerTarget::ComposerRow` per row for caret clicks and `PointerTarget::Compose`
+  on every row of the sections that open it (the criteria body or placeholder, the
+  `Add a comment…` line), and sets the terminal cursor; `follow_cursor` makes the
+  frame after a key `ensure_visible` the caret row. `wrapped_row_starts` now measures
+  only lines wider than the pane, since those targets sit at the foot of the document
+  and every line above them has to be counted each frame. Comments go out as Markdown
+  made HTML (`markdown_to_html` in `try_comment`), so bullets and code work; the
+  one-line `PromptField::Comment` is gone. `EditAcceptanceCriteria` is a new Actions
+  menu row and palette command. Description stays on `$EDITOR` for now; editing an
+  existing comment is next.
+
 - **`o` under WSL (2026-09-05, no ticket).** On the VDI `o` opened nothing: the launcher
   ran `xdg-open` with inherited stdio, and a WSL box has no working `xdg-open` unless
   `wslu` is installed. `open_in_browser` (`src/run/desktop.rs`) now tries, in order,

@@ -255,6 +255,12 @@ impl WorkItemsScreen {
                     prompt.input.paste(pasted, false);
                 }
             }
+            Some(TextEditor::Compose) => {
+                if let Some(composer) = self.composer.as_mut() {
+                    composer.input.paste_block(pasted);
+                    composer.follow_cursor = true;
+                }
+            }
             Some(TextEditor::Form) => {
                 if let Some(field) = self.focused_form_field_mut() {
                     field.input.paste(pasted, false);
@@ -319,6 +325,7 @@ impl WorkItemsScreen {
                 Some(TextEditor::ViewName)
             }
             WorkItemMode::Prompt => Some(TextEditor::Prompt),
+            WorkItemMode::Compose => Some(TextEditor::Compose),
             WorkItemMode::AssigneePicker => Some(TextEditor::Assignee),
             WorkItemMode::ParentPicker => Some(TextEditor::Parent),
             WorkItemMode::NodePicker => Some(TextEditor::Node),
@@ -870,8 +877,12 @@ impl WorkItemsScreen {
             CommandId::RemoveParent => self.remove_parent(shell),
             CommandId::EditDescription => self.edit_description(shell),
             CommandId::UndoEdit => self.undo_last_edit(shell),
+            CommandId::EditAcceptanceCriteria => {
+                self.open_composer(shell, ComposeTarget::AcceptanceCriteria);
+                AppAction::None
+            }
             CommandId::AddComment => {
-                self.open_prompt(shell, PromptField::Comment);
+                self.open_composer(shell, ComposeTarget::NewComment);
                 AppAction::None
             }
             CommandId::NewWorkItem => self.open_create_form(shell),

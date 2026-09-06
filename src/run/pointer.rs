@@ -50,6 +50,7 @@ pub(super) fn mouse_pointer_for_hover(
             PointerTarget::OpenInBrowser { .. }
             | PointerTarget::OpenSelectedUrl
             | PointerTarget::EditField { .. }
+            | PointerTarget::Compose(_)
             | PointerTarget::RunCommand(_),
         ) => MousePointerShape::Link,
         Some(PointerTarget::PaneDivider { .. }) => match divider {

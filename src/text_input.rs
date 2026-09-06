@@ -128,6 +128,51 @@ impl TextInput {
         self.insert_str(&sanitized);
     }
 
+    /// Inserts pasted text at the caret keeping its line breaks, for a field
+    /// that holds a document rather than a line: `\r\n` becomes `\n`, a tab
+    /// becomes two spaces, and other control characters are dropped.
+    pub fn paste_block(&mut self, pasted: &str) {
+        let mut sanitized = String::with_capacity(pasted.len());
+        for character in pasted.replace("\r\n", "\n").chars() {
+            match character {
+                '\n' => sanitized.push('\n'),
+                '\t' => sanitized.push_str("  "),
+                character if character.is_control() => {}
+                character => sanitized.push(character),
+            }
+        }
+        self.insert_str(&sanitized);
+    }
+
+    pub fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    /// Moves the caret up one wrapped row at `width` columns, keeping its
+    /// column where the row above is long enough.
+    pub fn move_up(&mut self, width: usize) {
+        self.move_rows(-1, width);
+    }
+
+    /// Moves the caret down one wrapped row, the way [`Self::move_up`] moves
+    /// it up.
+    pub fn move_down(&mut self, width: usize) {
+        self.move_rows(1, width);
+    }
+
+    fn move_rows(&mut self, delta: isize, width: usize) {
+        let layout = wrap_with_cursor(&self.text, self.cursor, width);
+        let (row, column) = layout.cursor;
+        let Some(target) = row
+            .checked_add_signed(delta)
+            .filter(|target| *target < layout.rows.len())
+        else {
+            return;
+        };
+        let (start, text) = &layout.rows[target];
+        self.cursor = start + column.min(text.chars().count());
+    }
+
     /// Applies one editing key, reporting whether the field consumed it. Callers
     /// keep the keys that mean something beyond editing (submit, cancel, history,
     /// list navigation) for themselves.
@@ -174,6 +219,63 @@ fn byte_index(text: &str, character_index: usize) -> usize {
     text.char_indices()
         .nth(character_index)
         .map_or(text.len(), |(index, _)| index)
+}
+
+/// A multi-line text soft-wrapped to a width: each row's first character
+/// index and its text, and the row and column the caret lands on.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WrapLayout {
+    pub rows: Vec<(usize, String)>,
+    /// The caret as `(row, column)` in the rows above.
+    pub cursor: (usize, usize),
+}
+
+/// Wraps `text` to `width` columns and finds the caret at character `cursor`.
+/// A row ends at a newline, at a space that would not fit, or after the last
+/// space before the width runs out; a word longer than the width is cut. There
+/// is always at least one row, so the caret always has somewhere to be, and a
+/// text ending in a newline ends in an empty row for the same reason.
+// ponytail: a character is one cell, as the rest of the pane measures; add
+// unicode-width if CJK or emoji misplace the caret.
+#[must_use]
+pub fn wrap_with_cursor(text: &str, cursor: usize, width: usize) -> WrapLayout {
+    let width = width.max(1);
+    let chars: Vec<char> = text.chars().collect();
+    let mut rows: Vec<(usize, String)> = Vec::new();
+    let mut start = 0;
+    loop {
+        let mut end = start;
+        let mut last_space = None;
+        while end < chars.len() && chars[end] != '\n' && end - start < width {
+            if chars[end] == ' ' {
+                last_space = Some(end);
+            }
+            end += 1;
+        }
+        let (row_end, next) = if end == chars.len() || matches!(chars[end], '\n' | ' ') {
+            // The text ends the row, or a newline does, or a space that
+            // would not fit and is dropped with the break.
+            (end, end + 1)
+        } else if let Some(space) = last_space.filter(|space| *space > start) {
+            (space, space + 1)
+        } else {
+            (end, end)
+        };
+        rows.push((start, chars[start..row_end].iter().collect()));
+        if end == chars.len() {
+            break;
+        }
+        start = next;
+    }
+    let cursor = cursor.min(chars.len());
+    let row = rows
+        .iter()
+        .rposition(|(start, _)| *start <= cursor)
+        .unwrap_or(0);
+    WrapLayout {
+        cursor: (row, cursor - rows[row].0),
+        rows,
+    }
 }
 
 fn sanitize_multiline(pasted: &str) -> String {
@@ -292,5 +394,73 @@ mod tests {
             "alt chords belong to the caller"
         );
         assert_eq!(input.text(), "é");
+    }
+
+    fn rows(layout: &WrapLayout) -> Vec<&str> {
+        layout.rows.iter().map(|(_, text)| text.as_str()).collect()
+    }
+
+    #[test]
+    fn wrapping_breaks_at_spaces_newlines_and_the_width_and_places_the_caret() {
+        let layout = wrap_with_cursor("alpha beta\ngamma", 6, 7);
+        assert_eq!(rows(&layout), ["alpha", "beta", "gamma"]);
+        assert_eq!(
+            layout.cursor,
+            (1, 0),
+            "the caret after the dropped space starts the next row"
+        );
+        assert_eq!(
+            wrap_with_cursor("alpha beta", 5, 7).cursor,
+            (0, 5),
+            "the caret on the dropped space ends its row"
+        );
+        assert_eq!(
+            rows(&wrap_with_cursor("abcdefgh", 0, 3)),
+            ["abc", "def", "gh"],
+            "a word wider than the row is cut"
+        );
+        assert_eq!(wrap_with_cursor("abcdefgh", 3, 3).cursor, (1, 0));
+        assert_eq!(
+            rows(&wrap_with_cursor("abc def", 0, 3)),
+            ["abc", "def"],
+            "a space on the boundary is dropped with the break"
+        );
+        assert_eq!(rows(&wrap_with_cursor("", 0, 10)), [""]);
+        let trailing = wrap_with_cursor("ab\n", 3, 10);
+        assert_eq!(rows(&trailing), ["ab", ""]);
+        assert_eq!(trailing.cursor, (1, 0), "a trailing newline opens a row");
+    }
+
+    #[test]
+    fn vertical_moves_keep_the_column_and_stop_at_the_edges() {
+        // Wrapped at 6: alpha / beta / gamma / delta.
+        let mut input = TextInput::new("alpha beta\ngamma delta");
+        input.move_up(6);
+        assert_eq!(input.cursor(), 16, "the same column on the row above");
+        input.move_up(6);
+        assert_eq!(input.cursor(), 10, "clamped to a shorter row");
+        input.move_up(6);
+        assert_eq!(input.cursor(), 4);
+        input.move_up(6);
+        assert_eq!(input.cursor(), 4, "the first row is as far up as it goes");
+        input.move_down(6);
+        assert_eq!(input.cursor(), 10);
+        input.move_down(6);
+        assert_eq!(input.cursor(), 15);
+        input.move_down(6);
+        assert_eq!(input.cursor(), 21);
+        input.move_down(6);
+        assert_eq!(input.cursor(), 21, "the last row is as far down as it goes");
+
+        input.insert_newline();
+        assert_eq!(input.text(), "alpha beta\ngamma delt\na");
+    }
+
+    #[test]
+    fn a_block_paste_keeps_its_line_breaks() {
+        let mut input = TextInput::new("");
+        input.paste_block("one\r\ntwo\tthree\u{7}");
+        assert_eq!(input.text(), "one\ntwo  three");
+        assert_eq!(input.cursor(), 14);
     }
 }
