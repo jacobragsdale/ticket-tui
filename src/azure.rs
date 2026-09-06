@@ -512,14 +512,67 @@ impl AzureClient {
         pull_request: i64,
         work_item: i64,
     ) -> Result<()> {
+        self.add_artifact_link(work_item, |current| {
+            pull_request_link(current, project_id, repo_id, pull_request)
+        })
+    }
+
+    /// Link one work item to one branch, which is what pins it to a repository
+    /// before any pull request exists. Written the way a pull request link is.
+    pub fn link_branch(
+        &self,
+        project_id: &str,
+        repo_id: &str,
+        branch: &str,
+        work_item: i64,
+    ) -> Result<()> {
+        self.add_artifact_link(work_item, |current| {
+            branch_link(current, project_id, repo_id, branch)
+        })
+    }
+
+    fn add_artifact_link(
+        &self,
+        work_item: i64,
+        document: impl FnOnce(&Value) -> Result<Vec<Value>>,
+    ) -> Result<()> {
         let url = format!(
             "{}/_apis/wit/workitems/{work_item}?$expand=relations&api-version={API_VERSION}",
             self.config.base_url()
         );
         let current = self.get(&url)?;
-        let document = pull_request_link(&current, project_id, repo_id, pull_request)?;
+        let document = document(&current)?;
         self.send(&url, Request::Patch(&document))?;
         Ok(())
+    }
+
+    /// Make a branch at the head of another — `from_ref` as stored, with or
+    /// without its `refs/heads/` — the way the web UI's "create a branch" does.
+    /// Nothing is checked out anywhere; the clone on this machine is not
+    /// touched.
+    pub fn create_branch(&self, repo_id: &str, name: &str, from_ref: &str) -> Result<()> {
+        let from = from_ref.strip_prefix("refs/heads/").unwrap_or(from_ref);
+        let mut url = self.code_url(&["_apis", "git", "repositories", repo_id, "refs"])?;
+        url.set_query(Some(&format!(
+            "filter=heads/{from}&api-version={API_VERSION}"
+        )));
+        let response = self.get(url.as_str())?;
+        let sha = ref_object_id(&response, &format!("refs/heads/{from}"))
+            .with_context(|| format!("there is no branch {from} to branch from"))?;
+        url.set_query(Some(&version_query()));
+        let response = self.post(url.as_str(), &new_ref_document(name, &sha))?;
+        let outcome = &response["value"][0];
+        match outcome["updateStatus"].as_str() {
+            Some("succeeded") => Ok(()),
+            status => bail!(
+                "Azure DevOps did not create {name}: {}{}",
+                status.unwrap_or("no answer"),
+                outcome["customMessage"]
+                    .as_str()
+                    .map(|message| format!(" ({message})"))
+                    .unwrap_or_default()
+            ),
+        }
     }
 
     /// Add a work item to the project, answering with Azure DevOps's own copy
@@ -2201,17 +2254,46 @@ fn pull_request_link(
     repo_id: &str,
     pull_request: i64,
 ) -> Result<Vec<Value>> {
+    let url = format!("vstfs:///Git/PullRequestId/{project_id}%2F{repo_id}%2F{pull_request}");
+    artifact_link_document(item, url, "Pull Request", &format!("!{pull_request}"))
+}
+
+/// The JSON Patch document that links a work item to a branch. The slashes
+/// inside the branch name are encoded like the separators around it, which is
+/// how Azure DevOps spells the link itself.
+fn branch_link(item: &Value, project_id: &str, repo_id: &str, branch: &str) -> Result<Vec<Value>> {
+    let url = format!(
+        "vstfs:///Git/Ref/{project_id}%2F{repo_id}%2FGB{}",
+        branch.replace('/', "%2F")
+    );
+    artifact_link_document(item, url, "Branch", branch)
+}
+
+/// One artifact link appended to the work item `item` is, behind a test of its
+/// revision. A link the work item already holds — compared as what it points
+/// at, so the encoding Azure DevOps stored it with does not matter — is refused
+/// here rather than sent.
+fn artifact_link_document(
+    item: &Value,
+    url: String,
+    name: &str,
+    target: &str,
+) -> Result<Vec<Value>> {
     let revision = item
         .get("rev")
         .and_then(Value::as_i64)
         .context("the work item came back without a revision to test")?;
-    let url = format!("vstfs:///Git/PullRequestId/{project_id}%2F{repo_id}%2F{pull_request}");
+    let kind = artifact_kind(&url);
     if let Some(relations) = item.get("relations").and_then(Value::as_array)
-        && relations
-            .iter()
-            .any(|relation| relation.get("url").and_then(Value::as_str) == Some(url.as_str()))
+        && relations.iter().any(|relation| {
+            relation
+                .get("url")
+                .and_then(Value::as_str)
+                .and_then(artifact_kind)
+                == kind
+        })
     {
-        bail!("that work item is already linked to !{pull_request}");
+        bail!("that work item is already linked to {target}");
     }
     Ok(vec![
         crate::edit::revision_test(revision),
@@ -2221,10 +2303,30 @@ fn pull_request_link(
             "value": {
                 "rel": "ArtifactLink",
                 "url": url,
-                "attributes": {"name": "Pull Request"},
+                "attributes": {"name": name},
             },
         }),
     ])
+}
+
+/// The commit a ref points at, from a `refs` listing. The listing is filtered
+/// by prefix, so `heads/main` also lists `main-old`; only the exact name counts.
+fn ref_object_id(response: &Value, full_ref: &str) -> Option<String> {
+    response["value"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["name"].as_str() == Some(full_ref))
+        .and_then(|entry| entry["objectId"].as_str())
+        .map(str::to_owned)
+}
+
+/// The refs update that creates a branch: a new ref, from nothing, at `sha`.
+fn new_ref_document(name: &str, sha: &str) -> Value {
+    json!([{
+        "name": format!("refs/heads/{name}"),
+        "oldObjectId": "0000000000000000000000000000000000000000",
+        "newObjectId": sha,
+    }])
 }
 
 /// The JSON Patch document that creates a work item: the operations setting
@@ -3638,6 +3740,79 @@ mod tests {
                 id: 45,
             }),
             "what is written is what the pull reads back"
+        );
+    }
+
+    #[test]
+    fn linking_a_branch_writes_the_ref_url_the_read_side_parses() {
+        let item = with_relations(6, vec![related_relation(700)]);
+
+        let document = branch_link(&item, "project-guid", "repo-guid", "feature/x").unwrap();
+
+        assert_eq!(
+            document,
+            vec![
+                json!({"op": "test", "path": "/rev", "value": 6}),
+                json!({
+                    "op": "add",
+                    "path": "/relations/-",
+                    "value": {
+                        "rel": "ArtifactLink",
+                        "url": "vstfs:///Git/Ref/project-guid%2Frepo-guid%2FGBfeature%2Fx",
+                        "attributes": {"name": "Branch"},
+                    },
+                }),
+            ],
+            "the branch's own slash is encoded like the separators"
+        );
+        assert_eq!(
+            artifact_kind("vstfs:///Git/Ref/project-guid%2Frepo-guid%2FGBfeature%2Fx"),
+            Some(ArtifactKind::Branch {
+                repo_id: "repo-guid".into(),
+                name: "feature/x".into(),
+            }),
+            "what is written is what the pull reads back"
+        );
+    }
+
+    #[test]
+    fn a_branch_already_linked_is_refused_however_azure_devops_spelt_it() {
+        let item = with_relations(
+            6,
+            vec![json!({
+                "rel": "ArtifactLink",
+                "url": "vstfs:///Git/Ref/project-guid%2frepo-guid%2fGBfeature/x",
+                "attributes": {"name": "Branch"},
+            })],
+        );
+
+        let error = branch_link(&item, "project-guid", "repo-guid", "feature/x").unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "that work item is already linked to feature/x"
+        );
+    }
+
+    #[test]
+    fn a_branch_is_made_at_the_exact_ref_asked_for_not_a_prefix_match() {
+        let listing = json!({"value": [
+            {"name": "refs/heads/main-old", "objectId": "1111111"},
+            {"name": "refs/heads/main", "objectId": "abc1234"},
+        ]});
+
+        assert_eq!(
+            ref_object_id(&listing, "refs/heads/main").as_deref(),
+            Some("abc1234")
+        );
+        assert_eq!(ref_object_id(&listing, "refs/heads/develop"), None);
+        assert_eq!(
+            new_ref_document("715-fix-the-thing", "abc1234"),
+            json!([{
+                "name": "refs/heads/715-fix-the-thing",
+                "oldObjectId": "0000000000000000000000000000000000000000",
+                "newObjectId": "abc1234",
+            }])
         );
     }
 
