@@ -22,6 +22,7 @@ use crate::app::pipelines::RunSchema;
 use crate::app::pipelines::rows::{RunRow, duration_label, run_glyph, short_branch};
 use crate::app::pull_requests::{PrRow, PrSchema};
 use crate::app::repos::{RepoRow, RepoSchema};
+use crate::app::work_items::branch_name;
 use crate::azure::{self, AzureClient, AzureConfig};
 use crate::classification::{self, NodeKind};
 use crate::config::Config;
@@ -31,8 +32,9 @@ use crate::filter::{FilterField, MatchContext, ParsedQuery, WorkItemSchema, pars
 use crate::local;
 use crate::markdown;
 use crate::model::{
-    Approval, CommentRecord, CompletionOptions, Identity, MergeStrategy, Pipeline, PullRequest,
-    Run, RunResult, Ticket, TicketKey, TimelineKind, TimelineRecord, same_text,
+    Approval, ArtifactKind, ArtifactLink, CommentRecord, CompletionOptions, Identity,
+    MergeStrategy, Pipeline, PullRequest, Repo, Run, RunResult, Ticket, TicketKey, TimelineKind,
+    TimelineRecord, same_text,
 };
 use crate::search;
 use crate::status;
@@ -182,6 +184,17 @@ pub enum Command {
     },
     /// Add a work item to the project
     Create(CreateArgs),
+    /// Link a work item to a branch, making the branch first when the
+    /// repository has none of that name
+    Link {
+        /// The work item to link
+        work_item: i64,
+        /// The repository, by name
+        repo: String,
+        /// The branch; left out, it is `{id}-{slug}` from the work item's
+        /// title, such as `715-fix-the-thing`
+        branch: Option<String>,
+    },
     /// Read the project's Git repositories and the clones on this machine
     #[command(subcommand)]
     Repos(ReposCommand),
@@ -442,6 +455,11 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Edit(args) => run_edit(cli, &database, args),
         Command::Comment { id, text } => run_comment(cli, &database, *id, text.as_deref()),
         Command::Create(args) => run_create(cli, &database, args),
+        Command::Link {
+            work_item,
+            repo,
+            branch,
+        } => run_link(cli, &database, *work_item, repo, branch.as_deref()),
         Command::Repos(command) => run_repos(cli, &database, command),
         Command::Prs(command) => run_prs(cli, &database, command),
         Command::Pipelines { json } => run_pipelines(&database, *json),
@@ -622,7 +640,19 @@ fn sync_report(outcome: &SyncOutcome, config: &AzureConfig) -> Result<String> {
 
 fn run_show(database: &Path, id: i64, json: bool) -> Result<()> {
     let repository = open_database(database)?;
-    let ticket = repository
+    let ticket = find_work_item(&repository, database, id)?;
+    emit(&if json {
+        to_json(&TicketJson::detailed(&ticket))?
+    } else {
+        let graph = repository.load_graph()?;
+        let repos = repository.load_repos()?;
+        describe(&ticket, &graph.artifacts_for(&ticket.key), &repos)
+    });
+    Ok(())
+}
+
+fn find_work_item(repository: &SqliteTicketRepository, database: &Path, id: i64) -> Result<Ticket> {
+    repository
         .load_all()?
         .into_iter()
         .find(|ticket| ticket.key.id == id)
@@ -631,12 +661,53 @@ fn run_show(database: &Path, id: i64, json: bool) -> Result<()> {
                 "work item {id} is not in {}; run `ticket-tui sync`",
                 database.display()
             )
-        })?;
-    emit(&if json {
-        to_json(&TicketJson::detailed(&ticket))?
-    } else {
-        describe(&ticket)
-    });
+        })
+}
+
+/// One link between a work item and a branch, the branch made first when the
+/// repository has none of that name. Azure DevOps keeps the link on the work
+/// item, so its own Related section follows at the next pull.
+fn run_link(
+    cli: &Cli,
+    database: &Path,
+    work_item: i64,
+    repo: &str,
+    branch: Option<&str>,
+) -> Result<()> {
+    let repository = open_database(database)?;
+    let target = repository
+        .load_repos()?
+        .into_iter()
+        .find(|held| same_text(&held.name, repo))
+        .with_context(|| format!("no repository called {repo} is in the database"))?;
+    let branch = match branch {
+        Some(branch) => branch
+            .strip_prefix("refs/heads/")
+            .unwrap_or(branch)
+            .to_owned(),
+        None => branch_name(
+            work_item,
+            &find_work_item(&repository, database, work_item)?.title,
+        ),
+    };
+    let project_id = repository
+        .meta(db::PROJECT_ID_KEY)?
+        .context("the project id is not on file yet; run `ticket-tui sync` first")?;
+    let client = connect(cli)?;
+    let created = !client.fetch_branches(&target.id)?.contains(&branch);
+    if created {
+        let from = target
+            .default_branch
+            .as_deref()
+            .with_context(|| format!("{} has no default branch to branch from", target.name))?;
+        client.create_branch(&target.id, &branch, from)?;
+    }
+    client.link_branch(&project_id, &target.id, &branch, work_item)?;
+    emit(&format!(
+        "#{work_item} linked to {}/{branch}{}",
+        target.name,
+        if created { " (branch created)" } else { "" }
+    ));
     Ok(())
 }
 
@@ -1220,7 +1291,7 @@ fn to_json(value: &impl Serialize) -> Result<String> {
 /// One work item as a block of text: what it is on the first line, what it
 /// says on the second, its planning fields under that, and its description
 /// last.
-fn describe(ticket: &Ticket) -> String {
+fn describe(ticket: &Ticket, artifacts: &[&ArtifactLink], repos: &[Repo]) -> String {
     let mut lines = vec![
         format!(
             "#{} {} · {} · rev {}",
@@ -1255,7 +1326,41 @@ fn describe(ticket: &Ticket) -> String {
         lines.push("Acceptance criteria".to_owned());
         lines.push(ticket.acceptance_criteria.trim_end().to_owned());
     }
+    if !artifacts.is_empty() {
+        lines.push(String::new());
+        lines.push("Related".to_owned());
+        lines.extend(
+            artifacts
+                .iter()
+                .map(|artifact| related_line(artifact, repos)),
+        );
+    }
     lines.join("\n")
+}
+
+/// One artifact link as `show` prints it: what it is, then where, the way the
+/// details pane's Related section reads.
+fn related_line(artifact: &ArtifactLink, repos: &[Repo]) -> String {
+    let repo_name = |id: &str| {
+        repos
+            .iter()
+            .find(|repo| repo.id == id)
+            .map_or_else(|| id.to_owned(), |repo| repo.name.clone())
+    };
+    let label = artifact.kind.label();
+    let text = match &artifact.kind {
+        ArtifactKind::PullRequest { id, .. } => format!("!{id}"),
+        ArtifactKind::Commit { repo_id, sha } => {
+            format!(
+                "{} in {}",
+                sha.chars().take(7).collect::<String>(),
+                repo_name(repo_id)
+            )
+        }
+        ArtifactKind::Build(id) => id.to_string(),
+        ArtifactKind::Branch { repo_id, name } => format!("{name} in {}", repo_name(repo_id)),
+    };
+    format!("  {label:<14}{text}")
 }
 
 /// The rows as a table: id, state, type, assignee, title, each column as wide
@@ -3797,6 +3902,61 @@ mod tests {
             Cli::parse_from(["ticket-tui", "prs", "comment", "11", "looks good"]).command,
             Some(Command::Prs(PrsCommand::Comment { id: 11, ref text })) if text.as_deref() == Some("looks good")
         ));
+        assert!(matches!(
+            Cli::parse_from(["ticket-tui", "link", "715", "ado-helper"]).command,
+            Some(Command::Link { work_item: 715, ref repo, branch: None }) if repo == "ado-helper"
+        ));
+        assert!(matches!(
+            Cli::parse_from(["ticket-tui", "link", "715", "ado-helper", "feature/x"]).command,
+            Some(Command::Link { work_item: 715, ref branch, .. }) if branch.as_deref() == Some("feature/x")
+        ));
+    }
+
+    #[test]
+    fn show_lists_what_the_work_item_is_linked_to_by_repository_name() {
+        let ticket = ticket(715, "Fix the thing", "Doing", None);
+        let repos = vec![Repo {
+            id: "aaa-111".into(),
+            name: "ado-helper".into(),
+            project: "atlas".into(),
+            default_branch: Some("refs/heads/main".into()),
+            remote_url: String::new(),
+            ssh_url: String::new(),
+            web_url: String::new(),
+            is_disabled: false,
+            size: None,
+        }];
+        let links = [
+            ArtifactLink {
+                work_item: ticket.key.clone(),
+                kind: ArtifactKind::Branch {
+                    repo_id: "aaa-111".into(),
+                    name: "715-fix-the-thing".into(),
+                },
+                name: "Branch".into(),
+            },
+            ArtifactLink {
+                work_item: ticket.key.clone(),
+                kind: ArtifactKind::Commit {
+                    repo_id: "bbb-222".into(),
+                    sha: "abc1234def5678".into(),
+                },
+                name: "Fixed in Commit".into(),
+            },
+        ];
+
+        let text = describe(&ticket, &links.iter().collect::<Vec<_>>(), &repos);
+
+        assert!(
+            text.ends_with(
+                "Related\n  Branch        715-fix-the-thing in ado-helper\n  Commit        abc1234 in bbb-222"
+            ),
+            "{text}"
+        );
+        assert!(
+            !describe(&ticket, &[], &repos).contains("Related"),
+            "nothing linked, no section"
+        );
     }
 
     #[test]

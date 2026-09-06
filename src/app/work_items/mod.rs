@@ -12,6 +12,7 @@ use edits::{BulkEdit, PendingEdit, UndoEntry};
 pub use edits::{DeleteConfirm, EditMenu, EditScope, PromptField, SyncTarget, TextPrompt};
 pub use family::{ChildProgress, ChildProgressIndex};
 pub use forms::{FormField, FormFieldId, FormFieldKind, FormKind, FormOverlay, FormPicker};
+pub use link::branch_name;
 pub use pickers::{
     AssigneeCandidate, AssigneePicker, NodePicker, NodeRow, ParentCandidate, ParentPicker,
     PriorityPicker, StatePicker, TagPicker, TypePicker,
@@ -934,6 +935,7 @@ mod edits;
 mod family;
 mod forms;
 mod history;
+mod link;
 mod pickers;
 mod pointer;
 mod query;
