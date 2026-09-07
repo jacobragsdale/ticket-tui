@@ -318,3 +318,25 @@ fn the_help_takes_a_share_of_a_big_screen_and_still_fits_a_small_one() {
         "and it still fits a small one: {small:?}"
     );
 }
+
+#[test]
+fn the_agent_prompt_overlay_shows_the_prompt_as_it_was_sent() {
+    let mut app = App::new(vec![ticket()]);
+    let id = app.work_items.selected_ticket().unwrap().key.id;
+    let mut session = crate::app::work_items::tests::agent::live_session(id);
+    session.prompt = Some(
+        "Work item #715 in demo/atlas (Azure DevOps): \"Fix the thing!\".\nRead these two files before anything else:\n1. /h/SKILL.md".into(),
+    );
+    app.work_items.apply_agent_event(
+        &mut app.shell,
+        crate::agents::AgentEvent::Sessions(vec![session]),
+    );
+    app.work_items
+        .run_command(&mut app.shell, CommandId::ShowAgentPrompt);
+    assert_eq!(app.work_items.mode, WorkItemMode::AgentPrompt);
+    let text = render_text(120, 30, &mut app);
+    assert!(text.contains("Agent prompt · #"), "{text}");
+    assert!(text.contains("(Copilot)"), "{text}");
+    assert!(text.contains("Work item #715 in demo/atlas"), "{text}");
+    assert!(text.contains("1. /h/SKILL.md"), "{text}");
+}

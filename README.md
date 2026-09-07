@@ -77,7 +77,7 @@ offline, browsing whatever the database already holds.
 | `o` | Open the selected row in the system browser |
 | `?` | The in-app help, generated from the same table the keys are bound in |
 | `L` | On Work items: link the work item to a branch — a repository, then one of its branches or a new name, made at the head of the default branch. On Pull requests: link a work item to the one under the cursor |
-| `w` | On Work items: work with a coding agent — Copilot or Cursor in a Herdr pane, in the work item's repository, with the ticket in front of it; or back to the agent already on it. **Start another agent session** and **Copy agent prompt** are in the Actions menu and the palette |
+| `w` | On Work items: work with a coding agent — Copilot or Cursor in a Herdr pane, in the work item's repository, with the ticket in front of it; or back to the agent already on it. **Start another agent session**, **Copy agent prompt** and **Show agent prompt** are in the Actions menu and the palette |
 | `g` | Go to what the row points at: a work item's pull request, build or the repository its branch is in; a pull request's work items; a run's pull request; a repository's open pull request, its linked work items or, with none, the pipeline that builds it |
 | `[` / `]` | Back and forward through everywhere you have been, across tabs |
 | `q` | Quit |
@@ -155,6 +155,10 @@ skill and a short opening prompt that asks it to refine the ticket with you
 before implementing; when told to go on it implements, verifies, pushes and
 opens a linked draft pull request with `ticket-tui prs create`. It needs
 ticket-tui to be running inside Herdr; **Copy agent prompt** works anywhere.
+The agent's own input box shows the pasted prompt as one truncated line, so
+**Show agent prompt** opens the prompt the agent on the work item was sent, and
+every launch writes it as `prompt.md` beside `context.md` under
+`<database dir>/handoffs/<org>-<id>/`.
 
 ```toml
 [agents]

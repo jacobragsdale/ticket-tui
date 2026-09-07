@@ -181,12 +181,47 @@ pub(super) fn render_help_popup(
         ),
         (78, 18),
     );
+    render_text_popup(frame, screen, shell, " Help ", area, Text::from(lines));
+}
+
+/// The opening prompt the selected work item's agent was sent, as sent. The
+/// agent's own input box shows the paste as one truncated line.
+pub(super) fn render_agent_prompt_overlay(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
+    let Some(ticket) = screen.selected_ticket() else {
+        return;
+    };
+    let id = ticket.key.id;
+    let Some(session) = screen.agent_prompt_for(&ticket.key) else {
+        return;
+    };
+    let title = format!(
+        " Agent prompt \u{00b7} #{id} ({}) ",
+        session.provider.label()
+    );
+    let text = Text::from(session.prompt.clone().unwrap_or_default());
+    let area = ratio_rect(frame.area(), (70, 70), (100, u16::MAX), (60, 12));
+    render_text_popup(frame, screen, shell, &title, area, text);
+}
+
+/// One box of wrapped text under a title, scrolled by the help's state and
+/// selectable with the mouse: the help, and the agent prompt.
+fn render_text_popup(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+    title: &str,
+    area: Rect,
+    help: Text<'_>,
+) {
     dim_behind(frame, area);
     frame.render_widget(Clear, area);
-    let help = Text::from(lines);
     let block = Block::default()
         .title(Line::styled(
-            " Help ",
+            title.to_owned(),
             Style::default().add_modifier(Modifier::BOLD),
         ))
         .title(Line::styled(CLOSE_LABEL, Style::default().fg(theme().muted)).right_aligned())

@@ -58,6 +58,35 @@ impl WorkItemsScreen {
             .find(|session| session.is_complete() && session.ticket_key() == *key)
     }
 
+    /// The prompt the latest agent on one work item was given, live or
+    /// not: a launch that failed after its handoff still has one.
+    #[must_use]
+    pub fn agent_prompt_for(&self, key: &TicketKey) -> Option<&AgentSession> {
+        self.agent_sessions
+            .iter()
+            .rev()
+            .find(|session| session.ticket_key() == *key && session.prompt.is_some())
+    }
+
+    /// Show agent prompt: the stored opening prompt of the selected work
+    /// item's agent, in the help's scrolling box.
+    pub(super) fn show_agent_prompt(&mut self, shell: &mut Shell) -> AppAction {
+        let Some(ticket) = self.selected_ticket() else {
+            shell.set_error("No work item is selected");
+            return AppAction::None;
+        };
+        if self.agent_prompt_for(&ticket.key).is_none() {
+            shell.set_error(format!(
+                "No agent prompt on file for #{}; w launches an agent with one",
+                ticket.key.id
+            ));
+            return AppAction::None;
+        }
+        self.help.scroll_to(0);
+        self.mode = WorkItemMode::AgentPrompt;
+        AppAction::None
+    }
+
     /// What the agent thread is doing for this screen, while it is.
     #[must_use]
     pub fn agent_busy(&self) -> Option<&str> {

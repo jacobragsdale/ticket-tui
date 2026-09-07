@@ -75,6 +75,8 @@ pub enum CommandId {
     StartAnotherAgentSession,
     /// The opening prompt, for a terminal already open somewhere.
     CopyAgentPrompt,
+    /// The opening prompt the agent on the work item was sent, on screen.
+    ShowAgentPrompt,
     ToggleClosedPrs,
     /// `g`: whatever the row under the cursor points at, worked out per tab.
     Follow,
@@ -263,6 +265,13 @@ pub const COMMANDS: &[Command] = &[
         title: "Copy agent prompt",
         keys: &[],
         help: "For a terminal you already have open",
+        scope: Scope::Tabs(&[TabId::WorkItems]),
+    },
+    Command {
+        id: CommandId::ShowAgentPrompt,
+        title: "Show agent prompt",
+        keys: &[],
+        help: "What the agent on this work item was told",
         scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
@@ -783,6 +792,10 @@ pub const EDIT_MENU: &[EditMenuEntry] = &[
     EditMenuEntry {
         label: "Copy agent prompt",
         command: CommandId::CopyAgentPrompt,
+    },
+    EditMenuEntry {
+        label: "Show agent prompt",
+        command: CommandId::ShowAgentPrompt,
     },
     EditMenuEntry {
         label: "Delete work item\u{2026}",

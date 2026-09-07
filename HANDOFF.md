@@ -15,9 +15,11 @@ Last updated 2026-09-07. The backlog itself lives in Azure DevOps
   finds the clone (the Repos tab's scan, or `[herdr.paths]`) and adds a git worktree
   under `<clone>/../.worktrees/<repo>/<branch>` — reusing one already on the branch,
   tracking a branch on origin, refusing a *linked* branch that is nowhere, never
-  resetting or pushing — `handoff.rs` writes `context.md` and the embedded
-  `ticket-agent-workflow` skill under `<database dir>/handoffs/` and words the short
-  opening prompt, and `mod.rs` runs the launch stage by stage (checkout, handoff,
+  resetting or pushing — `handoff.rs` writes `context.md`, the embedded
+  `ticket-agent-workflow` skill and `prompt.md` (the opening prompt as sent, since the
+  agent's input box shows the paste as one truncated line; **Show agent prompt** on the
+  screen reads the same text back off the session) under `<database dir>/handoffs/` and
+  words the short opening prompt, and `mod.rs` runs the launch stage by stage (checkout, handoff,
   workspace, tab, pane, agent, prompt, focus), writing `<database>.agents.json` after
   each with the ids Herdr answered, so a launch that stops is carried on by the next
   `w` — same tab, agent started only if it was not, prompt sent only once — and

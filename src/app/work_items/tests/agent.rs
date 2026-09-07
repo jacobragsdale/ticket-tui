@@ -56,7 +56,7 @@ fn agent_app(dir: &std::path::Path) -> App {
     app
 }
 
-fn live_session(id: i64) -> AgentSession {
+pub(crate) fn live_session(id: i64) -> AgentSession {
     AgentSession {
         id: format!("demo-{id}-1"),
         organization: "demo".into(),
@@ -413,4 +413,40 @@ fn the_plan_carries_the_open_pull_request_of_the_repository() {
             "Pull request !41 in payments-api (abandoned): Old try"
         ]
     );
+}
+
+#[test]
+fn show_agent_prompt_opens_the_stored_prompt_and_says_when_there_is_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = agent_app(dir.path());
+    assert_eq!(
+        app.work_items
+            .run_command(&mut app.shell, CommandId::ShowAgentPrompt),
+        AppAction::None
+    );
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(
+        app.shell
+            .notification()
+            .is_some_and(|(text, _)| text.starts_with("No agent prompt on file for #715")),
+        "{:?}",
+        app.shell.notification()
+    );
+    // A launch that stopped after its handoff still has the prompt it wrote.
+    let mut partial = live_session(715);
+    partial.agent_name = None;
+    partial.prompt_sent = false;
+    app.work_items
+        .apply_agent_event(&mut app.shell, AgentEvent::Sessions(vec![partial]));
+    app.work_items
+        .run_command(&mut app.shell, CommandId::ShowAgentPrompt);
+    assert_eq!(app.work_items.mode, WorkItemMode::AgentPrompt);
+    assert_eq!(
+        app.work_items
+            .agent_prompt_for(&key(715))
+            .and_then(|session| session.prompt.as_deref()),
+        Some("go")
+    );
+    assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
 }

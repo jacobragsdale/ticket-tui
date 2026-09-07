@@ -886,6 +886,7 @@ impl WorkItemsScreen {
             CommandId::WorkWithAgent => self.work_with_agent(shell, false, false),
             CommandId::StartAnotherAgentSession => self.work_with_agent(shell, true, false),
             CommandId::CopyAgentPrompt => self.work_with_agent(shell, false, true),
+            CommandId::ShowAgentPrompt => self.show_agent_prompt(shell),
             CommandId::EditTitle => {
                 self.open_prompt(shell, PromptField::Title);
                 AppAction::None

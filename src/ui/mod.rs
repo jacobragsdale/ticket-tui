@@ -45,10 +45,10 @@ mod widgets;
 use details::{assigned_to_me_style, field_label, field_line, render_details};
 use overlays::{
     ListOverlay, bar_fields, column_rows, link_line, overlay_line, overlay_row, overlay_row_width,
-    pill_style, render_chips, render_column_overlay, render_facet_bar, render_facet_menu,
-    render_filter_overlay, render_help_popup, render_info_overlay, render_list_overlay,
-    render_palette, render_sort_popup, render_sprint_overlay, render_views_overlay,
-    terminate_underline,
+    pill_style, render_agent_prompt_overlay, render_chips, render_column_overlay, render_facet_bar,
+    render_facet_menu, render_filter_overlay, render_help_popup, render_info_overlay,
+    render_list_overlay, render_palette, render_sort_popup, render_sprint_overlay,
+    render_views_overlay, terminate_underline,
 };
 use panes::{PaneNames, PanePair, render_inner_split, render_workspace};
 use pickers::{
@@ -336,6 +336,7 @@ fn render_pass(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, shell: &mut 
     match screen.mode {
         WorkItemMode::Sort => render_sort_popup(frame, screen, shell),
         WorkItemMode::Help => render_help_popup(frame, screen, shell),
+        WorkItemMode::AgentPrompt => render_agent_prompt_overlay(frame, screen, shell),
         WorkItemMode::Filter => render_filter_overlay(frame, screen, shell),
         WorkItemMode::Columns => {
             let columns = column_rows(Screen::columns(screen));

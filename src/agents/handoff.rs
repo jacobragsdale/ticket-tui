@@ -25,8 +25,10 @@ pub struct HandoffFiles {
     pub skill: PathBuf,
 }
 
-/// Writes the context file and the skill under `dir`, replacing whatever an
-/// earlier launch of the same work item left.
+/// Writes the context file, the skill, and the opening prompt as it will be
+/// sent under `dir`, replacing whatever an earlier launch of the same work
+/// item left. The prompt is written so it can be read back: the agent's own
+/// input box shows a paste of it as one truncated line.
 pub fn write(dir: &Path, plan: &LaunchPlan, checkout: &Checkout) -> Result<HandoffFiles> {
     let skill = dir.join(SKILL_RELATIVE);
     if let Some(parent) = skill.parent() {
@@ -41,7 +43,11 @@ pub fn write(dir: &Path, plan: &LaunchPlan, checkout: &Checkout) -> Result<Hando
     let context = folder.join("context.md");
     std::fs::write(&context, context_markdown(plan, checkout, &skill))
         .with_context(|| format!("failed to write {}", context.display()))?;
-    Ok(HandoffFiles { context, skill })
+    let files = HandoffFiles { context, skill };
+    let prompt = folder.join("prompt.md");
+    std::fs::write(&prompt, opening_prompt(plan, checkout, &files))
+        .with_context(|| format!("failed to write {}", prompt.display()))?;
+    Ok(files)
 }
 
 /// The `ticket-tui` invocation that reaches the right place: every global
@@ -524,6 +530,11 @@ pub(crate) mod tests {
             dir.path().join("skills/ticket-agent-workflow/SKILL.md")
         );
         assert_eq!(std::fs::read_to_string(&files.skill).unwrap(), SKILL);
+        assert_eq!(
+            std::fs::read_to_string(files.context.with_file_name("prompt.md")).unwrap(),
+            opening_prompt(&plan, &checkout(), &files),
+            "the prompt on disk is the one sent"
+        );
         assert!(SKILL.contains("name: ticket-agent-workflow"));
         assert!(SKILL.contains("Do not start implementing during refinement"));
         assert!(SKILL.contains("prs create"));

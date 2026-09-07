@@ -34,6 +34,9 @@ pub enum WorkItemMode {
     Palette,
     Views,
     Info,
+    /// The opening prompt the agent on the selected work item was sent,
+    /// scrolled like the help.
+    AgentPrompt,
     /// The read-only board for one iteration: who has how much, and how much
     /// of it is finished.
     Sprint,
@@ -518,7 +521,9 @@ impl WorkItemsScreen {
                 "←→ cursor  Ctrl-P/N history  Ctrl-W delete word  Ctrl-U clear  Enter/Esc finish"
             }
             WorkItemMode::Sort => "↑↓ choose field  ←→ direction  Enter apply  Esc cancel",
-            WorkItemMode::Help => "↑↓/jk scroll  PgUp/PgDn page  Home/End jump  ?/Esc close",
+            WorkItemMode::Help | WorkItemMode::AgentPrompt => {
+                "↑↓/jk scroll  PgUp/PgDn page  Home/End jump  ?/Esc close"
+            }
             WorkItemMode::Facets if self.facet_bar.field_index >= self.facet_bar.shown.len() => {
                 "←→ field  Enter more filters  Esc back"
             }
@@ -599,7 +604,7 @@ impl WorkItemsScreen {
             WorkItemMode::Browse => self.handle_browse_key(shell, key),
             WorkItemMode::Search => self.handle_search_key(shell, key),
             WorkItemMode::Sort => self.handle_sort_key(shell, key),
-            WorkItemMode::Help => {
+            WorkItemMode::Help | WorkItemMode::AgentPrompt => {
                 self.handle_help_key(key);
                 AppAction::None
             }
@@ -903,6 +908,7 @@ const fn mode_name(mode: WorkItemMode) -> &'static str {
         WorkItemMode::Palette => "palette",
         WorkItemMode::Views => "views",
         WorkItemMode::Info => "info",
+        WorkItemMode::AgentPrompt => "agent-prompt",
         WorkItemMode::Sprint => "sprint",
         WorkItemMode::Facets => "facets",
         WorkItemMode::Edit => "edit",
@@ -975,7 +981,7 @@ mod pickers;
 mod pointer;
 mod query;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod views;
 
 impl Screen for WorkItemsScreen {
