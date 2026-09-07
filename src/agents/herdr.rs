@@ -271,7 +271,8 @@ impl Herdr {
     }
 
     /// Makes a workspace with `label`, whose first tab and pane open in
-    /// `cwd`. Answers the workspace, that tab and that pane.
+    /// `cwd`, and shows it: a launch is the user asking to go there. Answers
+    /// the workspace, that tab and that pane.
     pub fn create_workspace(&self, label: &str, cwd: &Path) -> Result<(Workspace, Tab, Pane)> {
         let cwd = cwd.to_string_lossy();
         let result = self.api.call(&[
@@ -281,7 +282,7 @@ impl Herdr {
             label,
             "--cwd",
             &cwd,
-            "--no-focus",
+            "--focus",
         ])?;
         Ok((
             workspace_of(&result["workspace"]),
@@ -312,7 +313,7 @@ impl Herdr {
             label,
             "--cwd",
             &cwd,
-            "--no-focus",
+            "--focus",
         ])?;
         Ok((tab_of(&result["tab"]), pane_of(&result["root_pane"])))
     }
@@ -356,7 +357,7 @@ impl Herdr {
             "right",
             "--cwd",
             &cwd,
-            "--no-focus",
+            "--focus",
         ])?;
         Ok(pane_of(&result["pane"]))
     }

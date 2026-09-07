@@ -984,6 +984,13 @@ pub fn launch(
     }
     let pane_id = session.pane_id.clone().expect("settled above");
 
+    // On screen now, before the CLI is even started: the tab is what the
+    // user is waiting for, and an agent takes seconds to come up.
+    if let Some(tab_id) = &session.tab_id {
+        let _ = herdr.focus_workspace(&workspace_id);
+        let _ = herdr.focus_tab(tab_id);
+    }
+
     if session.agent_name.is_none() {
         let name = herdr
             .free_agent_name(&agent_name_for(plan.ticket.id))
@@ -1006,7 +1013,8 @@ pub fn launch(
         save(store, &session, Stage::Prompt)?;
     }
 
-    if let Err(error) = bring_to_front(herdr, &session) {
+    // The tab is already showing; this lands the keyboard on the agent.
+    if let Err(error) = herdr.focus_agent(&agent_name) {
         notes.push(format!("could not focus it: {error:#}"));
     }
     Ok((session, notes.join("; ")))
