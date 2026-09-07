@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -274,12 +275,36 @@ pub fn load(path: &Path) -> Result<Session> {
 }
 
 pub fn save(path: &Path, session: &Session) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
     let raw = serde_json::to_string_pretty(session).context("failed to serialize session")?;
-    fs::write(path, raw).with_context(|| format!("failed to write session {}", path.display()))
+    write_atomically(path, raw.as_bytes())
+        .with_context(|| format!("failed to write session {}", path.display()))
+}
+
+/// Writes `bytes` to `path` through a temporary file beside it, so the file
+/// on disk is either the document that was there or the whole new one, never
+/// the front half of the new one. The temporary file is removed when any step
+/// fails, and the old file is left as it was.
+///
+/// Two processes saving at once still take turns overwriting each other: the
+/// last rename wins whole, but the other's changes are gone. This guards
+/// against a crash mid-write, not against concurrent writers.
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let mut file = tempfile::Builder::new()
+        .prefix(".")
+        .suffix(".tmp")
+        .tempfile_in(parent)
+        .with_context(|| format!("failed to create a temporary file in {}", parent.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.as_file().sync_all())
+        .with_context(|| format!("failed to write {}", file.path().display()))?;
+    file.persist(path)
+        .with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -321,6 +346,75 @@ mod tests {
                 "the path still selects its own rows: {stored}"
             );
         }
+    }
+
+    #[test]
+    fn a_save_replaces_the_file_whole_and_leaves_nothing_beside_it() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("nested").join("tickets.session.json");
+        let mut session = Session {
+            stale_days: 21,
+            ..Session::default()
+        };
+        save(&path, &session).unwrap();
+        session.stale_days = 30;
+
+        save(&path, &session).unwrap();
+
+        assert_eq!(load(&path).unwrap().stale_days, 30);
+        assert_eq!(
+            entries(path.parent().unwrap()),
+            ["tickets.session.json"],
+            "no temporary file is left behind"
+        );
+    }
+
+    /// A save that cannot get as far as the rename leaves the last good
+    /// document where it was, rather than a file cut off part way.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_that_cannot_finish_leaves_the_last_good_document_where_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("tickets.session.json");
+        let mut session = Session {
+            stale_days: 21,
+            ..Session::default()
+        };
+        save(&path, &session).unwrap();
+        // A directory nothing can be made in: the temporary file the save
+        // goes through is refused, and the document is never touched.
+        let writable = fs::Permissions::from_mode(0o700);
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        if fs::File::create(directory.path().join("probe")).is_ok() {
+            // root writes anywhere, so there is no failure to stage here.
+            fs::set_permissions(directory.path(), writable).unwrap();
+            return;
+        }
+        session.stale_days = 30;
+
+        let error = save(&path, &session).unwrap_err();
+
+        fs::set_permissions(directory.path(), writable).unwrap();
+        let message = format!("{error:#}");
+        assert!(message.contains("failed to write session"), "{message}");
+        assert!(message.contains("temporary file"), "{message}");
+        assert_eq!(
+            load(&path).unwrap().stale_days,
+            21,
+            "the document on disk is the one that was there"
+        );
+        assert_eq!(entries(directory.path()), ["tickets.session.json"]);
+    }
+
+    /// The names in a directory, sorted.
+    fn entries(directory: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]

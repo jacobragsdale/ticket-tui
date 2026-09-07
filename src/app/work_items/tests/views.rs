@@ -789,30 +789,32 @@ fn a_threshold_of_no_days_at_all_is_held_at_the_one_day_floor() {
 /// quarter beside it. One open item and one finished item have sat
 /// untouched since January, so the stale rule has something to bite on and
 /// something to leave alone.
+/// `days` before now. The sprint below is dated against the clock rather
+/// than the calendar, because the summary's stale figure asks the clock: a
+/// fixed August would cross the fortnight one day and fail from then on.
+fn days_ago(days: i64) -> Timestamp {
+    Timestamp::now().plus_seconds(-days * 24 * 60 * 60)
+}
+
 fn sprint_tickets() -> Vec<Ticket> {
-    let planned =
-        |id: i64, state: &str, assignee: Option<&str>, node: &str, changed: &str| Ticket {
-            state: state.into(),
-            assigned_to: assignee.map(Into::into),
-            iteration_path: node.into(),
-            ..ticket(id, "Sprint work", changed)
-        };
+    let planned = |id: i64, state: &str, assignee: Option<&str>, node: &str, days: i64| Ticket {
+        state: state.into(),
+        assigned_to: assignee.map(Into::into),
+        iteration_path: node.into(),
+        changed_at: days_ago(days),
+        ..ticket(id, "Sprint work", "2026-01-01T00:00:00Z")
+    };
     let sprint = "development\\Sprint 1";
     vec![
-        planned(1, "To Do", Some("Avery"), sprint, "2026-08-28T00:00:00Z"),
-        planned(2, "Doing", Some("Avery"), sprint, "2026-08-27T00:00:00Z"),
-        planned(3, "Done", Some("Avery"), sprint, "2026-08-26T00:00:00Z"),
-        planned(4, "Done", Some("Avery"), sprint, "2026-08-25T00:00:00Z"),
-        planned(5, "To Do", Some("Blake"), sprint, "2026-08-24T00:00:00Z"),
-        planned(6, "Done", Some("Blake"), sprint, "2026-01-06T00:00:00Z"),
-        planned(7, "To Do", None, sprint, "2026-01-05T00:00:00Z"),
-        planned(
-            8,
-            "Doing",
-            Some("Avery"),
-            "development\\Q3",
-            "2026-08-22T00:00:00Z",
-        ),
+        planned(1, "To Do", Some("Avery"), sprint, 1),
+        planned(2, "Doing", Some("Avery"), sprint, 2),
+        planned(3, "Done", Some("Avery"), sprint, 3),
+        planned(4, "Done", Some("Avery"), sprint, 4),
+        planned(5, "To Do", Some("Blake"), sprint, 5),
+        // Two that have sat since the turn of the year: one open, one done.
+        planned(6, "Done", Some("Blake"), sprint, 240),
+        planned(7, "To Do", None, sprint, 241),
+        planned(8, "Doing", Some("Avery"), "development\\Q3", 7),
     ]
 }
 
@@ -895,8 +897,8 @@ fn the_summary_stale_figure_is_the_one_the_changed_column_paints() {
     );
     assert_eq!(
         summary.stale, 1,
-        "the open work item nobody has touched since January, and never the \
-             finished one beside it"
+        "the open work item nobody has touched since the turn of the year, and \
+             never the finished one beside it"
     );
 }
 
@@ -1084,7 +1086,8 @@ fn two_sprints_sharing_a_leaf_name_stay_apart_when_the_summary_filters() {
         state: "To Do".into(),
         assigned_to: Some("Avery".into()),
         iteration_path: "development\\Release 2\\Sprint 1".into(),
-        ..ticket(9, "Another sprint of the same name", "2026-08-21T00:00:00Z")
+        changed_at: days_ago(8),
+        ..ticket(9, "Another sprint of the same name", "2026-01-01T00:00:00Z")
     });
     let mut app = App::new(tickets);
     app.work_items.select_row(&mut app.shell, 0);

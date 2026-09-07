@@ -6,6 +6,7 @@ mod desktop;
 mod details;
 mod editor;
 mod edits;
+mod local;
 mod notify;
 mod settle;
 mod startup;

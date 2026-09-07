@@ -621,6 +621,12 @@ it was loaded; State not saved — syncing the latest copy` and asks for a pull 
 once, so the value somebody else wrote appears. Anything else Azure DevOps
 refused is reported as it came.
 
+A write Azure DevOps took whose copy SQLite then would not take — a comment,
+create, move, delete or edit — is not a refusal: the screen keeps what Azure
+DevOps kept, nothing is sent again, the notification says `saved in Azure
+DevOps, but the local cache could not be updated`, and a pull is booked for the
+next turn to bring the file into step.
+
 Edits ride the same worker as pulls and are handled in the order they arrive, so
 typing is never blocked and an edit queued before a pull is written before that
 pull reads. If a pull finishes while an edit is still in flight, the edit stays
@@ -1333,7 +1339,11 @@ cloned, and the details pane says where it looked. The read never fetches, so
 what the column calls behind is what your last fetch knew.
 
 It runs on a thread of its own, so a clone that takes a minute holds up neither
-the pull nor an edit.
+the pull nor an edit. One read of the workspace is out at a time: a reason to
+look again while one is running — the tab opened again, the minute come round,
+a git command finished — books a single follow-up that goes when the read
+answers, so a slow workspace is never read by a queue of scans. A thread that
+stops takes its spinners with it and says so.
 
 | Key | Action |
 |---|---|
@@ -1894,6 +1904,7 @@ the `classification_nodes_fetched_at` below:
 | `watermark_changed_at` | The greatest `System.ChangedDate` the last successful pull saw, as an RFC 3339 UTC timestamp |
 | `organization`, `project` | Where the stored work items were pulled from |
 | `sync_scope` | The extra WIQL condition that pull narrowed the project with, empty for a project pulled whole |
+| `pr_refresh_pending` | The pull requests whose work items, threads or build policy the last pull could not read in full, or passed over for its budget, as a JSON list of ids the next pull reads again |
 
 The watermark is where the next incremental pull starts asking; a database
 without one is pulled in full and left with one. The organization and project

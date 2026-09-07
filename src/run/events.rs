@@ -300,7 +300,9 @@ pub(super) fn handle_action(
         // events, so nothing waits here.
         AppAction::LocalGit(request) => match runtime.local.worker.as_ref() {
             Some(worker) => {
-                let _ = worker.send(request);
+                if let Err(error) = worker.send(request) {
+                    runtime.local.stop(app, &format!("{error:#}"));
+                }
             }
             None => app
                 .shell

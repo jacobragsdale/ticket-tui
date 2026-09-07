@@ -172,6 +172,64 @@ fn a_posted_comment_reaches_the_discussion_and_a_refused_one_only_the_toast() {
 }
 
 #[test]
+fn a_comment_azure_devops_took_settles_on_screen_even_when_the_cache_will_not_take_it() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("tickets.sqlite3");
+    let stored = CommentRecord {
+        ticket: TicketKey {
+            organization: "example-org".into(),
+            id: 3,
+        },
+        comment_id: 11,
+        created_at: Timestamp::parse("2026-03-04T09:15:00Z").unwrap(),
+        author: Some("Jacob Ragsdale".into()),
+        text: "Merged into main".into(),
+        html: String::new(),
+    };
+    let (mut app, mut repository, mut runtime) =
+        synced_app(&path, FakeAzure::commenting(stored.clone()));
+    // The table the comment lands in is gone, so the worker's local write
+    // fails after Azure DevOps has taken the post.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE work_item_comments")
+        .unwrap();
+    let selected = app.work_items.selected_ticket().unwrap().key.clone();
+
+    let action = app
+        .work_items
+        .comment_selected(&mut app.shell, "Merged into main".into());
+    handle_action(action, &mut app, &mut runtime, &failing_opener);
+    await_comment(&mut app, &mut repository, &mut runtime);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.shell.notification().map(|(_, level)| level) != Some(NotificationLevel::Error) {
+        poll_sync(&mut app, &mut repository, &mut runtime);
+        assert!(Instant::now() < deadline, "the miss was never reported");
+        thread::yield_now();
+    }
+
+    assert_eq!(
+        app.work_items.comments_for(&selected),
+        vec![&stored],
+        "the discussion shows the comment Azure DevOps kept"
+    );
+    assert!(
+        !app.work_items.comments_pending(),
+        "nothing is waiting to be sent again"
+    );
+    let (message, _) = app.shell.notification().unwrap();
+    assert!(
+        message
+            .starts_with("Comment saved in Azure DevOps, but the local cache could not be updated"),
+        "{message}"
+    );
+    assert!(
+        runtime.scheduler.due(Instant::now()),
+        "a pull is booked to bring the file into step"
+    );
+}
+
+#[test]
 fn an_accepted_edit_updates_the_row_and_the_database_without_a_reload() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("tickets.sqlite3");

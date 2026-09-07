@@ -236,7 +236,8 @@ pub enum SyncEvent {
     /// project that will not answer is not mistaken for one with nothing in
     /// it.
     Warning(String),
-    /// One edit landed, or was refused and changes nothing.
+    /// One edit landed — and is in SQLite, unless [`SyncEvent::CacheMissed`]
+    /// follows — or was refused and changes nothing.
     Edited(Box<Result<EditApplied, EditRejection>>),
     /// One work item's comments and revision history were read, or could not
     /// be.
@@ -249,22 +250,32 @@ pub enum SyncEvent {
     /// Empty when they could not be read, which is not worth reporting: both
     /// pickers already offer every path the database has seen.
     ClassificationNodes(Vec<ClassificationNode>),
-    /// One comment landed and is already written to SQLite, or was refused and
-    /// nothing was written at all.
+    /// One comment landed and is already written to SQLite — unless
+    /// [`SyncEvent::CacheMissed`] follows — or was refused and nothing was
+    /// written at all.
     Commented(Box<Result<CommentRecord, CommentRejection>>),
     /// The work item types the project's process offers, already stored. Empty
     /// when they could not be read, which is not worth reporting: the type
     /// picker already offers every type the database has seen.
     WorkItemTypes(Vec<String>),
-    /// One work item was created and is already written to SQLite, or was
-    /// refused and nothing was written at all.
+    /// One work item was created and is already written to SQLite — unless
+    /// [`SyncEvent::CacheMissed`] follows — or was refused and nothing was
+    /// written at all.
     Created(Box<Result<CreatedWorkItem, CreateRejection>>),
     /// One work item was moved under a different parent and is already written
-    /// to SQLite, or was refused and the graph has to go back the way it was.
+    /// to SQLite — unless [`SyncEvent::CacheMissed`] follows — or was refused
+    /// and the graph has to go back the way it was.
     Reparented(Box<Result<ReparentApplied, ReparentRejection>>),
-    /// One work item went to the recycle bin and is already out of SQLite, or
-    /// was refused and is still exactly where it was.
+    /// One work item went to the recycle bin and is already out of SQLite —
+    /// unless [`SyncEvent::CacheMissed`] follows — or was refused and is still
+    /// exactly where it was.
     Deleted(Box<Result<TicketKey, DeleteRejection>>),
+    /// A write Azure DevOps took whose copy SQLite would not: the answer
+    /// before this one carries what Azure DevOps kept, and the file is behind
+    /// it until the next pull. Sent after that answer, so the row on screen
+    /// settles first and the message that follows is not mistaken for a
+    /// refusal to try again.
+    CacheMissed(String),
     /// The worker thread is gone and no further events will arrive.
     Stopped,
 }
@@ -1223,7 +1234,13 @@ fn work(
             }
             SyncRequest::Delete(key) => SyncEvent::Deleted(Box::new(worker.delete(key, events))),
         };
+        let cache_miss = worker.cache_miss.take();
         if events.send(event).is_err() {
+            break;
+        }
+        if let Some(message) = cache_miss
+            && events.send(SyncEvent::CacheMissed(message)).is_err()
+        {
             break;
         }
     }
@@ -1256,6 +1273,9 @@ struct Worker {
     last_reconcile: Option<Instant>,
     /// How long a timer pull may go without reconciling.
     reconcile_every: Duration,
+    /// A write Azure DevOps took whose local copy could not be written, said
+    /// once the answer carrying what Azure DevOps kept is out.
+    cache_miss: Option<String>,
 }
 
 impl Worker {
@@ -1271,6 +1291,21 @@ impl Worker {
             force_full: false,
             last_reconcile: None,
             reconcile_every: RECONCILE_EVERY,
+            cache_miss: None,
+        }
+    }
+
+    /// Notes a SQLite write that failed after Azure DevOps took the write.
+    /// The write is not tried again — it landed — and the answer still
+    /// carries what Azure DevOps kept; the main thread hears about the miss
+    /// after that answer and pulls, and the pull reconciles against the
+    /// project's own id list so a row that should be gone goes.
+    fn note_cache_miss(&mut self, what: &str, stored: Result<()>) {
+        if let Err(error) = stored {
+            self.cache_miss = Some(format!(
+                "{what} saved in Azure DevOps, but the local cache could not be updated: {error:#}"
+            ));
+            self.last_reconcile = None;
         }
     }
 
@@ -1430,7 +1465,10 @@ impl Worker {
         let (ticket, relations, artifacts) = self
             .source(events)?
             .patch_work_item(request.key.id, &request.document())?;
-        self.repository()?.upsert(&ticket, &relations, &artifacts)?;
+        let stored = self
+            .repository()
+            .and_then(|repository| repository.upsert(&ticket, &relations, &artifacts));
+        self.note_cache_miss("Edit", stored);
         Ok(EditApplied {
             ticket,
             relations,
@@ -1469,7 +1507,10 @@ impl Worker {
         let (ticket, relations, _) = self
             .source(events)?
             .reparent_work_item(key.id, new_parent)?;
-        self.repository()?.reparent(&ticket, &relations)?;
+        let stored = self
+            .repository()
+            .and_then(|repository| repository.reparent(&ticket, &relations));
+        self.note_cache_miss("Move", stored);
         let parent = relations
             .iter()
             .find(|relation| relation.kind == RelationKind::Parent)
@@ -1541,7 +1582,10 @@ impl Worker {
             ticket: key.clone(),
             ..posted
         };
-        self.repository()?.insert_comment(&comment)?;
+        let stored = self
+            .repository()
+            .and_then(|repository| repository.insert_comment(&comment));
+        self.note_cache_miss("Comment", stored);
         Ok(comment)
     }
 
@@ -1593,7 +1637,10 @@ impl Worker {
         let (ticket, relations, artifacts) =
             self.source(events)?
                 .create_work_item(work_item_type, patch, parent)?;
-        self.repository()?.upsert(&ticket, &relations, &artifacts)?;
+        let stored = self
+            .repository()
+            .and_then(|repository| repository.upsert(&ticket, &relations, &artifacts));
+        self.note_cache_miss("Work item", stored);
         Ok(CreatedWorkItem { ticket, relations })
     }
 
@@ -1619,7 +1666,11 @@ impl Worker {
     /// with it: a soft delete takes the one work item.
     fn try_delete(&mut self, key: &TicketKey, events: &Sender<SyncEvent>) -> Result<()> {
         self.source(events)?.delete_work_item(key.id)?;
-        self.repository()?.delete_work_item(key)
+        let stored = self
+            .repository()
+            .and_then(|repository| repository.delete_work_item(key));
+        self.note_cache_miss("Delete", stored);
+        Ok(())
     }
 
     /// Reads both classification trees and stores them for the next session,
@@ -2053,24 +2104,37 @@ impl Worker {
     /// those recently closed so one that just landed does not vanish. For the
     /// active ones whose head commit or reviewer set has moved — and at most
     /// [`PR_REFRESH_BUDGET`] of them per pull, so a busy project does not cost
-    /// a hundred requests — the work items and the build policy are read too.
-    /// Answers whether anything was written.
+    /// a hundred requests — the work items, threads and build policy are read
+    /// too. Answers whether anything was written.
+    ///
+    /// A page that would not come leaves the stored rows alone: replacing them
+    /// with a list missing that page would drop every pull request on it.
+    /// Each extra starts from what was read before and is replaced only by a
+    /// read that answered — an empty answer included — and a pull request read
+    /// in part, or passed over by the budget, is noted so the next pull reads
+    /// it again whether or not its head has moved.
     fn sync_pull_requests(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
-        let active = match self.source(events)?.pull_requests("active", 200) {
-            Ok(found) => found,
-            Err(error) => return Ok(Self::warn(events, "Pull requests", &error)),
-        };
-        let mut requests = active;
-        for (status, top) in [("completed", 50), ("abandoned", 50)] {
-            if let Ok(closed) = self.source(events)?.pull_requests(status, top) {
-                requests.extend(closed);
+        let mut requests = Vec::new();
+        for (status, top) in [("active", 200), ("completed", 50), ("abandoned", 50)] {
+            match self.source(events)?.pull_requests(status, top) {
+                Ok(found) => requests.extend(found),
+                Err(error) => return Ok(Self::warn(events, "Pull requests", &error)),
             }
         }
         let stored = self.repository()?.load_pull_requests()?;
         let project_id = self.repository()?.meta(db::PROJECT_ID_KEY)?;
+        let was_pending = self.pending_pr_refresh()?;
+        let mut pending = HashSet::new();
         let mut refreshed = 0;
+        let mut failed = 0;
+        let mut last_error = None;
         for request in &mut requests {
             let held = stored.iter().find(|held| held.id == request.id);
+            if let Some(held) = held {
+                request.work_items.clone_from(&held.work_items);
+                request.build.clone_from(&held.build);
+                request.threads.clone_from(&held.threads);
+            }
             // What was read before is kept unless the pull request has moved,
             // which is what keeps the per-request reads down to what changed.
             // A build the policy is still deciding is a reason to look again:
@@ -2085,37 +2149,86 @@ impl Worker {
                             .as_ref()
                             .is_some_and(|build| build_undecided(&build.status)))
             });
-            if unchanged {
-                if let Some(held) = held {
-                    request.work_items.clone_from(&held.work_items);
-                    request.build.clone_from(&held.build);
-                    request.threads.clone_from(&held.threads);
-                }
+            if (unchanged && !was_pending.contains(&request.id)) || request.status.is_closed() {
                 continue;
             }
-            if request.status.is_closed() || refreshed >= PR_REFRESH_BUDGET {
-                if let Some(held) = held {
-                    request.work_items.clone_from(&held.work_items);
-                    request.build.clone_from(&held.build);
-                    request.threads.clone_from(&held.threads);
-                }
+            if refreshed >= PR_REFRESH_BUDGET {
+                pending.insert(request.id);
                 continue;
             }
             refreshed += 1;
             let source = self.source(events)?;
-            if let Ok(work_items) = source.pull_request_work_items(&request.repo_id, request.id) {
-                request.work_items = work_items;
+            let mut complete = true;
+            match source.pull_request_work_items(&request.repo_id, request.id) {
+                Ok(work_items) => request.work_items = work_items,
+                Err(error) => {
+                    complete = false;
+                    last_error = Some(error);
+                }
             }
-            if let Ok(threads) = source.pull_request_threads(&request.repo_id, request.id) {
-                request.threads = threads;
+            match source.pull_request_threads(&request.repo_id, request.id) {
+                Ok(threads) => request.threads = threads,
+                Err(error) => {
+                    complete = false;
+                    last_error = Some(error);
+                }
             }
-            if let Some(project_id) = project_id.as_deref()
-                && let Ok(build) = source.pull_request_policy(project_id, request.id)
-            {
-                request.build = build;
+            if let Some(project_id) = project_id.as_deref() {
+                match source.pull_request_policy(project_id, request.id) {
+                    Ok(build) => request.build = build,
+                    Err(error) => {
+                        complete = false;
+                        last_error = Some(error);
+                    }
+                }
+            }
+            if !complete {
+                failed += 1;
+                pending.insert(request.id);
             }
         }
-        self.repository()?.replace_pull_requests(&requests)
+        if let Some(error) = last_error {
+            let noun = if failed == 1 {
+                "pull request"
+            } else {
+                "pull requests"
+            };
+            let _ = events.send(SyncEvent::Warning(format!(
+                "Pull requests: {failed} {noun} not read in full, read again next pull: {error:#}"
+            )));
+        }
+        let written = self.repository()?.replace_pull_requests(&requests)?;
+        let noted = self.set_pending_pr_refresh(&was_pending, &pending)?;
+        Ok(written || noted)
+    }
+
+    /// The pull requests the last pull left to read again.
+    fn pending_pr_refresh(&mut self) -> Result<HashSet<i64>> {
+        Ok(self
+            .repository()?
+            .meta(db::PR_REFRESH_PENDING_KEY)?
+            .and_then(|raw| serde_json::from_str::<Vec<i64>>(&raw).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .collect())
+    }
+
+    /// Records the pull requests to read again, and only when the set moved,
+    /// so an idle project's pull still leaves the file untouched. Answers
+    /// whether it was written.
+    fn set_pending_pr_refresh(
+        &mut self,
+        before: &HashSet<i64>,
+        pending: &HashSet<i64>,
+    ) -> Result<bool> {
+        if before == pending {
+            return Ok(false);
+        }
+        let mut ids: Vec<i64> = pending.iter().copied().collect();
+        ids.sort_unstable();
+        self.repository()?
+            .set_meta(db::PR_REFRESH_PENDING_KEY, &serde_json::to_string(&ids)?)?;
+        Ok(true)
     }
 
     /// The rows, their graph, and the states they allow, all out of the same
@@ -2470,6 +2583,14 @@ mod tests {
         /// read.
         pull_requests: Arc<Mutex<Vec<PullRequest>>>,
         pr_extras: Arc<Mutex<Vec<i64>>>,
+        /// The completed pull requests it lists, and why the closed pages are
+        /// refused instead of listed.
+        pr_closed: Arc<Mutex<Vec<PullRequest>>>,
+        pr_closed_refusal: Arc<Mutex<Option<String>>>,
+        /// The pull requests whose work items it will not read, and what a
+        /// work items read answers with instead of the usual one.
+        pr_failing: Arc<Mutex<Vec<i64>>>,
+        pr_work_items: Arc<Mutex<Option<Vec<i64>>>>,
         /// Who this source says is signed in, how often it was asked, and
         /// every vote it took.
         my_id: Option<String>,
@@ -2798,8 +2919,14 @@ mod tests {
         }
 
         fn pull_requests(&self, status: &str, _top: usize) -> Result<Vec<PullRequest>> {
-            Ok(if status == "active" {
-                self.pull_requests.lock().unwrap().clone()
+            if status == "active" {
+                return Ok(self.pull_requests.lock().unwrap().clone());
+            }
+            if let Some(reason) = self.pr_closed_refusal.lock().unwrap().as_ref() {
+                return Err(anyhow!("{reason}"));
+            }
+            Ok(if status == "completed" {
+                self.pr_closed.lock().unwrap().clone()
             } else {
                 Vec::new()
             })
@@ -2807,7 +2934,15 @@ mod tests {
 
         fn pull_request_work_items(&self, _repo_id: &str, id: i64) -> Result<Vec<i64>> {
             self.pr_extras.lock().unwrap().push(id);
-            Ok(vec![10_001])
+            if self.pr_failing.lock().unwrap().contains(&id) {
+                return Err(anyhow!("HTTP 500 for pullRequests/{id}/workitems"));
+            }
+            Ok(self
+                .pr_work_items
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| vec![10_001]))
         }
 
         fn pipelines(&self) -> Result<Vec<Pipeline>> {
@@ -3727,6 +3862,256 @@ mod tests {
         assert!(
             extras.lock().unwrap().is_empty(),
             "and nothing was read for it"
+        );
+    }
+
+    /// The outcome of the next pull, and every warning it sent on the way.
+    fn pulled_with_warnings(handle: &SyncHandle) -> (SyncOutcome, Vec<String>) {
+        let mut warnings = Vec::new();
+        loop {
+            match next_event(handle) {
+                SyncEvent::Finished { outcome, .. } => return (outcome, warnings),
+                SyncEvent::Warning(text) => warnings.push(text),
+                SyncEvent::DisplayName(_) => continue,
+                other => panic!("expected a finished pull, got {other:?}"),
+            }
+        }
+    }
+
+    fn stored_pull_requests(path: &std::path::Path) -> Vec<PullRequest> {
+        SqliteTicketRepository::open_existing(path)
+            .unwrap()
+            .load_pull_requests()
+            .unwrap()
+    }
+
+    /// Enough quiet pulls for a test that pulls `count` times.
+    fn quiet_pulls(count: usize) -> Vec<Result<SyncBatch, String>> {
+        (0..count).map(|_| Ok(SyncBatch::default())).collect()
+    }
+
+    #[test]
+    fn a_closed_page_that_will_not_come_leaves_the_stored_pull_requests_alone() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let source = FakeSource {
+            pull_requests: Arc::new(Mutex::new(vec![pull_request(
+                7,
+                "commit-a",
+                PrStatus::Active,
+            )])),
+            pr_closed: Arc::new(Mutex::new(vec![pull_request(
+                9,
+                "commit-z",
+                PrStatus::Completed,
+            )])),
+            ..FakeSource::with(quiet_pulls(2))
+        };
+        let closed_refusal = Arc::clone(&source.pr_closed_refusal);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let (_, warnings) = pulled_with_warnings(&handle);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            stored_pull_requests(&path)
+                .iter()
+                .map(|request| request.id)
+                .collect::<Vec<_>>(),
+            vec![9, 7]
+        );
+
+        *closed_refusal.lock().unwrap() = Some("HTTP 503 for pullrequests".into());
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let (_, warnings) = pulled_with_warnings(&handle);
+        assert_eq!(warnings, ["Pull requests: HTTP 503 for pullrequests"]);
+        let stored = stored_pull_requests(&path);
+        assert_eq!(
+            stored.iter().map(|request| request.id).collect::<Vec<_>>(),
+            vec![9, 7],
+            "a page that would not come drops nothing that was on it"
+        );
+        assert_eq!(
+            stored[1].work_items,
+            vec![10_001],
+            "and nothing read before is lost"
+        );
+    }
+
+    #[test]
+    fn a_pull_request_read_in_part_keeps_what_it_had_and_is_read_again_next_pull() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let active = Arc::new(Mutex::new(vec![pull_request(
+            7,
+            "commit-a",
+            PrStatus::Active,
+        )]));
+        let source = FakeSource {
+            pull_requests: Arc::clone(&active),
+            ..FakeSource::with(quiet_pulls(5))
+        };
+        let extras = Arc::clone(&source.pr_extras);
+        let failing = Arc::clone(&source.pr_failing);
+        let work_items = Arc::clone(&source.pr_work_items);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        pulled_with_warnings(&handle);
+        assert_eq!(stored_pull_requests(&path)[0].work_items, vec![10_001]);
+
+        // The head moves and the work items will not come.
+        extras.lock().unwrap().clear();
+        failing.lock().unwrap().push(7);
+        *active.lock().unwrap() = vec![pull_request(7, "commit-b", PrStatus::Active)];
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let (_, warnings) = pulled_with_warnings(&handle);
+        assert_eq!(*extras.lock().unwrap(), vec![7]);
+        assert_eq!(
+            warnings,
+            [
+                "Pull requests: 1 pull request not read in full, read again next pull: \
+              HTTP 500 for pullRequests/7/workitems"
+            ]
+        );
+        let stored = stored_pull_requests(&path);
+        assert_eq!(stored[0].last_merge_source_commit, "commit-b");
+        assert_eq!(
+            stored[0].work_items,
+            vec![10_001],
+            "what was read before stands in for what would not come"
+        );
+
+        // Nothing moves, but the read that failed is made again — and the
+        // one after it is not.
+        extras.lock().unwrap().clear();
+        failing.lock().unwrap().clear();
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let (_, warnings) = pulled_with_warnings(&handle);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            *extras.lock().unwrap(),
+            vec![7],
+            "the pull request read in part is read again although its head stayed put"
+        );
+        extras.lock().unwrap().clear();
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        pulled_with_warnings(&handle);
+        assert!(
+            extras.lock().unwrap().is_empty(),
+            "once read in full it is left alone"
+        );
+
+        // A read that answers with nothing is an answer: the old work items go.
+        *work_items.lock().unwrap() = Some(Vec::new());
+        *active.lock().unwrap() = vec![pull_request(7, "commit-c", PrStatus::Active)];
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        pulled_with_warnings(&handle);
+        assert!(
+            stored_pull_requests(&path)[0].work_items.is_empty(),
+            "an empty answer clears what was read before"
+        );
+    }
+
+    #[test]
+    fn pull_requests_past_the_budget_are_read_by_the_pulls_that_follow() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let listed: Vec<PullRequest> = (101..=101 + PR_REFRESH_BUDGET as i64)
+            .map(|id| pull_request(id, "commit-a", PrStatus::Active))
+            .collect();
+        let source = FakeSource {
+            pull_requests: Arc::new(Mutex::new(listed)),
+            ..FakeSource::with(quiet_pulls(3))
+        };
+        let extras = Arc::clone(&source.pr_extras);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        pulled_with_warnings(&handle);
+        assert_eq!(extras.lock().unwrap().len(), PR_REFRESH_BUDGET);
+        let left = 101 + PR_REFRESH_BUDGET as i64;
+        assert!(
+            stored_pull_requests(&path)
+                .iter()
+                .find(|request| request.id == left)
+                .unwrap()
+                .work_items
+                .is_empty(),
+            "the one past the budget waits"
+        );
+
+        extras.lock().unwrap().clear();
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        pulled_with_warnings(&handle);
+        assert_eq!(
+            *extras.lock().unwrap(),
+            vec![left],
+            "and is read on the next pull although nothing about it moved"
+        );
+
+        extras.lock().unwrap().clear();
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        pulled_with_warnings(&handle);
+        assert!(
+            extras.lock().unwrap().is_empty(),
+            "with everything read, nothing is read again"
+        );
+        assert_eq!(
+            SqliteTicketRepository::open_existing(&path)
+                .unwrap()
+                .meta(db::PR_REFRESH_PENDING_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("[]"),
+            "and nothing is noted for the pull after"
+        );
+    }
+
+    #[test]
+    fn a_comment_azure_devops_took_is_answered_as_taken_when_sqlite_will_not_store_it() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        // The table the comment lands in is gone, so the local write fails
+        // after the post has been made.
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("DROP TABLE work_item_comments")
+            .unwrap();
+        let comment = posted_comment(11, "2026-03-04T09:15:00Z", "Merged into main");
+        let source = FakeSource {
+            comment: Some(comment.clone()),
+            ..FakeSource::with(Vec::new())
+        };
+        let posted = Arc::clone(&source.posted);
+        let handle = SyncHandle::spawn(path, Box::new(source)).unwrap();
+
+        handle
+            .send(SyncRequest::Comment {
+                key: comment.ticket.clone(),
+                text: "Merged into main".into(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            commented(&handle).unwrap(),
+            comment,
+            "the answer carries what Azure DevOps kept"
+        );
+        let SyncEvent::CacheMissed(message) = next_event(&handle) else {
+            panic!("the miss is said after the answer");
+        };
+        assert!(
+            message.starts_with(
+                "Comment saved in Azure DevOps, but the local cache could not be updated: "
+            ),
+            "{message}"
+        );
+        assert!(message.contains("work_item_comments"), "{message}");
+        assert_eq!(
+            posted.lock().unwrap().len(),
+            1,
+            "a write that landed is not made again"
         );
     }
 
@@ -4817,6 +5202,7 @@ mod tests {
                 | SyncEvent::Reparented(_)
                 | SyncEvent::Deleted(_)
                 | SyncEvent::Commented(_)
+                | SyncEvent::CacheMissed(_)
                 | SyncEvent::Warning(_) => continue,
                 SyncEvent::Stopped => panic!("the worker stopped early"),
             }

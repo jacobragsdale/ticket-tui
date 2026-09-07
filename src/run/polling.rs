@@ -152,10 +152,15 @@ fn run_source(app: &App, run: &Run) -> String {
 /// Reads the workspace while the Repos tab is showing, and folds in whatever
 /// the local thread has found or done. Nothing here is written to SQLite: what
 /// is on this machine is not the project's business, and a rescan is cheap.
+///
+/// One scan is out at a time. A reason to look again while one is out — the
+/// tab opened again, the cadence come round, a job finished — books one
+/// follow-up, sent when the scan answers, so a slow workspace is never read
+/// by a queue of scans and the follow-up reads it as it is then.
 pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
-    let Some(worker) = runtime.local.worker.as_ref() else {
+    if runtime.local.worker.is_none() {
         return false;
-    };
+    }
     let showing = app.tab == TabId::Repos;
     let opened = showing && !runtime.local.showing;
     runtime.local.showing = showing;
@@ -163,23 +168,16 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
         .local
         .scanned
         .is_none_or(|at| at.elapsed() >= LOCAL_SCAN_CADENCE);
-    if showing
-        && (opened || due)
-        && let Some(workspace) = app.shell.workspace().map(std::path::Path::to_path_buf)
-    {
-        runtime.local.scanned = Some(Instant::now());
-        let repos = app
-            .shell
-            .repos()
-            .iter()
-            .map(|repo| local::RepoKey {
-                id: repo.id.clone(),
-                remote: local::normalise_remote(&repo.remote_url),
-                name: repo.name.clone(),
-            })
-            .collect();
-        let _ = worker.send(LocalRequest::Scan { workspace, repos });
+    if showing && (opened || due) {
+        if runtime.local.scanning {
+            runtime.local.rescan = true;
+        } else {
+            send_scan(app, runtime);
+        }
     }
+    let Some(worker) = runtime.local.worker.as_ref() else {
+        return true;
+    };
     // Drained first, so the events can be answered without holding a borrow of
     // the thread that sent them.
     let events: Vec<LocalEvent> = std::iter::from_fn(|| worker.try_event()).collect();
@@ -187,7 +185,13 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     let redraw = !events.is_empty() || app.repos.busy();
     for event in events {
         match event {
-            LocalEvent::Scanned(local) => app.repos.set_local(local),
+            LocalEvent::Scanned(local) => {
+                app.repos.set_local(local);
+                runtime.local.scanning = false;
+                if std::mem::take(&mut runtime.local.rescan) {
+                    send_scan(app, runtime);
+                }
+            }
             LocalEvent::Started { repo_id, job } => app.repos.set_job(&repo_id, Some(job)),
             LocalEvent::Finished {
                 repo_id,
@@ -209,10 +213,37 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 // Whatever git did, the workspace is not what it was.
                 runtime.local.scanned = None;
             }
-            LocalEvent::Stopped => runtime.local.worker = None,
+            LocalEvent::Stopped => runtime.local.stop(app, "the thread is gone"),
         }
     }
     redraw
+}
+
+/// Asks the local thread to read the workspace as it stands now. Nothing is
+/// sent without a workspace to read; a thread that will not take the request
+/// is gone, and is reported as such.
+fn send_scan(app: &mut App, runtime: &mut SyncRuntime) {
+    let Some(workspace) = app.shell.workspace().map(std::path::Path::to_path_buf) else {
+        return;
+    };
+    let Some(worker) = runtime.local.worker.as_ref() else {
+        return;
+    };
+    let repos = app
+        .shell
+        .repos()
+        .iter()
+        .map(|repo| local::RepoKey {
+            id: repo.id.clone(),
+            remote: local::normalise_remote(&repo.remote_url),
+            name: repo.name.clone(),
+        })
+        .collect();
+    runtime.local.scanned = Some(Instant::now());
+    match worker.send(LocalRequest::Scan { workspace, repos }) {
+        Ok(()) => runtime.local.scanning = true,
+        Err(error) => runtime.local.stop(app, &format!("{error:#}")),
+    }
 }
 
 /// Folds in what the agent thread has done: a launch that landed or failed,
@@ -566,6 +597,15 @@ pub(super) fn poll_sync(
                 }
             },
             SyncEvent::Warning(text) => app.shell.set_error(text),
+            // Azure DevOps has the write and the file does not. The answer
+            // before this one already settled the row, so nothing is put back
+            // and nothing is asked again: a pull is booked for the next turn to
+            // bring the file into step. A timer pull says nothing when it
+            // lands, which leaves this message on screen for its full stay.
+            SyncEvent::CacheMissed(message) => {
+                runtime.scheduler.schedule_now(Instant::now());
+                app.shell.set_error(message);
+            }
             SyncEvent::Stopped => {
                 runtime.stop(app, "the Azure DevOps sync worker stopped");
             }

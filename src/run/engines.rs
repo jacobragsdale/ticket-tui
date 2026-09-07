@@ -19,6 +19,28 @@ pub(super) struct LocalRuntime {
     /// Whether the Repos tab was showing last turn, so opening it reads the
     /// workspace at once rather than up to a minute later.
     pub(super) showing: bool,
+    /// Whether a scan is out with the thread. One at a time: a workspace of
+    /// a hundred clones is a hundred `git status` calls, and a tab opened and
+    /// closed while one runs must not queue a second behind it.
+    pub(super) scanning: bool,
+    /// Whether the workspace moved while a scan was out — a job finished, the
+    /// tab was opened again — so one more follows when it answers. One, not
+    /// one per reason: the follow-up reads the workspace as it is then.
+    pub(super) rescan: bool,
+}
+
+impl LocalRuntime {
+    /// The thread is gone, or would not take a request: nothing it was asked
+    /// is coming back, so the glyphs waiting on it stop turning and the tab
+    /// says why.
+    pub(super) fn stop(&mut self, app: &mut App, error: &str) {
+        self.worker = None;
+        self.scanning = false;
+        self.rescan = false;
+        app.repos.clear_jobs();
+        app.shell
+            .set_error(format!("Local repositories stopped: {error}"));
+    }
 }
 
 /// The agent side: the thread that drives Herdr and git for `w`.

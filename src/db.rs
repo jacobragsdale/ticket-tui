@@ -69,6 +69,12 @@ pub fn team_iterations(stored: Option<String>) -> Vec<String> {
 /// and artifact-link endpoints ask for by id rather than by name.
 pub const PROJECT_ID_KEY: &str = "project_id";
 
+/// `sync_meta` key holding the pull requests whose work items, threads or
+/// build policy the last pull could not read in full — a read that failed, or
+/// one left for later by the per-pull budget — as a JSON list of ids, so the
+/// next pull reads them again even though nothing about them has moved.
+pub const PR_REFRESH_PENDING_KEY: &str = "pr_refresh_pending";
+
 /// `sync_meta` key holding when the project's classification nodes were last
 /// read. The iteration and area pickers open from the cached trees and only ask
 /// Azure DevOps again once this is an hour old, so a run that follows another
@@ -863,61 +869,76 @@ impl SqliteTicketRepository {
             })
         })?;
         let mut requests = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        // Three reads for the whole table rather than three per pull request:
+        // a busy project's few hundred rows were costing a thousand queries.
+        // Each child table is read in its own order and dealt out by pull
+        // request, so no row is joined into every other's children.
+        let mut reviewers = self.load_pr_reviewers()?;
+        let mut work_items = self.load_pr_work_items()?;
+        let mut threads = self.load_pr_threads()?;
         for request in &mut requests {
-            request.reviewers = self.load_pr_reviewers(request.id)?;
-            request.work_items = self.load_pr_work_items(request.id)?;
-            request.threads = self.load_pr_threads(request.id)?;
+            request.reviewers = reviewers.remove(&request.id).unwrap_or_default();
+            request.work_items = work_items.remove(&request.id).unwrap_or_default();
+            request.threads = threads.remove(&request.id).unwrap_or_default();
         }
         Ok(requests)
     }
 
-    fn load_pr_reviewers(&self, pull_request: i64) -> Result<Vec<PrReviewer>> {
+    /// Every stored reviewer, by pull request, each list in the position its
+    /// pull request listed them.
+    fn load_pr_reviewers(&self) -> Result<HashMap<i64, Vec<PrReviewer>>> {
         let mut statement = self.connection.prepare(
-            "SELECT reviewer_id, display_name, unique_name, vote, is_required
-             FROM pr_reviewers WHERE pull_request_id = ?1 ORDER BY position",
+            "SELECT pull_request_id, reviewer_id, display_name, unique_name, vote, is_required
+             FROM pr_reviewers ORDER BY pull_request_id, position",
         )?;
-        let rows = statement.query_map(params![pull_request], |row| {
-            Ok(PrReviewer {
-                id: row.get(0)?,
-                display_name: row.get(1)?,
-                unique_name: row.get(2)?,
-                vote: i8::try_from(row.get::<_, i64>(3)?).unwrap_or_default(),
-                is_required: row.get::<_, i64>(4)? != 0,
-            })
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                PrReviewer {
+                    id: row.get(1)?,
+                    display_name: row.get(2)?,
+                    unique_name: row.get(3)?,
+                    vote: i8::try_from(row.get::<_, i64>(4)?).unwrap_or_default(),
+                    is_required: row.get::<_, i64>(5)? != 0,
+                },
+            ))
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to load pull request reviewers")
+        grouped(rows).context("failed to load pull request reviewers")
     }
 
-    fn load_pr_threads(&self, pull_request: i64) -> Result<Vec<PrThread>> {
+    /// Every stored thread, by pull request, each list in thread id order.
+    fn load_pr_threads(&self) -> Result<HashMap<i64, Vec<PrThread>>> {
         let mut statement = self.connection.prepare(
-            "SELECT thread_id, author, text, published_at, status
-             FROM pr_threads WHERE pull_request_id = ?1 ORDER BY thread_id",
+            "SELECT pull_request_id, thread_id, author, text, published_at, status
+             FROM pr_threads ORDER BY pull_request_id, thread_id",
         )?;
-        let rows = statement.query_map(params![pull_request], |row| {
-            Ok(PrThread {
-                id: row.get(0)?,
-                author: row.get(1)?,
-                text: row.get(2)?,
-                published_at: row
-                    .get::<_, Option<String>>(3)?
-                    .as_deref()
-                    .and_then(|raw| Timestamp::parse(raw).ok()),
-                status: row.get(4)?,
-            })
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                PrThread {
+                    id: row.get(1)?,
+                    author: row.get(2)?,
+                    text: row.get(3)?,
+                    published_at: row
+                        .get::<_, Option<String>>(4)?
+                        .as_deref()
+                        .and_then(|raw| Timestamp::parse(raw).ok()),
+                    status: row.get(5)?,
+                },
+            ))
         })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to load pull request threads")
+        grouped(rows).context("failed to load pull request threads")
     }
 
-    fn load_pr_work_items(&self, pull_request: i64) -> Result<Vec<i64>> {
+    /// Every stored work-item link, by pull request, each list in work item
+    /// id order.
+    fn load_pr_work_items(&self) -> Result<HashMap<i64, Vec<i64>>> {
         let mut statement = self.connection.prepare(
-            "SELECT work_item_id FROM pr_work_items WHERE pull_request_id = ?1
-             ORDER BY work_item_id",
+            "SELECT pull_request_id, work_item_id FROM pr_work_items
+             ORDER BY pull_request_id, work_item_id",
         )?;
-        let rows = statement.query_map(params![pull_request], |row| row.get(0))?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .context("failed to load pull request work items")
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        grouped(rows).context("failed to load pull request work items")
     }
 
     /// Everybody the last identity fetch found, by display name.
@@ -1404,6 +1425,19 @@ impl SqliteTicketRepository {
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .context("failed to load history")
     }
+}
+
+/// Deals `(parent id, child)` rows, read in parent order, into one list per
+/// parent, each list in the order the rows came.
+fn grouped<T>(
+    rows: impl Iterator<Item = rusqlite::Result<(i64, T)>>,
+) -> rusqlite::Result<HashMap<i64, Vec<T>>> {
+    let mut by_parent: HashMap<i64, Vec<T>> = HashMap::new();
+    for row in rows {
+        let (parent, child) = row?;
+        by_parent.entry(parent).or_default().push(child);
+    }
+    Ok(by_parent)
 }
 
 #[must_use]
@@ -2312,6 +2346,143 @@ mod tests {
             "a batch that saw nothing newer leaves it where it was"
         );
         assert_eq!(repository.stored_ids().unwrap().len(), 3);
+    }
+
+    fn pull_request(id: i64) -> PullRequest {
+        PullRequest {
+            repo_id: "aaa-111".into(),
+            id,
+            title: format!("Pull request {id}"),
+            description: String::new(),
+            status: PrStatus::Active,
+            is_draft: false,
+            created_by: Identity::new("Avery Chen".to_owned(), None),
+            created_at: Some(ts("2026-08-29T07:00:00Z")),
+            closed_at: None,
+            source_ref: format!("refs/heads/feature/{id}"),
+            target_ref: "refs/heads/main".into(),
+            merge_status: "succeeded".into(),
+            last_merge_source_commit: format!("commit-{id}"),
+            auto_complete_set_by: None,
+            url: String::new(),
+            reviewers: Vec::new(),
+            work_items: Vec::new(),
+            build: None,
+            threads: Vec::new(),
+        }
+    }
+
+    fn reviewer(id: &str, vote: i8) -> PrReviewer {
+        PrReviewer {
+            id: id.into(),
+            display_name: id.to_uppercase(),
+            unique_name: None,
+            vote,
+            is_required: vote == 0,
+        }
+    }
+
+    fn thread(id: i64, text: &str) -> PrThread {
+        PrThread {
+            id,
+            author: "Avery Chen".into(),
+            text: text.into(),
+            published_at: Some(ts("2026-08-29T08:00:00Z")),
+            status: "active".into(),
+        }
+    }
+
+    #[test]
+    fn pull_requests_come_back_with_each_ones_own_children_in_the_order_they_were_stored() {
+        let directory = tempdir().unwrap();
+        let mut repository =
+            SqliteTicketRepository::open(directory.path().join("tickets.sqlite3")).unwrap();
+        let requests = vec![
+            PullRequest {
+                // Reviewers keep the position they were listed in, not their
+                // ids' order; work items and threads read in id order.
+                reviewers: vec![reviewer("zed", 10), reviewer("avery", 0)],
+                work_items: vec![900, 12],
+                threads: vec![thread(30, "Second"), thread(7, "First")],
+                ..pull_request(11)
+            },
+            PullRequest {
+                reviewers: vec![reviewer("blake", -10)],
+                work_items: vec![12],
+                threads: Vec::new(),
+                ..pull_request(12)
+            },
+            // One with no children at all, which must not borrow anybody
+            // else's.
+            pull_request(13),
+        ];
+
+        assert!(repository.replace_pull_requests(&requests).unwrap());
+        let stored = repository.load_pull_requests().unwrap();
+
+        assert_eq!(
+            stored.iter().map(|request| request.id).collect::<Vec<_>>(),
+            vec![13, 12, 11],
+            "newest first"
+        );
+        let by_id = |id: i64| stored.iter().find(|request| request.id == id).unwrap();
+        assert_eq!(
+            by_id(11)
+                .reviewers
+                .iter()
+                .map(|reviewer| reviewer.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zed", "avery"]
+        );
+        assert_eq!(by_id(11).work_items, vec![12, 900]);
+        assert_eq!(
+            by_id(11)
+                .threads
+                .iter()
+                .map(|thread| thread.id)
+                .collect::<Vec<_>>(),
+            vec![7, 30]
+        );
+        assert_eq!(by_id(12).reviewers, vec![reviewer("blake", -10)]);
+        assert_eq!(by_id(12).work_items, vec![12]);
+        assert!(by_id(12).threads.is_empty());
+        assert!(by_id(13).reviewers.is_empty());
+        assert!(by_id(13).work_items.is_empty());
+        assert!(by_id(13).threads.is_empty());
+    }
+
+    /// Not a test but a stopwatch: reading a busy project's pull requests back
+    /// with their reviewers, work items and threads. Run it by name with
+    /// `cargo test --release -- --ignored bench_load_pull_requests --nocapture`.
+    #[test]
+    #[ignore = "a stopwatch, not a check; run by name with --nocapture"]
+    fn bench_load_pull_requests_reads_a_busy_project() {
+        let directory = tempdir().unwrap();
+        let mut repository =
+            SqliteTicketRepository::open(directory.path().join("bench.sqlite3")).unwrap();
+        let requests: Vec<PullRequest> = (1..=2_000)
+            .map(|id| PullRequest {
+                reviewers: (0..3)
+                    .map(|n| reviewer(&format!("reviewer-{n}"), 0))
+                    .collect(),
+                work_items: vec![id * 10, id * 10 + 1],
+                threads: (0..4)
+                    .map(|n| thread(n, "Looks fine to me, one nit inline."))
+                    .collect(),
+                ..pull_request(id)
+            })
+            .collect();
+        repository.replace_pull_requests(&requests).unwrap();
+
+        let started = std::time::Instant::now();
+        let stored = repository.load_pull_requests().unwrap();
+        println!(
+            "load_pull_requests read {} rows in {:?}",
+            stored.len(),
+            started.elapsed()
+        );
+        assert_eq!(stored.len(), 2_000);
+        assert_eq!(stored[0].threads.len(), 4);
     }
 
     /// Not a test but a stopwatch: the write phase of a full pull at the 35k

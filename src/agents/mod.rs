@@ -488,17 +488,14 @@ impl SessionStore {
     }
 
     pub fn save(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
         let document = StoreDocument {
             schema_version: 1,
             sessions: self.sessions.clone(),
         };
         let raw = serde_json::to_string_pretty(&document)
             .context("failed to serialize agent sessions")?;
-        std::fs::write(&self.path, raw).with_context(|| format!("writing {}", self.path.display()))
+        crate::session::write_atomically(&self.path, raw.as_bytes())
+            .with_context(|| format!("writing {}", self.path.display()))
     }
 
     pub fn upsert(&mut self, session: AgentSession) -> Result<()> {
@@ -1224,6 +1221,70 @@ mod tests {
 
     fn store_in(root: &Path) -> SessionStore {
         SessionStore::load(&root.join("tickets.agents.json")).unwrap()
+    }
+
+    fn session_for(id: &str, work_item: i64) -> AgentSession {
+        AgentSession {
+            id: id.into(),
+            organization: "demo".into(),
+            project: "atlas".into(),
+            work_item,
+            repo_id: "id-pay".into(),
+            repo_name: "pay".into(),
+            workdir: PathBuf::from("/work/pay"),
+            branch: format!("{work_item}-ticket"),
+            policy: CheckoutPolicy::Worktree,
+            provider: Provider::Cursor,
+            workspace: "Payments".into(),
+            workspace_id: None,
+            tab_id: None,
+            pane_id: None,
+            agent_name: None,
+            context_path: None,
+            prompt: None,
+            prompt_sent: false,
+            started_at: "2026-09-07T09:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn the_store_is_rewritten_whole_and_a_write_that_cannot_finish_leaves_the_last_one() {
+        let dir = tempdir().unwrap();
+        let mut store = store_in(dir.path());
+        store.upsert(session_for("s1", 715)).unwrap();
+        store.upsert(session_for("s2", 722)).unwrap();
+        store.remove("s1").unwrap();
+        let reloaded = store_in(dir.path());
+        assert_eq!(reloaded.sessions, [session_for("s2", 722)]);
+        let mut names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["tickets.agents.json"], "no temporary file is left");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let writable = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+            if std::fs::File::create(dir.path().join("probe")).is_ok() {
+                // root writes anywhere, so there is no failure to stage.
+                std::fs::set_permissions(dir.path(), writable).unwrap();
+                return;
+            }
+            let error = store.upsert(session_for("s3", 730)).unwrap_err();
+            std::fs::set_permissions(dir.path(), writable).unwrap();
+            assert!(
+                format!("{error:#}").contains("tickets.agents.json"),
+                "{error:#}"
+            );
+            assert_eq!(
+                store_in(dir.path()).sessions,
+                [session_for("s2", 722)],
+                "the file holds the last store that was written whole"
+            );
+        }
     }
 
     #[test]

@@ -100,6 +100,17 @@ impl LocalHandle {
         })
     }
 
+    /// A handle over channels somebody else holds the far ends of, for tests
+    /// that play the thread themselves and decide when a scan answers.
+    #[must_use]
+    pub fn from_channels(requests: Sender<LocalRequest>, events: Receiver<LocalEvent>) -> Self {
+        Self {
+            requests,
+            events,
+            stopped: std::cell::Cell::new(false),
+        }
+    }
+
     pub fn send(&self, request: LocalRequest) -> Result<()> {
         self.requests
             .send(request)

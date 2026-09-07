@@ -135,6 +135,12 @@ impl ReposScreen {
         !self.jobs.is_empty()
     }
 
+    /// The thread running the jobs is gone, so none of them will report back
+    /// and no glyph should go on turning for one.
+    pub fn clear_jobs(&mut self) {
+        self.jobs.clear();
+    }
+
     /// What git is doing to one repository, if anything.
     #[must_use]
     pub fn job_for(&self, repo_id: &str) -> Option<GitJob> {
