@@ -62,3 +62,35 @@ command = "osascript -e 'on run argv' -e 'display notification (item 2 of argv) 
 
 # Linux:
 # command = "notify-send {title} {body}"
+
+# `w` on a work item: a coding CLI in a Herdr pane, in the work item's
+# repository, with the ticket already in front of it. Left out, `w` launches
+# Copilot in a git worktree of its own for the ticket's branch.
+[agents]
+default = "copilot"           # copilot · cursor — Herdr's kind names
+checkout = "worktree"         # worktree · shared: a worktree per ticket, or the clone itself
+
+[agents.copilot]
+args = []                     # native arguments, after Herdr's `--`
+[agents.cursor]
+args = []
+
+# Where in Herdr a repository's agent goes. Workspaces group repositories —
+# one tab per repository inside its workspace, one agent per pane in that
+# tab — and are made only when a launch first needs them. A repository no
+# workspace names goes to `unmapped_workspace`, or is asked about (Ctrl-S in
+# that picker writes the answer here).
+[herdr]
+# unmapped_workspace = "Other"
+
+# Where a clone is when it is not under `workspace` above, by repository.
+[herdr.paths]
+# payments-api = "~/src/pay"
+
+# [[herdr.workspaces]]
+# name = "Payments"
+# repos = ["payments-api", "settlement-worker", "payment-contracts"]
+#
+# [[herdr.workspaces]]
+# name = "Reporting"
+# repos = ["reporting-api", "report-exporter"]

@@ -21,6 +21,7 @@ use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
 use serde_json::Value;
 use ticket_tui::agent_context::{self, AgentContext};
+use ticket_tui::agents::{self, AgentEvent, AgentHandle, AgentRequest, AgentSettings};
 use ticket_tui::app::{
     App, AppAction, CopiedContent, DividerOrientation, NotificationLevel, PointerTarget, Snapshot,
     SyncTarget, TabId,
@@ -132,6 +133,12 @@ pub(super) fn run() -> Result<()> {
     let shell = &app.shell;
     app.pull_requests
         .set_pull_requests(pull_requests.clone(), shell);
+    app.shell.set_pull_request_sources(
+        pull_requests
+            .iter()
+            .map(|request| (request.id, request.source_ref.clone(), request.url.clone()))
+            .collect(),
+    );
     app.relate_repos(&pull_requests);
     app.work_items.set_identities(repository.load_identities()?);
     app.work_items
@@ -186,6 +193,7 @@ pub(super) fn run() -> Result<()> {
         .set_sync_target(config.as_ref().map(|config| SyncTarget {
             organization: config.organization.clone(),
             project: config.project.clone(),
+            code_project: config.code_project.clone(),
             teams: config.teams.clone(),
             refresh_seconds: refresh,
         }));
@@ -204,7 +212,22 @@ pub(super) fn run() -> Result<()> {
             worker: LocalHandle::spawn().ok(),
             ..LocalRuntime::default()
         },
+        agents: AgentRuntime {
+            worker: AgentHandle::spawn(
+                agents::store_path(&database_path),
+                Box::new(agents::herdr::HerdrCli::default()),
+            )
+            .ok(),
+        },
     };
+    // The sessions on file are checked against Herdr once, so a `w` on a
+    // work item whose agent has since gone starts one rather than pointing
+    // at an empty pane. Outside Herdr there is nothing to check against.
+    if agents::herdr::inside_herdr()
+        && let Some(worker) = runtime.agents.worker.as_ref()
+    {
+        let _ = worker.send(AgentRequest::Refresh);
+    }
     if let Some(config) = config.filter(|_| wrong_project.is_none()) {
         runtime.worker = Some(SyncHandle::spawn(
             database_path.clone(),
@@ -237,6 +260,10 @@ pub(super) fn run() -> Result<()> {
         app.shell.set_error(message);
     }
 
+    app.shell.set_launch_environment(
+        agents::herdr::inside_herdr(),
+        ticket_tui::config::default_path(),
+    );
     // The theme is painted from the file last, so a file that cannot be read
     // is the newest thing in the footer when the screen first appears.
     let mut config_watch = ConfigWatch::new(ticket_tui::config::default_path(), theme_choice);

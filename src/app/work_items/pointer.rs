@@ -33,6 +33,7 @@ impl WorkItemsScreen {
             ScrollSurface::AssigneePicker => self.assignee_picker.cursor.scroll,
             ScrollSurface::ParentPicker => self.parent_picker.cursor.scroll,
             ScrollSurface::LinkPicker => self.link_picker.cursor.scroll,
+            ScrollSurface::AgentPicker => self.agent_picker.cursor.scroll,
             ScrollSurface::NodePicker => self.node_picker.cursor.scroll,
             ScrollSurface::TypePicker => self.type_picker.cursor.scroll,
             ScrollSurface::Form => self.form_scroll,
@@ -61,6 +62,7 @@ impl WorkItemsScreen {
             ScrollSurface::AssigneePicker => &mut self.assignee_picker.cursor.scroll,
             ScrollSurface::ParentPicker => &mut self.parent_picker.cursor.scroll,
             ScrollSurface::LinkPicker => &mut self.link_picker.cursor.scroll,
+            ScrollSurface::AgentPicker => &mut self.agent_picker.cursor.scroll,
             ScrollSurface::NodePicker => &mut self.node_picker.cursor.scroll,
             ScrollSurface::TypePicker => &mut self.type_picker.cursor.scroll,
             ScrollSurface::Form => &mut self.form_scroll,
@@ -232,6 +234,13 @@ impl WorkItemsScreen {
             PointerTarget::LinkQuery => {
                 self.place_caret(shell, TextEditor::Link, column, row);
             }
+            PointerTarget::AgentOption { index } => {
+                self.agent_picker.cursor.focus(index);
+                return self.choose_agent_option(shell, index, false);
+            }
+            PointerTarget::AgentQuery => {
+                self.place_caret(shell, TextEditor::Agent, column, row);
+            }
             PointerTarget::NodeOption { index } => {
                 self.node_picker.cursor.focus(index);
                 return self.choose_node(shell, index);
@@ -281,8 +290,10 @@ impl WorkItemsScreen {
             | PointerTarget::TreeRow { .. }
             | PointerTarget::TableCell { .. }
             | PointerTarget::ApprovalRow { .. }
-            | PointerTarget::CopyText { .. }
-            | PointerTarget::RunCommand(_) => {}
+            | PointerTarget::CopyText { .. } => {}
+            // A chip standing for a key: the details pane's `[Work with
+            // agent]`, and any button another renderer draws for this tab.
+            PointerTarget::RunCommand(id) => return self.run_command(shell, id),
             PointerTarget::DismissOverlay => self.close_overlay(shell),
             PointerTarget::PromptInput => {
                 self.place_caret(shell, TextEditor::Prompt, column, row);
@@ -396,6 +407,7 @@ impl WorkItemsScreen {
                 | TextEditor::Node
                 | TextEditor::Parent
                 | TextEditor::Link
+                | TextEditor::Agent
                 | TextEditor::Capture
                 | TextEditor::Form => SelectableSurface::Overlay,
             })
@@ -429,6 +441,7 @@ impl WorkItemsScreen {
             TextEditor::Assignee => self.assignee_picker.query.set_cursor(index),
             TextEditor::Parent => self.parent_picker.query.set_cursor(index),
             TextEditor::Link => self.link_picker.query.set_cursor(index),
+            TextEditor::Agent => self.agent_picker.query.set_cursor(index),
             TextEditor::Node => self.node_picker.query.set_cursor(index),
             TextEditor::Form => {
                 if let Some(field) = self.focused_form_field_mut() {

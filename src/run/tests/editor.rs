@@ -17,6 +17,7 @@ fn offline_runtime() -> SyncRuntime {
         watched_runs: Vec::new(),
         approvals_seen: None,
         local: LocalRuntime::default(),
+        agents: AgentRuntime::default(),
     }
 }
 

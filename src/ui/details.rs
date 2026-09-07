@@ -2,6 +2,7 @@
 //! tree, its history and its comments.
 
 use super::*;
+use crate::command::CommandId;
 use crate::model::same_text;
 use crate::text_input::{WrapLayout, wrap_with_cursor};
 
@@ -71,6 +72,8 @@ pub(super) fn render_details(
     let mut line_links: Vec<(u16, TicketKey)> = Vec::new();
     // The artifact lines that go somewhere: the line and where.
     let mut artifact_links: Vec<(u16, Jump)> = Vec::new();
+    // The chips that stand for a key: the line and the command.
+    let mut command_chips: Vec<(u16, CommandId)> = Vec::new();
     // Every click target is a line of the one paragraph, so each is recorded
     // against its logical line and placed once the scroll offset is known.
     let mut field_hits: Vec<(u16, EditableField, u16, u16)> = Vec::new();
@@ -115,6 +118,36 @@ pub(super) fn render_details(
     {
         artifact_links.push((index, jump));
         lines.push(line);
+    }
+    // The chip that stands for `w`, and the agent already on the work item
+    // when there is one. A peeked relative is read-only, so neither is drawn.
+    if !peeking {
+        if let Some(session) = screen.live_agent_for(&ticket.key) {
+            lines.push(field_line(
+                "Agent",
+                format!(
+                    "{} \u{00b7} {} \u{203a} {} \u{00b7} {}",
+                    session.provider.label(),
+                    session.workspace,
+                    session.repo_name,
+                    session.branch
+                ),
+            ));
+        }
+        let label = if screen.live_agent_for(&ticket.key).is_some() {
+            "[Return to agent]"
+        } else {
+            "[Work with agent]"
+        };
+        if let Ok(index) = u16::try_from(lines.len()) {
+            command_chips.push((index, CommandId::WorkWithAgent));
+            lines.push(Line::styled(
+                label,
+                Style::default()
+                    .fg(theme().link)
+                    .add_modifier(Modifier::UNDERLINED),
+            ));
+        }
     }
     lines.push(Line::default());
 
@@ -456,6 +489,17 @@ pub(super) fn render_details(
             shell.hit_regions.push(region(
                 Rect::new(inner.x, y, inner.width, 1),
                 PointerTarget::Follow(jump),
+                PointerLayer::Base,
+                Some(SelectableSurface::Details),
+                Some(ScrollSurface::Details),
+            ));
+        }
+    }
+    for (logical, id) in command_chips {
+        if let Some(y) = row_of(logical) {
+            shell.hit_regions.push(region(
+                Rect::new(inner.x, y, inner.width, 1),
+                PointerTarget::RunCommand(id),
                 PointerLayer::Base,
                 Some(SelectableSurface::Details),
                 Some(ScrollSurface::Details),

@@ -18,6 +18,8 @@ drive.
 - [`repos list`, `repos show`](#repos-list-repos-show)
 - [`prs list`, `prs show`](#prs-list-prs-show)
 - [The pull-request writes](#the-pull-request-writes)
+- [`prs create`](#prs-create)
+- [`agent`](#agent)
 - [`pipelines`, `runs`](#pipelines-runs)
 - [Waiting, and exit codes](#waiting-and-exit-codes)
 - [`approvals`](#approvals)
@@ -28,6 +30,7 @@ ticket-tui show <id> [--json]
 ticket-tui list [--query '<filter>'] [--json]
 ticket-tui edit <id> [--state S] [--assignee A] [--priority N] [--iteration I]
                      [--area A] [--title T] [--tags a,b] [--description-file F]
+                     [--acceptance-criteria-file F]
 ticket-tui comment <id> "text"
 ticket-tui create --type TYPE --title TITLE [--parent ID] [--iteration I]
                   [--assignee A] [--priority N] [--tags a,b]
@@ -41,6 +44,8 @@ ticket-tui prs complete <id> [--strategy squash|merge|rebase] [--keep-source]
 ticket-tui prs abandon <id>
 ticket-tui prs autocomplete <id> on|off
 ticket-tui prs comment <id> "text"
+ticket-tui prs create --repo NAME --source BRANCH [--target BRANCH] --title T
+                      [--description-file F] --work-item ID... [--draft] [--json]
 ticket-tui pipelines [--json]
 ticket-tui runs list [--pipeline NAME] [--query '<filter>'] [--json]
 ticket-tui runs show <id> [--json]
@@ -52,6 +57,9 @@ ticket-tui runs wait <id>
 ticket-tui approvals list [--json]
 ticket-tui approvals approve <id> [--comment TEXT]
 ticket-tui approvals reject <id> [--comment TEXT]
+ticket-tui agent launch <id> [--repo NAME] [--herdr-workspace NAME] [--provider KIND] [--new] [--note TEXT]
+ticket-tui agent prompt <id> [--repo NAME] [--note TEXT]
+ticket-tui agent list [--json]
 ```
 
 ## Global options
@@ -205,6 +213,7 @@ Changes fields in Azure DevOps and stores the copy that comes back.
 | `--title T` | An empty title is refused |
 | `--tags a,b` | **Replaces** the whole tag list. Commas on the command line, stored as Azure DevOps semicolons |
 | `--description-file PATH` | Reads Markdown and writes the HTML Azure DevOps stores |
+| `--acceptance-criteria-file PATH` | The same, over the acceptance criteria |
 
 ```console
 $ ticket-tui edit 627 --state Doing --tags agents,docs
@@ -333,6 +342,67 @@ error: Azure DevOps returned HTTP 409 … the source branch has been updated
 
 Run `ticket-tui sync` and look again. A pull request that cannot fast-forward,
 or a policy that is not satisfied, is Azure DevOps's refusal in its own words.
+
+## `prs create`
+
+Opens a pull request linked to one or more work items, and is safe to run
+again.
+
+```console
+$ ticket-tui prs create --repo payments-api --source 715-fix-duplicate-imports \
+    --target main --title "Fix duplicate imports" --description-file pr.md \
+    --work-item 715 --draft
+!42 created: https://dev.azure.com/org/Fiquants/_git/payments-api/pullrequest/42 (draft)
+linked #715
+```
+
+| Flag | Notes |
+|---|---|
+| `--repo NAME` | The repository, as the project spells it |
+| `--source BRANCH` | With or without `refs/heads/` |
+| `--target BRANCH` | Left out, the repository's default branch |
+| `--title T` | Required |
+| `--description-file PATH` | Markdown, sent as it is; left out, empty |
+| `--work-item ID` | Repeatable; **at least one is required** |
+| `--draft` | Open it as a draft |
+| `--json` | `{id, url, repo, source, target, status, is_draft, created, work_items, missing_links}` |
+
+The rules a retry can rely on:
+
+- An active pull request from the same source into the same target in that
+  repository is **reused**: nothing on it is rewritten — not its title, not
+  its description, not its draft state — and only the work-item links it
+  lacks are added. `created` is `false` and the first line says `already
+  open`.
+- Two such pull requests is an error naming both; close one.
+- Links are verified, not assumed: after a create or a reuse the pull
+  request's own work-item list is read back, a missing link is written on
+  the work item the way `prs link` writes it, and the list is read once more.
+  A link still missing exits 1 with the pull request's id and URL and the
+  work items not linked; run the same command again to repair it. Success —
+  exit 0 — means every requested link is confirmed.
+- The stored copy is updated, so a running TUI shows the pull request at once.
+
+## `agent`
+
+`w` in the TUI, from a shell. `launch` needs to run inside a Herdr pane
+(`HERDR_ENV=1`); `prompt` and `list` do not.
+
+```console
+ticket-tui agent launch 715                      # the linked repository, the routed workspace, the default provider
+ticket-tui agent launch 715 --repo payments-api --herdr-workspace Payments --provider cursor --new
+ticket-tui agent prompt 715 | pbcopy             # writes the handoff, prints the opening prompt
+ticket-tui agent list --json
+```
+
+`launch` returns to a live agent already on the work item unless `--new`;
+a launch that stopped part way is carried on from the stage it reached when
+run again. `--repo` is needed when the work item is linked to no repository
+or to several; `--herdr-workspace` when `config.toml` routes the repository
+nowhere (`--workspace` stays the clone root, as on every subcommand).
+`--note` travels in the handoff as a line from the user. The handoff context
+file is written under `<database dir>/handoffs/<org>-<id>/context.md` and
+the workflow skill beside it; `prompt` prints the path on stderr.
 
 ## `pipelines`, `runs`
 

@@ -67,6 +67,14 @@ pub enum CommandId {
     LinkWorkItem,
     /// `L` on Work items: a repository, then a branch, linked to the work item.
     LinkBranch,
+    /// `w` on Work items: a coding CLI in a Herdr pane with the work item in
+    /// front of it — or, when one is already there, back to it.
+    WorkWithAgent,
+    /// A second agent on the same work item, provider asked for, beside the
+    /// first rather than instead of it.
+    StartAnotherAgentSession,
+    /// The opening prompt, for a terminal already open somewhere.
+    CopyAgentPrompt,
     ToggleClosedPrs,
     /// `g`: whatever the row under the cursor points at, worked out per tab.
     Follow,
@@ -234,6 +242,27 @@ pub const COMMANDS: &[Command] = &[
         title: "Link a branch",
         keys: &[key('L')],
         help: "A repository, then a branch \u{2014} or a new one",
+        scope: Scope::Tabs(&[TabId::WorkItems]),
+    },
+    Command {
+        id: CommandId::WorkWithAgent,
+        title: "Work with agent",
+        keys: &[key('w')],
+        help: "A coding CLI in Herdr, or back to the one on it",
+        scope: Scope::Tabs(&[TabId::WorkItems]),
+    },
+    Command {
+        id: CommandId::StartAnotherAgentSession,
+        title: "Start another agent session",
+        keys: &[],
+        help: "A second agent beside the first",
+        scope: Scope::Tabs(&[TabId::WorkItems]),
+    },
+    Command {
+        id: CommandId::CopyAgentPrompt,
+        title: "Copy agent prompt",
+        keys: &[],
+        help: "For a terminal you already have open",
         scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
@@ -746,6 +775,14 @@ pub const EDIT_MENU: &[EditMenuEntry] = &[
     EditMenuEntry {
         label: "New child",
         command: CommandId::NewChild,
+    },
+    EditMenuEntry {
+        label: "Work with agent",
+        command: CommandId::WorkWithAgent,
+    },
+    EditMenuEntry {
+        label: "Copy agent prompt",
+        command: CommandId::CopyAgentPrompt,
     },
     EditMenuEntry {
         label: "Delete work item\u{2026}",

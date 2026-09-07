@@ -18,6 +18,7 @@ use clap::{Args, Parser, Subcommand, ValueHint};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::agents;
 use crate::app::pipelines::RunSchema;
 use crate::app::pipelines::rows::{RunRow, duration_label, run_glyph, short_branch};
 use crate::app::pull_requests::{PrRow, PrSchema};
@@ -221,6 +222,54 @@ pub enum Command {
     },
     /// Print the project's teams, one name a line, to copy into config.toml
     Teams,
+    /// Launch a coding agent on a work item in Herdr, print the prompt for
+    /// one, or list the agents on file
+    #[command(subcommand)]
+    Agent(AgentCommand),
+}
+
+/// `w` without the TUI: the same launch, from a shell inside a Herdr pane.
+#[derive(Clone, Debug, Subcommand)]
+pub enum AgentCommand {
+    /// Launch an agent on a work item in a Herdr pane, or return to the one
+    /// already on it
+    Launch {
+        /// The work item
+        id: i64,
+        /// The repository, by name; left out, the one the work item is
+        /// linked to
+        #[arg(long, value_name = "NAME")]
+        repo: Option<String>,
+        /// The Herdr workspace; left out, what config.toml routes the
+        /// repository to. (`--workspace` is the clone root, as everywhere.)
+        #[arg(long, value_name = "NAME")]
+        herdr_workspace: Option<String>,
+        /// `copilot` or `cursor`; left out, config.toml's default
+        #[arg(long, value_name = "KIND")]
+        provider: Option<String>,
+        /// Start another agent beside the one already on the work item
+        #[arg(long)]
+        new: bool,
+        /// A line for the agent from you, carried in the handoff
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write the handoff for a work item and print the opening prompt, for
+    /// a terminal you already have open
+    Prompt {
+        id: i64,
+        #[arg(long, value_name = "NAME")]
+        repo: Option<String>,
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+    },
+    /// Print the agent sessions on file
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// The Pipelines tab, without the tab. `list` answers from the database; every
@@ -385,6 +434,36 @@ pub enum PrsCommand {
         /// piped in; a piped body is posted as a code block.
         text: Option<String>,
     },
+    /// Open a pull request linked to one or more work items, or find the
+    /// active one already open between the same branches and repair its links
+    Create(PrCreateArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PrCreateArgs {
+    /// The repository, by name
+    #[arg(long, value_name = "NAME")]
+    pub repo: String,
+    /// The branch to merge, with or without `refs/heads/`
+    #[arg(long, value_name = "BRANCH")]
+    pub source: String,
+    /// The branch to merge into; left out, the repository's default branch
+    #[arg(long, value_name = "BRANCH")]
+    pub target: Option<String>,
+    #[arg(long, value_name = "TITLE")]
+    pub title: String,
+    /// A file of Markdown for the description; left out, it is empty
+    #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+    pub description_file: Option<PathBuf>,
+    /// A work item to link, repeatable; at least one is required
+    #[arg(long = "work-item", value_name = "ID", required = true)]
+    pub work_items: Vec<i64>,
+    /// Open it as a draft
+    #[arg(long)]
+    pub draft: bool,
+    /// Print the outcome as a JSON object rather than as lines
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -416,6 +495,9 @@ pub struct EditArgs {
     /// A file of Markdown to write over the description
     #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
     pub description_file: Option<PathBuf>,
+    /// A file of Markdown to write over the acceptance criteria
+    #[arg(long, value_name = "PATH", value_hint = ValueHint::FilePath)]
+    pub acceptance_criteria_file: Option<PathBuf>,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -462,6 +544,7 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         } => run_link(cli, &database, *work_item, repo, branch.as_deref()),
         Command::Repos(command) => run_repos(cli, &database, command),
         Command::Prs(command) => run_prs(cli, &database, command),
+        Command::Agent(command) => run_agent(cli, &database, command),
         Command::Pipelines { json } => run_pipelines(&database, *json),
         Command::Runs(command) => run_runs(cli, &database, command),
         Command::Approvals(command) => run_approvals(cli, command),
@@ -472,6 +555,353 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
 
 /// The project's teams as Azure DevOps names them, one a line, so `team` in
 /// `config.toml` can be written exactly as the project spells it.
+/// One agent session as `agent list --json` prints it.
+#[derive(Debug, Serialize)]
+struct AgentSessionJson<'a> {
+    id: &'a str,
+    work_item: i64,
+    organization: &'a str,
+    project: &'a str,
+    repo: &'a str,
+    provider: &'static str,
+    workspace: &'a str,
+    workspace_id: Option<&'a str>,
+    tab_id: Option<&'a str>,
+    pane_id: Option<&'a str>,
+    agent: Option<&'a str>,
+    workdir: String,
+    branch: &'a str,
+    checkout: &'static str,
+    complete: bool,
+    context: Option<String>,
+    started_at: &'a str,
+}
+
+impl<'a> AgentSessionJson<'a> {
+    fn of(session: &'a agents::AgentSession) -> Self {
+        Self {
+            id: &session.id,
+            work_item: session.work_item,
+            organization: &session.organization,
+            project: &session.project,
+            repo: &session.repo_name,
+            provider: session.provider.kind(),
+            workspace: &session.workspace,
+            workspace_id: session.workspace_id.as_deref(),
+            tab_id: session.tab_id.as_deref(),
+            pane_id: session.pane_id.as_deref(),
+            agent: session.agent_name.as_deref(),
+            workdir: session.workdir.display().to_string(),
+            branch: &session.branch,
+            checkout: session.policy.as_str(),
+            complete: session.is_complete(),
+            context: session
+                .context_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            started_at: &session.started_at,
+        }
+    }
+}
+
+fn run_agent(cli: &Cli, database: &Path, command: &AgentCommand) -> Result<()> {
+    match command {
+        AgentCommand::List { json } => {
+            let store = agents::SessionStore::load(&agents::store_path(database))?;
+            if *json {
+                emit(&to_json(
+                    &store
+                        .sessions
+                        .iter()
+                        .map(AgentSessionJson::of)
+                        .collect::<Vec<_>>(),
+                )?);
+            } else if store.sessions.is_empty() {
+                emit("no agent sessions on file");
+            } else {
+                emit(&columns(
+                    &store
+                        .sessions
+                        .iter()
+                        .map(|session| {
+                            vec![
+                                format!("#{}", session.work_item),
+                                session.provider.label().to_owned(),
+                                format!("{} \u{203a} {}", session.workspace, session.repo_name),
+                                session.branch.clone(),
+                                session.pane_id.clone().unwrap_or_default(),
+                                if session.is_complete() {
+                                    "live".to_owned()
+                                } else {
+                                    "unfinished".to_owned()
+                                },
+                            ]
+                        })
+                        .collect::<Vec<_>>(),
+                ));
+            }
+            Ok(())
+        }
+        AgentCommand::Prompt { id, repo, note } => {
+            let plan = agent_plan(
+                cli,
+                database,
+                *id,
+                repo.as_deref(),
+                None,
+                None,
+                false,
+                note.clone(),
+                false,
+            )?;
+            let (prompt, context) = agents::prompt_only(&plan).map_err(|failure| {
+                anyhow::anyhow!(
+                    "#{id}: {} failed: {:#}",
+                    failure.stage.label(),
+                    failure.error
+                )
+            })?;
+            eprintln!("context: {}", context.display());
+            emit(&prompt);
+            Ok(())
+        }
+        AgentCommand::Launch {
+            id,
+            repo,
+            herdr_workspace,
+            provider,
+            new,
+            note,
+            json,
+        } => {
+            if !agents::herdr::inside_herdr() {
+                bail!(
+                    "not inside Herdr: run this in a Herdr pane, where HERDR_ENV=1, or use `ticket-tui agent prompt {id}`"
+                );
+            }
+            let plan = agent_plan(
+                cli,
+                database,
+                *id,
+                repo.as_deref(),
+                herdr_workspace.as_deref(),
+                provider.as_deref(),
+                *new,
+                note.clone(),
+                true,
+            )?;
+            let herdr = agents::herdr::Herdr::new(Box::new(agents::herdr::HerdrCli::default()));
+            let mut store = agents::SessionStore::load(&agents::store_path(database))?;
+            if !new
+                && let Some(session) = store
+                    .sessions
+                    .iter()
+                    .rev()
+                    .find(|held| {
+                        held.is_complete()
+                            && held.work_item == *id
+                            && held.organization == plan.ticket.organization
+                    })
+                    .cloned()
+            {
+                match agents::return_to(&herdr, &mut store, &session.id) {
+                    Ok(_) => {
+                        if *json {
+                            emit(&to_json(&AgentSessionJson::of(&session))?);
+                        } else {
+                            emit(&format!(
+                                "back to the {} agent on #{id} in {} \u{203a} {} (pane {})",
+                                session.provider.label(),
+                                session.workspace,
+                                session.repo_name,
+                                session.pane_id.as_deref().unwrap_or("?")
+                            ));
+                        }
+                        return Ok(());
+                    }
+                    Err(agents::Returned::Stale { reason, .. }) => {
+                        eprintln!("the agent on #{id} is gone ({reason}); launching another");
+                    }
+                    Err(agents::Returned::Failed(error)) => return Err(error),
+                }
+            }
+            match agents::launch(&herdr, &mut store, &plan) {
+                Ok((session, note)) => {
+                    if *json {
+                        emit(&to_json(&AgentSessionJson::of(&session))?);
+                    } else {
+                        emit(&format!(
+                            "{} on #{id} in {} \u{203a} {} (pane {}) \u{2014} {note}",
+                            session.provider.label(),
+                            session.workspace,
+                            session.repo_name,
+                            session.pane_id.as_deref().unwrap_or("?")
+                        ));
+                    }
+                    Ok(())
+                }
+                Err(failure) => {
+                    let resume = if failure.session.is_some() {
+                        "; run it again to carry on from there"
+                    } else {
+                        ""
+                    };
+                    bail!(
+                        "#{id}: {} failed: {:#}{resume}",
+                        failure.stage.label(),
+                        failure.error
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// The plan `agent launch` and `agent prompt` hand over: the work item off
+/// the database, the repository named or linked, and the routing and provider
+/// the file settles when the flags do not.
+#[allow(clippy::too_many_arguments)]
+fn agent_plan(
+    cli: &Cli,
+    database: &Path,
+    id: i64,
+    repo: Option<&str>,
+    workspace: Option<&str>,
+    provider: Option<&str>,
+    force_new: bool,
+    note: Option<String>,
+    for_launch: bool,
+) -> Result<agents::LaunchPlan> {
+    let settings =
+        agents::AgentSettings::from_config(&crate::config::load(&crate::config::default_path())?);
+    let repository = open_database(database)?;
+    let ticket = find_work_item(&repository, database, id)?;
+    let graph = repository.load_graph()?;
+    let tickets = repository.load_all()?;
+    let repos = repository.load_repos()?;
+    let pull_requests = repository.load_pull_requests()?;
+    let artifacts = graph.artifacts_for(&ticket.key);
+    let target = match repo {
+        Some(name) => repos
+            .iter()
+            .find(|held| same_text(&held.name, name))
+            .cloned()
+            .with_context(|| format!("no repository called {name} is in the database"))?,
+        None => {
+            let linked = agents::linked_repositories(&artifacts);
+            let candidates: Vec<&Repo> = repos
+                .iter()
+                .filter(|held| linked.contains(&held.id) && !held.is_disabled)
+                .collect();
+            match candidates.as_slice() {
+                [one] => (*one).clone(),
+                [] => bail!("#{id} is linked to no repository; pass --repo"),
+                several => bail!(
+                    "#{id} is linked to {} repositories: {}; pass --repo",
+                    several.len(),
+                    several
+                        .iter()
+                        .map(|held| held.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        }
+    };
+    // Only a launch needs somewhere in Herdr to go; a prompt for the
+    // clipboard names no workspace at all.
+    let workspace = match (workspace, for_launch) {
+        (Some(name), _) => name.to_owned(),
+        (None, false) => String::new(),
+        (None, true) => settings
+            .herdr
+            .workspace_for(&target.name)
+            .map(str::to_owned)
+            .with_context(|| {
+                format!(
+                    "config.toml routes {} to no Herdr workspace; pass --herdr-workspace, add it under [[herdr.workspaces]], or set herdr.unmapped_workspace",
+                    target.name
+                )
+            })?,
+    };
+    let provider = match provider {
+        Some(word) => agents::Provider::parse(word)
+            .with_context(|| format!("{word} is not a provider; it is one of copilot, cursor"))?,
+        None => settings.default,
+    };
+    let config = AzureConfig::resolve(
+        cli.org.clone(),
+        cli.project.clone(),
+        cli.code_project.clone(),
+        cli.query.clone(),
+        cli.team.clone(),
+    )?;
+    let repo_name = |repo_id: &str| {
+        repos
+            .iter()
+            .find(|held| held.id == repo_id)
+            .map_or_else(|| repo_id.to_owned(), |held| held.name.clone())
+    };
+    let (linked_branch, pull_request) = agents::repository_links(&artifacts, &target.id, &|pr| {
+        pull_requests
+            .iter()
+            .find(|held| held.id == pr)
+            .map(|held| (held.status, held.source_ref.clone(), held.url.clone()))
+    });
+    let brief = agents::TicketBrief::from_graph(
+        &ticket,
+        &graph,
+        &|key| {
+            tickets
+                .iter()
+                .find(|held| held.key == *key)
+                .map(|relative| agents::RelatedBrief {
+                    id: relative.key.id,
+                    work_item_type: relative.work_item_type.clone(),
+                    title: relative.title.clone(),
+                    state: relative.state.clone(),
+                })
+        },
+        &repo_name,
+        &|pr| {
+            pull_requests
+                .iter()
+                .find(|held| held.id == pr)
+                .map(|held| (held.title.clone(), held.status.as_str().to_owned()))
+        },
+    );
+    Ok(agents::LaunchPlan {
+        ticket: brief,
+        repo: agents::RepoBrief {
+            id: target.id.clone(),
+            name: target.name.clone(),
+            remote_url: target.remote_url.clone(),
+            web_url: target.web_url.clone(),
+            default_branch: target.default_branch.clone(),
+        },
+        linked_branch,
+        pull_request,
+        provider,
+        args: settings.args_for(provider).to_vec(),
+        policy: settings.policy,
+        workspace,
+        workspace_root: local::workspace_root(cli.workspace.clone()),
+        path_override: settings.herdr.path_for(&target.name).map(Path::to_path_buf),
+        invocation: agents::Invocation {
+            database: database.to_path_buf(),
+            organization: config.organization,
+            project: config.project,
+            code_project: config.code_project,
+            binary: std::env::current_exe().ok(),
+        },
+        handoff_dir: database
+            .parent()
+            .map_or_else(|| PathBuf::from("handoffs"), |dir| dir.join("handoffs")),
+        force_new,
+        note,
+    })
+}
+
 fn run_teams(cli: &Cli) -> Result<()> {
     for team in connect(cli)?.fetch_teams()? {
         println!("{team}");
@@ -855,7 +1285,7 @@ fn run_edit(cli: &Cli, database: &Path, args: &EditArgs) -> Result<()> {
     let edits = field_edits(args, &repository.load_identities()?, me.as_deref())?;
     if edits.is_empty() {
         bail!(
-            "nothing to change; pass at least one of --state, --assignee, --priority, --iteration, --area, --title, --tags, --description-file"
+            "nothing to change; pass at least one of --state, --assignee, --priority, --iteration, --area, --title, --tags, --description-file, --acceptance-criteria-file"
         );
     }
     let client = connect(cli)?;
@@ -952,6 +1382,9 @@ fn field_edits(
     }
     if let Some(path) = &args.description_file {
         edits.push(FieldEdit::description(&description_html(path)?));
+    }
+    if let Some(path) = &args.acceptance_criteria_file {
+        edits.push(FieldEdit::acceptance_criteria(&description_html(path)?));
     }
     Ok(edits)
 }
@@ -1831,6 +2264,7 @@ fn run_prs(cli: &Cli, database: &Path, command: &PrsCommand) -> Result<()> {
         }
         PrsCommand::Link { id, work_item } => run_pr_link(cli, database, *id, *work_item),
         PrsCommand::Comment { id, text } => run_pr_comment(cli, database, *id, text.as_deref()),
+        PrsCommand::Create(args) => run_pr_create(cli, database, args),
     }
 }
 
@@ -2106,6 +2540,298 @@ fn run_pr_comment(cli: &Cli, database: &Path, id: i64, text: Option<&str>) -> Re
     request.threads.push(thread);
     store_pull_request(&mut repository, request)?;
     emit(&format!("!{id} comment posted"));
+    Ok(())
+}
+
+/// What opening a pull request asks of Azure DevOps, so the retry rules —
+/// reuse the one already open, repair the links it is missing, never open a
+/// second — can be exercised against a fake.
+pub trait PullRequestCreator {
+    /// The active pull requests from `source_ref` into `target_ref`.
+    fn active_between(
+        &self,
+        repo_id: &str,
+        source_ref: &str,
+        target_ref: &str,
+    ) -> Result<Vec<PullRequest>>;
+    #[allow(clippy::too_many_arguments)]
+    fn create(
+        &self,
+        repo_id: &str,
+        source_ref: &str,
+        target_ref: &str,
+        title: &str,
+        description: &str,
+        draft: bool,
+        work_items: &[i64],
+    ) -> Result<PullRequest>;
+    /// The work items Azure DevOps says the pull request carries.
+    fn linked_work_items(&self, repo_id: &str, id: i64) -> Result<Vec<i64>>;
+    /// Links one more, the way `prs link` does.
+    fn link(&self, project_id: &str, repo_id: &str, id: i64, work_item: i64) -> Result<()>;
+}
+
+impl PullRequestCreator for AzureClient {
+    fn active_between(
+        &self,
+        repo_id: &str,
+        source_ref: &str,
+        target_ref: &str,
+    ) -> Result<Vec<PullRequest>> {
+        self.fetch_pull_requests_between(repo_id, source_ref, target_ref)
+    }
+
+    fn create(
+        &self,
+        repo_id: &str,
+        source_ref: &str,
+        target_ref: &str,
+        title: &str,
+        description: &str,
+        draft: bool,
+        work_items: &[i64],
+    ) -> Result<PullRequest> {
+        self.create_pull_request(
+            repo_id,
+            source_ref,
+            target_ref,
+            title,
+            description,
+            draft,
+            work_items,
+        )
+    }
+
+    fn linked_work_items(&self, repo_id: &str, id: i64) -> Result<Vec<i64>> {
+        self.fetch_pull_request_work_items(repo_id, id)
+    }
+
+    fn link(&self, project_id: &str, repo_id: &str, id: i64, work_item: i64) -> Result<()> {
+        self.link_pull_request(project_id, repo_id, id, work_item)
+    }
+}
+
+/// What `prs create` settled on: the pull request, whether this run opened
+/// it, and the work items it was asked to link that Azure DevOps still does
+/// not show on it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrCreation {
+    pub request: PullRequest,
+    pub created: bool,
+    pub missing: Vec<i64>,
+}
+
+/// One pull request between two branches, whatever happened last time: none
+/// open and one is opened with the links asked for; one open and it is kept
+/// as it is — title, description and draft state untouched — and only the
+/// links it lacks are added; two open is a question rather than a guess.
+/// Azure DevOps does not promise that a pull request and the links it was
+/// created with land together, so the links are read back afterwards and
+/// whatever is missing is written the way `prs link` writes it, then read
+/// back once more; what is still missing is reported rather than assumed.
+#[allow(clippy::too_many_arguments)]
+pub fn create_or_reuse(
+    source: &dyn PullRequestCreator,
+    project_id: &str,
+    repo: &Repo,
+    source_ref: &str,
+    target_ref: &str,
+    title: &str,
+    description: &str,
+    draft: bool,
+    work_items: &[i64],
+) -> Result<PrCreation> {
+    if work_items.is_empty() {
+        bail!("a pull request is opened for at least one work item; pass --work-item");
+    }
+    let existing = source.active_between(&repo.id, source_ref, target_ref)?;
+    let (mut request, created) = match existing.as_slice() {
+        [] => (
+            source.create(
+                &repo.id,
+                source_ref,
+                target_ref,
+                title,
+                description,
+                draft,
+                work_items,
+            )?,
+            true,
+        ),
+        [one] => (one.clone(), false),
+        several => bail!(
+            "{} active pull requests already go from {} into {} in {}: {}; close one, or name branches only one has",
+            several.len(),
+            short_branch(source_ref),
+            short_branch(target_ref),
+            repo.name,
+            several
+                .iter()
+                .map(|request| format!("!{}", request.id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    let mut linked = source.linked_work_items(&repo.id, request.id)?;
+    let mut repaired = false;
+    for work_item in work_items {
+        if linked.contains(work_item) {
+            continue;
+        }
+        match source.link(project_id, &repo.id, request.id, *work_item) {
+            Ok(()) => repaired = true,
+            // The work item carries the link even though the pull request's
+            // own list has not caught up; the read below settles it.
+            Err(error) if format!("{error:#}").contains("already linked") => repaired = true,
+            Err(error) => {
+                eprintln!(
+                    "warning: could not link #{work_item} to !{}: {error:#}",
+                    request.id
+                );
+            }
+        }
+    }
+    if repaired {
+        linked = source.linked_work_items(&repo.id, request.id)?;
+    }
+    let missing: Vec<i64> = work_items
+        .iter()
+        .copied()
+        .filter(|work_item| !linked.contains(work_item))
+        .collect();
+    for work_item in linked {
+        if !request.work_items.contains(&work_item) {
+            request.work_items.push(work_item);
+        }
+    }
+    Ok(PrCreation {
+        request,
+        created,
+        missing,
+    })
+}
+
+/// A branch as a full ref, however it was typed.
+fn full_ref(branch: &str) -> String {
+    let branch = branch.trim();
+    if branch.starts_with("refs/") {
+        branch.to_owned()
+    } else {
+        format!("refs/heads/{branch}")
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct PrCreatedJson<'a> {
+    id: i64,
+    url: &'a str,
+    repo: &'a str,
+    source: &'a str,
+    target: &'a str,
+    status: &'static str,
+    is_draft: bool,
+    /// Whether this run opened it, or found it already open.
+    created: bool,
+    work_items: &'a [i64],
+    /// The work items asked for that Azure DevOps does not show on it.
+    missing_links: &'a [i64],
+}
+
+fn run_pr_create(cli: &Cli, database: &Path, args: &PrCreateArgs) -> Result<()> {
+    let mut repository = open_database(database)?;
+    let repo = repository
+        .load_repos()?
+        .into_iter()
+        .find(|held| same_text(&held.name, &args.repo))
+        .with_context(|| format!("no repository called {} is in the database", args.repo))?;
+    let project_id = repository
+        .meta(db::PROJECT_ID_KEY)?
+        .context("the project id is not on file yet; run `ticket-tui sync` first")?;
+    let source_ref = full_ref(&args.source);
+    let target_ref = match &args.target {
+        Some(target) => full_ref(target),
+        None => repo
+            .default_branch
+            .clone()
+            .with_context(|| format!("{} has no default branch; pass --target", repo.name))?,
+    };
+    let title = args.title.trim();
+    if title.is_empty() {
+        bail!("a pull request cannot be opened without a title");
+    }
+    let description = match &args.description_file {
+        Some(path) => fs::read_to_string(path)
+            .with_context(|| format!("failed to read the description from {}", path.display()))?,
+        None => String::new(),
+    };
+    let client = connect(cli)?;
+    let outcome = create_or_reuse(
+        &client,
+        &project_id,
+        &repo,
+        &source_ref,
+        &target_ref,
+        title,
+        &description,
+        args.draft,
+        &args.work_items,
+    )?;
+    store_pull_request(&mut repository, outcome.request.clone())?;
+    let request = &outcome.request;
+    if args.json {
+        emit(&to_json(&PrCreatedJson {
+            id: request.id,
+            url: &request.url,
+            repo: &repo.name,
+            source: &request.source_ref,
+            target: &request.target_ref,
+            status: request.status.as_str(),
+            is_draft: request.is_draft,
+            created: outcome.created,
+            work_items: &request.work_items,
+            missing_links: &outcome.missing,
+        })?);
+    } else {
+        emit(&format!(
+            "!{} {}: {}{}\nlinked {}",
+            request.id,
+            if outcome.created {
+                "created"
+            } else {
+                "already open"
+            },
+            request.url,
+            if request.is_draft { " (draft)" } else { "" },
+            if request.work_items.is_empty() {
+                "nothing".to_owned()
+            } else {
+                request
+                    .work_items
+                    .iter()
+                    .map(|id| format!("#{id}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ));
+    }
+    if !outcome.missing.is_empty() {
+        bail!(
+            "!{} is open at {} but {} not linked; run the same command again to repair the links",
+            request.id,
+            request.url,
+            outcome
+                .missing
+                .iter()
+                .map(|id| format!("#{id}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+                + if outcome.missing.len() == 1 {
+                    " is"
+                } else {
+                    " are"
+                }
+        );
+    }
     Ok(())
 }
 
@@ -2789,6 +3515,7 @@ mod tests {
             title: None,
             tags: None,
             description_file: None,
+            acceptance_criteria_file: None,
         }
     }
 
@@ -4645,5 +5372,339 @@ mod tests {
         assert_eq!(json["pipeline"], "ticket-tui CI");
         assert_eq!(json["result"], "succeeded");
         assert_eq!(json["branch"], "main");
+    }
+
+    /// Azure DevOps stood in for `prs create`: what is open between two
+    /// branches, what a create answers, which links it shows, and which link
+    /// writes it refuses.
+    struct FakeCreator {
+        open: std::cell::RefCell<Vec<PullRequest>>,
+        /// The work items each pull request shows, by id.
+        links: std::cell::RefCell<Vec<(i64, Vec<i64>)>>,
+        /// Work items whose link write is refused.
+        refuse: Vec<i64>,
+        /// Whether a create links the work items it was asked to.
+        create_links: bool,
+        created: std::cell::Cell<usize>,
+    }
+
+    impl FakeCreator {
+        fn new() -> Self {
+            Self {
+                open: std::cell::RefCell::new(Vec::new()),
+                links: std::cell::RefCell::new(Vec::new()),
+                refuse: Vec::new(),
+                create_links: true,
+                created: std::cell::Cell::new(0),
+            }
+        }
+
+        fn shows(&self, id: i64) -> Vec<i64> {
+            self.links
+                .borrow()
+                .iter()
+                .find(|(held, _)| *held == id)
+                .map(|(_, items)| items.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    impl PullRequestCreator for FakeCreator {
+        fn active_between(
+            &self,
+            repo_id: &str,
+            source_ref: &str,
+            target_ref: &str,
+        ) -> Result<Vec<PullRequest>> {
+            Ok(self
+                .open
+                .borrow()
+                .iter()
+                .filter(|request| {
+                    request.repo_id == repo_id
+                        && request.source_ref == source_ref
+                        && request.target_ref == target_ref
+                        && !request.status.is_closed()
+                })
+                .cloned()
+                .collect())
+        }
+
+        fn create(
+            &self,
+            repo_id: &str,
+            source_ref: &str,
+            target_ref: &str,
+            title: &str,
+            description: &str,
+            draft: bool,
+            work_items: &[i64],
+        ) -> Result<PullRequest> {
+            self.created.set(self.created.get() + 1);
+            let id = 40 + i64::try_from(self.open.borrow().len()).unwrap_or_default();
+            let request = PullRequest {
+                repo_id: repo_id.into(),
+                id,
+                title: title.into(),
+                description: description.into(),
+                is_draft: draft,
+                source_ref: source_ref.into(),
+                target_ref: target_ref.into(),
+                work_items: Vec::new(),
+                url: format!("https://dev.azure.com/demo/atlas/_git/pay/pullrequest/{id}"),
+                ..stored_pull_request()
+            };
+            self.open.borrow_mut().push(request.clone());
+            let linked = if self.create_links {
+                work_items
+                    .iter()
+                    .copied()
+                    .filter(|item| !self.refuse.contains(item))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            self.links.borrow_mut().push((id, linked));
+            Ok(request)
+        }
+
+        fn linked_work_items(&self, _repo_id: &str, id: i64) -> Result<Vec<i64>> {
+            Ok(self.shows(id))
+        }
+
+        fn link(&self, _project_id: &str, _repo_id: &str, id: i64, work_item: i64) -> Result<()> {
+            if self.refuse.contains(&work_item) {
+                bail!("Azure DevOps returned HTTP 400: no such work item");
+            }
+            let mut links = self.links.borrow_mut();
+            match links.iter_mut().find(|(held, _)| *held == id) {
+                Some((_, items)) if items.contains(&work_item) => {
+                    bail!("that work item is already linked to !{id}")
+                }
+                Some((_, items)) => items.push(work_item),
+                None => links.push((id, vec![work_item])),
+            }
+            Ok(())
+        }
+    }
+
+    fn pay_repo() -> Repo {
+        crate::app::repos::tests::repo("aaa-111", "pay", false)
+    }
+
+    #[test]
+    fn prs_create_opens_one_pull_request_and_confirms_every_link() {
+        let fake = FakeCreator::new();
+        let outcome = create_or_reuse(
+            &fake,
+            "proj",
+            &pay_repo(),
+            "refs/heads/715-fix",
+            "refs/heads/main",
+            "Fix it",
+            "Why.",
+            true,
+            &[715, 716],
+        )
+        .unwrap();
+        assert!(outcome.created);
+        assert!(outcome.missing.is_empty());
+        assert_eq!(outcome.request.id, 40);
+        assert!(outcome.request.is_draft);
+        assert_eq!(outcome.request.work_items, [715, 716]);
+        assert_eq!(fake.created.get(), 1);
+
+        // Run again: the open one is found, nothing is created, nothing on
+        // it is rewritten, and the links stand.
+        let again = create_or_reuse(
+            &fake,
+            "proj",
+            &pay_repo(),
+            "refs/heads/715-fix",
+            "refs/heads/main",
+            "A different title",
+            "Different words.",
+            false,
+            &[715, 716],
+        )
+        .unwrap();
+        assert!(!again.created);
+        assert_eq!(fake.created.get(), 1, "no second pull request");
+        assert_eq!(again.request.title, "Fix it", "the title it has is kept");
+        assert!(again.request.is_draft, "and so is its draft state");
+        assert!(again.missing.is_empty());
+
+        // A work item asked for on the retry that the first run did not name
+        // is linked onto the existing pull request.
+        let more = create_or_reuse(
+            &fake,
+            "proj",
+            &pay_repo(),
+            "refs/heads/715-fix",
+            "refs/heads/main",
+            "Fix it",
+            "",
+            true,
+            &[715, 717],
+        )
+        .unwrap();
+        assert_eq!(fake.shows(40), [715, 716, 717]);
+        assert!(more.missing.is_empty());
+        assert_eq!(more.request.work_items, [715, 716, 717]);
+
+        assert!(
+            create_or_reuse(
+                &fake,
+                "proj",
+                &pay_repo(),
+                "refs/heads/x",
+                "refs/heads/main",
+                "t",
+                "",
+                false,
+                &[]
+            )
+            .is_err(),
+            "at least one work item"
+        );
+    }
+
+    #[test]
+    fn prs_create_reports_a_link_that_did_not_take_and_repairs_it_on_the_retry() {
+        // The create lands but Azure DevOps does not link what it was given.
+        let mut fake = FakeCreator::new();
+        fake.create_links = false;
+        fake.refuse = vec![716];
+        let outcome = create_or_reuse(
+            &fake,
+            "proj",
+            &pay_repo(),
+            "refs/heads/715-fix",
+            "refs/heads/main",
+            "Fix it",
+            "",
+            false,
+            &[715, 716],
+        )
+        .unwrap();
+        assert!(outcome.created);
+        assert_eq!(outcome.request.id, 40);
+        assert_eq!(outcome.missing, [716], "the link that was refused is named");
+        assert_eq!(
+            outcome.request.work_items,
+            [715],
+            "715 was repaired straight away"
+        );
+
+        // The refusal clears; the retry repairs 716 onto the same pull
+        // request rather than opening another.
+        fake.refuse.clear();
+        let retry = create_or_reuse(
+            &fake,
+            "proj",
+            &pay_repo(),
+            "refs/heads/715-fix",
+            "refs/heads/main",
+            "Fix it",
+            "",
+            false,
+            &[715, 716],
+        )
+        .unwrap();
+        assert!(!retry.created);
+        assert_eq!(retry.request.id, 40);
+        assert!(retry.missing.is_empty());
+        assert_eq!(fake.shows(40), [715, 716]);
+        assert_eq!(fake.created.get(), 1);
+    }
+
+    #[test]
+    fn prs_create_refuses_to_guess_between_two_open_pull_requests() {
+        let fake = FakeCreator::new();
+        for _ in 0..2 {
+            fake.create(
+                "aaa-111",
+                "refs/heads/715-fix",
+                "refs/heads/main",
+                "One",
+                "",
+                false,
+                &[715],
+            )
+            .unwrap();
+        }
+        let refused = create_or_reuse(
+            &fake,
+            "proj",
+            &pay_repo(),
+            "refs/heads/715-fix",
+            "refs/heads/main",
+            "Fix it",
+            "",
+            false,
+            &[715],
+        )
+        .unwrap_err();
+        let message = format!("{refused:#}");
+        assert!(
+            message.contains(
+                "2 active pull requests already go from 715-fix into main in pay: !40, !41"
+            ),
+            "{message}"
+        );
+        assert_eq!(fake.created.get(), 2, "and none was added");
+    }
+
+    #[test]
+    fn prs_create_takes_the_arguments_the_skill_documents() {
+        let Some(Command::Prs(PrsCommand::Create(args))) = Cli::parse_from([
+            "ticket-tui",
+            "prs",
+            "create",
+            "--repo",
+            "payments-api",
+            "--source",
+            "ticket/715-fix-duplicate-imports",
+            "--target",
+            "main",
+            "--title",
+            "Fix duplicate imports",
+            "--description-file",
+            "pr.md",
+            "--work-item",
+            "715",
+            "--work-item",
+            "716",
+            "--draft",
+            "--json",
+        ])
+        .command
+        else {
+            panic!("prs create did not parse");
+        };
+        assert_eq!(args.repo, "payments-api");
+        assert_eq!(args.source, "ticket/715-fix-duplicate-imports");
+        assert_eq!(args.target.as_deref(), Some("main"));
+        assert_eq!(args.title, "Fix duplicate imports");
+        assert_eq!(args.description_file, Some(PathBuf::from("pr.md")));
+        assert_eq!(args.work_items, [715, 716]);
+        assert!(args.draft && args.json);
+        assert!(
+            Cli::try_parse_from([
+                "ticket-tui",
+                "prs",
+                "create",
+                "--repo",
+                "pay",
+                "--source",
+                "x",
+                "--title",
+                "t"
+            ])
+            .is_err(),
+            "a pull request is opened for at least one work item"
+        );
+        assert_eq!(full_ref("feature/x"), "refs/heads/feature/x");
+        assert_eq!(full_ref("refs/heads/feature/x"), "refs/heads/feature/x");
     }
 }

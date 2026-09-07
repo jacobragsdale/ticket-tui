@@ -78,6 +78,8 @@ impl ConfigWatch {
         // soon as it is written.
         app.shell
             .set_notifier(Notifier::new(config.notify.command.clone()));
+        app.shell
+            .set_agent_settings(AgentSettings::from_config(&config));
         true
     }
 
@@ -208,6 +210,31 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
                 runtime.local.scanned = None;
             }
             LocalEvent::Stopped => runtime.local.worker = None,
+        }
+    }
+    redraw
+}
+
+/// Folds in what the agent thread has done: a launch that landed or failed,
+/// the sessions as they stand, a prompt for the clipboard.
+pub(super) fn poll_agents(app: &mut App, runtime: &mut SyncRuntime) -> bool {
+    let Some(worker) = runtime.agents.worker.as_ref() else {
+        return false;
+    };
+    let events: Vec<AgentEvent> = std::iter::from_fn(|| worker.try_event()).collect();
+    let redraw = !events.is_empty();
+    for event in events {
+        let stopped = matches!(event, AgentEvent::Stopped);
+        if let Some(text) = app.work_items.apply_agent_event(&mut app.shell, event) {
+            match copy_to_clipboard(&text) {
+                Ok(()) => {}
+                Err(error) => app
+                    .shell
+                    .set_error(format!("Could not copy the prompt: {error:#}")),
+            }
+        }
+        if stopped {
+            runtime.agents.worker = None;
         }
     }
     redraw

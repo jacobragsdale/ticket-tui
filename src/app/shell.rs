@@ -231,7 +231,17 @@ pub struct Shell {
     /// other tabs draw, so a link names what the database holds and says
     /// nothing about what it does not.
     pub(crate) pull_request_labels: Vec<(i64, String, PrStatus)>,
+    /// Each pull request's source ref and URL, for the handoff an agent
+    /// launch writes: it names the branch to carry on with.
+    pub(crate) pull_request_sources: Vec<(i64, String, String)>,
     pub(crate) run_labels: Vec<(i64, String, RunStatus, Option<RunResult>)>,
+    /// The `[agents]` and `[herdr]` tables, as `config.toml` last read.
+    pub(crate) agent_settings: crate::agents::AgentSettings,
+    /// Whether this run is inside a Herdr pane, which is the only place an
+    /// agent can be launched from.
+    pub(crate) inside_herdr: bool,
+    /// Where `config.toml` is, for the routing a picker remembers.
+    pub(crate) config_path: PathBuf,
     /// What the pipeline watcher is doing, as the database overlay reports
     /// it. `None` for a run with no watcher at all.
     pub(crate) watch_state: Option<String>,
@@ -298,7 +308,11 @@ impl Default for Shell {
             workspace: None,
             work_item_titles: Vec::new(),
             pull_request_labels: Vec::new(),
+            pull_request_sources: Vec::new(),
             run_labels: Vec::new(),
+            agent_settings: crate::agents::AgentSettings::default(),
+            inside_herdr: false,
+            config_path: PathBuf::new(),
             watch_state: None,
             history: Vec::new(),
             future: Vec::new(),
@@ -348,6 +362,38 @@ impl Shell {
             .iter()
             .find(|(held, _, _)| *held == id)
             .map(|(_, title, status)| (title.as_str(), *status))
+    }
+
+    /// Where each pull request comes from, for the agent handoff.
+    pub fn set_pull_request_sources(&mut self, sources: Vec<(i64, String, String)>) {
+        self.pull_request_sources = sources;
+    }
+
+    /// One pull request's source ref and URL, when the database holds it.
+    #[must_use]
+    pub fn pull_request_source(&self, id: i64) -> Option<(&str, &str)> {
+        self.pull_request_sources
+            .iter()
+            .find(|(held, _, _)| *held == id)
+            .map(|(_, source, url)| (source.as_str(), url.as_str()))
+    }
+
+    /// What `config.toml` says about agents and Herdr. Set when the file is
+    /// read, and again whenever it changes.
+    pub fn set_agent_settings(&mut self, settings: crate::agents::AgentSettings) {
+        self.agent_settings = settings;
+    }
+
+    #[must_use]
+    pub fn agent_settings(&self) -> &crate::agents::AgentSettings {
+        &self.agent_settings
+    }
+
+    /// Where this run stands with Herdr and its config file, settled once at
+    /// startup.
+    pub fn set_launch_environment(&mut self, inside_herdr: bool, config_path: PathBuf) {
+        self.inside_herdr = inside_herdr;
+        self.config_path = config_path;
     }
 
     /// One run's build number and how it went, when the database holds it.

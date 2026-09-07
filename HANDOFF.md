@@ -1,10 +1,64 @@
 # Where to pick up
 
-Last updated 2026-09-06. The backlog itself lives in Azure DevOps
+Last updated 2026-09-07. The backlog itself lives in Azure DevOps
 (`jacobragsdale/development`); this file is only the pointer into it. Run
 `ticket-tui` and browse the epics for the current state.
 
 ## State of `main`
+
+- **`w`: work with an agent in Herdr, and `prs create` (2026-09-07, no ticket).**
+  `w` on a work item launches Copilot or Cursor in a Herdr pane, in the work item's
+  repository, with the ticket already in front of it; the conversation is the CLI's
+  own. `src/agents/` is the whole of it: `herdr.rs` drives the `herdr` CLI through
+  argv (`HerdrApi` is the seam, `fake::FakeHerdr` the in-memory Herdr the tests run
+  against, plus one test over a shell script standing in for the binary), `checkout.rs`
+  finds the clone (the Repos tab's scan, or `[herdr.paths]`) and adds a git worktree
+  under `<clone>/../.worktrees/<repo>/<branch>` — reusing one already on the branch,
+  tracking a branch on origin, refusing a *linked* branch that is nowhere, never
+  resetting or pushing — `handoff.rs` writes `context.md` and the embedded
+  `ticket-agent-workflow` skill under `<database dir>/handoffs/` and words the short
+  opening prompt, and `mod.rs` runs the launch stage by stage (checkout, handoff,
+  workspace, tab, pane, agent, prompt, focus), writing `<database>.agents.json` after
+  each with the ids Herdr answered, so a launch that stops is carried on by the next
+  `w` — same tab, agent started only if it was not, prompt sent only once — and
+  validates a remembered agent (`agent get` on its pane: kind and name) before
+  focusing it. Config: `[agents] default/checkout`, `[agents.copilot|cursor] args`,
+  `[herdr] unmapped_workspace`, `[herdr.paths]`, `[[herdr.workspaces]]` (routing
+  validated for duplicates; `config::remember_workspace` edits the file's own text so
+  comments survive). The screen side is `src/app/work_items/agent.rs`: one
+  `AgentPicker` for repository / workspace / provider, `Ctrl-S` on a workspace
+  remembers it, `w` becomes Return to agent while one is live, **Start another agent
+  session** and **Copy agent prompt** in the Actions menu and palette, a
+  `[Work with agent]` chip and an `Agent` line in the details pane; the agent thread
+  (`AgentHandle`, like `LocalHandle`) is polled in `run/polling.rs::poll_agents`.
+  `ticket-tui agent launch|prompt|list` is the CLI twin (`--herdr-workspace`, since
+  `--workspace` is the clone root). `ticket-tui prs create` opens a draft pull request
+  linked to `--work-item`s (at least one), reuses the active one between the same
+  branches without rewriting it, reads the links back and repairs what is missing,
+  and exits 1 naming the pull request while a link is unconfirmed
+  (`cli::create_or_reuse` over the `PullRequestCreator` trait). `edit` gained
+  `--acceptance-criteria-file`. **Live (2026-09-07):** `prs create` opened draft !16
+  on `pr-checkout-smoke` from `766-test-drive-full-details-pane` linked to #766, the
+  retry reused it with the original title and linked #767 too, then `prs abandon 16`.
+  In an isolated headless Herdr (`herdr --session tt-verify server`, reached through
+  `TICKET_TUI_HERDR_SESSION`), `agent launch 766 --repo pr-checkout-smoke
+  --herdr-workspace Verify --provider cursor` made the workspace, renamed its tab
+  `pr-checkout-smoke`, made the worktree tracking origin, started a real Cursor Agent
+  as `wi-766` and prompted it in six seconds; a second `launch` returned to it;
+  closing the pane and launching again said the agent was gone and made another.
+  **Found live:** Herdr 0.8.2's `agent prompt` pastes into Cursor Agent but the Enter
+  after a multi-line paste does not submit, so `Herdr::prompt` sends one Enter when
+  the agent is still idle 1.5 s later (the `ponytail:` note in `herdr.rs`); the
+  Cursor account here is a free plan and refused the named model, which proves the
+  submission and nothing more. Copilot CLI is not installed on this machine and WSL
+  was not tried, so both are untested live; the pty walk of `w` in the TUI was not
+  done either — the flow is covered by `app/work_items/tests/agent.rs`. Sandbox
+  litter: !16 (abandoned) and its link on #767. Left out: a launch note typed in the
+  TUI (the CLI has `--note`), unlinking, closing a session from ticket-tui, an
+  `AGENTS.md`/`.cursor/rules` drop into the checkout (the prompt names the skill by
+  path instead), and a fix for
+  `the_summary_stale_figure_is_the_one_the_changed_column_paints`, which fails on a
+  clean tree since 2026-09-07 because its fixture dates crossed the 14-day line.
 
 - **Work items linked to repositories (2026-09-06, no ticket).** The stored truth is
   Azure DevOps's own Branch artifact link, `vstfs:///Git/Ref/{project}%2F{repo}%2FGB{branch}`
@@ -244,7 +298,7 @@ Last updated 2026-09-06. The backlog itself lives in Azure DevOps
   dispatches an agent: gather -> prompt -> launch, one worded verb per tab).
   #752 (tab 9 Artifacts) is superseded by the teardown.
 - The gate is `cargo fmt --check`, `cargo clippy --all-targets --all-features
-  -D warnings`, `cargo test --all-targets` (653 lib + 35 bin tests, one ignored stopwatch) and
+  -D warnings`, `cargo test --all-targets` (687 lib + 35 bin tests, one ignored stopwatch) and
   `cargo build --release`, with the test run repeated under `NO_COLOR=1`,
   `TICKET_TUI_THEME=terminal-light` and `TICKET_TUI_THEME=mono` - the theme
   matrix, which is real because `Theme::from_env` reads the variable.

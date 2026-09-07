@@ -7,6 +7,7 @@ use crate::columns::ColumnLayout;
 
 use super::*;
 
+pub use agent::{AgentChoice, AgentFlow, AgentPicker};
 pub use compose::Composer;
 use edits::{BulkEdit, PendingEdit, UndoEntry};
 pub use edits::{DeleteConfirm, EditMenu, EditScope, PromptField, SyncTarget, TextPrompt};
@@ -67,6 +68,9 @@ pub enum WorkItemMode {
     /// A repository, then one of its branches, for the selected work item to
     /// be linked to.
     LinkPicker,
+    /// The one question an agent launch has to ask: which repository, which
+    /// Herdr workspace, or which provider.
+    AgentPicker,
     /// The last word before a work item goes to the recycle bin.
     ConfirmDelete,
 }
@@ -230,6 +234,14 @@ pub struct WorkItemsScreen {
     pub assignee_picker: AssigneePicker,
     pub parent_picker: ParentPicker,
     pub link_picker: LinkPicker,
+    /// The agent launch's picker, and the launch it is asking for.
+    pub agent_picker: AgentPicker,
+    pub agent_flow: AgentFlow,
+    /// The agent sessions on file, as the agent thread last reported them.
+    agent_sessions: Vec<crate::agents::AgentSession>,
+    /// What the agent thread is doing for this screen, while it is: one
+    /// launch or prompt at a time.
+    agent_pending: Option<String>,
     pub node_picker: NodePicker,
     pub type_picker: TypePicker,
     /// The title being typed into the quick capture row, empty while it is
@@ -397,6 +409,10 @@ impl WorkItemsScreen {
             assignee_picker: AssigneePicker::default(),
             parent_picker: ParentPicker::default(),
             link_picker: LinkPicker::default(),
+            agent_picker: AgentPicker::default(),
+            agent_flow: AgentFlow::default(),
+            agent_sessions: Vec::new(),
+            agent_pending: None,
             node_picker: NodePicker::default(),
             prompt: None,
             composer: None,
@@ -544,6 +560,12 @@ impl WorkItemsScreen {
             WorkItemMode::LinkPicker => {
                 "Type to filter  \u{2191}\u{2193} select  Enter choose  Esc back"
             }
+            WorkItemMode::AgentPicker if self.agent_picker.choice == AgentChoice::Workspace => {
+                "Type to filter or name  \u{2191}\u{2193} select  Enter use once  Ctrl-S use and remember  Esc cancel"
+            }
+            WorkItemMode::AgentPicker => {
+                "Type to filter  \u{2191}\u{2193} select  Enter choose  Esc cancel"
+            }
             WorkItemMode::TypePicker => "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel",
             WorkItemMode::Form => {
                 "\u{2191}\u{2193}/Tab fields  Enter picker  Ctrl-S create  Esc cancel"
@@ -617,6 +639,7 @@ impl WorkItemsScreen {
             WorkItemMode::AssigneePicker => self.handle_assignee_picker_key(shell, key),
             WorkItemMode::ParentPicker => self.handle_parent_picker_key(shell, key),
             WorkItemMode::LinkPicker => self.handle_link_picker_key(shell, key),
+            WorkItemMode::AgentPicker => self.handle_agent_picker_key(shell, key),
             WorkItemMode::NodePicker => self.handle_node_picker_key(shell, key),
             WorkItemMode::Form => self.handle_form_key(shell, key),
             WorkItemMode::Capture => self.handle_capture_key(shell, key),
@@ -895,6 +918,7 @@ const fn mode_name(mode: WorkItemMode) -> &'static str {
         WorkItemMode::TypePicker => "type-picker",
         WorkItemMode::ParentPicker => "parent-picker",
         WorkItemMode::LinkPicker => "link-picker",
+        WorkItemMode::AgentPicker => "agent-picker",
         WorkItemMode::ConfirmDelete => "confirm-delete",
     }
 }
@@ -939,6 +963,7 @@ pub(crate) fn clamp_pos_to_snapshot(
     Some(TextPos { line, col })
 }
 
+mod agent;
 mod compose;
 mod context;
 mod edits;

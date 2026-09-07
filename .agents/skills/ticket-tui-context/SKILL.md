@@ -17,7 +17,7 @@ Four surfaces, each with a read, a write and a live view:
 |---|---|---|---|
 | Work items | `list`, `show` | `edit`, `comment`, `create` | `work_items` |
 | Repositories | `repos list`, `repos show` | — (clone/fetch/pull are the TUI's own keys) | `repos` |
-| Pull requests | `prs list`, `prs show` | `prs vote`, `complete`, `abandon`, `autocomplete`, `comment` | `pull_requests` |
+| Pull requests | `prs list`, `prs show` | `prs vote`, `complete`, `abandon`, `autocomplete`, `comment`, `create`, `link` | `pull_requests` |
 | Pipelines | `pipelines`, `runs list` | `runs trigger`, `cancel`, `retry`; `approvals approve`/`reject` | `pipelines` |
 
 `runs show`, `runs logs`, `runs wait` and `approvals list` read Azure DevOps

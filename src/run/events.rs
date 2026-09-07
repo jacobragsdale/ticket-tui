@@ -47,6 +47,7 @@ pub(super) fn run_terminal(
         }
         redraw |= poll_pipelines(app, runtime);
         redraw |= poll_local(app, runtime);
+        redraw |= poll_agents(app, runtime);
         redraw |= dispatch_due_pull(app, runtime);
         redraw |= dispatch_due_details(app, runtime);
         redraw |= config_watch.poll(app);
@@ -305,6 +306,18 @@ pub(super) fn handle_action(
                 .shell
                 .set_error("The local repositories thread is not running".to_owned()),
         },
+        // Herdr and git run on the agent thread; the screen hears back
+        // through its events, so nothing waits here either.
+        AppAction::Agent(request) => match runtime.agents.worker.as_ref() {
+            Some(worker) => {
+                if let Err(error) = worker.send(request) {
+                    app.shell.set_error(format!("{error:#}"));
+                }
+            }
+            None => app
+                .shell
+                .set_error("The agent thread is not running".to_owned()),
+        },
         AppAction::RefreshApprovals => {
             if let Some(watcher) = runtime.pipelines.as_ref() {
                 let _ = watcher.send(WatchRequest::RefreshApprovals);
@@ -370,6 +383,7 @@ pub(super) fn handle_action(
 fn spinning(app: &App) -> bool {
     app.shell.sync_pending
         || app.repos.busy()
+        || app.work_items.agent_busy().is_some()
         || app.work_items.details_pending.is_some()
         || app.shell.flashing()
 }

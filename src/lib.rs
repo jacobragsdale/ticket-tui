@@ -1,4 +1,5 @@
 pub mod agent_context;
+pub mod agents;
 pub mod app;
 pub mod azure;
 pub mod classification;

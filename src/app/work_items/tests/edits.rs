@@ -453,6 +453,8 @@ fn the_edit_menu_lists_the_field_editors_and_opens_the_one_chosen() {
             "Acceptance criteria",
             "Add comment",
             "New child",
+            "Work with agent",
+            "Copy agent prompt",
             "Delete work item\u{2026}"
         ],
         "later field editors append their own row above the two that act on

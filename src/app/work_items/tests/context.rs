@@ -64,6 +64,7 @@ fn the_agent_context_says_where_the_rows_come_from_and_how_the_last_pull_went() 
 
     app.shell.enable_sync();
     app.shell.set_sync_target(Some(SyncTarget {
+        code_project: "atlas".into(),
         organization: "example-org".into(),
         project: "atlas".into(),
         teams: Vec::new(),

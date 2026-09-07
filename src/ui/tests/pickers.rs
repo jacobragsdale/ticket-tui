@@ -880,3 +880,44 @@ fn the_link_picker_lists_repositories_then_the_branches_of_the_chosen_one() {
         "{text}"
     );
 }
+
+#[test]
+fn the_agent_picker_asks_its_question_and_the_details_pane_offers_the_chip() {
+    let mut app = App::new(vec![ticket_at(
+        716,
+        "Unlinked",
+        "Issue",
+        "To Do",
+        "2026-03-05T00:00:00Z",
+    )]);
+    app.shell.set_repos(vec![
+        crate::app::repos::tests::repo("aaa-111", "payments-api", false),
+        crate::app::repos::tests::repo("bbb-222", "reporting-api", false),
+    ]);
+    app.shell.set_sync_target(Some(crate::app::SyncTarget {
+        organization: "demo".into(),
+        project: "atlas".into(),
+        code_project: "atlas".into(),
+        teams: Vec::new(),
+        refresh_seconds: 60,
+    }));
+    app.shell
+        .set_launch_environment(true, std::path::PathBuf::from("/nowhere/config.toml"));
+    let text = render_text(100, 30, &mut app);
+    assert!(text.contains("[Work with agent]"), "{text}");
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+    let text = render_text(100, 30, &mut app);
+    assert!(text.contains("Work on #716 in which repository?"), "{text}");
+    assert!(text.contains("\u{203a} payments-api"), "{text}");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let text = render_text(100, 30, &mut app);
+    assert!(text.contains("Herdr workspace for payments-api"), "{text}");
+    assert!(text.contains("Type a workspace name"), "{text}");
+    for ch in "Money".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    let text = render_text(100, 30, &mut app);
+    assert!(text.contains("\u{203a} Money  (new workspace)"), "{text}");
+    assert!(text.contains("Ctrl-S use and remember"), "{text}");
+}

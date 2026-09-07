@@ -1109,6 +1109,60 @@ impl AzureClient {
         Ok(parse_pull_requests(&self.get(url.as_str())?, &self.config))
     }
 
+    /// The active pull requests of one repository from `source` into
+    /// `target`, both full refs. Normally none or one; two is a question.
+    pub fn fetch_pull_requests_between(
+        &self,
+        repo_id: &str,
+        source_ref: &str,
+        target_ref: &str,
+    ) -> Result<Vec<PullRequest>> {
+        let mut url = self.code_url(&["_apis", "git", "repositories", repo_id, "pullrequests"])?;
+        url.query_pairs_mut()
+            .append_pair("searchCriteria.status", "active")
+            .append_pair("searchCriteria.sourceRefName", source_ref)
+            .append_pair("searchCriteria.targetRefName", target_ref)
+            .append_pair("api-version", API_VERSION);
+        Ok(parse_pull_requests(&self.get(url.as_str())?, &self.config))
+    }
+
+    /// Opens a pull request, asking Azure DevOps to link `work_items` as it
+    /// does. The answer is the pull request as stored; whether every link
+    /// took is read back separately, since the API does not promise the two
+    /// land together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_pull_request(
+        &self,
+        repo_id: &str,
+        source_ref: &str,
+        target_ref: &str,
+        title: &str,
+        description: &str,
+        draft: bool,
+        work_items: &[i64],
+    ) -> Result<PullRequest> {
+        let mut url = self.code_url(&["_apis", "git", "repositories", repo_id, "pullrequests"])?;
+        url.set_query(Some(&version_query()));
+        let body = serde_json::json!({
+            "sourceRefName": source_ref,
+            "targetRefName": target_ref,
+            "title": title,
+            "description": description,
+            "isDraft": draft,
+            "workItemRefs": work_items
+                .iter()
+                .map(|id| serde_json::json!({ "id": id.to_string() }))
+                .collect::<Vec<_>>(),
+        });
+        let response = self.post(url.as_str(), &body)?;
+        parse_pull_requests(&serde_json::json!({ "value": [response] }), &self.config)
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                anyhow!("Azure DevOps answered with a pull request that could not be read")
+            })
+    }
+
     /// The work items one pull request says it closes.
     pub fn fetch_pull_request_work_items(&self, repo_id: &str, id: i64) -> Result<Vec<i64>> {
         let pull_request = id.to_string();

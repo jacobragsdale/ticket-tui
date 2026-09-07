@@ -268,6 +268,7 @@ fn synced_app(path: &Path, source: FakeAzure) -> (App, SqliteTicketRepository, S
         watched_runs: Vec::new(),
         approvals_seen: None,
         local: LocalRuntime::default(),
+        agents: AgentRuntime::default(),
     };
     (app, repository, runtime)
 }

@@ -72,7 +72,7 @@ pub use shell::{
 };
 use shell::{MAX_SPLIT_PERCENT, MIN_SPLIT_PERCENT};
 pub use work_items::{
-    BuiltinView, ChildProgress, ChildProgressIndex, ColumnOverlay, DEFAULT_STALE_DAYS,
+    AgentChoice, BuiltinView, ChildProgress, ChildProgressIndex, ColumnOverlay, DEFAULT_STALE_DAYS,
     DeleteConfirm, EditMenu, EditScope, FacetBar, FilterOverlay, FormField, FormFieldId,
     FormFieldKind, FormKind, FormOverlay, FormPicker, PRIORITY_CHOICES, PROGRESS_BAR_CELLS,
     PaletteState, PriorityPicker, PromptField, SortDraft, SprintOverlay, StatePicker, SyncTarget,
@@ -136,6 +136,9 @@ pub enum AppAction {
     /// Clone one repository into the workspace, or fetch or pull the one
     /// already there. The local thread runs git; nothing here waits on it.
     LocalGit(crate::local::LocalRequest),
+    /// Launch, return to, or write the prompt for a coding agent. The agent
+    /// thread runs Herdr and git; the screen hears back through its events.
+    Agent(crate::agents::AgentRequest),
     /// Read the pending approvals now rather than at the next poll.
     RefreshApprovals,
     /// Approve or reject one approval, with an optional word about why.
@@ -673,6 +676,12 @@ impl App {
                 .collect(),
             runs.iter()
                 .map(|run| (run.id, run.build_number.clone(), run.status, run.result))
+                .collect(),
+        );
+        self.shell.set_pull_request_sources(
+            pull_requests
+                .iter()
+                .map(|request| (request.id, request.source_ref.clone(), request.url.clone()))
                 .collect(),
         );
         self.work_items

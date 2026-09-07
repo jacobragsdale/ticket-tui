@@ -211,6 +211,9 @@ impl UndoEntry {
 pub struct SyncTarget {
     pub organization: String,
     pub project: String,
+    /// Where the repositories, pull requests and pipelines live, for the
+    /// handoff to address.
+    pub code_project: String,
     /// The teams the rows are one slice of, for the status bar to name beside
     /// the project. Empty for a project pulled whole.
     pub teams: Vec<String>,

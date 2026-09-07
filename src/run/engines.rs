@@ -21,6 +21,12 @@ pub(super) struct LocalRuntime {
     pub(super) showing: bool,
 }
 
+/// The agent side: the thread that drives Herdr and git for `w`.
+#[derive(Default)]
+pub(super) struct AgentRuntime {
+    pub(super) worker: Option<AgentHandle>,
+}
+
 /// Everything the event loop needs to keep the database in step with Azure
 /// DevOps: the worker thread, the timer that feeds it, and why there is no
 /// worker when there is none.
@@ -45,6 +51,9 @@ pub(super) struct SyncRuntime {
     /// Clones on this machine: their own thread, so a clone that takes a
     /// minute never holds up an edit.
     pub(super) local: LocalRuntime,
+    /// Coding agents in Herdr panes: their own thread too, since `agent
+    /// start` waits for a CLI to come up.
+    pub(super) agents: AgentRuntime,
     pub(super) scheduler: SyncScheduler,
     pub(super) config: Option<AzureConfig>,
     /// Why Azure DevOps could not be resolved, reported when the user asks for

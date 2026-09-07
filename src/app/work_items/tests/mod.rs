@@ -10,6 +10,7 @@ fn task_states() -> Vec<StateOption> {
     ]
 }
 
+mod agent;
 mod context;
 mod deletes;
 mod edits;

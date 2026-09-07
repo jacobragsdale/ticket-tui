@@ -77,6 +77,7 @@ offline, browsing whatever the database already holds.
 | `o` | Open the selected row in the system browser |
 | `?` | The in-app help, generated from the same table the keys are bound in |
 | `L` | On Work items: link the work item to a branch — a repository, then one of its branches or a new name, made at the head of the default branch. On Pull requests: link a work item to the one under the cursor |
+| `w` | On Work items: work with a coding agent — Copilot or Cursor in a Herdr pane, in the work item's repository, with the ticket in front of it; or back to the agent already on it. **Start another agent session** and **Copy agent prompt** are in the Actions menu and the palette |
 | `g` | Go to what the row points at: a work item's pull request, build or the repository its branch is in; a pull request's work items; a run's pull request; a repository's open pull request, its linked work items or, with none, the pipeline that builds it |
 | `[` / `]` | Back and forward through everywhere you have been, across tabs |
 | `q` | Quit |
@@ -142,9 +143,46 @@ writes this file for you, and repaints a running ticket-tui when it changes.
 Without one the sixteen ANSI colours of the terminal show through; `--theme
 terminal-light` suits a white ground, and `NO_COLOR` turns colour off.
 
+`[agents]` and `[herdr]` are what `w` reads. `w` on a work item launches a
+coding CLI in a Herdr pane, in that work item's repository, with the ticket
+already in front of it — and the conversation is then the CLI's own. Herdr
+workspaces are your groupings of repositories, one tab per repository inside
+each, one agent per pane in that tab, all made only when a launch first needs
+them; a repository no workspace names is asked about, and `Ctrl-S` in that
+picker writes the answer here. Each launch gets a git worktree of its own for
+the ticket's branch, and the agent is handed a context file, the workflow
+skill and a short opening prompt that asks it to refine the ticket with you
+before implementing; when told to go on it implements, verifies, pushes and
+opens a linked draft pull request with `ticket-tui prs create`. It needs
+ticket-tui to be running inside Herdr; **Copy agent prompt** works anywhere.
+
+```toml
+[agents]
+default = "copilot"           # or cursor
+checkout = "worktree"         # or shared
+
+[herdr]
+unmapped_workspace = "Other"
+
+[[herdr.workspaces]]
+name = "Payments"
+repos = ["payments-api", "settlement-worker"]
+```
+
 `ticket-tui` is also a CLI — `list`, `show`, `edit`, `comment`, `create`,
-`link`, `repos`, `prs`, `pipelines`, `runs`, `approvals`, `status` — so a
-script or an agent can do anything the TUI can.
+`link`, `repos`, `prs`, `pipelines`, `runs`, `approvals`, `status`, `agent` —
+so a script or an agent can do anything the TUI can.
+
+`prs create` opens a pull request linked to the work items it names — at
+least one — and is safe to run again: an active pull request between the
+same branches is reused untouched and only its missing links are repaired,
+and a link Azure DevOps has not confirmed is reported rather than assumed:
+
+```console
+ticket-tui prs create --repo payments-api --source 715-fix-duplicate-imports \
+  --target main --title "Fix duplicate imports" --description-file pr.md \
+  --work-item 715 --draft
+```
 
 `link` pins a work item to a repository through a Branch link, making the
 branch first when the repository has none of that name:

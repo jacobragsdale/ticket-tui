@@ -271,6 +271,7 @@ impl WorkItemsScreen {
             Some(TextEditor::Assignee) => self.assignee_picker.query.paste(pasted, false),
             Some(TextEditor::Parent) => self.parent_picker.query.paste(pasted, false),
             Some(TextEditor::Link) => self.link_picker.query.paste(pasted, false),
+            Some(TextEditor::Agent) => self.agent_picker.query.paste(pasted, false),
             Some(TextEditor::Node) => self.node_picker.query.paste(pasted, false),
             None => {}
         }
@@ -331,6 +332,7 @@ impl WorkItemsScreen {
             WorkItemMode::AssigneePicker => Some(TextEditor::Assignee),
             WorkItemMode::ParentPicker => Some(TextEditor::Parent),
             WorkItemMode::LinkPicker => Some(TextEditor::Link),
+            WorkItemMode::AgentPicker => Some(TextEditor::Agent),
             WorkItemMode::NodePicker => Some(TextEditor::Node),
             WorkItemMode::Form => Some(TextEditor::Form),
             WorkItemMode::Capture => Some(TextEditor::Capture),
@@ -881,6 +883,9 @@ impl WorkItemsScreen {
                 self.open_link_picker(shell);
                 AppAction::None
             }
+            CommandId::WorkWithAgent => self.work_with_agent(shell, false, false),
+            CommandId::StartAnotherAgentSession => self.work_with_agent(shell, true, false),
+            CommandId::CopyAgentPrompt => self.work_with_agent(shell, false, true),
             CommandId::EditTitle => {
                 self.open_prompt(shell, PromptField::Title);
                 AppAction::None

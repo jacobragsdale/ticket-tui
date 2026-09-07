@@ -1983,7 +1983,7 @@ to `config.toml`, so a shop that has edited that file writes none of them.
 ticket-tui sync [--full]
 ticket-tui show <id> [--json]
 ticket-tui list [--query '<filter>'] [--json]
-ticket-tui edit <id> [--state S] [--assignee A] [--priority N] [--iteration I] [--area A] [--title T] [--tags a,b] [--description-file F]
+ticket-tui edit <id> [--state S] [--assignee A] [--priority N] [--iteration I] [--area A] [--title T] [--tags a,b] [--description-file F] [--acceptance-criteria-file F]
 ticket-tui comment <id> ["text" | -]
 ticket-tui create --type Issue --title T [--parent ID] [--iteration I] [--assignee A] [--priority N] [--tags a,b]
 ticket-tui repos list [--query '<filter>'] [--json]
@@ -1996,6 +1996,7 @@ ticket-tui prs abandon <id>
 ticket-tui prs autocomplete <id> on|off
 ticket-tui prs link <id> <work-item>
 ticket-tui prs comment <id> ["text" | -]
+ticket-tui prs create --repo NAME --source BRANCH [--target BRANCH] --title T [--description-file F] --work-item ID... [--draft] [--json]
 ticket-tui pipelines [--json]
 ticket-tui runs list [--pipeline NAME] [--query '<filter>'] [--json]
 ticket-tui runs show <id> [--json]
@@ -2009,6 +2010,9 @@ ticket-tui approvals approve <id> [--comment TEXT]
 ticket-tui approvals reject <id> [--comment TEXT]
 ticket-tui status [--json]
 ticket-tui teams
+ticket-tui agent launch <id> [--repo NAME] [--herdr-workspace NAME] [--provider copilot|cursor] [--new] [--note TEXT] [--json]
+ticket-tui agent prompt <id> [--repo NAME] [--note TEXT]
+ticket-tui agent list [--json]
 ```
 
 `sync` pulls and exits, printing what moved — `Synced 3 changes from
@@ -2116,6 +2120,33 @@ DevOps keeps it, so it needs the project GUID the last pull recorded: a
 database that has never synced is told to sync rather than sent a URL with a
 hole in it.
 
+`prs create` opens a pull request for one or more work items and is safe to
+run again. It looks for an active pull request from the same source into the
+same target in that repository first: none, and one is opened with the title,
+description file, draft state and `workItemRefs` it was given; one, and that
+one is kept exactly as it is — its title, description and draft state are not
+rewritten — and only the work-item links it lacks are added, the way `prs
+link` adds one; two, and it refuses to guess between them. Azure DevOps does
+not promise that a pull request and the links it was created with land
+together, so after either path the pull request's own work-item list is read
+back, whatever is missing is written on the work item, and the list is read
+once more. What is still missing is printed and the command exits 1 naming
+the pull request, so a retry repairs links rather than opening another. The
+copy Azure DevOps answered with is stored, so a running TUI's Pull requests
+tab shows it at once; the work item's own Related section follows at the
+next pull.
+
+```console
+$ ticket-tui prs create --repo payments-api --source 715-fix-duplicate-imports \
+    --target main --title "Fix duplicate imports" --description-file pr.md \
+    --work-item 715 --draft
+!42 created: https://dev.azure.com/org/Fiquants/_git/payments-api/pullrequest/42 (draft)
+linked #715
+```
+
+`--json` prints `{id, url, repo, source, target, status, is_draft, created,
+work_items, missing_links}`; `created` says whether this run opened it.
+
 `pipelines` and `runs list` read the database; everything else under `runs` and
 `approvals` reads or writes Azure DevOps, because a timeline, a log and a run's
 own progress are not things a pull stores. `runs list` takes `--pipeline` and
@@ -2212,6 +2243,104 @@ and `live_runs` in `model.rs`, which the Pull requests and Pipelines badges call
 too, so the line and the bar cannot drift apart; `rejected_of_mine` and
 `runs_failed_since` sit beside them and are the status line's alone, since no
 tab badges those two.
+
+## Working a ticket with an agent in Herdr
+
+`w` on a work item puts a coding CLI — Copilot or Cursor — in a Herdr pane, in
+that work item's repository, with the ticket already in front of it, and the
+conversation is then the CLI's own. ticket-tui owns the ticket and repository
+context, the routing of repositories into Herdr workspaces, the launch and the
+way back to it, the handoff files and the portable workflow skill, and `prs
+create`; Herdr owns the terminals, the tabs and the panes; the agent's CLI
+owns the chat. There is no chat pane, transcript, queue or dashboard here.
+
+### Topology
+
+Herdr workspaces are the user's own groupings — `Payments`, `Reporting` —
+each holding one tab per repository, and each agent in a pane of its
+repository's tab. A second agent on the same repository goes in a pane split
+to the right of the last one; a plain shell pane already in the tab, with
+nothing in its foreground, is taken instead of splitting. Workspaces and tabs
+are made only when a launch first needs them, so a `config.toml` naming fifty
+repositories opens nothing until `w` is pressed. Tabs are named for
+repositories; the pane and the agent carry the ticket: the pane is labelled
+`Copilot · #715` and the agent is `wi-715` (`wi-715-2` when that name is
+taken).
+
+### The flow behind `w`
+
+1. The repository: the one the work item's links name — a Branch link first,
+   then a pull request, then a commit. None or several, and a picker asks.
+2. The Herdr workspace: what `[[herdr.workspaces]]` routes the repository
+   to, else `herdr.unmapped_workspace`, else a picker over the configured
+   and live workspace names, where a typed name makes a new one. `Enter`
+   uses the answer once; `Ctrl-S` uses it and writes the routing into
+   `config.toml`, adding the repository to that workspace's `repos` list — or
+   a new `[[herdr.workspaces]]` block — and leaving every other line and
+   comment as it was.
+3. The provider: `[agents] default`, or a picker for **Start another agent
+   session**, which is the explicit way to put a second agent on a work item
+   that already has one. `w` itself becomes **Return to agent** while one is
+   live, so repeated presses never make duplicates.
+4. The checkout, on the agent thread: the clone the Repos tab's scan claims
+   for the repository, or the path `[herdr.paths]` names. A repository with
+   no clone stops there with a message pointing at `C` on the Repos tab. By
+   default (`[agents] checkout = "worktree"`) the agent gets a git worktree
+   of its own under `<clone>/../.worktrees/<repo>/<branch>`, for the branch
+   the work item is linked to, else the open pull request's source, else
+   `{id}-{slug}` from the title: a worktree already on that branch is reused
+   (the clone itself included), a branch on origin is tracked, a branch
+   nowhere is made from the default branch, and a *linked* branch that is
+   nowhere is a refusal rather than a competing branch of the same name.
+   Nothing is reset, cleaned, deleted or pushed. `checkout = "shared"` works
+   in the clone as it stands and refuses a second managed session in it.
+5. The handoff: `context.md` under `<database dir>/handoffs/<org>-<id>/`
+   with the ticket in full (identity, URL, revision, title, description and
+   acceptance criteria as Markdown, parent and children, its own comments,
+   its links), the repository and checkout, the workflow and checkout policy,
+   the exact `ticket-tui --database … --org … --project … --code-project …`
+   invocation and the binary's path, and the user's note when there is one;
+   beside it the workflow skill, written from the copy embedded in the
+   binary. Never inside a repository.
+6. Herdr: workspace, tab and pane found by the ids of an earlier session for
+   the same repository or by label, else made; `agent start <name> --kind
+   <provider> --pane <id> [-- args]`; `agent prompt` with the short opening
+   prompt as one argv element — the ticket's text goes through no shell —
+   which names the ticket, the checkout, the two files to read, and asks for
+   discussion before implementation; then `agent focus`.
+
+Each stage is written to `<database>.agents.json` before the next begins,
+with the ids Herdr answered with. A launch that stops part way says which
+stage failed; `w` again carries on from what was made — the same workspace,
+tab and pane, the agent started only if it was not, the prompt sent only if
+it was not. Before anything remembered is reused it is checked against Herdr
+from the outside in, so a closed tab is remade without a second workspace,
+and a pane since taken by something else is left alone. **Return to agent**
+checks the pane still hosts an agent of the recorded kind and name before
+focusing it; one that does not is forgotten and said to be gone, never
+claimed as recovered. A Herdr that does not answer is an error, not a stale
+session.
+
+`w` outside a Herdr pane says so and stops; **Copy agent prompt** writes the
+handoff and puts the prompt on the clipboard for a terminal already open, and
+needs no Herdr. `ticket-tui agent launch <id>` is the same launch from a shell
+inside a Herdr pane, `agent prompt <id>` prints the prompt, and `agent list`
+prints the sessions on file.
+
+### The workflow skill
+
+`.agents/skills/ticket-agent-workflow/SKILL.md` is portable: it names none of
+this repository's own conventions. It asks the agent to read the handoff and
+the ticket live, read the repository's own agent instructions, inspect the
+code, refine the problem, scope and acceptance criteria with the user, save
+the agreed ticket text with `edit --description-file` and
+`--acceptance-criteria-file` before implementing, handle a refused write by
+syncing and reconciling, implement only when told, verify the way the
+repository verifies, push and open a linked draft pull request with `prs
+create`, comment a summary on the ticket, and stop there — the pull request
+is a draft awaiting a person, and the ticket's state is the person's. The
+refinement-first rule is a conversational agreement, not an enforced
+boundary; no permission-bypass flag is set on the agent's behalf.
 
 ## Live agent context
 

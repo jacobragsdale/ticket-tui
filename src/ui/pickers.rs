@@ -450,6 +450,103 @@ pub(super) fn render_link_picker(
     );
 }
 
+/// The agent launch's picker: one question — the repository, the Herdr
+/// workspace, or the provider — as a list under a filter. A workspace name
+/// none of the rows has is offered as itself, since `Enter` makes it.
+pub(super) fn render_agent_picker(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
+    let matches = screen.agent_matches();
+    let picker = &screen.agent_picker;
+    let muted = Style::default().fg(theme().muted);
+    let selected = picker.cursor.index;
+    let id = screen.agent_flow.key.as_ref().map_or(0, |key| key.id);
+    let (title, placeholder, empty) = match picker.choice {
+        crate::app::AgentChoice::Repo => (
+            format!(" Work on #{id} in which repository? "),
+            "Filter repositories\u{2026}",
+            "  No repository matches",
+        ),
+        crate::app::AgentChoice::Workspace => (
+            format!(
+                " Herdr workspace for {} ",
+                screen
+                    .agent_flow
+                    .repo
+                    .as_ref()
+                    .map_or("the repository", |repo| repo.name.as_str())
+            ),
+            "Filter, or type a new workspace name\u{2026}",
+            "  Type a workspace name",
+        ),
+        crate::app::AgentChoice::Provider => (
+            format!(" Which agent on #{id}? "),
+            "copilot or cursor\u{2026}",
+            "  No provider matches",
+        ),
+    };
+    let rows: Vec<Line> = if matches.is_empty() {
+        vec![Line::from(Span::styled(empty, muted))]
+    } else {
+        matches
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let marker = if index == selected { "\u{203a}" } else { " " };
+                let new = picker.choice == crate::app::AgentChoice::Workspace
+                    && !picker
+                        .items
+                        .iter()
+                        .any(|item| item.eq_ignore_ascii_case(name));
+                let mut spans = vec![
+                    Span::raw(format!("{marker} ")),
+                    Span::styled(name.clone(), Style::default().fg(theme().text)),
+                ];
+                if new {
+                    spans.push(Span::styled("  (new workspace)", muted));
+                }
+                Line::from(spans)
+            })
+            .collect()
+    };
+    let (text, cursor) = (picker.query.text().to_owned(), picker.query.cursor());
+    let height = u16::try_from(rows.len().saturating_add(3))
+        .unwrap_or(u16::MAX)
+        .clamp(5, 18);
+    let width = overlay_width(shell.overlay_anchor, &rows, 64, frame.area());
+    let area = overlay_area(frame.area(), shell.overlay_anchor, width, height);
+    let inner = render_modal_frame(frame, modal_layer(screen), shell, area, &title);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(inner);
+    render_query_field(
+        frame,
+        shell,
+        chunks[0],
+        &text,
+        cursor,
+        placeholder,
+        PointerTarget::AgentQuery,
+    );
+    render_list_overlay(
+        frame,
+        screen,
+        shell,
+        ListOverlay {
+            area: chunks[1],
+            surface: ScrollSurface::AgentPicker,
+            layer: PointerLayer::Modal,
+            selectable: Some(SelectableSurface::Overlay),
+            capture: false,
+            selected,
+            rows,
+            row_hit_width: None,
+            target: &|index| PointerTarget::AgentOption { index },
+            decorate: None,
+        },
+    );
+}
+
 /// The iteration or area picker: the project's tree as indented rows, the leaf
 /// of each named and the rest of the path implied by the indent, with the node
 /// the work item sits in already marked and under the cursor. An iteration row
