@@ -450,6 +450,10 @@ impl Herdr {
         self.api.call(&["tab", "focus", id]).map(drop)
     }
 
+    pub fn focus_workspace(&self, id: &str) -> Result<()> {
+        self.api.call(&["workspace", "focus", id]).map(drop)
+    }
+
     /// A name no live agent holds: `base`, then `base-2`, `base-3`…
     pub fn free_agent_name(&self, base: &str) -> Result<String> {
         let taken: Vec<String> = self
@@ -684,6 +688,14 @@ pub(crate) mod fake {
                     Ok(
                         json!({"tab": self.tab_json(&tab, &workspace, &label), "root_pane": Self::pane_json(pane)}),
                     )
+                }
+                ["workspace", "focus", id] => {
+                    if self.workspaces.iter().any(|(held, _)| held == id) {
+                        self.focused = Some((*id).to_owned());
+                        Ok(json!({}))
+                    } else {
+                        unknown()
+                    }
                 }
                 ["tab", "rename", id, label] => {
                     match self.tabs.iter_mut().find(|(held, _, _)| held == id) {

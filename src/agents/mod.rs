@@ -65,8 +65,8 @@ impl AgentSettings {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Provider {
-    #[default]
     Copilot,
+    #[default]
     Cursor,
 }
 
@@ -1006,10 +1006,24 @@ pub fn launch(
         save(store, &session, Stage::Prompt)?;
     }
 
-    if let Err(error) = herdr.focus_agent(&agent_name) {
+    if let Err(error) = bring_to_front(herdr, &session) {
         notes.push(format!("could not focus it: {error:#}"));
     }
     Ok((session, notes.join("; ")))
+}
+
+/// Puts the agent on screen: its workspace, then its tab, then the pane.
+/// `agent focus` alone lands the pane's focus without switching what the
+/// client is showing, so the two above it are asked for explicitly.
+fn bring_to_front(herdr: &Herdr, session: &AgentSession) -> Result<()> {
+    if let Some(workspace_id) = &session.workspace_id {
+        herdr.focus_workspace(workspace_id)?;
+    }
+    if let Some(tab_id) = &session.tab_id {
+        herdr.focus_tab(tab_id)?;
+    }
+    let name = session.agent_name.as_deref().unwrap_or_default();
+    herdr.focus_agent(name)
 }
 
 /// The live workspace with this label, or nothing; two of them is a
@@ -1118,8 +1132,7 @@ pub fn return_to(herdr: &Herdr, store: &mut SessionStore, id: &str) -> Result<i6
         }
         Err(error) => return Err(Returned::Failed(error)),
     }
-    let name = session.agent_name.as_deref().unwrap_or_default();
-    herdr.focus_agent(name).map_err(Returned::Failed)?;
+    bring_to_front(herdr, &session).map_err(Returned::Failed)?;
     Ok(session.work_item)
 }
 

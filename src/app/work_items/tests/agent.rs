@@ -93,7 +93,7 @@ fn w_on_a_linked_and_routed_work_item_launches_without_asking() {
     assert_eq!(plan.ticket.title, "Fix the thing!");
     assert_eq!(plan.repo.name, "payments-api");
     assert_eq!(plan.workspace, "Payments");
-    assert_eq!(plan.provider, Provider::Copilot, "the default provider");
+    assert_eq!(plan.provider, Provider::Cursor, "the default provider");
     assert_eq!(
         plan.policy,
         CheckoutPolicy::Worktree,

@@ -65,9 +65,9 @@ command = "osascript -e 'on run argv' -e 'display notification (item 2 of argv) 
 
 # `w` on a work item: a coding CLI in a Herdr pane, in the work item's
 # repository, with the ticket already in front of it. Left out, `w` launches
-# Copilot in a git worktree of its own for the ticket's branch.
+# Cursor in a git worktree of its own for the ticket's branch.
 [agents]
-default = "copilot"           # copilot · cursor — Herdr's kind names
+default = "cursor"            # copilot · cursor — Herdr's kind names
 checkout = "worktree"         # worktree · shared: a worktree per ticket, or the clone itself
 
 [agents.copilot]

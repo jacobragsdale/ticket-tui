@@ -39,7 +39,7 @@
 //! command = "notify-send {title} {body}"   # left out: nothing is ever run
 //!
 //! [agents]                   # `w` on a work item: which coding CLI, and how
-//! default = "copilot"        # copilot · cursor
+//! default = "cursor"         # copilot · cursor
 //! checkout = "worktree"      # worktree · shared — where the agent's checkout is
 //! [agents.copilot]
 //! args = []                  # native arguments for that CLI
@@ -88,7 +88,7 @@ pub struct Config {
 /// arguments each provider's CLI is started with.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 pub struct Agents {
-    /// `copilot` or `cursor`; left out, `copilot`.
+    /// `copilot` or `cursor`; left out, `cursor`.
     #[serde(default)]
     pub default: Option<String>,
     /// `worktree` (the default) or `shared`.

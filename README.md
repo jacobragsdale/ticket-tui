@@ -158,7 +158,7 @@ ticket-tui to be running inside Herdr; **Copy agent prompt** works anywhere.
 
 ```toml
 [agents]
-default = "copilot"           # or cursor
+default = "cursor"            # or copilot
 checkout = "worktree"         # or shared
 
 [herdr]
