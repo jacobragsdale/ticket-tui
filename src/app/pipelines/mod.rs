@@ -1048,7 +1048,8 @@ impl Screen for PipelinesScreen {
                 return self.choose_branch(shell);
             }
             PointerTarget::NodeQuery => {
-                self.branch_picker.query.set_cursor(usize::from(column));
+                let (col, width) = shell.hit_regions.field_click(column, row);
+                self.branch_picker.query.click(col, width);
             }
             PointerTarget::CloseOverlay | PointerTarget::DismissOverlay => {
                 self.close_overlay(shell);
@@ -1062,10 +1063,10 @@ impl Screen for PipelinesScreen {
         AppAction::None
     }
 
-    fn place_caret(&mut self, _shell: &mut Shell, editor: TextEditor, column: u16, _row: u16) {
+    fn place_caret(&mut self, shell: &mut Shell, editor: TextEditor, column: u16, row: u16) {
         if editor == TextEditor::Search {
-            let cursor = usize::from(column);
-            self.query_mut().set_cursor(cursor);
+            let (col, width) = shell.hit_regions.field_click(column, row);
+            self.query_mut().click(col, width);
         }
     }
 

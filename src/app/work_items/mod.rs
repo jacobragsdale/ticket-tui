@@ -573,7 +573,7 @@ impl WorkItemsScreen {
             }
             WorkItemMode::TypePicker => "\u{2191}\u{2193}/jk choose  Enter apply  Esc cancel",
             WorkItemMode::Form => {
-                "\u{2191}\u{2193}/Tab fields  Enter picker  Ctrl-S create  Esc cancel"
+                "\u{2191}\u{2193}/Tab fields  Enter picker  Ctrl-S create  Esc keep draft"
             }
             WorkItemMode::Capture => "Type a title  Enter create  Esc cancel",
             WorkItemMode::ConfirmDelete => "d delete  Esc cancel",

@@ -665,7 +665,7 @@ impl Screen for ReposScreen {
         shell: &mut Shell,
         target: PointerTarget,
         column: u16,
-        _row: u16,
+        row: u16,
     ) -> AppAction {
         match target {
             PointerTarget::TableRow { index } => {
@@ -701,16 +701,17 @@ impl Screen for ReposScreen {
             }
             PointerTarget::SearchField => {
                 self.mode = RepoMode::Search;
-                self.query.set_cursor(usize::from(column));
+                self.place_caret(shell, TextEditor::Search, column, row);
             }
             _ => {}
         }
         AppAction::None
     }
 
-    fn place_caret(&mut self, _shell: &mut Shell, editor: TextEditor, column: u16, _row: u16) {
+    fn place_caret(&mut self, shell: &mut Shell, editor: TextEditor, column: u16, row: u16) {
         if editor == TextEditor::Search {
-            self.query.set_cursor(usize::from(column));
+            let (col, width) = shell.hit_regions.field_click(column, row);
+            self.query.click(col, width);
         }
     }
 

@@ -91,8 +91,8 @@ impl WorkItemsScreen {
         }
         match target {
             PointerTarget::SearchField => {
-                self.begin_search();
                 self.place_caret(shell, TextEditor::Search, column, row);
+                self.enter_search();
             }
             PointerTarget::ClearQuery => self.set_query(shell, String::new()),
             PointerTarget::CloseOverlay => self.close_overlay(shell),
@@ -395,7 +395,10 @@ impl WorkItemsScreen {
         column: u16,
         row: u16,
     ) {
-        let Some(snapshot) = shell
+        // The column within the field, and the field's width: the field may
+        // have scrolled to keep its caret on screen, and the character under
+        // the click is found from both.
+        let (col, width) = match shell
             .hit_regions
             .selectable(match editor {
                 TextEditor::Search => SelectableSurface::Search,
@@ -411,47 +414,35 @@ impl WorkItemsScreen {
                 | TextEditor::Capture
                 | TextEditor::Form => SelectableSurface::Overlay,
             })
-            .and_then(|snapshot| snapshot.pos_at(column, row))
-            .or_else(|| {
-                shell
-                    .hit_regions
-                    .resolve(column, row)
-                    .map(|region| TextPos {
-                        line: 0,
-                        col: usize::from(column.saturating_sub(region.rect.x)),
-                    })
-            })
-        else {
-            return;
+            .and_then(|snapshot| {
+                snapshot
+                    .pos_at(column, row)
+                    .map(|position| (position.col, snapshot.rect.width))
+            }) {
+            Some(found) => found,
+            None if shell.hit_regions.resolve(column, row).is_some() => {
+                shell.hit_regions.field_click(column, row)
+            }
+            None => return,
         };
-        let index = snapshot.col;
-        match editor {
-            TextEditor::Search => self.query.set_cursor(index),
-            TextEditor::Palette => self.palette.query.set_cursor(index),
-            TextEditor::ViewName => {
-                if let Some(name) = self.views_overlay.naming.as_mut() {
-                    name.set_cursor(index);
-                }
-            }
-            TextEditor::Prompt => {
-                if let Some(prompt) = self.prompt.as_mut() {
-                    prompt.input.set_cursor(index);
-                }
-            }
-            TextEditor::Assignee => self.assignee_picker.query.set_cursor(index),
-            TextEditor::Parent => self.parent_picker.query.set_cursor(index),
-            TextEditor::Link => self.link_picker.query.set_cursor(index),
-            TextEditor::Agent => self.agent_picker.query.set_cursor(index),
-            TextEditor::Node => self.node_picker.query.set_cursor(index),
-            TextEditor::Form => {
-                if let Some(field) = self.focused_form_field_mut() {
-                    field.input.set_cursor(index);
-                }
-            }
-            TextEditor::Capture => self.capture.set_cursor(index),
+        let input = match editor {
+            TextEditor::Search => Some(&mut self.query),
+            TextEditor::Palette => Some(&mut self.palette.query),
+            TextEditor::ViewName => self.views_overlay.naming.as_mut(),
+            TextEditor::Prompt => self.prompt.as_mut().map(|prompt| &mut prompt.input),
+            TextEditor::Assignee => Some(&mut self.assignee_picker.query),
+            TextEditor::Parent => Some(&mut self.parent_picker.query),
+            TextEditor::Link => Some(&mut self.link_picker.query),
+            TextEditor::Agent => Some(&mut self.agent_picker.query),
+            TextEditor::Node => Some(&mut self.node_picker.query),
+            TextEditor::Form => self.focused_form_field_mut().map(|field| &mut field.input),
+            TextEditor::Capture => Some(&mut self.capture),
             // The composer's rows are their own targets, placed by row and
             // column rather than through the text snapshot.
-            TextEditor::Compose => {}
+            TextEditor::Compose => None,
+        };
+        if let Some(input) = input {
+            input.click(col, width);
         }
     }
 }

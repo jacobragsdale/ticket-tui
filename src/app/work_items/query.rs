@@ -391,6 +391,13 @@ impl WorkItemsScreen {
 
     pub(super) fn begin_search(&mut self) {
         self.query.move_end();
+        self.enter_search();
+    }
+
+    /// Gives the search row the keyboard with the caret where it is: a click
+    /// has already put it under the pointer, against the row as it was
+    /// scrolled for the caret before, so nothing may move it afterwards.
+    pub(super) fn enter_search(&mut self) {
         self.search_history_index = None;
         self.search_history_draft = self.query.text().to_owned();
         self.mode = WorkItemMode::Search;

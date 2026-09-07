@@ -27,6 +27,7 @@ use crate::pointer::{
 };
 use crate::search::QueryHighlighter;
 use crate::sprint::{SummaryRow, SummaryRowKind};
+use crate::text_input::{display_width, field_window};
 use crate::timestamp::Timestamp;
 
 mod details;
@@ -44,11 +45,12 @@ mod widgets;
 
 use details::{assigned_to_me_style, field_label, field_line, render_details};
 use overlays::{
-    ListOverlay, bar_fields, column_rows, link_line, overlay_line, overlay_row, overlay_row_width,
-    pill_style, render_agent_prompt_overlay, render_chips, render_column_overlay, render_facet_bar,
-    render_facet_menu, render_filter_overlay, render_help_popup, render_info_overlay,
-    render_list_overlay, render_palette, render_sort_popup, render_sprint_overlay,
-    render_views_overlay, terminate_underline,
+    ListOverlay, bar_fields, column_rows, link_line, no_matches_note, overlay_line, overlay_row,
+    overlay_row_width, pill_style, render_agent_prompt_overlay, render_chips,
+    render_column_overlay, render_empty_note, render_facet_bar, render_facet_menu,
+    render_filter_overlay, render_help_popup, render_info_overlay, render_list_overlay,
+    render_palette, render_sort_popup, render_sprint_overlay, render_views_overlay,
+    terminate_underline,
 };
 use panes::{PaneNames, PanePair, render_inner_split, render_workspace};
 use pickers::{
@@ -66,7 +68,7 @@ pub use theme::{Theme, ThemeChoice, chosen_theme, set_theme, theme};
 use widgets::{
     CLOSE_LABEL, Control, ControlKind, SearchRow, button_row, capture_selectable, dim_behind,
     follow_chip, paint_hover, paint_selection, register_buttons, register_close_button,
-    render_capture_row, render_control, render_modal_frame, render_query_field,
+    render_capture_row, render_control, render_field_text, render_modal_frame, render_query_field,
     render_screen_status_bar, render_scrollbar, render_search_row, row_on_screen, spinner_frame,
     wrapped_rows,
 };

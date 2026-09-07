@@ -204,6 +204,14 @@ impl TextInput {
         true
     }
 
+    /// Puts the caret where a click at `column` of a one-row field `width`
+    /// columns wide landed, the field showing the text the way
+    /// [`field_window`] scrolled it for the caret as it was.
+    pub fn click(&mut self, column: usize, width: u16) {
+        let (start, _) = field_window(&self.text, self.cursor, width);
+        self.cursor = char_at_column(&self.text, start, column);
+    }
+
     fn character_count(&self) -> usize {
         self.text.chars().count()
     }
@@ -213,6 +221,53 @@ impl TextInput {
         let end_byte = byte_index(&self.text, end);
         self.text.replace_range(start_byte..end_byte, "");
     }
+}
+
+/// The terminal columns `text` paints in, measured the way the buffer
+/// measures them: a CJK character is two, a combining mark none. Character
+/// indices are not columns, which is why every caret goes through this.
+#[must_use]
+pub fn display_width(text: &str) -> usize {
+    ratatui::text::Span::raw(text).width()
+}
+
+/// Where a one-row field `width` columns wide starts showing `text` so the
+/// caret at character `cursor` is on it: the index of the first character
+/// shown, and the caret's column within the field. The window moves by whole
+/// characters, so a wide one is never cut at the left edge, and the caret has
+/// a column of its own after the text before it — the end of the text
+/// included.
+#[must_use]
+pub fn field_window(text: &str, cursor: usize, width: u16) -> (usize, u16) {
+    let room = usize::from(width).max(1) - 1;
+    let widths: Vec<usize> = text
+        .chars()
+        .map(|character| display_width(character.encode_utf8(&mut [0; 4])))
+        .collect();
+    let cursor = cursor.min(widths.len());
+    let mut before: usize = widths[..cursor].iter().sum();
+    let mut start = 0;
+    while before > room && start < cursor {
+        before -= widths[start];
+        start += 1;
+    }
+    (start, u16::try_from(before).unwrap_or(u16::MAX))
+}
+
+/// The character a click at `column` lands on, in a field showing `text` from
+/// character `start`: the one painted under that column, or the end of the
+/// text past its last character. The caret goes in front of it.
+#[must_use]
+pub fn char_at_column(text: &str, start: usize, column: usize) -> usize {
+    let mut x = 0;
+    for (offset, character) in text.chars().skip(start).enumerate() {
+        let width = display_width(character.encode_utf8(&mut [0; 4]));
+        if x + width > column {
+            return start + offset;
+        }
+        x += width;
+    }
+    text.chars().count()
 }
 
 fn byte_index(text: &str, character_index: usize) -> usize {
@@ -454,6 +509,62 @@ mod tests {
 
         input.insert_newline();
         assert_eq!(input.text(), "alpha beta\ngamma delt\na");
+    }
+
+    #[test]
+    fn a_field_scrolls_by_whole_characters_to_keep_the_caret_on_it() {
+        // Everything fits: nothing scrolls and the caret is where the text is.
+        assert_eq!(field_window("abc", 3, 10), (0, 3));
+        assert_eq!(field_window("abc", 0, 10), (0, 0));
+        // Ten characters in a field of six: the caret at the end needs the
+        // last five in front of it.
+        assert_eq!(field_window("abcdefghij", 10, 6), (5, 5));
+        assert_eq!(field_window("abcdefghij", 5, 6), (0, 5));
+        assert_eq!(field_window("abcdefghij", 6, 6), (1, 5));
+        // A wide character is two columns, so the caret after 日本 is at 4,
+        // and a window that cannot hold 日 whole moves past it entirely.
+        assert_eq!(field_window("日本語", 2, 10), (0, 4));
+        assert_eq!(field_window("日本語", 3, 4), (2, 2));
+        // A combining mark takes no column of its own.
+        assert_eq!(field_window("e\u{301}x", 2, 10), (0, 1));
+        assert_eq!(field_window("e\u{301}x", 3, 10), (0, 2));
+        assert_eq!(
+            field_window("abc", 9, 10),
+            (0, 3),
+            "a caret past the end sits at the end"
+        );
+        assert_eq!(field_window("abc", 3, 0), (3, 0), "no width is one column");
+        assert_eq!(display_width("日本語"), 6);
+        assert_eq!(display_width("e\u{301}"), 1);
+    }
+
+    #[test]
+    fn a_click_lands_on_the_character_under_its_column() {
+        assert_eq!(char_at_column("abc", 0, 1), 1);
+        assert_eq!(char_at_column("abc", 0, 7), 3, "past the end is the end");
+        assert_eq!(char_at_column("abcdefghij", 5, 2), 7, "in a scrolled field");
+        assert_eq!(
+            char_at_column("日本語", 0, 1),
+            0,
+            "either column of a wide character is that character"
+        );
+        assert_eq!(char_at_column("日本語", 0, 2), 1);
+        assert_eq!(
+            char_at_column("e\u{301}x", 0, 1),
+            2,
+            "a mark and its base are one column"
+        );
+
+        let mut input = TextInput::new("abcdefghij");
+        input.click(2, 6);
+        assert_eq!(
+            input.cursor(),
+            7,
+            "the field was scrolled for the caret at the end"
+        );
+        input.move_home();
+        input.click(2, 6);
+        assert_eq!(input.cursor(), 2, "and not once the caret is at the start");
     }
 
     #[test]

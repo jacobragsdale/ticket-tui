@@ -947,7 +947,7 @@ impl Screen for PullRequestsScreen {
         shell: &mut Shell,
         target: PointerTarget,
         column: u16,
-        _row: u16,
+        row: u16,
     ) -> AppAction {
         match target {
             PointerTarget::CloseOverlay | PointerTarget::DismissOverlay => {
@@ -975,22 +975,23 @@ impl Screen for PullRequestsScreen {
             PointerTarget::ShowFinished => self.show_closed = true,
             PointerTarget::SearchField => {
                 self.mode = PrMode::Search;
-                self.query.set_cursor(usize::from(column));
+                self.place_caret(shell, TextEditor::Search, column, row);
             }
             PointerTarget::NodeOption { index } => {
                 self.link_cursor.focus(index);
                 return self.choose_work_item(shell);
             }
-            PointerTarget::NodeQuery => self.link_query.set_cursor(usize::from(column)),
+            PointerTarget::NodeQuery => self.place_caret(shell, TextEditor::Node, column, row),
             _ => {}
         }
         AppAction::None
     }
 
-    fn place_caret(&mut self, _shell: &mut Shell, editor: TextEditor, column: u16, _row: u16) {
+    fn place_caret(&mut self, shell: &mut Shell, editor: TextEditor, column: u16, row: u16) {
+        let (col, width) = shell.hit_regions.field_click(column, row);
         match editor {
-            TextEditor::Search => self.query.set_cursor(usize::from(column)),
-            TextEditor::Node => self.link_query.set_cursor(usize::from(column)),
+            TextEditor::Search => self.query.click(col, width),
+            TextEditor::Node => self.link_query.click(col, width),
             _ => {}
         }
     }

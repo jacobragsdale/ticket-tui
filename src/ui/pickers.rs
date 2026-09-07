@@ -263,6 +263,14 @@ pub(super) fn render_assignee_picker(
         "Filter people\u{2026}",
         PointerTarget::AssigneeQuery,
     );
+    if rows.is_empty() {
+        let note = if screen.assignee_picker.candidates.is_empty() {
+            "No people to offer".to_owned()
+        } else {
+            no_matches_note("people", chunks[1].width)
+        };
+        render_empty_note(frame, chunks[1], &note);
+    }
     render_list_overlay(
         frame,
         screen,
@@ -340,6 +348,14 @@ pub(super) fn render_parent_picker(
         "Filter by id or title\u{2026}",
         PointerTarget::ParentQuery,
     );
+    if rows.is_empty() {
+        let note = if screen.parent_picker.candidates.is_empty() {
+            "No work item could hold this one".to_owned()
+        } else {
+            no_matches_note("work items", chunks[1].width)
+        };
+        render_empty_note(frame, chunks[1], &note);
+    }
     render_list_overlay(
         frame,
         screen,
@@ -370,7 +386,6 @@ pub(super) fn render_link_picker(
 ) {
     let matches = screen.link_matches();
     let picker = &screen.link_picker;
-    let muted = Style::default().fg(theme().muted);
     let selected = picker.cursor.index;
     let typed = picker.query.text().trim().to_owned();
     let (title, placeholder) = match picker.chosen() {
@@ -383,24 +398,28 @@ pub(super) fn render_link_picker(
         ),
         Some(repo) => (format!(" Branch in {} ", repo.name), "Branch name\u{2026}"),
     };
-    let rows: Vec<Line> = if picker.repo.is_some() && !picker.loaded {
-        vec![Line::from(Span::styled(
-            "  Reading branches\u{2026}",
-            muted,
-        ))]
+    // A list with nothing to pick says so in a note rather than a row, so
+    // nothing reads as under the cursor and no click lands on it; `Enter`
+    // still does what the note says, since that is the query's, not a row's.
+    let note = if picker.repo.is_some() && !picker.loaded {
+        Some("Reading branches\u{2026}".to_owned())
     } else if matches.is_empty() {
-        let text = match picker.chosen() {
-            None => "  No repository matches".to_owned(),
-            Some(_) if typed.is_empty() => "  Type a branch name".to_owned(),
+        Some(match picker.chosen() {
+            None => "No repository matches".to_owned(),
+            Some(_) if typed.is_empty() => "Type a branch name".to_owned(),
             Some(repo) => match repo.default_branch.as_deref() {
                 Some(from) => format!(
-                    "  Enter makes {typed} at the head of {}",
+                    "Enter makes {typed} at the head of {}",
                     from.strip_prefix("refs/heads/").unwrap_or(from)
                 ),
-                None => format!("  {} has no default branch to branch from", repo.name),
+                None => format!("{} has no default branch to branch from", repo.name),
             },
-        };
-        vec![Line::from(Span::styled(text, muted))]
+        })
+    } else {
+        None
+    };
+    let rows: Vec<Line> = if note.is_some() {
+        Vec::new()
     } else {
         matches
             .iter()
@@ -431,6 +450,9 @@ pub(super) fn render_link_picker(
         placeholder,
         PointerTarget::LinkQuery,
     );
+    if let Some(note) = note {
+        render_empty_note(frame, chunks[1], &note);
+    }
     render_list_overlay(
         frame,
         screen,
@@ -467,7 +489,7 @@ pub(super) fn render_agent_picker(
         crate::app::AgentChoice::Repo => (
             format!(" Work on #{id} in which repository? "),
             "Filter repositories\u{2026}",
-            "  No repository matches",
+            "No repository matches",
         ),
         crate::app::AgentChoice::Workspace => (
             format!(
@@ -479,16 +501,16 @@ pub(super) fn render_agent_picker(
                     .map_or("the repository", |repo| repo.name.as_str())
             ),
             "Filter, or type a new workspace name\u{2026}",
-            "  Type a workspace name",
+            "Type a workspace name",
         ),
         crate::app::AgentChoice::Provider => (
             format!(" Which agent on #{id}? "),
             "copilot or cursor\u{2026}",
-            "  No provider matches",
+            "No provider matches",
         ),
     };
     let rows: Vec<Line> = if matches.is_empty() {
-        vec![Line::from(Span::styled(empty, muted))]
+        Vec::new()
     } else {
         matches
             .iter()
@@ -528,6 +550,9 @@ pub(super) fn render_agent_picker(
         placeholder,
         PointerTarget::AgentQuery,
     );
+    if matches.is_empty() {
+        render_empty_note(frame, chunks[1], empty);
+    }
     render_list_overlay(
         frame,
         screen,
@@ -613,6 +638,15 @@ pub(super) fn render_node_picker(
         &format!("Filter {}\u{2026}", kind.label().to_lowercase()),
         PointerTarget::NodeQuery,
     );
+    if rows.is_empty() {
+        let plural = format!("{}s", kind.label().to_lowercase());
+        let note = if screen.node_picker.rows.is_empty() {
+            format!("No {plural} known yet")
+        } else {
+            no_matches_note(&plural, chunks[1].width)
+        };
+        render_empty_note(frame, chunks[1], &note);
+    }
     render_list_overlay(
         frame,
         screen,
@@ -661,14 +695,15 @@ pub(super) fn render_prompt(
         Constraint::Fill(1),
     ])
     .split(inner);
+    // The label stays put; only the value scrolls under the caret.
     let prefix = format!("{}: ", field.label());
-    let offset = u16::try_from(prefix.chars().count()).unwrap_or(u16::MAX);
+    let offset = u16::try_from(display_width(&prefix)).unwrap_or(u16::MAX);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(prefix, Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(text.clone()),
-        ])),
-        chunks[0],
+        Paragraph::new(Span::styled(
+            prefix,
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Rect::new(chunks[0].x, chunks[0].y, chunks[0].width.min(offset), 1),
     );
     let editable = Rect::new(
         chunks[0].x.saturating_add(offset),
@@ -676,6 +711,7 @@ pub(super) fn render_prompt(
         chunks[0].width.saturating_sub(offset),
         1,
     );
+    let caret = render_field_text(frame, editable, &text, cursor, None, Style::default());
     shell.hit_regions.push(region(
         editable,
         PointerTarget::PromptInput,
@@ -684,11 +720,9 @@ pub(super) fn render_prompt(
         None,
     ));
     capture_selectable(frame, shell, SelectableSurface::Overlay, editable, false);
-    let cursor_x = editable
-        .x
-        .saturating_add(u16::try_from(cursor).unwrap_or(u16::MAX))
-        .min(editable.x.saturating_add(editable.width.saturating_sub(1)));
-    frame.set_cursor_position((cursor_x, editable.y));
+    if let Some(caret) = caret {
+        frame.set_cursor_position(caret);
+    }
     // A title has to say something, and so does a comment.
     let savable = !text.trim().is_empty();
     render_control(
@@ -785,6 +819,14 @@ pub(super) fn render_form(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, s
         .form
         .as_ref()
         .is_some_and(FormOverlay::is_submittable);
+    // Why `[Create]` is off, said quietly on the row above the buttons: the
+    // same words a refused submit would use, without the red, since nothing
+    // has been refused yet.
+    let missing = screen
+        .form
+        .as_ref()
+        .and_then(FormOverlay::first_blank_required)
+        .map(|field| format!("{} is required", field.label));
     let height = u16::try_from(fields.len().saturating_add(4))
         .unwrap_or(u16::MAX)
         .min(frame.area().height);
@@ -827,13 +869,23 @@ pub(super) fn render_form(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, s
         } else {
             Style::default().fg(theme().text)
         };
+        // The value under the caret scrolls by whole characters so the
+        // caret stays on the row; the label column never moves.
+        let (start, caret_column) = if focused && field.is_typed() {
+            field_window(field.shown(), field.input.cursor(), value_width)
+        } else {
+            (0, 0)
+        };
         let value = if field.shown().is_empty() {
             Span::styled(
                 field.placeholder.to_owned(),
                 Style::default().fg(theme().muted),
             )
         } else {
-            Span::styled(field.shown().to_owned(), value_style)
+            Span::styled(
+                field.shown().chars().skip(start).collect::<String>(),
+                value_style,
+            )
         };
         let mut spans = vec![
             Span::raw(if focused { "\u{203a} " } else { "  " }),
@@ -864,10 +916,10 @@ pub(super) fn render_form(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, s
                 Some(ScrollSurface::Form),
             ));
         }
-        if focused && field.is_typed() {
+        if focused && field.is_typed() && value_width > 0 {
             caret = Some((
                 value_x
-                    .saturating_add(u16::try_from(field.input.cursor()).unwrap_or(u16::MAX))
+                    .saturating_add(caret_column)
                     .min(value_x.saturating_add(value_width.saturating_sub(1))),
                 y,
             ));
@@ -907,6 +959,16 @@ pub(super) fn render_form(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, s
     if let Some((x, y)) = caret {
         frame.set_cursor_position((x, y));
     }
+    let guidance = chunks[1];
+    if let Some(missing) = missing
+        && guidance.width > 0
+        && guidance.height > 0
+    {
+        frame.render_widget(
+            Paragraph::new(Line::styled(missing, Style::default().fg(theme().muted))),
+            guidance,
+        );
+    }
     let buttons = chunks[2];
     render_control(
         frame,
@@ -920,12 +982,14 @@ pub(super) fn render_form(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, s
             enabled: submittable,
         },
     );
+    // `Close`, not `Cancel`: what was typed is kept for `n` to bring back,
+    // for as long as this run lasts.
     render_control(
         frame,
         shell,
         Control {
-            area: Rect::new(buttons.x.saturating_add(9), buttons.y, 8, 1),
-            label: " Cancel ",
+            area: Rect::new(buttons.x.saturating_add(9), buttons.y, 7, 1),
+            label: " Close ",
             target: PointerTarget::CancelForm,
             layer: PointerLayer::Modal,
             kind: ControlKind::Chip,

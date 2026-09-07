@@ -220,31 +220,87 @@ fn sync_glyph(status: &SyncStatus) -> (String, Color) {
 }
 
 /// As many whole hints as `width` holds, cut where one ends rather than in
-/// the middle of a key. The `?` overlay has the rest of them.
+/// the middle of a key. The ones that say how to finish — `Enter …`, `Esc …`,
+/// `Ctrl-S …`, `? help` — are kept first, so a narrow terminal drops `Type to
+/// filter` before it drops the way out. The `?` overlay has the rest of them.
 fn trim_hints(hint: &str, width: u16) -> String {
     let width = usize::from(width);
-    if hint.chars().count() <= width {
+    if display_width(hint) <= width {
         return hint.to_owned();
     }
-    let mut kept = String::new();
-    for part in hint.split("  ") {
-        if part.is_empty() {
-            continue;
+    let parts: Vec<&str> = hint.split("  ").filter(|part| !part.is_empty()).collect();
+    let mut kept = vec![false; parts.len()];
+    let mut used = 0;
+    let mut keep = |index: usize| {
+        let gap = if used == 0 { 0 } else { 2 };
+        let next = used + gap + display_width(parts[index]);
+        if next <= width {
+            kept[index] = true;
+            used = next;
         }
-        let next = if kept.is_empty() {
-            part.chars().count()
-        } else {
-            kept.chars().count() + 2 + part.chars().count()
-        };
-        if next > width {
-            break;
-        }
-        if !kept.is_empty() {
-            kept.push_str("  ");
-        }
-        kept.push_str(part);
+    };
+    // The essential hints first, from the end, where every mode puts the way
+    // out and the way to finish; then the rest, from the front, fill what is
+    // left. They are shown in their own order whichever were kept.
+    for index in (0..parts.len())
+        .rev()
+        .filter(|index| hint_is_essential(parts[*index]))
+    {
+        keep(index);
     }
-    kept
+    for index in (0..parts.len()).filter(|index| !hint_is_essential(parts[*index])) {
+        keep(index);
+    }
+    parts
+        .iter()
+        .zip(kept)
+        .filter_map(|(part, kept)| kept.then_some(*part))
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+/// Whether a hint says how to finish or get out: the key that submits, the
+/// one that closes, and the help that lists the rest.
+fn hint_is_essential(part: &str) -> bool {
+    let key = part.split(' ').next().unwrap_or(part);
+    key.starts_with("Enter")
+        || key.starts_with("Esc")
+        || key.starts_with("Ctrl-S")
+        || key.starts_with('?')
+}
+
+/// Paints one row of a text field: `text` scrolled by whole characters so the
+/// caret at character `cursor` is on the row — `placeholder`, muted, while
+/// there is no text — and answers where the caret is, in terminal columns
+/// rather than characters, so a CJK title and a combining mark both leave it
+/// on the character it belongs to. Nothing is painted into a row with no
+/// width or height.
+pub(super) fn render_field_text(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    text: &str,
+    cursor: usize,
+    placeholder: Option<&str>,
+    style: Style,
+) -> Option<(u16, u16)> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let area = Rect::new(area.x, area.y, area.width, 1);
+    let (start, caret) = field_window(text, cursor, area.width);
+    let line = match placeholder {
+        Some(placeholder) if text.is_empty() => {
+            Line::styled(placeholder.to_owned(), Style::default().fg(theme().muted))
+        }
+        _ => Line::styled(text.chars().skip(start).collect::<String>(), style),
+    };
+    frame.render_widget(Paragraph::new(line), area);
+    Some((
+        area.x
+            .saturating_add(caret)
+            .min(area.right().saturating_sub(1)),
+        area.y,
+    ))
 }
 
 /// The one-row search every tab opens with: a prompt glyph, the query or the
@@ -346,15 +402,15 @@ pub(super) fn render_search_row(frame: &mut Frame<'_>, shell: &mut Shell, row: S
             Rect::new(field.right(), area.y, trailer_width, 1),
         );
     }
-    let line = if text.is_empty() && !active {
-        Line::styled(placeholder.to_owned(), Style::default().fg(theme().muted))
-    } else {
-        Line::styled(text.to_owned(), Style::default().fg(theme().text))
-    };
     // The caret stays on screen in a query longer than the row.
-    let cursor_offset = u16::try_from(cursor).unwrap_or(u16::MAX);
-    let scroll = cursor_offset.saturating_sub(field.width.saturating_sub(1));
-    frame.render_widget(Paragraph::new(line).scroll((0, scroll)), field);
+    let caret = render_field_text(
+        frame,
+        field,
+        text,
+        cursor,
+        (!active).then_some(placeholder),
+        Style::default().fg(theme().text),
+    );
     if clear > 0 {
         render_control(
             frame,
@@ -377,14 +433,8 @@ pub(super) fn render_search_row(frame: &mut Frame<'_>, shell: &mut Shell, row: S
         None,
     ));
     capture_selectable(frame, shell, selectable, field, false);
-    if active {
-        frame.set_cursor_position((
-            field
-                .x
-                .saturating_add(cursor_offset.saturating_sub(scroll))
-                .min(field.right().saturating_sub(1)),
-            field.y,
-        ));
+    if active && let Some(caret) = caret {
+        frame.set_cursor_position(caret);
     }
 }
 
@@ -420,22 +470,17 @@ pub(super) fn render_capture_row(frame: &mut Frame<'_>, area: Rect, text: &str, 
         area.width.saturating_sub(2),
         1,
     );
-    let line = if text.is_empty() {
-        Line::styled("Title", Style::default().fg(theme().muted))
-    } else {
-        Line::styled(text.to_owned(), Style::default().fg(theme().text))
-    };
     // The caret stays on screen in a title longer than the row.
-    let cursor_offset = u16::try_from(cursor).unwrap_or(u16::MAX);
-    let scroll = cursor_offset.saturating_sub(field.width.saturating_sub(1));
-    frame.render_widget(Paragraph::new(line).scroll((0, scroll)), field);
-    frame.set_cursor_position((
-        field
-            .x
-            .saturating_add(cursor_offset.saturating_sub(scroll))
-            .min(field.right().saturating_sub(1)),
-        field.y,
-    ));
+    if let Some(caret) = render_field_text(
+        frame,
+        field,
+        text,
+        cursor,
+        Some("Title"),
+        Style::default().fg(theme().text),
+    ) {
+        frame.set_cursor_position(caret);
+    }
 }
 
 /// The frame a braille spinner is on this instant. Nothing schedules a
@@ -464,14 +509,13 @@ pub(super) fn render_query_field(
     placeholder: &str,
     target: PointerTarget,
 ) {
-    let query = if text.is_empty() {
-        Line::styled(placeholder.to_owned(), Style::default().fg(theme().muted))
-    } else {
-        Line::from(text.to_owned())
-    };
-    frame.render_widget(
-        Paragraph::new(query).style(Style::default().fg(theme().text)),
+    let caret = render_field_text(
+        frame,
         area,
+        text,
+        cursor,
+        Some(placeholder),
+        Style::default().fg(theme().text),
     );
     shell.hit_regions.push(region(
         area,
@@ -481,12 +525,9 @@ pub(super) fn render_query_field(
         None,
     ));
     capture_selectable(frame, shell, SelectableSurface::Overlay, area, false);
-    let cursor_x = area.x.saturating_add(
-        u16::try_from(cursor)
-            .unwrap_or(u16::MAX)
-            .min(area.width.saturating_sub(1)),
-    );
-    frame.set_cursor_position((cursor_x, area.y));
+    if let Some(caret) = caret {
+        frame.set_cursor_position(caret);
+    }
 }
 
 /// The row each line starts on once the paragraph has wrapped to `width`,

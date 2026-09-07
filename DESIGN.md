@@ -964,7 +964,7 @@ first multi-field overlay in the app — over whatever is on screen:
 │   Priority    2                                                  │
 │   Tags        sync; infra                                        │
 │                                                                  │
-│ [Create]  [Cancel]                                               │
+│ [Create]  [Close]                                                │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -976,10 +976,19 @@ the assignee list, each writing its choice back into the field and returning to
 the form. `Enter` on a typed field moves on to the next one; submitting is
 deliberately not bound to it, so a stray `Enter` halfway down the form never
 files a half-typed work item. `Ctrl-S` or `[Create]` files it, `Esc` or
-`[Cancel]` closes it. Clicking a typed field focuses it and puts the caret where
-the click landed; clicking a `▾` row drops that picker down, because a chevron
-that answers only the keyboard is a chevron that lies. The two buttons are
-clickable.
+`[Close]` closes it — the button says close rather than cancel because what was
+typed is kept for the next `n`, and the footer says `Esc keep draft` for the
+same reason. While a required field is still empty the row above the buttons
+says which, quietly (`Title is required`), and `[Create]` stays unlit; the
+guidance goes as soon as the field says something. Clicking a typed field
+focuses it and puts the caret where the click landed; clicking a `▾` row drops
+that picker down, because a chevron that answers only the keyboard is a chevron
+that lies. The two buttons are clickable. A value longer than its row scrolls
+under the caret by whole characters while the label stays put, as every
+one-row field does — the search row, the quick capture row, a picker's filter,
+the title prompt and the view name — and the caret is placed by terminal
+column, so a CJK title or a combining mark leaves it on the character it
+belongs to.
 
 The defaults are the ones that are usually right. **Type** starts at `Issue`,
 the Basic process's everyday unit of work, and the picker lists the project's
@@ -1056,8 +1065,8 @@ knowing what it is filing:
 │   Assignee    nobody                                           ▾ │
 │   Priority    unset — 1 to 4                                     │
 │   Tags        semicolon separated                                │
-│                                                                  │
-│ [Create]  [Cancel]                                               │
+│ Title is required                                                │
+│ [Create]  [Close]                                                │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1637,9 +1646,13 @@ way, clamped to what they hold and never smaller than they were before there
 was room to grow; the pickers keep the anchored geometry that hangs them off
 the field they edit. A modal's close button is a muted `×` in the top-right
 corner of its frame, its title is bold, and its buttons are chips: ` Cancel `
-on the surface ground, and the action the overlay exists for — ` Save `,
-` Delete `, ` Create ` — filled with the accent, or reversed where the palette
-has no colour to fill with. A list overlay marks the row under the cursor with
+(or ` Close `, where closing keeps a draft) on the surface ground, and the
+action the overlay exists for — ` Save `, ` Delete `, ` Create ` — filled with
+the accent, or reversed where the palette has no colour to fill with. A picker
+whose filter matches nothing says so in a muted note — `No matching people —
+Ctrl-U clears the filter`, the hint dropped where the row is too narrow for it —
+that is neither under the cursor nor a row a click lands on; one with nothing to
+offer at all says that instead. A list overlay marks the row under the cursor with
 an accent `›` on the surface ground and puts the key that runs it against
 the right-hand edge in the muted colour.
 

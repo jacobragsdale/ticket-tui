@@ -34,9 +34,12 @@ fn the_new_work_item_form_draws_every_field_and_a_click_focuses_or_drops_one_dow
         "an empty field says what it is for: {form}"
     );
     assert!(form.contains(" Create "), "{form}");
-    assert!(form.contains(" Cancel "), "{form}");
     assert!(
-        form.contains("Ctrl-S create"),
+        form.contains(" Close ") && !form.contains(" Cancel "),
+        "closing keeps the draft, so the button does not say cancel: {form}"
+    );
+    assert!(
+        form.contains("Ctrl-S create") && form.contains("Esc keep draft"),
         "the footer explains the form: {form}"
     );
     // A form wider and taller than the terminal is clipped rather than a
@@ -108,7 +111,7 @@ fn the_new_work_item_form_draws_every_field_and_a_click_focuses_or_drops_one_dow
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::CancelForm))
         .map(|region| (region.rect.x, region.rect.y))
-        .expect("the form offers a Cancel button");
+        .expect("the form offers a Close button");
     click(&mut app, x, y);
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert!(app.work_items.form.is_none());

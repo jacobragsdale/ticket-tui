@@ -492,6 +492,24 @@ impl HitRegions {
         .map(|region| region.rect)
     }
 
+    /// A click at `(column, row)` as a one-row text field sees it: the
+    /// column within the region under the pointer, and how wide that region
+    /// is, which is what [`crate::text_input::TextInput::click`] needs to
+    /// find the character under it once the field has scrolled. With no
+    /// region there the column is taken as it is.
+    #[must_use]
+    pub fn field_click(&self, column: u16, row: u16) -> (usize, u16) {
+        self.resolve(column, row).map_or_else(
+            || (usize::from(column), u16::MAX),
+            |region| {
+                (
+                    usize::from(column.saturating_sub(region.rect.x)),
+                    region.rect.width,
+                )
+            },
+        )
+    }
+
     #[must_use]
     pub fn resolve(&self, column: u16, row: u16) -> Option<&PointerRegion> {
         self.regions

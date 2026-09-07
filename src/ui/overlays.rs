@@ -854,6 +854,14 @@ pub(super) fn render_palette(
         PointerTarget::PaletteQuery,
     );
     let list_area = chunks[1];
+    if commands.is_empty() {
+        let note = if text.trim().is_empty() {
+            "No commands for this tab".to_owned()
+        } else {
+            no_matches_note("commands", list_area.width)
+        };
+        render_empty_note(frame, list_area, &note);
+    }
     let selected = screen.palette.selected;
     let rows: Vec<Line> = commands
         .iter()
@@ -910,12 +918,13 @@ pub(super) fn render_views_overlay(
             Constraint::Fill(1),
         ])
         .split(inner);
+        // The label stays put; only the name scrolls under the caret.
         frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("Name: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(name.clone()),
-            ])),
-            chunks[0],
+            Paragraph::new(Span::styled(
+                "Name: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Rect::new(chunks[0].x, chunks[0].y, chunks[0].width.min(6), 1),
         );
         let field = Rect::new(
             chunks[0].x.saturating_add(6),
@@ -923,6 +932,7 @@ pub(super) fn render_views_overlay(
             chunks[0].width.saturating_sub(6),
             1,
         );
+        let caret = render_field_text(frame, field, &name, name_cursor, None, Style::default());
         shell.hit_regions.push(region(
             field,
             PointerTarget::ViewName,
@@ -931,11 +941,9 @@ pub(super) fn render_views_overlay(
             None,
         ));
         capture_selectable(frame, shell, SelectableSurface::Overlay, field, false);
-        let cursor_x = field
-            .x
-            .saturating_add(u16::try_from(name_cursor).unwrap_or(u16::MAX))
-            .min(field.x.saturating_add(field.width.saturating_sub(1)));
-        frame.set_cursor_position((cursor_x, field.y));
+        if let Some(caret) = caret {
+            frame.set_cursor_position(caret);
+        }
         render_control(
             frame,
             shell,
@@ -1207,6 +1215,32 @@ pub(super) fn overlay_line(line: Line<'_>, selected: bool) -> Line<'_> {
 /// its own scrollbar tracks down the right-hand edge.
 pub(super) const fn overlay_row_width(area: Rect) -> u16 {
     area.width.saturating_sub(1)
+}
+
+/// What a list says on its first row when it has none: muted, never under
+/// the cursor, and not a row a click can land on. The list itself is drawn
+/// with no rows, so it registers nothing for `Enter` or the pointer to pick.
+pub(super) fn render_empty_note(frame: &mut Frame<'_>, area: Rect, text: &str) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            format!("  {text}"),
+            Style::default().fg(theme().muted),
+        )),
+        Rect::new(area.x, area.y, overlay_row_width(area), 1),
+    );
+}
+
+/// `No matching people`, and how to widen the list again where the row has
+/// room to say so.
+pub(super) fn no_matches_note(noun: &str, width: u16) -> String {
+    if usize::from(width) >= 44 + noun.len() {
+        format!("No matching {noun} \u{2014} Ctrl-U clears the filter")
+    } else {
+        format!("No matching {noun}")
+    }
 }
 
 /// One row of a list overlay: the cursor's `›` in the accent, what the row is,

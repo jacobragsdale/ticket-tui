@@ -1,6 +1,7 @@
 //! Tests for the work items screen renderer, split the way the module is.
 
 mod details;
+mod inputs;
 mod overlays;
 mod panes;
 mod pickers;
