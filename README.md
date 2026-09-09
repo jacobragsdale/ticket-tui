@@ -103,7 +103,9 @@ whole of it.
 left out, they live in the same project, which is what one project in one place
 has always meant. `query` is one WIQL condition ANDed into every pull, and
 `workspace` is where the Repos tab looks for clones, with a leading `~/` read
-as the home directory. `team` is one team of a project that is a whole
+as the home directory; the Pull requests and Pipelines tabs show only the
+repositories with a verified clone there — one whose `origin` is the
+repository. `team` is one team of a project that is a whole
 department's board, or a list of them: their area paths narrow every pull,
 their members are what the assignee picker offers, their sprints are what
 `@current` means, and a fresh session opens on Current sprint. `ticket-tui

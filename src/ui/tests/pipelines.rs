@@ -127,6 +127,7 @@ fn a_click_moves_the_cursor_and_a_header_click_turns_the_sort_around() {
 #[test]
 fn a_running_row_reports_its_elapsed_time_and_a_search_narrows_the_list() {
     let mut app = App::new(Vec::new());
+    app.shell.set_clones(["aaa-111".to_owned()].into());
     let shell = &app.shell;
     app.pipelines.set_pipelines(
         vec![
@@ -157,6 +158,7 @@ fn a_running_row_reports_its_elapsed_time_and_a_search_narrows_the_list() {
 #[test]
 fn a_canceled_run_fades_and_a_failed_one_is_painted_red() {
     let mut app = App::new(Vec::new());
+    app.shell.set_clones(["aaa-111".to_owned()].into());
     let shell = &app.shell;
     app.pipelines.set_pipelines(
         vec![pipeline(1, "ticket-tui CI", "\\")],
@@ -584,7 +586,7 @@ fn a_watched_run_finishing_is_reported_while_another_tab_is_showing() {
     assert_eq!(app.tab, TabId::WorkItems, "wherever the user is");
     assert!(!app.pipelines.is_watched(14), "and the watch is spent");
     assert_eq!(
-        Screen::badge(&app.pipelines),
+        Screen::badge(&app.pipelines, &app.shell),
         None,
         "the badge goes with the last running run"
     );
@@ -766,12 +768,15 @@ fn a_opens_the_approvals_waiting_and_answers_one_with_a_word() {
 #[test]
 fn the_tab_badge_counts_the_runs_going_and_the_approvals_waiting() {
     let mut app = pipelines_app();
-    assert_eq!(Screen::badge(&app.pipelines), Some("\u{25d0} 1".to_owned()));
+    assert_eq!(
+        Screen::badge(&app.pipelines, &app.shell),
+        Some("\u{25d0} 1".to_owned())
+    );
 
     app.pipelines
         .set_approvals(vec![approval("approval-1", "Deploy")]);
     assert_eq!(
-        Screen::badge(&app.pipelines),
+        Screen::badge(&app.pipelines, &app.shell),
         Some("\u{25d0} 1 \u{25c7} 1".to_owned()),
         "both, when both"
     );
@@ -781,7 +786,7 @@ fn the_tab_badge_counts_the_runs_going_and_the_approvals_waiting() {
         .pipelines
         .set_approvals(vec![approval("approval-2", "Deploy")]);
     assert_eq!(
-        Screen::badge(&quiet.pipelines),
+        Screen::badge(&quiet.pipelines, &quiet.shell),
         Some("\u{25c7} 1".to_owned())
     );
 }

@@ -294,12 +294,14 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
             }
             lines.push(Line::from(status));
             // A clone claimed by its name rather than its remote says where
-            // that remote actually points, because a fetch here goes there.
-            if crate::local::normalise_remote(&local.origin)
-                != crate::local::normalise_remote(&row.repo.remote_url)
-            {
+            // that remote actually points, because a fetch here goes there —
+            // and its pull requests and pipelines stay off their tabs.
+            if !local.verified && !local.origin.is_empty() {
                 lines.push(Line::styled(
-                    format!("  origin {} \u{2014} matched by name", local.origin),
+                    format!(
+                        "  origin {} \u{2014} matched by name, not verified",
+                        local.origin
+                    ),
                     Style::default().fg(theme().muted),
                 ));
             }

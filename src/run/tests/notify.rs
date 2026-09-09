@@ -110,7 +110,7 @@ fn without_a_notify_table_the_footer_is_all_there_is() {
     );
 }
 
-fn authored_by_me_with(vote: i8) -> ticket_tui::model::PullRequest {
+pub(super) fn authored_by_me_with(vote: i8) -> ticket_tui::model::PullRequest {
     ticket_tui::model::PullRequest {
         repo_id: "repo".to_owned(),
         id: 812,

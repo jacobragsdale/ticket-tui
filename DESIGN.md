@@ -1339,20 +1339,31 @@ after: its immediate subdirectories that are git repositories are matched to the
 project by their `origin` remote — both
 `https://…@dev.azure.com/org/project/_git/name` and
 `git@ssh.dev.azure.com:v3/org/project/name` read as the same repository — and
-each match is measured with `git status`. A directory no remote claimed is then
-offered to the repository of the same name, because a project whose
-repositories are mirrored somewhere else is still the code you have here; such
-a clone's details say `origin … — matched by name`, since a fetch in it goes
-wherever that points. A workspace that is not there is not an error: nothing is
-cloned, and the details pane says where it looked. The read never fetches, so
-what the column calls behind is what your last fetch knew.
+each match is measured with `git status`. A clone claimed by its remote is a
+**verified** clone. A directory no remote claimed is then offered to the
+repository of the same name, because a project whose repositories are mirrored
+somewhere else is still the code you have here; such a clone's details say
+`origin … — matched by name, not verified`, since a fetch in it goes wherever
+that points. A workspace that is not there is not an error: nothing is cloned,
+and the details pane says where it looked. The read never fetches, so what the
+column calls behind is what your last fetch knew.
+
+Which repositories have a verified clone is what the [Pull requests](#pull-requests)
+and [Pipelines](#pipelines) tabs are narrowed to: a pull request or a pipeline
+of a repository you have not cloned — or have only a mirror of — stays in the
+database and off its tab, and the tab badges count only what is on the tab. So
+the workspace is read before the first frame, on the main thread, by the cheap
+half of the scan: one `git remote get-url origin` a directory and no `git
+status`. The thread's fuller read follows whenever the workspace has moved — a
+git command finished, `r` was pressed — whatever tab is showing, and on the
+Repos tab's own cadence besides.
 
 It runs on a thread of its own, so a clone that takes a minute holds up neither
 the pull nor an edit. One read of the workspace is out at a time: a reason to
 look again while one is running — the tab opened again, the minute come round,
-a git command finished — books a single follow-up that goes when the read
-answers, so a slow workspace is never read by a queue of scans. A thread that
-stops takes its spinners with it and says so.
+a git command finished, `r` pressed — books a single follow-up that goes when
+the read answers, so a slow workspace is never read by a queue of scans. A
+thread that stops takes its spinners with it and says so.
 
 | Key | Action |
 |---|---|
@@ -1387,6 +1398,12 @@ is a run of reviewer glyphs — `✓✓·` is two approved and one not voted, `�
 red — and the Build column carries the branch policy's build, or `⚠ conflicts`
 in red when the merge is blocked, which is the thing to know first. Closed pull
 requests are left off the table behind the same chip finished work items use.
+Only the pull requests of repositories with a verified clone in
+[the workspace](#the-workspace) are on the table at all: the rest stay in the
+database, the badge and the chip do not count them, and a link that leads to
+one says which repository has no clone here rather than pretending the pull
+request is not on file. Cloning the repository — `C` on the Repos tab, or a
+`git clone` in a shell and `r` — brings them on.
 
 The details pane holds the title and status, the author and both branches, the
 description as text, the Reviewers with each vote and whether it is required, a
@@ -1445,6 +1462,11 @@ under the cursor with its build number and result, the pipeline, the branch,
 the short commit, who set it going and why, when it was queued, started and
 finished, and how long it took. `o` opens the run, or the pipeline, in the
 browser; column headers sort; the tab wears a `◐2` badge while anything runs.
+As on the Pull requests tab, only the pipelines of repositories with a verified
+clone in [the workspace](#the-workspace) are listed — one that names no
+repository the project holds is not — and the `◐` badge counts only their runs;
+the approvals overlay is not narrowed, since an approval waits on you wherever
+its repository is.
 
 `t` on a pipeline opens a branch picker — a filter field over the repository's
 branches, opening at once on the default branch and filling in when Azure
@@ -2106,8 +2128,11 @@ tail` — because truncating silently would keep the half that does not matter.
 reads answer from the database and take the tab's own filter grammar —
 `repos list --query 'local:dirty'`, `prs list --query 'reviewer:@me vote:none'`,
 which is what the To review count counts. `repos` also reads the workspace, so
-the Local column says what `git status` says; that is the only thing either read
-touches beyond SQLite, and it never fetches.
+the Local column says what `git status` says; `prs list`, `pipelines` and
+`status` read it too, the cheap way — one `git remote get-url` a directory —
+because they are narrowed to the repositories with a verified clone there, as
+the tabs are. That is the only thing any of these reads touches beyond SQLite,
+and none of them fetches.
 
 ```console
 $ ticket-tui prs list
@@ -2215,9 +2240,11 @@ said and exits 1.
 
 `ticket-tui status` prints the numbers the [tab bar](#tabs) badges as one line,
 with no ANSI in it, for a herdr status bar or a shell prompt that wants the
-same glance without switching panes. It answers from SQLite alone — no network,
-no `az` — in a few milliseconds, so a prompt can call it every time it
-draws.
+same glance without switching panes. It answers from SQLite and one `git remote
+get-url` per clone in the workspace — no network, no `az` — in a few
+milliseconds, so a prompt can call it every time it draws. The pull request and
+run figures are narrowed to the repositories with a verified clone, as the tabs
+they mirror are.
 
 ```console
 $ ticket-tui status

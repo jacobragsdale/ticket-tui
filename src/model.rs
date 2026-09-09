@@ -706,12 +706,15 @@ const REJECTED_VOTE: i8 = -10;
 /// the Pull requests tab badges and `ticket-tui status` calls `review`. Both
 /// read it here so the two cannot drift.
 #[must_use]
-pub fn awaiting_review(requests: &[PullRequest], me: Option<&str>) -> usize {
+pub fn awaiting_review<'a>(
+    requests: impl IntoIterator<Item = &'a PullRequest>,
+    me: Option<&str>,
+) -> usize {
     let Some(me) = me else {
         return 0;
     };
     requests
-        .iter()
+        .into_iter()
         .filter(|request| !request.status.is_closed())
         .filter(|request| {
             request
@@ -745,8 +748,8 @@ pub fn rejected_of_mine(requests: &[PullRequest], me: Option<&str>) -> usize {
 /// How many runs are going, which is what the Pipelines tab badges `◐ N` and
 /// `ticket-tui status` prints as `◐ N`.
 #[must_use]
-pub fn live_runs(runs: &[Run]) -> usize {
-    runs.iter().filter(|run| run.status.is_live()).count()
+pub fn live_runs<'a>(runs: impl IntoIterator<Item = &'a Run>) -> usize {
+    runs.into_iter().filter(|run| run.status.is_live()).count()
 }
 
 /// How many runs finished failed on or after `since` — the recent breakage a
@@ -776,6 +779,11 @@ pub struct LocalRepo {
     /// What a git command is doing to it right now, which the Local column
     /// says in place of the status.
     pub busy: Option<GitJob>,
+    /// Whether `origin` is this repository — the clone was claimed by its
+    /// remote — rather than a directory of the same name whose origin points
+    /// somewhere else. Only a verified clone puts its pull requests and
+    /// pipelines on their tabs.
+    pub verified: bool,
 }
 
 /// What the local-repos thread is doing to one clone.

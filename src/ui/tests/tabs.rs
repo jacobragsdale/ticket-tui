@@ -393,6 +393,7 @@ fn g_goes_from_a_work_item_to_the_pull_request_that_carried_it() {
         false,
     )]);
     app.repos.set_repos(&app.shell);
+    app.shell.set_clones(["aaa-111".to_owned()].into());
     app.shell.set_artifact_labels(
         vec![
             (41, "Earlier work".to_owned(), PrStatus::Completed),

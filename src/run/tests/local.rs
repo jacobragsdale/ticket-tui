@@ -95,6 +95,99 @@ fn a_slow_scan_is_not_joined_by_a_second_however_often_the_tab_is_opened() {
 }
 
 #[test]
+fn a_workspace_that_moved_is_read_whatever_tab_is_showing_and_the_answer_narrows_the_tabs() {
+    use ticket_tui::model::{LocalRepo, Repo};
+
+    let directory = tempdir().unwrap();
+    let (mut app, mut runtime, requests, events) = local_runtime(directory.path());
+    let repo = |id: &str, name: &str| Repo {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        project: "atlas".into(),
+        default_branch: None,
+        remote_url: format!("https://dev.azure.com/demo/atlas/_git/{name}"),
+        ssh_url: String::new(),
+        web_url: String::new(),
+        is_disabled: false,
+        size: None,
+    };
+    app.shell.set_repos(vec![
+        repo("aaa-111", "ticket-tui"),
+        repo("bbb-222", "skillbook"),
+    ]);
+    let mut here = super::notify::authored_by_me_with(0);
+    here.repo_id = "aaa-111".to_owned();
+    let mut elsewhere = super::notify::authored_by_me_with(0);
+    elsewhere.id = 813;
+    elsewhere.repo_id = "bbb-222".to_owned();
+    let shell = &app.shell;
+    app.pull_requests
+        .set_pull_requests(vec![here, elsewhere], shell);
+    assert!(
+        app.pull_requests.visible(&app.shell).is_empty(),
+        "nothing is on the tab until the workspace has been read"
+    );
+
+    // Start-up already read it, so nothing is asked for on the first turn.
+    runtime.local.scanned = Some(Instant::now());
+    app.tab = TabId::PullRequests;
+    poll_local(&mut app, &mut runtime);
+    assert_eq!(scans_asked(&requests), 0);
+
+    // `r`, on any tab and even offline, reads it again.
+    handle_action(AppAction::Sync, &mut app, &mut runtime, &failing_opener);
+    poll_local(&mut app, &mut runtime);
+    assert_eq!(scans_asked(&requests), 1, "r re-reads the workspace");
+
+    // The answer: one clone whose origin is the repository, one that only
+    // has its name.
+    let clone = |verified: bool| LocalRepo {
+        branch: "main".to_owned(),
+        verified,
+        ..LocalRepo::default()
+    };
+    events
+        .send(LocalEvent::Scanned(vec![
+            ("aaa-111".to_owned(), clone(true)),
+            ("bbb-222".to_owned(), clone(false)),
+        ]))
+        .unwrap();
+    poll_local(&mut app, &mut runtime);
+    assert_eq!(
+        app.pull_requests
+            .visible(&app.shell)
+            .iter()
+            .map(|row| row.request.id)
+            .collect::<Vec<_>>(),
+        [812],
+        "the verified clone's pull request is on the tab; the name-matched one's is not"
+    );
+    assert!(app.shell.has_clone("aaa-111") && !app.shell.has_clone("bbb-222"));
+    assert!(
+        app.repos.local_for("bbb-222").is_some(),
+        "the Repos tab still lists the clone that only has the name"
+    );
+
+    // A git command finishing moves the workspace: it is read again even
+    // though the Repos tab is not showing.
+    events
+        .send(LocalEvent::Finished {
+            repo_id: "bbb-222".into(),
+            job: GitJob::Cloning,
+            message: "Cloned skillbook".into(),
+            error: false,
+        })
+        .unwrap();
+    poll_local(&mut app, &mut runtime);
+    poll_local(&mut app, &mut runtime);
+    assert_eq!(
+        scans_asked(&requests),
+        1,
+        "a finished clone is read for, on the Pull requests tab"
+    );
+}
+
+#[test]
 fn a_job_that_finishes_while_a_scan_is_out_gets_one_scan_after_it() {
     let directory = tempdir().unwrap();
     let (mut app, mut runtime, requests, events) = local_runtime(directory.path());

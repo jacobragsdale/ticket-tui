@@ -223,6 +223,10 @@ pub struct Shell {
     /// The directory the Repos tab looks for clones in and makes new ones
     /// under. `None` when there is no home directory to fall back on.
     pub(crate) workspace: Option<std::path::PathBuf>,
+    /// The repositories with a verified clone in the workspace — one whose
+    /// `origin` is the repository — by id, as the workspace was last read.
+    /// The Pull requests and Pipelines tabs show nothing outside them.
+    pub(crate) clones: HashSet<String>,
     /// What each work item is called, by id, so the tabs that only carry ids
     /// — a pull request's linked items, a run's — can name them.
     pub(crate) work_item_titles: Vec<(i64, String)>,
@@ -306,6 +310,7 @@ impl Default for Shell {
             sync_pending: false,
             repos: Vec::new(),
             workspace: None,
+            clones: HashSet::new(),
             work_item_titles: Vec::new(),
             pull_request_labels: Vec::new(),
             pull_request_sources: Vec::new(),
@@ -443,6 +448,18 @@ impl Shell {
     #[must_use]
     pub fn workspace(&self) -> Option<&std::path::Path> {
         self.workspace.as_deref()
+    }
+
+    /// What the last read of the workspace found verified clones of.
+    pub fn set_clones(&mut self, clones: HashSet<String>) {
+        self.clones = clones;
+    }
+
+    /// Whether a repository has a verified clone here, which is what puts its
+    /// pull requests and pipelines on their tabs.
+    #[must_use]
+    pub fn has_clone(&self, repo_id: &str) -> bool {
+        self.clones.contains(repo_id)
     }
 
     /// What a repository GUID is called, for the tabs that only ever see the

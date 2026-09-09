@@ -8,6 +8,7 @@
 //! DevOps answers with, so a running TUI picks the change up from the database
 //! it is already watching.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
@@ -545,7 +546,7 @@ pub fn run(cli: &Cli, command: &Command) -> Result<()> {
         Command::Repos(command) => run_repos(cli, &database, command),
         Command::Prs(command) => run_prs(cli, &database, command),
         Command::Agent(command) => run_agent(cli, &database, command),
-        Command::Pipelines { json } => run_pipelines(&database, *json),
+        Command::Pipelines { json } => run_pipelines(cli, &database, *json),
         Command::Runs(command) => run_runs(cli, &database, command),
         Command::Approvals(command) => run_approvals(cli, command),
         Command::Status { json } => run_status(cli, &database, *json),
@@ -919,8 +920,10 @@ fn run_status(cli: &Cli, database: &Path, json: bool) -> Result<()> {
         std::env::var("TICKET_TUI_ME").ok(),
     );
     let asked = resolve_stale_days(cli.stale_days, std::env::var("TICKET_TUI_STALE_DAYS").ok())?;
+    let clones = verified_clones(cli, &repository)?;
     let status = status::collect(
         &repository,
+        &clones,
         me.as_deref(),
         status::stale_days(asked, database),
         resolve_refresh(cli.refresh, std::env::var("TICKET_TUI_REFRESH").ok())?,
@@ -2036,14 +2039,7 @@ fn run_repos(cli: &Cli, database: &Path, command: &ReposCommand) -> Result<()> {
         .map(|workspace| {
             local::scan(
                 &workspace,
-                &repos
-                    .iter()
-                    .map(|repo| local::RepoKey {
-                        id: repo.id.clone(),
-                        remote: local::normalise_remote(&repo.remote_url),
-                        name: repo.name.clone(),
-                    })
-                    .collect::<Vec<_>>(),
+                &repos.iter().map(local::RepoKey::of).collect::<Vec<_>>(),
             )
         })
         .unwrap_or_default();
@@ -2198,7 +2194,9 @@ fn run_prs(cli: &Cli, database: &Path, command: &PrsCommand) -> Result<()> {
     match command {
         PrsCommand::List { query, json } => {
             let repository = open_database(database)?;
-            let rows = pr_rows(&repository)?;
+            let clones = verified_clones(cli, &repository)?;
+            let mut rows = pr_rows(&repository)?;
+            rows.retain(|row| clones.contains(&row.request.repo_id));
             let me = resolve_me(
                 repository.meta(db::ME_DISPLAY_NAME_KEY)?,
                 std::env::var("TICKET_TUI_ME").ok(),
@@ -2269,6 +2267,17 @@ fn run_prs(cli: &Cli, database: &Path, command: &PrsCommand) -> Result<()> {
 }
 
 /// Every stored pull request, with the repository name the table shows.
+/// The repositories with a verified clone in the workspace, which is what the
+/// Pull requests and Pipelines tabs are narrowed to and so what `prs list`,
+/// `pipelines` and `status` are narrowed to: one `git remote get-url` a
+/// directory, and no network.
+fn verified_clones(cli: &Cli, repository: &SqliteTicketRepository) -> Result<HashSet<String>> {
+    Ok(local::verified(
+        local::workspace_root(cli.workspace.clone()).as_deref(),
+        &repository.load_repos()?,
+    ))
+}
+
 fn pr_rows(repository: &SqliteTicketRepository) -> Result<Vec<PrRow>> {
     let repos = repository.load_repos()?;
     Ok(repository
@@ -2854,9 +2863,16 @@ fn store_pull_request(
 }
 
 /// The project's build definitions, from the database.
-fn run_pipelines(database: &Path, json: bool) -> Result<()> {
+fn run_pipelines(cli: &Cli, database: &Path, json: bool) -> Result<()> {
     let repository = open_database(database)?;
-    let pipelines = repository.load_pipelines()?;
+    let clones = verified_clones(cli, &repository)?;
+    let mut pipelines = repository.load_pipelines()?;
+    pipelines.retain(|pipeline| {
+        pipeline
+            .repo_id
+            .as_deref()
+            .is_some_and(|id| clones.contains(id))
+    });
     let runs = repository.load_runs()?;
     emit(&if json {
         to_json(

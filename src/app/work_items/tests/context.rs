@@ -228,7 +228,7 @@ fn the_context_describes_every_tab_and_says_which_one_is_showing() {
     // other tabs are filled from theirs.
     let mut app = pipelines_app();
     app.repos.set_repos(&app.shell);
-    app.repos.set_local(vec![(
+    app.apply_scan(vec![(
         "aaa-111".to_owned(),
         crate::app::repos::tests::local("main", true, 0, 2),
     )]);

@@ -77,7 +77,6 @@ pub struct PullRequestsScreen {
     pub active_view: Option<String>,
     /// How many are waiting on the signed-in user, worked out when the list
     /// is set so the tab bar can ask for it without a shell.
-    to_review: usize,
     /// Votes out on the wire, with what they were before, so a refusal can put
     /// the glyph back.
     pending_votes: Vec<(i64, i8)>,
@@ -111,7 +110,6 @@ impl Default for PullRequestsScreen {
             details: ScrollState::default(),
             show_closed: false,
             active_view: None,
-            to_review: 0,
             pending_votes: Vec::new(),
             undo_votes: Vec::new(),
             completion: CompletionOptions::default(),
@@ -136,13 +134,12 @@ impl PullRequestsScreen {
             .map(|repo| (repo.id.clone(), repo.name.clone()))
             .collect();
         self.requests = requests;
-        self.to_review = self.to_review(shell);
         self.settle_cursor(shell, selected);
     }
 
     /// Puts the cursor back on one pull request, or clamps it when that one
     /// is no longer on the table.
-    fn settle_cursor(&mut self, shell: &Shell, id: Option<i64>) {
+    pub(crate) fn settle_cursor(&mut self, shell: &Shell, id: Option<i64>) {
         let rows = self.visible(shell);
         match id.and_then(|id| rows.iter().position(|row| row.request.id == id)) {
             Some(index) => self.cursor.focus(index),
@@ -183,7 +180,7 @@ impl PullRequestsScreen {
         }
         let parsed: ParsedQuery<PrSchema> = parse_query(self.query.text());
         let context = self.match_context(shell);
-        self.rows()
+        self.rows(shell)
             .into_iter()
             .filter(|row| {
                 row.request.status.is_closed()
@@ -202,7 +199,7 @@ impl PullRequestsScreen {
         // the toggle says — the same rule finished work items follow.
         let names_status = self.query.text().contains("status:");
         let mut rows: Vec<PrRow> = self
-            .rows()
+            .rows(shell)
             .into_iter()
             .filter(|row| {
                 (self.show_closed || names_status || !row.request.status.is_closed())
@@ -222,10 +219,13 @@ impl PullRequestsScreen {
         rows
     }
 
-    /// Every pull request on file, as the table sees them.
-    fn rows(&self) -> Vec<PrRow> {
+    /// Every pull request on file whose repository has a verified clone here,
+    /// as the table sees them. The rest stay in the database and off the tab:
+    /// a repository you have not cloned is not one you are reviewing.
+    fn rows(&self, shell: &Shell) -> Vec<PrRow> {
         self.requests
             .iter()
+            .filter(|request| shell.has_clone(&request.repo_id))
             .map(|request| PrRow {
                 repo: self
                     .repo_names
@@ -313,7 +313,21 @@ impl PullRequestsScreen {
     /// `ticket-tui status`.
     #[must_use]
     pub fn to_review(&self, shell: &Shell) -> usize {
-        crate::model::awaiting_review(&self.requests, shell.me())
+        crate::model::awaiting_review(
+            self.requests
+                .iter()
+                .filter(|request| shell.has_clone(&request.repo_id)),
+            shell.me(),
+        )
+    }
+
+    /// The repository one pull request on file belongs to.
+    #[must_use]
+    pub fn repo_of(&self, id: i64) -> Option<&str> {
+        self.requests
+            .iter()
+            .find(|request| request.id == id)
+            .map(|request| request.repo_id.as_str())
     }
 
     /// Loads one of the built-in views, which are queries and nothing more.
@@ -1067,6 +1081,11 @@ impl Screen for PullRequestsScreen {
         let Some(request) = self.requests.iter().find(|request| request.id == *id) else {
             return false;
         };
+        // One whose repository is not cloned here is not on the table under
+        // any query, so the query is left alone.
+        if !shell.has_clone(&request.repo_id) {
+            return false;
+        }
         // A closed pull request is worth landing on even while they are hidden.
         if request.status.is_closed() {
             self.show_closed = true;
@@ -1105,8 +1124,9 @@ impl Screen for PullRequestsScreen {
     /// What is waiting on the signed-in user's vote. The count is worked out
     /// when the pull requests are set, since a badge is drawn without a shell
     /// to ask.
-    fn badge(&self) -> Option<String> {
-        (self.to_review > 0).then(|| self.to_review.to_string())
+    fn badge(&self, shell: &Shell) -> Option<String> {
+        let to_review = self.to_review(shell);
+        (to_review > 0).then(|| to_review.to_string())
     }
 
     fn snapshot(&self) -> TabSession {

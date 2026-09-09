@@ -6,6 +6,7 @@
 //! clone that takes a minute never holds up an edit, and it never fetches
 //! behind your back: a status read is `git status`, nothing more.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -13,7 +14,7 @@ use std::thread;
 
 use anyhow::{Context, Result};
 
-use crate::model::{GitJob, LocalRepo};
+use crate::model::{GitJob, LocalRepo, Repo};
 
 /// How long a transfer may crawl below 1 KB/s before git gives up on it. The
 /// TUI has no way to interrupt a git command, so one that stalls has to end
@@ -27,6 +28,28 @@ pub struct RepoKey {
     pub id: String,
     pub remote: Option<String>,
     pub name: String,
+}
+
+impl RepoKey {
+    #[must_use]
+    pub fn of(repo: &Repo) -> Self {
+        Self {
+            id: repo.id.clone(),
+            remote: normalise_remote(&repo.remote_url),
+            name: repo.name.clone(),
+        }
+    }
+}
+
+/// A directory of the workspace that is one of the project's repositories:
+/// which, where, what its `origin` says, and whether that origin is the
+/// repository itself — `verified` — or the directory merely has its name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Claim {
+    pub repo_id: String,
+    pub path: PathBuf,
+    pub origin: String,
+    pub verified: bool,
 }
 
 /// What the local side can be asked to do.
@@ -191,14 +214,37 @@ fn last_line(message: &str) -> String {
 /// Every repository in `workspace` that is one of `repos`, with its state.
 /// A workspace that is not there is not an error: it is answered with nothing,
 /// and the tab says where it looked.
+#[must_use]
+pub fn scan(workspace: &Path, repos: &[RepoKey]) -> Vec<(String, LocalRepo)> {
+    let mut found: Vec<(String, LocalRepo)> = claim(workspace, repos)
+        .into_iter()
+        .filter_map(|claim| {
+            read_status(&claim.path, &claim.origin).map(|local| {
+                (
+                    claim.repo_id,
+                    LocalRepo {
+                        verified: claim.verified,
+                        ..local
+                    },
+                )
+            })
+        })
+        .collect();
+    found.sort_by(|left, right| left.0.cmp(&right.0));
+    found
+}
+
+/// Which of `repos` are checked out in `workspace`, from one `git remote
+/// get-url` per directory and no `git status`: the cheap half of a scan, which
+/// is all the question "is this repository here?" needs.
 ///
 /// A directory is claimed by its `origin` first. One that no remote claimed is
 /// then offered to the repository of the same name, because a project whose
 /// repositories are mirrored somewhere else — the origin here is GitHub's —
 /// is still the code you have on this machine; the details pane says where
-/// such a clone's origin actually points.
+/// such a clone's origin actually points, and it is not `verified`.
 #[must_use]
-pub fn scan(workspace: &Path, repos: &[RepoKey]) -> Vec<(String, LocalRepo)> {
+pub fn claim(workspace: &Path, repos: &[RepoKey]) -> Vec<Claim> {
     let Ok(entries) = std::fs::read_dir(workspace) else {
         return Vec::new();
     };
@@ -212,7 +258,7 @@ pub fn scan(workspace: &Path, repos: &[RepoKey]) -> Vec<(String, LocalRepo)> {
             clones.push((path, origin.trim().to_owned()));
         }
     }
-    let mut claimed: Vec<(String, PathBuf, String)> = Vec::new();
+    let mut claimed: Vec<Claim> = Vec::new();
     for (path, origin) in &clones {
         let Some(key) = normalise_remote(origin) else {
             continue;
@@ -222,28 +268,49 @@ pub fn scan(workspace: &Path, repos: &[RepoKey]) -> Vec<(String, LocalRepo)> {
                 .as_ref()
                 .is_some_and(|remote| remote.eq_ignore_ascii_case(&key))
         }) {
-            claimed.push((repo.id.clone(), path.clone(), origin.clone()));
+            claimed.push(Claim {
+                repo_id: repo.id.clone(),
+                path: path.clone(),
+                origin: origin.clone(),
+                verified: true,
+            });
         }
     }
     for (path, origin) in &clones {
-        if claimed.iter().any(|(_, held, _)| held == path) {
+        if claimed.iter().any(|claim| claim.path == *path) {
             continue;
         }
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
         if let Some(repo) = repos.iter().find(|repo| {
-            repo.name.eq_ignore_ascii_case(name) && !claimed.iter().any(|(id, _, _)| *id == repo.id)
+            repo.name.eq_ignore_ascii_case(name)
+                && !claimed.iter().any(|claim| claim.repo_id == repo.id)
         }) {
-            claimed.push((repo.id.clone(), path.clone(), origin.clone()));
+            claimed.push(Claim {
+                repo_id: repo.id.clone(),
+                path: path.clone(),
+                origin: origin.clone(),
+                verified: false,
+            });
         }
     }
-    let mut found: Vec<(String, LocalRepo)> = claimed
+    claimed
+}
+
+/// The repositories with a verified clone in `workspace`, by id — what the
+/// Pull requests and Pipelines tabs are narrowed to. No workspace, no clones.
+#[must_use]
+pub fn verified(workspace: Option<&Path>, repos: &[Repo]) -> HashSet<String> {
+    let Some(workspace) = workspace else {
+        return HashSet::new();
+    };
+    let keys: Vec<RepoKey> = repos.iter().map(RepoKey::of).collect();
+    claim(workspace, &keys)
         .into_iter()
-        .filter_map(|(id, path, origin)| read_status(&path, &origin).map(|local| (id, local)))
-        .collect();
-    found.sort_by(|left, right| left.0.cmp(&right.0));
-    found
+        .filter(|claim| claim.verified)
+        .map(|claim| claim.repo_id)
+        .collect()
 }
 
 /// `git status --porcelain=v2 --branch`, read into the four things the column
@@ -279,6 +346,7 @@ pub fn read_status(path: &Path, origin: &str) -> Option<LocalRepo> {
         ahead,
         behind,
         busy: None,
+        verified: false,
     })
 }
 
@@ -667,6 +735,30 @@ mod tests {
             "and it carries where its origin really points: {}",
             local.origin
         );
+        assert!(
+            !local.verified,
+            "a clone claimed by its name is not verified as the repository"
+        );
+        let repo = |id: &str, name: &str| Repo {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            project: "atlas".into(),
+            default_branch: None,
+            remote_url: format!("https://dev.azure.com/demo/atlas/_git/{name}"),
+            ssh_url: String::new(),
+            web_url: String::new(),
+            is_disabled: false,
+            size: None,
+        };
+        let repos = [repo("aaa-111", "ticket-tui"), repo("bbb-222", "skillbook")];
+        assert!(
+            verified(Some(&workspace), &repos).is_empty(),
+            "so neither repository counts as cloned here"
+        );
+        assert!(
+            verified(None, &repos).is_empty(),
+            "and no workspace is no clones"
+        );
 
         // A remote that does match wins the directory it names, so a name
         // that happens to collide cannot take it.
@@ -685,6 +777,12 @@ mod tests {
             found[0].1.path.file_name().unwrap(),
             "skillbook",
             "the remote is what the repository is, whatever the directory is called"
+        );
+        assert!(found[0].1.verified);
+        assert_eq!(
+            verified(Some(&workspace), &repos),
+            HashSet::from(["aaa-111".to_owned()]),
+            "the one claimed by its remote is the one the tabs are narrowed to"
         );
     }
 

@@ -31,7 +31,7 @@ use crate::filter::{
 pub use crate::model::Jump;
 use crate::model::{
     ArtifactLink, CommentRecord, DetailsUpdate, FamilySnapshot, FamilyTree, HistoryRecord,
-    Identity, PullRequest, RelationKind, RelationRecord, Repo, SortDirection, SortField,
+    Identity, LocalRepo, PullRequest, RelationKind, RelationRecord, Repo, SortDirection, SortField,
     StateCatalog, StateCategory, StateOption, Ticket, TicketGraph, TicketKey, compare_tickets,
     path_leaf, same_text,
 };
@@ -309,7 +309,13 @@ impl App {
     pub fn tabs(&self) -> Vec<(TabId, bool, Option<String>)> {
         TabId::ALL
             .into_iter()
-            .map(|tab| (tab, tab == self.tab, self.screen_for(tab).badge()))
+            .map(|tab| {
+                (
+                    tab,
+                    tab == self.tab,
+                    self.screen_for(tab).badge(&self.shell),
+                )
+            })
             .collect()
     }
 
@@ -495,9 +501,29 @@ impl App {
             self.shell.record_jump(jump.clone());
         } else {
             self.tab = previous;
-            self.shell.set_error(jump.missing_message());
+            let message = match self.uncloned_repo_of(jump) {
+                Some(repo) => format!(
+                    "{} is in {repo}, which has no verified clone here \u{2014} C on the Repos tab clones it",
+                    jump.describe()
+                ),
+                None => jump.missing_message(),
+            };
+            self.shell.set_error(message);
         }
         found
+    }
+
+    /// The repository a jump's target belongs to, when the target is on file
+    /// but its repository has no verified clone here — the one reason a row
+    /// the database holds is not on its tab.
+    fn uncloned_repo_of(&self, jump: &Jump) -> Option<String> {
+        let repo_id = match jump {
+            Jump::PullRequest { id, .. } => self.pull_requests.repo_of(*id),
+            Jump::Pipeline(id) => self.pipelines.repo_of_pipeline(*id),
+            Jump::Run(id) => self.pipelines.repo_of_run(*id),
+            Jump::WorkItem(_) | Jump::WorkItems(_) | Jump::Repo(_) => None,
+        }?;
+        (!self.shell.has_clone(repo_id)).then(|| self.shell.repo_name(repo_id))
     }
 
     /// `g`: goes where the row under the cursor points, or says why it
@@ -710,6 +736,28 @@ impl App {
         for (title, body) in news {
             self.shell.notify(NotificationLevel::Info, &title, &body);
         }
+    }
+
+    /// What a read of the workspace found: the Repos tab's Local column, and
+    /// the verified clones the Pull requests and Pipelines tabs are narrowed
+    /// to. Each of those keeps its cursor on the row it was on, wherever that
+    /// now sits, as a pull would.
+    pub fn apply_scan(&mut self, local: Vec<(String, LocalRepo)>) {
+        let pull_request = self
+            .pull_requests
+            .selected(&self.shell)
+            .map(|row| row.request.id);
+        let (pipeline, run) = self.pipelines.selected_ids(&self.shell);
+        self.shell.set_clones(
+            local
+                .iter()
+                .filter(|(_, local)| local.verified)
+                .map(|(id, _)| id.clone())
+                .collect(),
+        );
+        self.repos.set_local(local);
+        self.pull_requests.settle_cursor(&self.shell, pull_request);
+        self.pipelines.settle_cursors(&self.shell, pipeline, run);
     }
 
     /// Gives the Repos tab the repositories the shell holds and what the other

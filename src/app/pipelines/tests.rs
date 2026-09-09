@@ -48,6 +48,7 @@ pub(crate) fn pipelines_app() -> App {
         is_disabled: false,
         size: None,
     }]);
+    app.shell.set_clones(["aaa-111".to_owned()].into());
     let pipelines = vec![
         pipeline(1, "ticket-tui CI", "\\"),
         pipeline(2, "nightly", "\\scheduled"),
@@ -80,6 +81,70 @@ fn the_pipelines_level_lists_every_definition_with_the_run_it_last_had() {
     );
     assert_eq!(ci.repo, "ticket-tui", "the repository reads as its name");
     assert_eq!(ci.branch(), "main", "and the branch without its ref prefix");
+}
+
+#[test]
+fn a_pipeline_of_a_repository_not_cloned_here_stays_off_the_tab_and_out_of_the_badge() {
+    use crate::app::{Jump, Screen};
+
+    let mut app = pipelines_app();
+    app.shell.set_repos(vec![
+        crate::app::repos::tests::repo("aaa-111", "ticket-tui", false),
+        crate::app::repos::tests::repo("bbb-222", "skillbook", false),
+    ]);
+    let mut elsewhere = pipeline(3, "skillbook CI", "\\");
+    elsewhere.repo_id = Some("bbb-222".into());
+    let mut nowhere = pipeline(4, "imported", "\\");
+    nowhere.repo_id = None;
+    let pipelines = vec![
+        pipeline(1, "ticket-tui CI", "\\"),
+        pipeline(2, "nightly", "\\scheduled"),
+        elsewhere,
+        nowhere,
+    ];
+    let runs = vec![
+        run(16, 3, RunStatus::InProgress, None),
+        run(15, 4, RunStatus::InProgress, None),
+        run(14, 1, RunStatus::InProgress, None),
+        run(13, 1, RunStatus::Completed, Some(RunResult::Failed)),
+    ];
+    let shell = &app.shell;
+    app.pipelines.set_pipelines(pipelines, runs, shell);
+
+    assert_eq!(
+        app.pipelines
+            .visible_pipelines(&app.shell)
+            .iter()
+            .map(|row| row.pipeline.id)
+            .collect::<Vec<_>>(),
+        [1, 2],
+        "the cloned repository's pipelines, and no others"
+    );
+    assert_eq!(
+        Screen::badge(&app.pipelines, &app.shell),
+        Some("\u{25d0} 1".to_owned()),
+        "the runs going elsewhere are not worn"
+    );
+    assert!(!app.follow(&Jump::Pipeline(3)));
+    let (message, _) = app.shell.notification().expect("the refusal says why");
+    assert!(
+        message.contains("skillbook") && message.contains("no verified clone"),
+        "{message}"
+    );
+    assert!(!app.follow(&Jump::Run(16)));
+    assert!(
+        !app.follow(&Jump::Pipeline(4)),
+        "one that names no repository is nowhere to go either"
+    );
+
+    app.shell
+        .set_clones(["aaa-111".to_owned(), "bbb-222".to_owned()].into());
+    assert_eq!(app.pipelines.visible_pipelines(&app.shell).len(), 3);
+    assert_eq!(
+        Screen::badge(&app.pipelines, &app.shell),
+        Some("\u{25d0} 2".to_owned())
+    );
+    assert!(app.follow(&Jump::Run(16)));
 }
 
 #[test]
@@ -175,7 +240,10 @@ fn a_running_row_reports_the_time_it_has_been_going_and_a_finished_one_its_durat
 #[test]
 fn the_tab_wears_a_badge_while_anything_is_running() {
     let app = pipelines_app();
-    assert_eq!(Screen::badge(&app.pipelines), Some("\u{25d0} 1".to_owned()));
+    assert_eq!(
+        Screen::badge(&app.pipelines, &app.shell),
+        Some("\u{25d0} 1".to_owned())
+    );
 
     let mut both = pipelines_app();
     both.pipelines.set_approvals(vec![crate::model::Approval {
@@ -188,7 +256,7 @@ fn the_tab_wears_a_badge_while_anything_is_running() {
         requested_at: None,
     }]);
     assert_eq!(
-        Screen::badge(&both.pipelines),
+        Screen::badge(&both.pipelines, &both.shell),
         Some("\u{25d0} 1 \u{25c7} 1".to_owned()),
         "a space after every glyph: a terminal that draws them two cells wide \
          would paint over the count"
@@ -201,7 +269,7 @@ fn the_tab_wears_a_badge_while_anything_is_running() {
         vec![run(12, 1, RunStatus::Completed, Some(RunResult::Succeeded))],
         shell,
     );
-    assert_eq!(Screen::badge(&quiet.pipelines), None);
+    assert_eq!(Screen::badge(&quiet.pipelines, &quiet.shell), None);
 }
 
 #[test]

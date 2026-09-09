@@ -56,6 +56,9 @@ pub(super) fn dispatch_due_details(app: &mut App, runtime: &mut SyncRuntime) -> 
 
 /// `r`: pull now, whatever the timer is doing.
 pub(super) fn start_sync(app: &mut App, runtime: &mut SyncRuntime) {
+    // `r` re-reads the workspace too, so a repository cloned in a shell
+    // since brings its pull requests and pipelines onto their tabs.
+    runtime.local.scanned = None;
     if runtime.worker.is_none() {
         app.shell.set_error(runtime.offline_message());
         return;

@@ -126,6 +126,12 @@ pub(super) fn run() -> Result<()> {
     app.shell.set_repos(repository.load_repos()?);
     app.shell
         .set_workspace(local::workspace_root(cli.workspace.clone()));
+    // Which repositories are cloned here decides what the Pull requests and
+    // Pipelines tabs show, so it is read before the first frame — the cheap
+    // read, one `git remote get-url` a directory — rather than a moment
+    // after it.
+    let clones = local::verified(app.shell.workspace(), app.shell.repos());
+    app.shell.set_clones(clones);
     let (pipelines, runs) = (repository.load_pipelines()?, repository.load_runs()?);
     let shell = &app.shell;
     app.pipelines.set_pipelines(pipelines, runs, shell);
@@ -210,6 +216,9 @@ pub(super) fn run() -> Result<()> {
         approvals_seen: None,
         local: LocalRuntime {
             worker: LocalHandle::spawn().ok(),
+            // The workspace was read above; the thread's fuller read waits
+            // for the Repos tab, a git command or `r`.
+            scanned: Some(Instant::now()),
             ..LocalRuntime::default()
         },
         agents: AgentRuntime {

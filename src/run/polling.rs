@@ -149,9 +149,13 @@ fn run_source(app: &App, run: &Run) -> String {
         )
 }
 
-/// Reads the workspace while the Repos tab is showing, and folds in whatever
-/// the local thread has found or done. Nothing here is written to SQLite: what
-/// is on this machine is not the project's business, and a rescan is cheap.
+/// Reads the workspace while the Repos tab is showing — and, whatever tab is
+/// showing, when it has moved: a git command finished, `r` was pressed, or
+/// nothing has read it yet — then folds in whatever the local thread has found
+/// or done. Nothing here is written to SQLite: what is on this machine is not
+/// the project's business, and a rescan is cheap. What the read finds is what
+/// narrows the Pull requests and Pipelines tabs, which is why it cannot wait
+/// for the Repos tab to be opened.
 ///
 /// One scan is out at a time. A reason to look again while one is out — the
 /// tab opened again, the cadence come round, a job finished — books one
@@ -164,11 +168,12 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     let showing = app.tab == TabId::Repos;
     let opened = showing && !runtime.local.showing;
     runtime.local.showing = showing;
+    let moved = runtime.local.scanned.is_none();
     let due = runtime
         .local
         .scanned
         .is_none_or(|at| at.elapsed() >= LOCAL_SCAN_CADENCE);
-    if showing && (opened || due) {
+    if moved || (showing && (opened || due)) {
         if runtime.local.scanning {
             runtime.local.rescan = true;
         } else {
@@ -186,7 +191,7 @@ pub(super) fn poll_local(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     for event in events {
         match event {
             LocalEvent::Scanned(local) => {
-                app.repos.set_local(local);
+                app.apply_scan(local);
                 runtime.local.scanning = false;
                 if std::mem::take(&mut runtime.local.rescan) {
                     send_scan(app, runtime);
@@ -229,16 +234,7 @@ fn send_scan(app: &mut App, runtime: &mut SyncRuntime) {
     let Some(worker) = runtime.local.worker.as_ref() else {
         return;
     };
-    let repos = app
-        .shell
-        .repos()
-        .iter()
-        .map(|repo| local::RepoKey {
-            id: repo.id.clone(),
-            remote: local::normalise_remote(&repo.remote_url),
-            name: repo.name.clone(),
-        })
-        .collect();
+    let repos = app.shell.repos().iter().map(local::RepoKey::of).collect();
     runtime.local.scanned = Some(Instant::now());
     match worker.send(LocalRequest::Scan { workspace, repos }) {
         Ok(()) => runtime.local.scanning = true,

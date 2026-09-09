@@ -7,6 +7,7 @@
 //! file a running TUI publishes. Nothing to say prints nothing, so a prompt
 //! that calls this on every line stays clean.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -115,19 +116,35 @@ impl Status {
 /// Reads every figure out of one database and the context file beside it.
 ///
 /// The reads are the ones the tabs already make, through the same functions
-/// the badges call, so the line and the tab bar cannot drift. Nothing here
-/// reaches the network, and the only process it ever starts is the `ps` that
-/// asks whether a context file's owner is still up.
+/// the badges call, so the line and the tab bar cannot drift — which is why
+/// `clones`, the repositories with a verified clone in the workspace, narrows
+/// the pull request and run figures the way it narrows those tabs. Nothing
+/// here reaches the network, and the only process it ever starts is the `ps`
+/// that asks whether a context file's owner is still up.
 pub fn collect(
     repository: &SqliteTicketRepository,
+    clones: &HashSet<String>,
     me: Option<&str>,
     stale_days: u16,
     refresh_seconds: u64,
     now: Timestamp,
 ) -> Result<Status> {
     let tickets = repository.load_all()?;
-    let requests = repository.load_pull_requests()?;
-    let runs = repository.load_runs()?;
+    let mut requests = repository.load_pull_requests()?;
+    requests.retain(|request| clones.contains(&request.repo_id));
+    let shown: HashSet<i64> = repository
+        .load_pipelines()?
+        .into_iter()
+        .filter(|pipeline| {
+            pipeline
+                .repo_id
+                .as_deref()
+                .is_some_and(|id| clones.contains(id))
+        })
+        .map(|pipeline| pipeline.id)
+        .collect();
+    let mut runs = repository.load_runs()?;
+    runs.retain(|run| shown.contains(&run.pipeline_id));
     let context = read_context(&agent_context::path_for(repository.path()));
     let synced_at = db::data_modified(repository.path())
         .map(|modified| Timestamp::from_offset_date_time(OffsetDateTime::from(modified)));
@@ -341,6 +358,17 @@ mod tests {
             ])
             .unwrap();
         repository
+            .replace_pipelines(&[model::Pipeline {
+                id: 1,
+                name: "CI".into(),
+                folder: "\\".into(),
+                repo_id: Some("repo".into()),
+                default_branch: None,
+                url: String::new(),
+                queue_status: "enabled".into(),
+            }])
+            .unwrap();
+        repository
             .replace_runs(&[
                 run(21, RunStatus::InProgress, None, None),
                 run(
@@ -367,6 +395,11 @@ mod tests {
         (directory, repository)
     }
 
+    /// The one repository the fixtures name, cloned here.
+    fn clones() -> HashSet<String> {
+        HashSet::from(["repo".to_owned()])
+    }
+
     fn write_context(repository: &SqliteTicketRepository, pid: u32) {
         let document = json!({
             "schema_version": 4,
@@ -385,7 +418,15 @@ mod tests {
         let (_directory, repository) = filled();
         write_context(&repository, std::process::id());
 
-        let status = collect(&repository, Some("Jacob Ragsdale"), 14, 60, now()).unwrap();
+        let status = collect(
+            &repository,
+            &clones(),
+            Some("Jacob Ragsdale"),
+            14,
+            60,
+            now(),
+        )
+        .unwrap();
 
         assert_eq!(
             status.line(),
@@ -400,7 +441,15 @@ mod tests {
     fn nothing_to_say_prints_nothing_so_a_prompt_stays_clean() {
         let (_directory, repository) = database();
 
-        let status = collect(&repository, Some("Jacob Ragsdale"), 14, 60, now()).unwrap();
+        let status = collect(
+            &repository,
+            &clones(),
+            Some("Jacob Ragsdale"),
+            14,
+            60,
+            now(),
+        )
+        .unwrap();
 
         assert_eq!(status.line(), "");
         assert_eq!(report(&status, false).unwrap(), None);
@@ -412,7 +461,15 @@ mod tests {
         let (_directory, repository) = filled();
         write_context(&repository, std::process::id());
 
-        let status = collect(&repository, Some("Jacob Ragsdale"), 14, 60, now()).unwrap();
+        let status = collect(
+            &repository,
+            &clones(),
+            Some("Jacob Ragsdale"),
+            14,
+            60,
+            now(),
+        )
+        .unwrap();
         let reading: Value =
             serde_json::from_str(&report(&status, true).unwrap().unwrap()).unwrap();
 
@@ -426,7 +483,7 @@ mod tests {
         assert!(reading["synced_at"].is_string(), "{reading}");
 
         let (_empty_directory, empty) = database();
-        let nothing = collect(&empty, None, 14, 60, now()).unwrap();
+        let nothing = collect(&empty, &clones(), None, 14, 60, now()).unwrap();
         let reading = nothing.json();
         assert_eq!(reading["doing"], json!(0), "the zeros stay in the object");
         assert_eq!(reading["context"], json!("absent"));
@@ -439,7 +496,15 @@ mod tests {
         // another way: u32::MAX is above every pid_max either platform allows.
         write_context(&repository, u32::MAX);
 
-        let status = collect(&repository, Some("Jacob Ragsdale"), 14, 60, now()).unwrap();
+        let status = collect(
+            &repository,
+            &clones(),
+            Some("Jacob Ragsdale"),
+            14,
+            60,
+            now(),
+        )
+        .unwrap();
 
         assert_eq!(status.context, ContextState::Stale);
     }
@@ -467,10 +532,33 @@ mod tests {
     }
 
     #[test]
+    fn a_repository_with_no_verified_clone_here_is_left_off_the_line_as_it_is_off_the_tabs() {
+        let (_directory, repository) = filled();
+
+        let status = collect(
+            &repository,
+            &HashSet::new(),
+            Some("Jacob Ragsdale"),
+            14,
+            60,
+            now(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            (status.doing, status.stale),
+            (2, 1),
+            "work items are not a repository's"
+        );
+        assert_eq!((status.review, status.rejected), (0, 0));
+        assert_eq!((status.live_runs, status.failed_runs), (0, 0));
+    }
+
+    #[test]
     fn without_a_signed_in_name_nothing_is_counted_as_yours() {
         let (_directory, repository) = filled();
 
-        let status = collect(&repository, None, 14, 60, now()).unwrap();
+        let status = collect(&repository, &clones(), None, 14, 60, now()).unwrap();
 
         assert_eq!((status.doing, status.stale), (0, 0));
         assert_eq!((status.review, status.rejected), (0, 0));

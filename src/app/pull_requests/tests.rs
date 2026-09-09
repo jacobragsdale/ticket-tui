@@ -61,6 +61,7 @@ pub(crate) fn pull_requests_app() -> App {
         is_disabled: false,
         size: None,
     }]);
+    app.shell.set_clones(["aaa-111".to_owned()].into());
     app.shell.set_me(Some("Jacob Ragsdale".to_owned()));
 
     let mut waiting = pull_request(11, "Split the files", "Avery", PrStatus::Active);
@@ -107,6 +108,85 @@ fn the_table_hides_closed_pull_requests_until_the_chip_puts_them_back() {
 
     app.pull_requests.show_closed(true);
     assert_eq!(app.pull_requests.visible(&app.shell).len(), 4);
+}
+
+#[test]
+fn a_pull_request_in_a_repository_not_cloned_here_stays_off_the_tab_and_a_jump_says_why() {
+    use crate::app::Jump;
+
+    let mut app = pull_requests_app();
+    app.shell.set_repos(vec![
+        crate::app::repos::tests::repo("aaa-111", "ticket-tui", false),
+        crate::app::repos::tests::repo("bbb-222", "skillbook", false),
+    ]);
+    let mut elsewhere = pull_request(15, "Skillbook work", "Avery", PrStatus::Active);
+    elsewhere.repo_id = "bbb-222".into();
+    elsewhere.reviewers = vec![reviewer("Jacob Ragsdale", 0, true)];
+    let mut closed_elsewhere = pull_request(16, "Skillbook past", "Avery", PrStatus::Completed);
+    closed_elsewhere.repo_id = "bbb-222".into();
+    let mut requests: Vec<PullRequest> = app
+        .pull_requests
+        .visible(&app.shell)
+        .into_iter()
+        .map(|row| row.request)
+        .collect();
+    requests.push(elsewhere);
+    requests.push(closed_elsewhere);
+    let shell = &app.shell;
+    app.pull_requests.set_pull_requests(requests, shell);
+
+    assert_eq!(
+        app.pull_requests
+            .visible(&app.shell)
+            .iter()
+            .map(|row| row.request.id)
+            .collect::<Vec<_>>(),
+        [13, 12, 11],
+        "only the cloned repository's pull requests are on the table"
+    );
+    assert_eq!(
+        app.pull_requests.to_review(&app.shell),
+        1,
+        "the one waiting on me elsewhere is not badged"
+    );
+    assert_eq!(
+        app.pull_requests.hidden_closed(&app.shell),
+        0,
+        "nor is its closed one counted behind the chip"
+    );
+    let followed = app.follow(&Jump::PullRequest {
+        repo: "skillbook".to_owned(),
+        id: 15,
+    });
+    assert!(!followed);
+    let (message, _) = app.shell.notification().expect("the refusal says why");
+    assert!(
+        message.contains("skillbook") && message.contains("no verified clone"),
+        "{message}"
+    );
+    assert_eq!(
+        app.pull_requests.query(),
+        "",
+        "and the query was not cleared for a row no query would show"
+    );
+
+    // The clone lands: the workspace is read again and the tab widens.
+    app.apply_scan(vec![
+        (
+            "aaa-111".to_owned(),
+            crate::app::repos::tests::local("main", false, 0, 0),
+        ),
+        (
+            "bbb-222".to_owned(),
+            crate::app::repos::tests::local("main", false, 0, 0),
+        ),
+    ]);
+    assert_eq!(app.pull_requests.visible(&app.shell).len(), 4);
+    assert_eq!(app.pull_requests.to_review(&app.shell), 2);
+    assert!(app.follow(&Jump::PullRequest {
+        repo: "skillbook".to_owned(),
+        id: 15,
+    }));
 }
 
 #[test]

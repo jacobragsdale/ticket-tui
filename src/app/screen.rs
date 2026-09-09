@@ -324,7 +324,7 @@ pub trait Screen {
 
     /// What the tab bar draws after this tab's name, when the tab has
     /// something waiting: `3` pull requests to review, `◐ 2` runs going.
-    fn badge(&self) -> Option<String> {
+    fn badge(&self, _shell: &Shell) -> Option<String> {
         None
     }
 

@@ -271,18 +271,67 @@ impl PipelinesScreen {
         }
         merged.sort_by_key(|run| std::cmp::Reverse(run.id));
         self.runs = merged;
+        self.settle_cursors(shell, selected_pipeline, selected_run);
+    }
+
+    /// The pipeline under the cursor and, on the runs level, the run.
+    #[must_use]
+    pub fn selected_ids(&self, shell: &Shell) -> (Option<i64>, Option<i64>) {
+        let pipeline = self
+            .visible_pipelines(shell)
+            .get(self.pipeline_cursor.index)
+            .map(|row| row.pipeline.id);
+        let run = match self.level {
+            Level::Runs(_) => self.selected_run(shell).map(|row| row.run.id),
+            Level::Pipelines => None,
+        };
+        (pipeline, run)
+    }
+
+    /// Puts each cursor back on the row it was on, or clamps it when that row
+    /// is no longer on the table.
+    pub(crate) fn settle_cursors(
+        &mut self,
+        shell: &Shell,
+        pipeline: Option<i64>,
+        run: Option<i64>,
+    ) {
         let pipelines = self.visible_pipelines(shell);
-        match selected_pipeline
-            .and_then(|id| pipelines.iter().position(|row| row.pipeline.id == id))
-        {
+        match pipeline.and_then(|id| pipelines.iter().position(|row| row.pipeline.id == id)) {
             Some(index) => self.pipeline_cursor.focus(index),
             None => self.pipeline_cursor.clamp(pipelines.len()),
         }
         let runs = self.visible_runs(shell);
-        match selected_run.and_then(|id| runs.iter().position(|row| row.run.id == id)) {
+        match run.and_then(|id| runs.iter().position(|row| row.run.id == id)) {
             Some(index) => self.run_cursor.focus(index),
             None => self.run_cursor.clamp(runs.len()),
         }
+    }
+
+    /// Whether a pipeline is on the tab at all: it builds a repository with a
+    /// verified clone here. One that names no repository this project holds
+    /// is not.
+    fn shown(&self, pipeline: &Pipeline, shell: &Shell) -> bool {
+        pipeline
+            .repo_id
+            .as_deref()
+            .is_some_and(|id| shell.has_clone(id))
+    }
+
+    /// The repository one pipeline on file builds.
+    #[must_use]
+    pub fn repo_of_pipeline(&self, id: i64) -> Option<&str> {
+        self.pipelines
+            .iter()
+            .find(|pipeline| pipeline.id == id)
+            .and_then(|pipeline| pipeline.repo_id.as_deref())
+    }
+
+    /// The repository one run on file was of.
+    #[must_use]
+    pub fn repo_of_run(&self, id: i64) -> Option<&str> {
+        let run = self.runs.iter().find(|run| run.id == id)?;
+        self.repo_of_pipeline(run.pipeline_id)
     }
 
     /// Folds in what the watcher has seen. A run already on file is updated
@@ -710,7 +759,8 @@ impl PipelinesScreen {
         }
     }
 
-    /// Every pipeline the query leaves, in the order the table draws them.
+    /// Every pipeline of a repository cloned here that the query leaves, in
+    /// the order the table draws them.
     #[must_use]
     pub fn visible_pipelines(&self, shell: &Shell) -> Vec<PipelineRow> {
         let parsed: ParsedQuery<PipelineSchema> = parse_query(self.pipeline_query.text());
@@ -718,6 +768,7 @@ impl PipelinesScreen {
         let mut rows: Vec<PipelineRow> = self
             .pipelines
             .iter()
+            .filter(|pipeline| self.shown(pipeline, shell))
             .map(|pipeline| self.row_for(pipeline))
             .filter(|row| {
                 parsed.filters.matches_in(row, false, &context) && row.matches_fuzzy(&parsed.fuzzy)
@@ -1142,7 +1193,11 @@ impl Screen for PipelinesScreen {
     fn select(&mut self, shell: &mut Shell, jump: &Jump) -> bool {
         match jump {
             Jump::Pipeline(id) => {
-                if !self.pipelines.iter().any(|pipeline| pipeline.id == *id) {
+                let Some(pipeline) = self.pipelines.iter().find(|pipeline| pipeline.id == *id)
+                else {
+                    return false;
+                };
+                if !self.shown(pipeline, shell) {
                     return false;
                 }
                 let position = |screen: &Self| {
@@ -1172,6 +1227,13 @@ impl Screen for PipelinesScreen {
                 let Some(run) = self.runs.iter().find(|run| run.id == *id).cloned() else {
                     return false;
                 };
+                if !self
+                    .pipelines
+                    .iter()
+                    .any(|pipeline| pipeline.id == run.pipeline_id && self.shown(pipeline, shell))
+                {
+                    return false;
+                }
                 self.level = Level::Runs(run.pipeline_id);
                 let position = |screen: &Self| {
                     screen
@@ -1213,8 +1275,20 @@ impl Screen for PipelinesScreen {
 
     /// `◐ 2` while runs are going, `◇ 1` while an approval waits, both when
     /// both.
-    fn badge(&self) -> Option<String> {
-        let live = crate::model::live_runs(&self.runs);
+    fn badge(&self, shell: &Shell) -> Option<String> {
+        // Runs of the pipelines on the tab: a run going in a repository you
+        // have not cloned is not a number to wear.
+        let shown: std::collections::HashSet<i64> = self
+            .pipelines
+            .iter()
+            .filter(|pipeline| self.shown(pipeline, shell))
+            .map(|pipeline| pipeline.id)
+            .collect();
+        let live = crate::model::live_runs(
+            self.runs
+                .iter()
+                .filter(|run| shown.contains(&run.pipeline_id)),
+        );
         let waiting = self.approvals.len();
         let mut badge = String::new();
         if live > 0 {

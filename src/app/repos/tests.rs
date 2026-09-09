@@ -26,6 +26,7 @@ pub(crate) fn local(branch: &str, dirty: bool, ahead: u32, behind: u32) -> Local
         ahead,
         behind,
         busy: None,
+        verified: true,
     }
 }
 
@@ -42,7 +43,7 @@ pub(crate) fn repos_app() -> App {
     app.repos.set_repos(&app.shell);
     app.shell
         .set_workspace(Some("/Users/jacob/Development".into()));
-    app.repos.set_local(vec![
+    app.apply_scan(vec![
         ("aaa-111".to_owned(), local("main", false, 0, 0)),
         ("bbb-222".to_owned(), local("feature/x", true, 1, 2)),
     ]);
