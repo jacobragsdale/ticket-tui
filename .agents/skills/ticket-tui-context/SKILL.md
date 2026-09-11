@@ -101,7 +101,7 @@ ticket-tui runs logs 14 --job Build --follow
 ```
 
 `repos show NAME` prints one. `repos` also reads the workspace —
-`--workspace PATH`, else `TICKET_TUI_WORKSPACE`, else `~/Development` — so the
+`--workspace PATH`, else `TICKET_TUI_WORKSPACE`, else `~/dev` — so the
 Local column says what `git status` says; it never fetches. Cloning, fetching
 and pulling are the TUI's keys `C`, `G` and `P` rather than subcommands: an
 agent that wants a clone should run `git` itself.

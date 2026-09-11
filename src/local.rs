@@ -512,11 +512,11 @@ pub fn git(path: &Path, arguments: &[&str]) -> Result<String> {
 }
 
 /// Where clones are looked for and made: the flag, then the variable, then
-/// `~/Development`.
+/// `~/dev`. Linux and WSL only: `HOME` is the home directory.
 #[must_use]
 pub fn workspace_root(flag: Option<PathBuf>) -> Option<PathBuf> {
     flag.or_else(|| std::env::var_os("TICKET_TUI_WORKSPACE").map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Development")))
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join("dev")))
 }
 
 #[cfg(test)]

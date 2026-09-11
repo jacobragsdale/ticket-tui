@@ -11,7 +11,7 @@
 //! code_project = "Fiquants"  # repos, pull requests and pipelines; left out = project
 //! query = "[System.AreaPath] UNDER 'ISTO\\Team'"   # optional WIQL scope on every pull
 //! # team = ["Payments", "Platform"]  # the teams whose areas, members and sprints these are
-//! workspace = "~/Development"                      # where clones live
+//! workspace = "~/dev"                              # where clones live
 //!
 //! [theme]
 //! preset = "custom"          # terminal · terminal-light · mono · custom

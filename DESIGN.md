@@ -188,7 +188,7 @@ project = "ISTO"              # where the work items live
 code_project = "Fiquants"     # repos, pull requests and pipelines; left out = project
 # query = "[System.AreaPath] UNDER 'ISTO\\Team'"   # optional WIQL scope on every pull
 # team = "Payments"           # the team whose areas, members and sprint this is
-# workspace = "~/Development" # where clones live; a leading ~ is the home directory
+# workspace = "~/dev"         # where clones live; a leading ~ is the home directory
 
 [notify]                      # a desktop notification when a watched thing moves
 command = "notify-send {title} {body}"        # left out: nothing is ever run
@@ -331,7 +331,7 @@ cargo run --release -- --workspace ~/src
 `TICKET_TUI_WORKSPACE` sets the same directory and `workspace` under `[devops]`
 in `config.toml` is the third way to say it, in that order of precedence; a
 leading `~/` in the file is the home directory. Without any of the three it is
-`~/Development`. See [The workspace](#the-workspace).
+`~/dev`. See [The workspace](#the-workspace).
 
 ### `--query`: how much of the project to sync
 
@@ -1333,7 +1333,8 @@ Its grammar: `name:`, `branch:`, `local:` (`cloned`, `dirty`, `ahead`,
 ### The workspace
 
 Clones are looked for, and made, in one directory: `--workspace PATH`, else
-`TICKET_TUI_WORKSPACE`, else `~/Development`. The `i` overlay says which. While
+`TICKET_TUI_WORKSPACE`, else `~/dev`. This is Linux and WSL only; Windows is
+not supported. The `i` overlay says which. While
 the tab is showing, that directory is read on arrival and every 60 seconds
 after: its immediate subdirectories that are git repositories are matched to the
 project by their `origin` remote — both

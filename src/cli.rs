@@ -88,7 +88,7 @@ pub struct Cli {
     #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,
     /// Directory the Repos tab looks for clones in and makes new ones under;
-    /// defaults to TICKET_TUI_WORKSPACE, then config.toml, then ~/Development
+    /// defaults to TICKET_TUI_WORKSPACE, then config.toml, then ~/dev
     #[arg(long, global = true, value_name = "PATH", value_hint = ValueHint::DirPath)]
     pub workspace: Option<PathBuf>,
     #[command(subcommand)]

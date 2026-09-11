@@ -440,7 +440,7 @@ impl Shell {
     }
 
     /// Where clones are looked for and made: `--workspace`, then
-    /// `TICKET_TUI_WORKSPACE`, then `~/Development`.
+    /// `TICKET_TUI_WORKSPACE`, then `~/dev`.
     pub fn set_workspace(&mut self, workspace: Option<std::path::PathBuf>) {
         self.workspace = workspace;
     }

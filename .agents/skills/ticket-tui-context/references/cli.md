@@ -71,7 +71,7 @@ These are global: valid on every subcommand, either side of it.
 | `--database PATH` | SQLite database to use instead of the platform data-directory default |
 | `--org ORG` | Azure DevOps organization, as a slug or a URL; else `TICKET_TUI_ORG`, else `az devops configure` defaults |
 | `--project PROJECT` | Azure DevOps project; else `TICKET_TUI_PROJECT`, else `az devops configure` defaults |
-| `--workspace PATH` | Where `repos` looks for clones; else `TICKET_TUI_WORKSPACE`, else `~/Development` |
+| `--workspace PATH` | Where `repos` looks for clones; else `TICKET_TUI_WORKSPACE`, else `~/dev` |
 
 `--query WIQL`, `--refresh SECONDS`, and `--stale-days DAYS` are **not** global. They must be written before the subcommand, and `ticket-tui sync
 --query …` is rejected as an unexpected argument:
@@ -270,7 +270,7 @@ no `--description-file` on `create`, so write the body with a following
 
 Both read the database and the workspace, and neither touches the network. The
 workspace is `--workspace PATH`, else `TICKET_TUI_WORKSPACE`, else
-`~/Development`: its immediate subdirectories that are git repositories are
+`~/dev`: its immediate subdirectories that are git repositories are
 matched to the project by their `origin` remote, or by name when no remote
 matches — a project mirrored on GitHub is still the code you have — and each is
 measured with `git status`. A workspace that is not there simply finds nothing.
