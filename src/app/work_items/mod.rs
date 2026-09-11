@@ -982,6 +982,7 @@ pub(crate) fn clamp_pos_to_snapshot(
 }
 
 mod agent;
+pub use agent::repo_needs_clone;
 mod compose;
 mod context;
 mod edits;

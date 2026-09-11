@@ -906,6 +906,11 @@ fn the_agent_picker_asks_its_question_and_the_details_pane_offers_the_chip() {
     }));
     app.shell
         .set_launch_environment(true, std::path::PathBuf::from("/nowhere/config.toml"));
+    // One repository is cloned under the workspace, the other is not.
+    app.shell
+        .set_workspace(Some(std::path::PathBuf::from("/dev")));
+    app.shell
+        .set_clones(std::iter::once("aaa-111".to_owned()).collect());
     let text = render_text(100, 30, &mut app);
     assert!(text.contains("[Work with agent]"), "{text}");
 
@@ -913,6 +918,11 @@ fn the_agent_picker_asks_its_question_and_the_details_pane_offers_the_chip() {
     let text = render_text(100, 30, &mut app);
     assert!(text.contains("Work on #716 in which repository?"), "{text}");
     assert!(text.contains("\u{203a} payments-api"), "{text}");
+    assert!(
+        !text.contains("payments-api  (will clone)"),
+        "a repository already here is not marked: {text}"
+    );
+    assert!(text.contains("reporting-api  (will clone)"), "{text}");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let text = render_text(100, 30, &mut app);
     assert!(text.contains("Herdr workspace for payments-api"), "{text}");

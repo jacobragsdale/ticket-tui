@@ -522,12 +522,23 @@ pub(super) fn render_agent_picker(
                         .items
                         .iter()
                         .any(|item| item.eq_ignore_ascii_case(name));
+                // A repository not here yet is cloned by the launch: said
+                // before Enter, since a clone takes a while.
+                let will_clone = picker.choice == crate::app::AgentChoice::Repo
+                    && shell
+                        .repos()
+                        .iter()
+                        .find(|repo| repo.name == *name)
+                        .is_some_and(|repo| crate::app::work_items::repo_needs_clone(shell, repo));
                 let mut spans = vec![
                     Span::raw(format!("{marker} ")),
                     Span::styled(name.clone(), Style::default().fg(theme().text)),
                 ];
                 if new {
                     spans.push(Span::styled("  (new workspace)", muted));
+                }
+                if will_clone {
+                    spans.push(Span::styled("  (will clone)", muted));
                 }
                 Line::from(spans)
             })
