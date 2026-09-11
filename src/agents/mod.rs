@@ -751,7 +751,7 @@ fn settle_checkout(plan: &LaunchPlan, for_launch: bool) -> Result<Checkout> {
         plan.workspace_root.as_deref(),
         plan.path_override.as_deref(),
         &plan.repo_key(),
-    )
+    )?
     .with_context(|| {
         let looked = plan.path_override.as_deref().map_or_else(
             || {

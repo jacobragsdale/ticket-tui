@@ -51,22 +51,35 @@ pub struct Checkout {
 }
 
 /// The clone of one repository on this machine: the path the file names for
-/// it, else what the workspace scan claims for it. `None` is a repository
-/// that is not here, which the caller turns into a clone.
-#[must_use]
+/// it, else what the workspace claims for it. `None` is a repository that is
+/// not here, which the caller turns into a clone. A directory that merely
+/// has the repository's name, its origin being some other repository, is
+/// refused rather than taken: an agent started in it would work on the
+/// wrong code.
 pub fn find_clone(
     workspace_root: Option<&Path>,
     path_override: Option<&Path>,
     repo: &RepoKey,
-) -> Option<PathBuf> {
+) -> Result<Option<PathBuf>> {
     if let Some(path) = path_override {
-        return path.join(".git").exists().then(|| path.to_path_buf());
+        return Ok(path.join(".git").exists().then(|| path.to_path_buf()));
     }
-    let root = workspace_root?;
-    local::scan(root, std::slice::from_ref(repo))
+    let Some(root) = workspace_root else {
+        return Ok(None);
+    };
+    match local::claim(root, std::slice::from_ref(repo))
         .into_iter()
-        .find(|(id, _)| *id == repo.id)
-        .map(|(_, found)| found.path)
+        .find(|claim| claim.repo_id == repo.id)
+    {
+        Some(claim) if claim.verified => Ok(Some(claim.path)),
+        Some(claim) => bail!(
+            "{} is named {} but its origin is {}, not this repository; move it aside or name the right clone under [herdr.paths]",
+            claim.path.display(),
+            repo.name,
+            claim.origin
+        ),
+        None => Ok(None),
+    }
 }
 
 /// Settles the checkout an agent is started in. With the shared policy that
@@ -485,18 +498,35 @@ mod tests {
             name: "pay".into(),
         };
         assert_eq!(
-            find_clone(Some(&dir.path().join("work")), None, &key),
+            find_clone(Some(&dir.path().join("work")), None, &key).unwrap(),
             Some(clone.clone())
         );
         assert_eq!(
-            find_clone(Some(&clone), Some(&clone), &key),
+            find_clone(Some(&clone), Some(&clone), &key).unwrap(),
             Some(clone.clone())
         );
         assert_eq!(
-            find_clone(None, Some(&dir.path().join("nowhere")), &key),
+            find_clone(None, Some(&dir.path().join("nowhere")), &key).unwrap(),
             None,
             "an override that is not a clone finds nothing rather than something else"
         );
-        assert_eq!(find_clone(None, None, &key), None);
+        assert_eq!(find_clone(None, None, &key).unwrap(), None);
+
+        // A directory that merely has a repository's name is not its clone:
+        // its origin says what it is, and the launch is told rather than
+        // started in the wrong code.
+        let other = RepoKey {
+            id: "bbb".into(),
+            remote: Some("demo/atlas/other-pay".into()),
+            name: "pay".into(),
+        };
+        let refused = find_clone(Some(&dir.path().join("work")), None, &other).unwrap_err();
+        let message = format!("{refused:#}");
+        assert!(
+            message.contains(
+                "is named pay but its origin is https://dev.azure.com/demo/atlas/_git/pay"
+            ),
+            "{message}"
+        );
     }
 }
