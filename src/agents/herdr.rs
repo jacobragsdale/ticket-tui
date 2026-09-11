@@ -542,6 +542,9 @@ pub(crate) mod fake {
         pub failing: Vec<(String, HerdrError)>,
         /// Whether the server is down: every call is refused.
         pub down: bool,
+        /// Whether a started agent comes up blocked: it is registered under
+        /// its name, as Herdr does, but `agent start` answers `agent_not_ready`.
+        pub start_blocked: bool,
     }
 
     /// The fake, shared between the test and the thread under test.
@@ -804,10 +807,18 @@ pub(crate) mod fake {
                         }
                         .into());
                     }
+                    let blocked = self.start_blocked;
                     match self.panes.iter_mut().find(|held| held.id == *pane) {
                         Some(held) if held.agent.is_none() && !held.busy => {
                             held.agent = Some(kind);
-                            held.agent_name = Some(name);
+                            held.agent_name = Some(name.clone());
+                            if blocked {
+                                return Err(HerdrError {
+                                    code: "agent_not_ready".into(),
+                                    message: format!("{name} is blocked during startup"),
+                                }
+                                .into());
+                            }
                             Ok(json!({"agent": Self::pane_json(held)}))
                         }
                         Some(_) => Err(HerdrError {

@@ -1000,11 +1000,14 @@ pub fn launch(
         let name = herdr
             .free_agent_name(&agent_name_for(plan.ticket.id))
             .map_err(|error| fail(Stage::Agent, error, Some(session.clone())))?;
+        // Herdr holds the name from the moment the start is asked for, even
+        // when the CLI is slow to come ready. Remembered first, a retry finds
+        // the agent that did start rather than starting another beside it.
+        session.agent_name = Some(name.clone());
+        save(store, &session, Stage::Agent)?;
         herdr
             .start_agent(&name, plan.provider.kind(), &pane_id, &plan.args)
             .map_err(|error| fail(Stage::Agent, error, Some(session.clone())))?;
-        session.agent_name = Some(name);
-        save(store, &session, Stage::Agent)?;
         let _ = herdr.rename_pane(&pane_id, &session.pane_label());
     }
     let agent_name = session.agent_name.clone().expect("settled above");
@@ -1522,7 +1525,11 @@ mod tests {
         assert!(
             partial.workspace_id.is_some() && partial.tab_id.is_some() && partial.pane_id.is_some()
         );
-        assert!(partial.agent_name.is_none());
+        assert_eq!(
+            partial.agent_name.as_deref(),
+            Some("wi-715"),
+            "the name Herdr was asked for is remembered"
+        );
         assert_eq!(
             store_in(dir.path()).sessions,
             std::slice::from_ref(&partial)
@@ -1571,6 +1578,44 @@ mod tests {
         assert_ne!(second.id, session.id);
         assert_eq!(second.agent_name.as_deref(), Some("wi-715-2"));
         assert_eq!(fake.state().panes.len(), 2);
+    }
+
+    #[test]
+    fn an_agent_slow_to_come_ready_is_kept_rather_than_started_twice() {
+        let dir = tempdir().unwrap();
+        clone_under(dir.path(), "pay");
+        let fake = FakeHerdr::default();
+        let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
+        let mut store = store_in(dir.path());
+        let plan = plan_in(dir.path(), 715, "pay");
+        // The CLI comes up but not ready — a login prompt, say — and is not
+        // ready in time either: Herdr holds the name all the same.
+        fake.state.lock().unwrap().start_blocked = true;
+        fake.fail("agent wait", "timeout", "still not ready");
+        let failure = launch(&herdr, &mut store, &plan).unwrap_err();
+        assert_eq!(failure.stage, Stage::Agent);
+        assert_eq!(
+            failure.session.unwrap().agent_name.as_deref(),
+            Some("wi-715")
+        );
+
+        // Once it is ready, the retry prompts that agent: no second start,
+        // no second pane.
+        fake.clear_failure();
+        fake.state.lock().unwrap().start_blocked = false;
+        let (session, _) = launch(&herdr, &mut store, &plan).unwrap();
+        assert!(session.is_complete());
+        assert_eq!(session.agent_name.as_deref(), Some("wi-715"));
+        let state = fake.state();
+        assert_eq!(state.panes.len(), 1);
+        assert_eq!(state.panes[0].prompts.len(), 1);
+        assert_eq!(
+            fake.calls()
+                .iter()
+                .filter(|call| call.starts_with("agent start"))
+                .count(),
+            1
+        );
     }
 
     #[test]
