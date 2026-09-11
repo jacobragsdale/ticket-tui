@@ -1,6 +1,7 @@
 //! The work item table: its rows, its cells and the colours they carry.
 
 use super::*;
+use crate::classification::SprintBucket;
 use crate::columns::{
     COLUMN_SPACING, ColumnId, MARKER_WIDTH, SCROLLBAR_WIDTH, SELECTION_WIDTH, TableLayout,
 };
@@ -344,6 +345,14 @@ pub(super) fn render_table(
         .iter()
         .any(|column| column.visible && column.id == SortField::Repo)
         .then(|| screen.repos_by_item(shell));
+    // And the calendar only while the Sprint column is.
+    let calendar = screen
+        .layout
+        .columns
+        .iter()
+        .any(|column| column.visible && column.id == SortField::Iteration)
+        .then(|| screen.sprint_calendar());
+    let today = now.date();
     let rows: Vec<PaintedRow<'_>> = screen
         .visible_tickets()
         .skip(offset)
@@ -360,6 +369,13 @@ pub(super) fn render_table(
                     .and_then(|repos| repos.get(&ticket.key.id))
                     .and_then(|names| names.first().cloned()),
                 progress: screen.child_progress(&ticket.key),
+                sprint: calendar.as_ref().and_then(|calendar| {
+                    Some(SprintTag {
+                        bucket: calendar.bucket(&ticket.iteration_path, today)?,
+                        offset: calendar.offset(&ticket.iteration_path),
+                        root: calendar.is_root(&ticket.iteration_path),
+                    })
+                }),
             },
         })
         .collect();
@@ -496,6 +512,21 @@ pub(super) struct RowContext {
     /// The first repository the work item is linked to, read only while the
     /// Repo column is showing.
     repo: Option<String>,
+    /// Where the work item's iteration sits against today, read only while
+    /// the Sprint column is showing and only once the tree is known.
+    sprint: Option<SprintTag>,
+}
+
+/// What the Sprint column says about a row's iteration beyond its name.
+#[derive(Clone, Copy)]
+pub(super) struct SprintTag {
+    bucket: SprintBucket,
+    /// How many sprints from the current one, when the iteration is a dated
+    /// sibling of it.
+    offset: Option<i64>,
+    /// Whether the iteration is the project root, whose leaf is only the
+    /// project's name.
+    root: bool,
 }
 
 pub(super) fn table_cell(
@@ -511,6 +542,7 @@ pub(super) fn table_cell(
         mine,
         progress,
         repo,
+        sprint,
     } = row;
     let plain = tone.apply(Style::default());
     let line = match field {
@@ -559,9 +591,7 @@ pub(super) fn table_cell(
             .style(plain),
         // Only the leaf fits a table column; the details pane keeps the full path.
         SortField::Area => highlight_searchable(path_leaf(&ticket.area_path), plain, highlighter),
-        SortField::Iteration => {
-            highlight_searchable(path_leaf(&ticket.iteration_path), plain, highlighter)
-        }
+        SortField::Iteration => sprint_cell(ticket, sprint, tone, plain, highlighter),
         SortField::Tags => Line::from(tag_badge_spans(&ticket.tags, tone, highlighter)),
         SortField::Repo => Line::from(repo.unwrap_or_default()).style(plain),
         // A work item with no children shows an empty cell rather than `0/0`:
@@ -579,6 +609,62 @@ pub(super) fn table_cell(
     } else {
         Cell::from(line)
     }
+}
+
+/// The Sprint cell: where the iteration sits against today, then its name —
+/// `-2 · Sprint 16`, `now · Sprint 18`, `+1 · Sprint 19`, `backlog`. The
+/// signal comes first so a long sprint name loses its tail and never the
+/// signal. Leftovers are painted in the warning colour and this sprint in the
+/// accent; what has not started or was never planned recedes. Without a tree
+/// to read against, the cell is the bare leaf it always was.
+fn sprint_cell(
+    ticket: &Ticket,
+    sprint: Option<SprintTag>,
+    tone: RowTone,
+    plain: Style,
+    highlighter: &mut QueryHighlighter,
+) -> Line<'static> {
+    let leaf = path_leaf(&ticket.iteration_path);
+    let Some(sprint) = sprint else {
+        return highlight_searchable(leaf, plain, highlighter);
+    };
+    let muted = tone.apply(Style::default().fg(theme().muted));
+    let (tag, tag_style, name_style) = match sprint.bucket {
+        SprintBucket::Current => (
+            "now".to_owned(),
+            tone.apply(
+                Style::default()
+                    .fg(theme().accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            plain,
+        ),
+        SprintBucket::Past => (
+            sprint
+                .offset
+                .map_or_else(|| "past".to_owned(), |behind| format!("-{}", -behind)),
+            tone.apply(Style::default().fg(theme().warning)),
+            plain,
+        ),
+        SprintBucket::Future => (
+            sprint
+                .offset
+                .map_or_else(|| "later".to_owned(), |ahead| format!("+{ahead}")),
+            muted,
+            muted,
+        ),
+        SprintBucket::Backlog => ("backlog".to_owned(), muted, muted),
+    };
+    // The root's leaf is only the project's name, and a node called Backlog
+    // would say it twice.
+    let named = sprint.bucket != SprintBucket::Backlog
+        || !(sprint.root || crate::model::same_text(leaf, "backlog"));
+    let mut spans = vec![Span::styled(tag, tag_style)];
+    if named {
+        spans.push(Span::styled(" \u{b7} ", name_style));
+        spans.extend(highlight_searchable(leaf, name_style, highlighter).spans);
+    }
+    Line::from(spans)
 }
 
 pub(super) fn highlight_searchable(

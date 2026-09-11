@@ -68,7 +68,7 @@ offline, browsing whatever the database already holds.
 | Key | Does |
 |---|---|
 | `1`–`4` | Work items, Repos, Pull requests, Pipelines |
-| `/` | Live fuzzy search — `state:active`, `assignee:@me`, `id:642`, `repo:ado-helper` |
+| `/` | Live fuzzy search — `state:active`, `assignee:@me`, `iteration:@past`, `id:642`, `repo:ado-helper` |
 | `p` / `:` | The command palette: every action the tab can take |
 | `e` | The Actions menu — edit title, state, assignee, tags, description, acceptance criteria, comment |
 | `n` / `N` | New work item, or a new child of the selected one |
@@ -108,7 +108,11 @@ repositories with a verified clone there — one whose `origin` is the
 repository. `team` is one team of a project that is a whole
 department's board, or a list of them: their area paths narrow every pull,
 their members are what the assignee picker offers, their sprints are what
-`@current` means, and a fresh session opens on Current sprint. `ticket-tui
+`@current` means, and a fresh session opens on Current sprint; the Sprint
+column then says where every row sits against it — `-2 · Sprint 16` is a
+leftover, `now · Sprint 18` this sprint, `backlog` unplanned — and the
+Leftovers and Backlog views (`iteration:@past`, `iteration:@backlog`) pick
+those out. `ticket-tui
 teams` prints the names to choose from. A large team's whole history is still
 inside its areas; `query` is what keeps it out:
 

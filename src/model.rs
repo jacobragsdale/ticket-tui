@@ -955,10 +955,13 @@ impl crate::columns::ColumnId for SortField {
     }
 
     /// The header labels, which are the sort popup's names shortened where a
-    /// column is narrower than its name.
+    /// column is narrower than its name. Iteration is headed Sprint because
+    /// that is what the cell says: where the row sits against the sprint the
+    /// team is in, then the iteration's name.
     fn label(self) -> &'static str {
         match self {
             Self::Priority => "Pri",
+            Self::Iteration => "Sprint",
             other => other.label(),
         }
     }
@@ -981,7 +984,13 @@ impl crate::columns::ColumnId for SortField {
     fn default_visible(self) -> bool {
         matches!(
             self,
-            Self::Id | Self::Title | Self::State | Self::Type | Self::Priority | Self::Assignee
+            Self::Id
+                | Self::Title
+                | Self::State
+                | Self::Type
+                | Self::Priority
+                | Self::Assignee
+                | Self::Iteration
         )
     }
 

@@ -99,6 +99,8 @@ fn the_views_overlay_lists_the_built_ins_above_whatever_the_user_saved() {
             ("Doing", "state:doing"),
             ("Stale", "changed:>14d state:@open"),
             ("Current sprint", "iteration:@current"),
+            ("Leftovers", "iteration:@past state:@open"),
+            ("Backlog", "iteration:@backlog"),
         ]
     );
     assert!(rows[0].is_heading());
@@ -111,11 +113,11 @@ fn the_views_overlay_lists_the_built_ins_above_whatever_the_user_saved() {
     app.work_items.save_view(&mut app.shell, "Rust work".into());
 
     let rows = app.work_items.view_rows();
-    assert_eq!(rows.len(), 8);
-    assert!(rows[6].is_heading());
-    assert_eq!(rows[6].label, "Saved");
-    assert_eq!(rows[7].label, "Rust work");
-    assert!(rows[7].active, "the view just saved is the one on screen");
+    assert_eq!(rows.len(), 10);
+    assert!(rows[8].is_heading());
+    assert_eq!(rows[8].label, "Saved");
+    assert_eq!(rows[9].label, "Rust work");
+    assert!(rows[9].active, "the view just saved is the one on screen");
 }
 
 #[test]
@@ -182,7 +184,7 @@ fn a_built_in_view_cannot_be_saved_over_or_deleted() {
     );
     assert_eq!(
         app.work_items.view_rows().len(),
-        6,
+        8,
         "and no second Mine is listed"
     );
     assert_eq!(
@@ -194,7 +196,7 @@ fn a_built_in_view_cannot_be_saved_over_or_deleted() {
 
     app.work_items.delete_view_at(&mut app.shell, row);
 
-    assert_eq!(app.work_items.view_rows().len(), 6);
+    assert_eq!(app.work_items.view_rows().len(), 8);
     assert_eq!(
         app.shell.notification().map(|(message, _)| message),
         Some("'Mine' is a built-in view and cannot be deleted")
@@ -213,18 +215,18 @@ fn the_views_cursor_opens_on_the_first_built_in_and_steps_over_the_headings() {
         "row zero is the Built-in heading"
     );
 
-    for _ in 0..4 {
+    for _ in 0..6 {
         press(&mut app, KeyCode::Down);
     }
-    assert_eq!(app.work_items.views_overlay.index, 5, "the last built-in");
+    assert_eq!(app.work_items.views_overlay.index, 7, "the last built-in");
     press(&mut app, KeyCode::Down);
     assert_eq!(
-        app.work_items.views_overlay.index, 7,
+        app.work_items.views_overlay.index, 9,
         "the Saved heading is stepped over"
     );
     press(&mut app, KeyCode::Down);
     assert_eq!(
-        app.work_items.views_overlay.index, 7,
+        app.work_items.views_overlay.index, 9,
         "and the list stops at its end"
     );
     assert!(
@@ -233,7 +235,7 @@ fn the_views_cursor_opens_on_the_first_built_in_and_steps_over_the_headings() {
     );
 
     press(&mut app, KeyCode::Up);
-    assert_eq!(app.work_items.views_overlay.index, 5);
+    assert_eq!(app.work_items.views_overlay.index, 7);
     assert!(
         !app.work_items.can_delete_focused_view(),
         "a built-in cannot"

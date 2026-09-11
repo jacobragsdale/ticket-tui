@@ -563,6 +563,7 @@ fn the_progress_column_is_hidden_until_the_column_overlay_shows_it() {
         SortField::Type,
         SortField::Priority,
         SortField::Assignee,
+        SortField::Iteration,
     ] {
         let index = column_index(&app, field);
         ColumnLayout::toggle_visible(&mut app.work_items.layout, index);

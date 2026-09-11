@@ -994,6 +994,14 @@ impl WorkItemsScreen {
             .collect()
     }
 
+    /// The iteration tree read against the team's sprint, which the Sprint
+    /// column, its sort and the `@past`, `@future` and `@backlog` sentinels
+    /// all consult.
+    #[must_use]
+    pub fn sprint_calendar(&self) -> classification::SprintCalendar {
+        classification::SprintCalendar::new(&self.classification_nodes, self.current_iterations())
+    }
+
     /// The sprints the configured teams are in, read out of the database at
     /// startup; every pull after that carries them in its snapshot.
     pub fn set_team_iterations(&mut self, iterations: Vec<String>) {

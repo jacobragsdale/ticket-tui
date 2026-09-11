@@ -9,10 +9,12 @@
 //! field path is built here, from the names on the way down, rather than taken
 //! from what the server says.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 use time::Date;
 
-use crate::model::path_leaf;
+use crate::model::{path_leaf, same_text};
 use crate::timestamp::Timestamp;
 
 /// Which of the two trees a node belongs to.
@@ -131,6 +133,217 @@ pub fn current_iteration(nodes: &[ClassificationNode], today: Date) -> Option<&C
         .iter()
         .filter(|node| node.kind == NodeKind::Iteration && node.contains(today))
         .max_by_key(|node| (node.depth, -node.span_seconds()))
+}
+
+/// Where an iteration sits against today. This is what the Sprint column
+/// paints a row by and what `iteration:@past`, `@future` and `@backlog` match.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SprintBucket {
+    /// A scheduled iteration that finished before today: open work here is a
+    /// leftover.
+    Past,
+    /// The team's sprint, or any iteration whose dates contain today.
+    Current,
+    /// A scheduled iteration that has not started.
+    Future,
+    /// An iteration nobody scheduled — the project root, a `Backlog` node, an
+    /// undated quarter — which is where unplanned work sits.
+    Backlog,
+}
+
+impl SprintBucket {
+    /// The order the Sprint column sorts the buckets in, ascending: leftovers
+    /// first, then this sprint, then what is coming, then the backlog.
+    #[must_use]
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Past => 0,
+            Self::Current => 1,
+            Self::Future => 2,
+            Self::Backlog => 3,
+        }
+    }
+}
+
+/// One iteration as the calendar keeps it: the dates, and where it hangs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Sprint {
+    path: String,
+    depth: usize,
+    start: Option<Date>,
+    finish: Option<Date>,
+}
+
+/// The iteration tree read against today and the team's sprint: which bucket
+/// a work item's iteration path is in, how many sprints it is from the
+/// current one, and how the Sprint column orders two paths.
+///
+/// Built from the same nodes the pickers list, so it answers the same offline
+/// as after a pull, and empty — knowing nothing — until the tree has been
+/// fetched once, in which case every question answers `None` and the column
+/// falls back to the bare leaf.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SprintCalendar {
+    /// The paths `@current` names: one a team, or the one the calendar picks.
+    current: Vec<String>,
+    sprints: Vec<Sprint>,
+    /// Each sprint's place in `sprints`, keyed by its path as [`same_text`]
+    /// reads it, because a work item's field and the tree are not always
+    /// spelled alike.
+    by_path: HashMap<String, usize>,
+    /// How many sprints each sibling of the current sprint is from it, keyed
+    /// like `by_path`: `-2` two sprints ago, `1` the next. Only the sprints
+    /// under the same parent count, so a quarter kept beside them does not
+    /// put the neighbours a step further apart.
+    offsets: HashMap<String, i64>,
+}
+
+fn path_key(path: &str) -> String {
+    path.trim().chars().flat_map(char::to_lowercase).collect()
+}
+
+fn path_parent(path: &str) -> &str {
+    path.rsplit_once(['\\', '/'])
+        .map_or("", |(parent, _)| parent)
+}
+
+impl SprintCalendar {
+    /// Reads the iteration nodes out of `nodes`, taking `current` as the
+    /// sprint the team is in — the first of them anchors the offsets.
+    #[must_use]
+    pub fn new(nodes: &[ClassificationNode], current: Vec<String>) -> Self {
+        let sprints: Vec<Sprint> = nodes
+            .iter()
+            .filter(|node| node.kind == NodeKind::Iteration)
+            .map(|node| Sprint {
+                path: node.path.clone(),
+                depth: node.depth,
+                start: node.start_date.map(Timestamp::date),
+                finish: node.finish_date.map(Timestamp::date),
+            })
+            .collect();
+        let by_path: HashMap<String, usize> = sprints
+            .iter()
+            .enumerate()
+            .map(|(index, sprint)| (path_key(&sprint.path), index))
+            .collect();
+
+        let mut offsets = HashMap::new();
+        if let Some(anchor) = current
+            .iter()
+            .find_map(|path| by_path.get(&path_key(path)).copied())
+        {
+            let parent = path_parent(&sprints[anchor].path);
+            let mut siblings: Vec<&Sprint> = sprints
+                .iter()
+                .filter(|sprint| {
+                    sprint.start.is_some()
+                        && sprint.finish.is_some()
+                        && same_text(path_parent(&sprint.path), parent)
+                })
+                .collect();
+            siblings.sort_by(|left, right| {
+                left.start
+                    .cmp(&right.start)
+                    .then_with(|| path_key(&left.path).cmp(&path_key(&right.path)))
+            });
+            if let Some(origin) = siblings
+                .iter()
+                .position(|sprint| same_text(&sprint.path, &sprints[anchor].path))
+            {
+                for (index, sprint) in siblings.iter().enumerate() {
+                    let offset = i64::try_from(index).unwrap_or(i64::MAX)
+                        - i64::try_from(origin).unwrap_or(i64::MAX);
+                    offsets.insert(path_key(&sprint.path), offset);
+                }
+            }
+        }
+
+        Self {
+            current,
+            sprints,
+            by_path,
+            offsets,
+        }
+    }
+
+    /// Sets what `@current` names, leaving the tree as it is. This is how a
+    /// context built without a tree still knows the team's sprint.
+    #[must_use]
+    pub fn with_current(mut self, current: Vec<String>) -> Self {
+        self.current = current;
+        self
+    }
+
+    /// The paths `@current` stands for.
+    #[must_use]
+    pub fn current(&self) -> &[String] {
+        &self.current
+    }
+
+    /// Whether the tree has been read at all.
+    #[must_use]
+    pub fn knows_tree(&self) -> bool {
+        !self.sprints.is_empty()
+    }
+
+    /// Whether `path` is one of the sprints `@current` names.
+    #[must_use]
+    pub fn is_current(&self, path: &str) -> bool {
+        self.current.iter().any(|current| same_text(path, current))
+    }
+
+    fn sprint(&self, path: &str) -> Option<&Sprint> {
+        self.by_path
+            .get(&path_key(path))
+            .map(|index| &self.sprints[*index])
+    }
+
+    /// Which bucket `path` falls in on `today`, and `None` for a path the tree
+    /// does not hold — every path, until the tree has been read.
+    #[must_use]
+    pub fn bucket(&self, path: &str, today: Date) -> Option<SprintBucket> {
+        if self.is_current(path) {
+            return Some(SprintBucket::Current);
+        }
+        let sprint = self.sprint(path)?;
+        Some(match (sprint.start, sprint.finish) {
+            (Some(_), Some(finish)) if finish < today => SprintBucket::Past,
+            (Some(start), Some(_)) if start > today => SprintBucket::Future,
+            (Some(_), Some(_)) => SprintBucket::Current,
+            _ => SprintBucket::Backlog,
+        })
+    }
+
+    /// How many sprints `path` is from the current one: negative behind,
+    /// positive ahead, zero for the current sprint itself. `None` when it is
+    /// not a dated sibling of the current sprint, or nothing is current.
+    #[must_use]
+    pub fn offset(&self, path: &str) -> Option<i64> {
+        self.offsets.get(&path_key(path)).copied()
+    }
+
+    /// Whether `path` is the root of the tree, where unplanned work sits by
+    /// default and the leaf is only the project's name.
+    #[must_use]
+    pub fn is_root(&self, path: &str) -> bool {
+        self.sprint(path).is_some_and(|sprint| sprint.depth == 0)
+    }
+
+    /// The key the Sprint column sorts a path by, ascending: the buckets in
+    /// [`SprintBucket::rank`] order, the dated ones by start date inside
+    /// that, and a path the tree does not hold after everything else. Two
+    /// keys that tie are left to the caller's text comparison.
+    #[must_use]
+    pub fn sort_key(&self, path: &str, today: Date) -> (u8, Option<Date>) {
+        match self.bucket(path, today) {
+            Some(bucket) => (
+                bucket.rank(),
+                self.sprint(path).and_then(|sprint| sprint.start),
+            ),
+            None => (u8::MAX, None),
+        }
+    }
 }
 
 /// Both trees, flattened in the order Azure DevOps nests them: each root
@@ -319,6 +532,104 @@ mod tests {
             None,
             "an iteration nobody scheduled is never current"
         );
+    }
+
+    #[test]
+    fn the_calendar_buckets_paths_against_today_and_counts_sprints_from_the_current_one() {
+        let sprint = |name: &str, start: &str, finish: &str| ClassificationNode {
+            start_date: Some(ts(&format!("{start}T00:00:00Z"))),
+            finish_date: Some(ts(&format!("{finish}T00:00:00Z"))),
+            ..ClassificationNode::new(NodeKind::Iteration, format!("ISTO\\2026\\{name}"), 2)
+        };
+        let nodes = vec![
+            ClassificationNode::new(NodeKind::Area, "ISTO", 0),
+            ClassificationNode::new(NodeKind::Iteration, "ISTO", 0),
+            ClassificationNode::new(NodeKind::Iteration, "ISTO\\Backlog", 1),
+            ClassificationNode {
+                start_date: Some(ts("2026-01-01T00:00:00Z")),
+                finish_date: Some(ts("2026-12-31T00:00:00Z")),
+                ..ClassificationNode::new(NodeKind::Iteration, "ISTO\\2026", 1)
+            },
+            sprint("Sprint 16", "2026-08-10", "2026-08-21"),
+            sprint("Sprint 17", "2026-08-24", "2026-09-04"),
+            sprint("Sprint 18", "2026-09-07", "2026-09-18"),
+            sprint("Sprint 19", "2026-09-21", "2026-10-02"),
+            ClassificationNode::new(NodeKind::Iteration, "ISTO\\2026\\Sprint 20", 2),
+        ];
+        let today = date!(2026 - 09 - 11);
+        let calendar = SprintCalendar::new(&nodes, vec!["ISTO\\2026\\Sprint 18".into()]);
+
+        let bucket = |path: &str| calendar.bucket(path, today);
+        assert_eq!(bucket("ISTO\\2026\\Sprint 16"), Some(SprintBucket::Past));
+        assert_eq!(bucket("ISTO\\2026\\Sprint 18"), Some(SprintBucket::Current));
+        assert_eq!(
+            bucket("isto\\2026\\sprint 19"),
+            Some(SprintBucket::Future),
+            "a path is found however the field spells it"
+        );
+        assert_eq!(
+            bucket("ISTO\\2026"),
+            Some(SprintBucket::Current),
+            "a year that contains today is now, though @current does not name it"
+        );
+        assert!(!calendar.is_current("ISTO\\2026"));
+        assert_eq!(bucket("ISTO"), Some(SprintBucket::Backlog));
+        assert_eq!(bucket("ISTO\\Backlog"), Some(SprintBucket::Backlog));
+        assert_eq!(
+            bucket("ISTO\\2026\\Sprint 20"),
+            Some(SprintBucket::Backlog),
+            "a sprint nobody has dated yet is backlog until they do"
+        );
+        assert_eq!(
+            bucket("ISTO\\Gone"),
+            None,
+            "a path the tree lacks is unknown"
+        );
+        assert!(calendar.is_root("ISTO") && !calendar.is_root("ISTO\\Backlog"));
+
+        assert_eq!(calendar.offset("ISTO\\2026\\Sprint 16"), Some(-2));
+        assert_eq!(calendar.offset("ISTO\\2026\\Sprint 18"), Some(0));
+        assert_eq!(calendar.offset("ISTO\\2026\\Sprint 19"), Some(1));
+        assert_eq!(
+            calendar.offset("ISTO\\2026"),
+            None,
+            "the year is the sprints' parent, not one of them"
+        );
+        assert_eq!(calendar.offset("ISTO\\2026\\Sprint 20"), None);
+
+        let key = |path: &str| calendar.sort_key(path, today);
+        let mut paths = [
+            "ISTO\\Gone",
+            "ISTO",
+            "ISTO\\2026\\Sprint 19",
+            "ISTO\\2026\\Sprint 18",
+            "ISTO\\2026\\Sprint 17",
+            "ISTO\\2026\\Sprint 16",
+        ];
+        paths.sort_by_key(|path| key(path));
+        assert_eq!(
+            paths,
+            [
+                "ISTO\\2026\\Sprint 16",
+                "ISTO\\2026\\Sprint 17",
+                "ISTO\\2026\\Sprint 18",
+                "ISTO\\2026\\Sprint 19",
+                "ISTO",
+                "ISTO\\Gone",
+            ],
+            "leftovers first, then now, then what is coming, then the backlog"
+        );
+
+        let unread = SprintCalendar::default().with_current(vec!["ISTO\\2026\\Sprint 18".into()]);
+        assert!(!unread.knows_tree());
+        assert!(unread.is_current("ISTO\\2026\\Sprint 18"));
+        assert_eq!(
+            unread.bucket("ISTO\\2026\\Sprint 18", today),
+            Some(SprintBucket::Current),
+            "the team's sprint is current before the tree is read"
+        );
+        assert_eq!(unread.bucket("ISTO\\2026\\Sprint 16", today), None);
+        assert_eq!(unread.offset("ISTO\\2026\\Sprint 18"), None);
     }
 
     #[test]

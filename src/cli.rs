@@ -1232,7 +1232,10 @@ fn match_context(
     Ok((
         MatchContext::now()
             .with_me(me)
-            .with_current_iterations(current_iteration.into_iter().collect())
+            .with_sprints(classification::SprintCalendar::new(
+                &nodes,
+                current_iteration.into_iter().collect(),
+            ))
             .with_repos(filter::repos_by_item(&graph.artifacts, name_of)),
         tree,
     ))
@@ -1259,7 +1262,16 @@ fn refuse_unresolvable_sentinels(
     if context.me.is_none() && parsed.filters.contains(FilterField::Assignee, "@me") {
         bail!("no signed-in name to resolve @me; run `ticket-tui sync` once or set TICKET_TUI_ME");
     }
-    if context.current_iterations.is_empty()
+    if tree == IterationTree::Unread
+        && ["@past", "@future", "@backlog"]
+            .iter()
+            .any(|value| parsed.filters.contains(FilterField::Iteration, value))
+    {
+        bail!(
+            "no iteration tree to resolve iteration:@past, @future or @backlog against; run `ticket-tui sync` once"
+        );
+    }
+    if context.sprints.current().is_empty()
         && parsed.filters.contains(FilterField::Iteration, "@current")
     {
         match tree {

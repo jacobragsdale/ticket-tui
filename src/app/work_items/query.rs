@@ -96,7 +96,7 @@ impl WorkItemsScreen {
     pub fn match_context(&self, shell: &Shell) -> MatchContext {
         MatchContext::now()
             .with_me(shell.me.clone())
-            .with_current_iterations(self.current_iterations())
+            .with_sprints(self.sprint_calendar())
             .with_repos(self.repos_by_item(shell))
     }
 
@@ -499,6 +499,17 @@ impl WorkItemsScreen {
         // `compare_tickets` is left to break the ties.
         let progress = (field == SortField::Progress).then(|| self.child_progress.clone());
         let repos = (field == SortField::Repo).then(|| self.repos_by_item(shell));
+        // The Sprint column orders by the calendar rather than by name, so
+        // Sprint 9 comes before Sprint 10 and the rows read leftovers, this
+        // sprint, what is coming, backlog; the text comparison breaks the ties.
+        let sprint_keys = (field == SortField::Iteration).then(|| {
+            let calendar = self.sprint_calendar();
+            let today = crate::timestamp::Timestamp::now().date();
+            tickets
+                .iter()
+                .map(|ticket| calendar.sort_key(&ticket.iteration_path, today))
+                .collect::<Vec<_>>()
+        });
         let repo_of = |key: &TicketKey| {
             repos
                 .as_ref()
@@ -512,6 +523,13 @@ impl WorkItemsScreen {
             } else {
                 Ordering::Equal
             };
+            let sprint = sprint_keys.as_ref().map_or(Ordering::Equal, |keys| {
+                let ordering = keys[left.ticket_index].cmp(&keys[right.ticket_index]);
+                match direction {
+                    crate::model::SortDirection::Ascending => ordering,
+                    crate::model::SortDirection::Descending => ordering.reverse(),
+                }
+            });
             let left = &tickets[left.ticket_index];
             let right = &tickets[right.ticket_index];
             relevance
@@ -520,6 +538,7 @@ impl WorkItemsScreen {
                         progress.compare(&left.key, &right.key, direction)
                     })
                 })
+                .then_with(|| sprint)
                 .then_with(|| {
                     if repos.is_some() {
                         crate::model::compare_optional_text_last(

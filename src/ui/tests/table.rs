@@ -1,5 +1,6 @@
 use super::*;
 use crate::app::repos::RepoColumn;
+use crate::classification::{ClassificationNode, NodeKind};
 use crate::columns::{ColumnLayout, TableLayout};
 use crate::pointer::SelectableSurface;
 use crate::ui::details::ticket_badge_line;
@@ -564,5 +565,100 @@ fn the_repo_column_is_hidden_until_asked_for_and_names_the_branch_link_repositor
     assert!(
         find_buffer_text_in(terminal.backend().buffer(), table_body(&app), "ado-helper").is_some(),
         "and names the repository once shown"
+    );
+}
+
+#[test]
+fn the_sprint_column_says_where_a_row_sits_against_the_sprint_and_sorts_by_the_calendar() {
+    let row = |id: i64, title: &str, path: &str| {
+        let mut row = ticket_at(id, title, "Issue", "To Do", "2026-03-03T00:00:00Z");
+        row.iteration_path = path.into();
+        row
+    };
+    let mut app = App::new(vec![
+        row(1, "Planned later", "ISTO\\2026\\Sprint 19"),
+        row(2, "Unplanned", "ISTO"),
+        row(3, "This sprint", "ISTO\\2026\\Sprint 18"),
+        row(4, "Leftover", "ISTO\\2026\\Sprint 16"),
+    ]);
+    // Only the columns under test, so the Sprint column is not the one a
+    // narrow pane drops first.
+    for field in [
+        SortField::State,
+        SortField::Type,
+        SortField::Priority,
+        SortField::Assignee,
+    ] {
+        let index = app
+            .work_items
+            .layout
+            .columns
+            .iter()
+            .position(|column| column.id == field)
+            .expect("the column exists");
+        ColumnLayout::toggle_visible(&mut app.work_items.layout, index);
+    }
+
+    let before = render_text(100, 20, &mut app);
+    assert!(
+        before.contains("Sprint"),
+        "the column is on by default:\n{before}"
+    );
+    assert!(
+        before.contains("Sprint 16") && !before.contains("-2 \u{b7}"),
+        "without a tree the cell is the bare leaf:\n{before}"
+    );
+
+    let day = 24 * 60 * 60;
+    let now = Timestamp::now();
+    let sprint = |name: &str, from: i64, to: i64| ClassificationNode {
+        start_date: Some(now.plus_seconds(from * day)),
+        finish_date: Some(now.plus_seconds(to * day)),
+        ..ClassificationNode::new(NodeKind::Iteration, format!("ISTO\\2026\\{name}"), 2)
+    };
+    app.work_items.set_classification_nodes(
+        vec![
+            ClassificationNode::new(NodeKind::Iteration, "ISTO", 0),
+            ClassificationNode::new(NodeKind::Iteration, "ISTO\\2026", 1),
+            sprint("Sprint 16", -30, -19),
+            sprint("Sprint 17", -16, -5),
+            sprint("Sprint 18", -2, 9),
+            sprint("Sprint 19", 12, 23),
+        ],
+        None,
+    );
+
+    let text = render_text(100, 20, &mut app);
+    for cell in [
+        "-2 \u{b7} Sprint 16",
+        "now \u{b7} Sprint 18",
+        "+1 \u{b7} Sprint 19",
+        "backlog",
+    ] {
+        assert!(text.contains(cell), "{cell} should be on screen:\n{text}");
+    }
+    assert!(
+        !text.contains("backlog \u{b7}"),
+        "the root's leaf is only the project's name:\n{text}"
+    );
+
+    let header = header_rect(&app, SortField::Iteration);
+    click(&mut app, header.x, header.y);
+    assert_eq!(app.work_items.sort_field, SortField::Iteration);
+    let order: Vec<i64> = app
+        .work_items
+        .visible_tickets()
+        .map(|ticket| ticket.key.id)
+        .collect();
+    assert_eq!(order, [4, 3, 1, 2], "leftovers, this sprint, next, backlog");
+    assert_eq!(
+        column_cell_colors(&mut app, SortField::Iteration, 4),
+        [
+            theme().warning,
+            theme().accent,
+            theme().muted,
+            theme().muted
+        ],
+        "a leftover is flagged, this sprint is lit, the rest recedes"
     );
 }

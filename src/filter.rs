@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::classification::{SprintBucket, SprintCalendar};
 use crate::model::{ArtifactKind, ArtifactLink, StateCategory, Ticket, path_leaf, same_text};
 use crate::timestamp::Timestamp;
 
@@ -148,6 +149,9 @@ impl FilterSchema for WorkItemSchema {
             (FilterField::Assignee, "me") => Some(Sentinel::Me),
             (FilterField::Assignee, "none") => Some(Sentinel::Nobody),
             (FilterField::Iteration, "current") => Some(Sentinel::CurrentIteration),
+            (FilterField::Iteration, "past") => Some(Sentinel::PastIteration),
+            (FilterField::Iteration, "future") => Some(Sentinel::FutureIteration),
+            (FilterField::Iteration, "backlog") => Some(Sentinel::Backlog),
             (FilterField::State, "open") => Some(Sentinel::Open),
             _ => None,
         }
@@ -159,6 +163,12 @@ impl FilterSchema for WorkItemSchema {
         row: &Self::Row,
         context: &MatchContext,
     ) -> bool {
+        let in_bucket = |bucket: SprintBucket| {
+            context
+                .sprints
+                .bucket(&row.iteration_path, context.now.date())
+                == Some(bucket)
+        };
         match sentinel {
             Sentinel::Me => context.me.as_deref().is_some_and(|me| {
                 row.assigned_to
@@ -166,10 +176,10 @@ impl FilterSchema for WorkItemSchema {
                     .is_some_and(|assignee| same_text(assignee, me))
             }),
             Sentinel::Nobody => row.assigned_to.is_none(),
-            Sentinel::CurrentIteration => context
-                .current_iterations
-                .iter()
-                .any(|iteration| same_text(&row.iteration_path, iteration)),
+            Sentinel::CurrentIteration => context.sprints.is_current(&row.iteration_path),
+            Sentinel::PastIteration => in_bucket(SprintBucket::Past),
+            Sentinel::FutureIteration => in_bucket(SprintBucket::Future),
+            Sentinel::Backlog => in_bucket(SprintBucket::Backlog),
             Sentinel::Open => !StateCategory::of(&row.state).is_done(),
         }
     }
@@ -443,6 +453,14 @@ pub enum Sentinel {
     Nobody,
     /// `iteration:@current`, the sprint whose dates contain today.
     CurrentIteration,
+    /// `iteration:@past`, a scheduled sprint that finished before today,
+    /// which is where leftovers sit.
+    PastIteration,
+    /// `iteration:@future`, a scheduled sprint that has not started.
+    FutureIteration,
+    /// `iteration:@backlog`, an iteration nobody scheduled: the project root
+    /// and every undated node, which is where unplanned work waits.
+    Backlog,
     /// `state:@open`, anything the workflow has not finished with. Read by
     /// state category rather than by name, because every process template
     /// spells its finished states differently.
@@ -459,6 +477,9 @@ impl Sentinel {
             Self::Me => "@me",
             Self::Nobody => "@none",
             Self::CurrentIteration => "@current",
+            Self::PastIteration => "@past",
+            Self::FutureIteration => "@future",
+            Self::Backlog => "@backlog",
             Self::Open => "@open",
         }
     }
@@ -476,9 +497,11 @@ pub struct MatchContext {
     pub now: Timestamp,
     /// The display name `@me` stands for, and `None` when nobody is signed in.
     pub me: Option<String>,
-    /// The iteration paths `@current` stands for — one a team, or the one the
-    /// calendar names — and empty when no sprint is scheduled around today.
-    pub current_iterations: Vec<String>,
+    /// The iteration tree read against today: the paths `@current` stands
+    /// for — one a team, or the one the calendar names, and none when no
+    /// sprint is scheduled around today — and the buckets `@past`, `@future`
+    /// and `@backlog` sort every other path into.
+    pub sprints: SprintCalendar,
     /// The repositories each work item is linked to, by name, which
     /// [`repos_by_item`] reads off the artifact links.
     pub repos_by_item: BTreeMap<i64, Vec<String>>,
@@ -494,11 +517,11 @@ impl MatchContext {
     /// The same against a fixed instant, which is how a relative bound is
     /// tested without reaching for the clock.
     #[must_use]
-    pub const fn at(now: Timestamp) -> Self {
+    pub fn at(now: Timestamp) -> Self {
         Self {
             now,
             me: None,
-            current_iterations: Vec::new(),
+            sprints: SprintCalendar::default(),
             repos_by_item: BTreeMap::new(),
         }
     }
@@ -509,9 +532,16 @@ impl MatchContext {
         self
     }
 
+    /// Names the sprint without a tree, which is all `@current` needs.
     #[must_use]
     pub fn with_current_iterations(mut self, iterations: Vec<String>) -> Self {
-        self.current_iterations = iterations;
+        self.sprints = self.sprints.with_current(iterations);
+        self
+    }
+
+    #[must_use]
+    pub fn with_sprints(mut self, sprints: SprintCalendar) -> Self {
+        self.sprints = sprints;
         self
     }
 
@@ -1686,6 +1716,64 @@ mod tests {
         assert!(
             !filters.matches_in(&sprint_one, false, &MatchContext::at(now)),
             "with no sprint scheduled @current is no sprint at all"
+        );
+    }
+
+    #[test]
+    fn the_past_future_and_backlog_sentinels_read_the_tree_against_today() {
+        use crate::classification::{ClassificationNode, NodeKind};
+
+        let now = ts("2026-09-11T12:00:00Z");
+        let sprint = |name: &str, start: &str, finish: &str| ClassificationNode {
+            start_date: Some(ts(&format!("{start}T00:00:00Z"))),
+            finish_date: Some(ts(&format!("{finish}T00:00:00Z"))),
+            ..ClassificationNode::new(NodeKind::Iteration, format!("Atlas\\{name}"), 1)
+        };
+        let nodes = vec![
+            ClassificationNode::new(NodeKind::Iteration, "Atlas", 0),
+            sprint("Sprint 1", "2026-08-24", "2026-09-04"),
+            sprint("Sprint 2", "2026-09-07", "2026-09-18"),
+            sprint("Sprint 3", "2026-09-21", "2026-10-02"),
+        ];
+        let context = MatchContext::at(now)
+            .with_sprints(SprintCalendar::new(&nodes, vec!["Atlas\\Sprint 2".into()]));
+        let row = |path: &str| Ticket {
+            iteration_path: path.into(),
+            ..ticket("Active", "Bug", Some("Avery"), "rust")
+        };
+        let matches = |query: &str, path: &str, context: &MatchContext| {
+            parse_query::<WorkItemSchema>(query)
+                .filters
+                .matches_in(&row(path), false, context)
+        };
+
+        assert!(matches("iteration:@past", "Atlas\\Sprint 1", &context));
+        assert!(!matches("iteration:@past", "Atlas\\Sprint 2", &context));
+        assert!(matches("iteration:@current", "Atlas\\Sprint 2", &context));
+        assert!(matches("iteration:@future", "Atlas\\Sprint 3", &context));
+        assert!(!matches("iteration:@future", "Atlas\\Sprint 1", &context));
+        assert!(matches("iteration:@backlog", "Atlas", &context));
+        assert!(!matches("iteration:@backlog", "Atlas\\Sprint 1", &context));
+        assert!(
+            matches("iteration:@past iteration:@backlog", "Atlas", &context)
+                && matches(
+                    "iteration:@past iteration:@backlog",
+                    "Atlas\\Sprint 1",
+                    &context
+                ),
+            "two values in one field are ORed, sentinels included"
+        );
+        assert!(
+            matches("sprint:@past", "Atlas\\Sprint 1", &context),
+            "`sprint:` is the same field"
+        );
+
+        let unread = MatchContext::at(now).with_current_iterations(vec!["Atlas\\Sprint 2".into()]);
+        assert!(matches("iteration:@current", "Atlas\\Sprint 2", &unread));
+        assert!(
+            !matches("iteration:@past", "Atlas\\Sprint 1", &unread)
+                && !matches("iteration:@backlog", "Atlas", &unread),
+            "before the tree is read the other three name nothing rather than everything"
         );
     }
 

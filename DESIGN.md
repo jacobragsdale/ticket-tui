@@ -771,9 +771,9 @@ row also carries the days it runs between — `Aug 25 – Sep 5` — and the one
 containing today (UTC) is marked `current`.
 
 `Enter` writes the full backslash path — `development\Sprint 1`, not
-`Sprint 1` — to `System.IterationPath` or `System.AreaPath`. The Iteration and
-Area table columns go on showing only the leaf, and the `iteration:` and `area:`
-search filters go on matching it.
+`Sprint 1` — to `System.IterationPath` or `System.AreaPath`. The Area column
+goes on showing only the leaf, the Sprint column the leaf behind its marker,
+and the `iteration:` and `area:` search filters go on matching it.
 
 These pickers never wait for the network either. Both trees come from one
 request — `GET /<project>/_apis/wit/classificationnodes?$depth=10` — read once a
@@ -1783,12 +1783,17 @@ August. Relative windows are measured as the filter runs, so a view saved as
 offers 24h, 7d, 14d, and 30d presets for both fields, where a date has no list
 of values to check off.
 
-Four values are written with a leading `@` and stand for something the app
+Seven values are written with a leading `@` and stand for something the app
 works out as the filter runs rather than when the query is typed:
 `assignee:@me` is whoever the last sync signed in as, `assignee:@none` is the
-work nobody owns, `iteration:@current` is the sprint whose dates contain today,
-and `state:@open` is anything the workflow has not finished with, read by state
-category so it holds whatever the process template calls its states. They can
+work nobody owns, `iteration:@current` is the sprint the team is in (or the
+one whose dates contain today, without a team), `iteration:@past` is any
+scheduled sprint that finished before today — where leftovers sit —
+`iteration:@future` one that has not started, `iteration:@backlog` an
+iteration nobody scheduled, the project root included, and `state:@open` is
+anything the workflow has not finished with, read by state category so it
+holds whatever the process template calls its states. The three that read the
+calendar name nothing until the iteration tree has been read once. They can
 be typed straight into the search box, they are stored and shown as written,
 and a sentinel the app cannot fill in — nobody signed in, no sprint scheduled —
 matches nothing rather than everything. `TICKET_TUI_ME` sets who `@me` is for
@@ -1828,15 +1833,14 @@ Item blue, Task cyan, Bug and Impediment red, Test Case green — priority 1 is
 red, 2 yellow, 3 and 4 blue, and each tag is hashed onto a stable badge colour
 so one tag reads the same everywhere. Completed and removed rows are dimmed
 wherever they are shown — once the toggle above lists them, and in the family
-tree, which never leaves them out — the Area and Iteration table columns show only the last
-path segment while details keeps the full path, the State cell and the
-family-tree rows carry the same one-character state glyph
-(`○ ◐ ● ✓ ✗`) in front of the word, the Pri cell reads `P1`–`P4`, and matched
-search characters are underlined in visible results. ID, Title, State, Type,
-Pri, Changed, and Assignee are the columns a fresh session shows; Org, Project,
-Area, Iteration, Created, Tags, and Progress are there under `c` and stay hidden
-until they are switched on, after which the choice is saved with the rest of the
-layout. A table that cannot fit the columns it has been given drops the
+tree, which never leaves them out — the Area column shows only the last path
+segment and the Sprint column the iteration's last segment behind a marker
+saying where it sits against today (below), while details keeps the full path,
+the Pri cell reads `P1`–`P4`, and matched search characters are underlined in
+visible results. ID, Title, State, Type, Pri, Assignee, and Sprint are the
+columns a fresh session shows; Area, Created, Tags, Repo, and Progress are
+there under `c` and stay hidden until they are switched on, after which the
+choice is saved with the rest of the layout. A table that cannot fit the columns it has been given drops the
 right-most optional one for as long as the Title would otherwise fall under 24
 characters — so a narrow pane loses Assignee, then Changed, rather than the
 title, and each comes back as soon as there is room for it again. ID and Title
@@ -1855,11 +1859,31 @@ where weight carries the same distinctions: badges keep their brackets,
 finished rows dim instead of fading, state glyphs and your own work items go
 bold, and a hovered row reverses.
 
-`V` opens the views. Five built-in ones are listed under a **Built-in**
+**The Sprint column** is the Iteration field read against today, because
+where a work item sits against the sprint is how its owner thinks about it
+and the iteration path is too long to say so in a column. The cell leads with
+the signal — `now` for the sprint the team is in or any iteration whose dates
+contain today, `-2` for the sprint two back and `+1` for the next, `past` or
+`later` for a dated iteration under some other parent, and `backlog` for one
+nobody scheduled, the project root included — and follows it with the
+iteration's name, so a long sprint name loses its tail and never the signal;
+the root's own name is left off, since it is only the project's. Leftovers are
+painted in the warning colour, this sprint in the accent, and what has not
+started or was never planned recedes. The offsets count the dated sprints that
+share the current sprint's parent, so a quarter kept beside them does not push
+the neighbours a step apart. Sorting on the column orders by the calendar
+rather than by name — leftovers oldest first, then this sprint, then what is
+coming, then the backlog, Sprint 9 before Sprint 10 — and the path breaks the
+ties. Until the iteration tree has been read once the cell is the bare last
+segment and the sort is by name, as they always were.
+
+`V` opens the views. Seven built-in ones are listed under a **Built-in**
 heading, above whatever you have saved: **Mine** (`assignee:@me`),
 **Unassigned** (`assignee:@none`), **Doing** (`state:doing`), **Stale**
 (`changed:>14d state:@open`, oldest first, leaving out work that is finished),
-and **Current sprint** (`iteration:@current`). A fresh run — one with no
+**Current sprint** (`iteration:@current`), **Leftovers** (`iteration:@past
+state:@open`, sorted on the Sprint column so the oldest sprint's leftovers
+come first), and **Backlog** (`iteration:@backlog`). A fresh run — one with no
 session file yet — opens on **Mine**; a session that remembers a query or a
 view is restored over it, an empty query included. A built-in sets the query and
 the sort and leaves the columns and the row density as you have them; it is

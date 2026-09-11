@@ -111,6 +111,8 @@ fn the_views_overlay_paints_the_built_ins_under_their_heading_above_the_saved_on
         "state:doing",
         "changed:>14d state:@open",
         "iteration:@current",
+        "iteration:@past state:@open",
+        "iteration:@backlog",
         "Saved",
         "Rust work",
     ];

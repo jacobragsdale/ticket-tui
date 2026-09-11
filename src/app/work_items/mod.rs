@@ -111,7 +111,7 @@ pub const DEFAULT_WORK_ITEM_TYPE: &str = "Issue";
 /// The five built-in views, in the order the overlay lists them. All but
 /// `Stale` take the table's default order, newest change first; `Stale` turns
 /// it around, so the item nobody has touched for longest is the first row.
-pub const BUILTIN_VIEWS: [BuiltinView; 5] = [
+pub const BUILTIN_VIEWS: [BuiltinView; 7] = [
     BuiltinView {
         name: "Mine",
         query: "assignee:@me",
@@ -139,6 +139,18 @@ pub const BUILTIN_VIEWS: [BuiltinView; 5] = [
     BuiltinView {
         name: "Current sprint",
         query: "iteration:@current",
+        sort_field: SortField::Changed,
+        sort_direction: SortDirection::Descending,
+    },
+    BuiltinView {
+        name: "Leftovers",
+        query: "iteration:@past state:@open",
+        sort_field: SortField::Iteration,
+        sort_direction: SortDirection::Ascending,
+    },
+    BuiltinView {
+        name: "Backlog",
+        query: "iteration:@backlog",
         sort_field: SortField::Changed,
         sort_direction: SortDirection::Descending,
     },
