@@ -1049,6 +1049,10 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A child another test forked while the script was being written
+        // holds its descriptor until it execs, and running the script before
+        // then is refused as busy: a moment lets those children go.
+        thread::sleep(Duration::from_millis(100));
         let herdr = Herdr::new(Box::new(HerdrCli::at(&script)));
 
         assert_eq!(
