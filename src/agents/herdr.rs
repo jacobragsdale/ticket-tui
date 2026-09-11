@@ -1,14 +1,18 @@
 //! Herdr, driven through its own CLI. Every call is one `herdr` process:
 //! the arguments go out as argv — never through a shell — and the answer is
-//! the JSON it prints. The commands this uses were read off `herdr 0.8.2`;
-//! nothing here is guessed from a sidebar.
+//! the JSON it prints. The commands this uses were read off `herdr 0.9.0`
+//! (`herdr --skill` and the bare command groups; `herdr <cmd> --help` prints
+//! only the top page); nothing here is guessed from a sidebar.
 //!
 //! [`HerdrApi`] is the seam the tests stand a fake behind: one method, one
 //! process, so the fake only has to answer argv with the JSON Herdr would.
 
 use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -25,7 +29,15 @@ pub trait HerdrApi: Send {
 pub struct HerdrCli {
     binary: PathBuf,
     session: Option<String>,
+    /// The most one call may take before it is given up on.
+    cap: Duration,
 }
+
+/// The most one `herdr` call may take. `agent start` may legitimately wait a
+/// minute for a cold CLI, so this sits above that; a server that has stopped
+/// answering would otherwise hold the agent thread, and every later `w`,
+/// for ever.
+const CALL_CAP: Duration = Duration::from_secs(90);
 
 impl Default for HerdrCli {
     fn default() -> Self {
@@ -44,6 +56,7 @@ impl HerdrCli {
         Self {
             binary: binary.to_path_buf(),
             session: None,
+            cap: CALL_CAP,
         }
     }
 }
@@ -54,17 +67,57 @@ impl HerdrApi for HerdrCli {
         if let Some(session) = &self.session {
             command.arg("--session").arg(session);
         }
-        let output = command
+        let mut child = command
             .args(args)
             .stdin(Stdio::null())
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .with_context(|| format!("{} could not be run", self.binary.display()))?;
-        parse_response(
-            &String::from_utf8_lossy(&output.stdout),
-            &String::from_utf8_lossy(&output.stderr),
-            output.status.code(),
-        )
+        // Drained as they come, so a long answer never fills a pipe and
+        // stalls the child while this waits for it.
+        let stdout = drain(child.stdout.take());
+        let stderr = drain(child.stderr.take());
+        let deadline = Instant::now() + self.cap;
+        let status = loop {
+            if let Some(status) = child.try_wait().context("waiting for herdr")? {
+                break Some(status);
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let Some(status) = status else {
+            // Not joined: whatever the killed child left holding the pipes
+            // ends on its own, and there is nothing to read from it anyway.
+            return Err(HerdrError {
+                code: "no_answer".to_owned(),
+                message: format!(
+                    "herdr {} gave no answer in {} s",
+                    args.iter().take(2).copied().collect::<Vec<_>>().join(" "),
+                    self.cap.as_secs()
+                ),
+            }
+            .into());
+        };
+        let stdout = stdout.join().unwrap_or_default();
+        let stderr = stderr.join().unwrap_or_default();
+        parse_response(&stdout, &stderr, status.code())
     }
+}
+
+/// Reads a child's stream to the end on a thread of its own.
+fn drain<R: Read + Send + 'static>(reader: Option<R>) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut reader) = reader {
+            let _ = reader.read_to_end(&mut bytes);
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    })
 }
 
 /// What Herdr refused, as it said it: `server_not_running`,
@@ -987,6 +1040,7 @@ mod tests {
                  'pane get') echo 'unknown command: pane get' >&2; exit 2 ;;\n\
                  'agent get') echo '{{\"id\":\"1\",\"result\":{{\"agent\":{{\"pane_id\":\"w1:p1\",\"agent\":\"copilot\",\"agent_status\":\"working\"}}}}}}' ;;\n\
                  'agent prompt') printf '%s' \"$4\" > {prompt}; echo '{{\"id\":\"1\",\"result\":{{}}}}' ;;\n\
+                 'agent wait') sleep 5 ;;\n\
                  *) echo '{{\"id\":\"1\",\"error\":{{\"code\":\"agent_blocked\",\"message\":\"no\"}}}}' >&2; exit 1 ;;\n\
                  esac\n",
                 log = log.display(),
@@ -1021,6 +1075,19 @@ mod tests {
         assert_eq!(
             refused.downcast_ref::<HerdrError>().unwrap().code,
             "agent_blocked"
+        );
+        // A call that never answers is given up on at the cap, not waited for.
+        let mut capped = HerdrCli::at(&script);
+        capped.cap = Duration::from_millis(300);
+        let started = Instant::now();
+        let hung = capped.call(&["agent", "wait", "wi-715"]).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(3));
+        let refusal = hung.downcast_ref::<HerdrError>().unwrap();
+        assert_eq!(refusal.code, "no_answer");
+        assert!(
+            refusal.message.contains("agent wait"),
+            "{}",
+            refusal.message
         );
         let calls = std::fs::read_to_string(&log).unwrap();
         assert!(
