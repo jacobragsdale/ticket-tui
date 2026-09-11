@@ -1014,11 +1014,12 @@ pub fn launch(
 
     if !session.prompt_sent {
         let prompt = session.prompt.clone().unwrap_or_default();
-        herdr
+        let unconfirmed = herdr
             .prompt(&agent_name, &prompt)
             .map_err(|error| fail(Stage::Prompt, error, Some(session.clone())))?;
         session.prompt_sent = true;
         save(store, &session, Stage::Prompt)?;
+        notes.extend(unconfirmed);
     }
 
     // The tab is already showing; this lands the keyboard on the agent.
@@ -1304,7 +1305,7 @@ mod tests {
         let dir = tempdir().unwrap();
         clone_under(dir.path(), "pay");
         let fake = FakeHerdr::default();
-        let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
+        let herdr = Herdr::new(Box::new(fake.clone()));
         let mut store = store_in(dir.path());
         let plan = plan_in(dir.path(), 715, "pay");
 
@@ -1378,7 +1379,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let clone = clone_under(dir.path(), "pay").canonicalize().unwrap();
         let fake = FakeHerdr::default();
-        let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
+        let herdr = Herdr::new(Box::new(fake.clone()));
         let mut store = store_in(dir.path());
         launch(&herdr, &mut store, &plan_in(dir.path(), 715, "pay")).unwrap();
         let mut second = plan_in(dir.path(), 722, "pay");
@@ -1454,7 +1455,7 @@ mod tests {
         clone_under(dir.path(), "pay");
         clone_under(dir.path(), "settle");
         let fake = FakeHerdr::default();
-        let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
+        let herdr = Herdr::new(Box::new(fake.clone()));
         let mut store = store_in(dir.path());
         launch(&herdr, &mut store, &plan_in(dir.path(), 715, "pay")).unwrap();
         launch(&herdr, &mut store, &plan_in(dir.path(), 716, "settle")).unwrap();
@@ -1486,7 +1487,7 @@ mod tests {
         );
         let root = state.add_pane(&tab, &worktree.to_string_lossy(), None);
         let fake = FakeHerdr::with(state);
-        let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
+        let herdr = Herdr::new(Box::new(fake.clone()));
         let mut store = store_in(dir.path());
         let (session, _) = launch(&herdr, &mut store, &plan_in(dir.path(), 715, "pay")).unwrap();
         assert_eq!(session.workspace_id.as_deref(), Some(payments.as_str()));
@@ -1512,7 +1513,7 @@ mod tests {
         let dir = tempdir().unwrap();
         clone_under(dir.path(), "pay");
         let fake = FakeHerdr::default();
-        let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
+        let herdr = Herdr::new(Box::new(fake.clone()));
         let mut store = store_in(dir.path());
         let plan = plan_in(dir.path(), 715, "pay");
 
@@ -1585,7 +1586,7 @@ mod tests {
         let dir = tempdir().unwrap();
         clone_under(dir.path(), "pay");
         let fake = FakeHerdr::default();
-        let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
+        let herdr = Herdr::new(Box::new(fake.clone()));
         let mut store = store_in(dir.path());
         let plan = plan_in(dir.path(), 715, "pay");
         // The CLI comes up but not ready — a login prompt, say — and is not
@@ -1619,11 +1620,26 @@ mod tests {
     }
 
     #[test]
+    fn a_prompt_the_agent_did_not_take_is_said_and_not_sent_again() {
+        let dir = tempdir().unwrap();
+        clone_under(dir.path(), "pay");
+        let fake = FakeHerdr::default();
+        let herdr = Herdr::new(Box::new(fake.clone()));
+        let mut store = store_in(dir.path());
+        fake.state.lock().unwrap().prompt_stalls = true;
+        fake.fail("agent wait", "timeout", "still idle");
+        let (session, note) = launch(&herdr, &mut store, &plan_in(dir.path(), 715, "pay")).unwrap();
+        assert!(session.is_complete(), "the text is in the box: not resent");
+        assert!(note.contains("press Enter in the pane"), "{note}");
+        assert_eq!(fake.state().panes[0].prompts.len(), 1);
+    }
+
+    #[test]
     fn a_half_made_session_whose_tab_was_closed_remakes_only_the_tab() {
         let dir = tempdir().unwrap();
         clone_under(dir.path(), "pay");
         let fake = FakeHerdr::default();
-        let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
+        let herdr = Herdr::new(Box::new(fake.clone()));
         let mut store = store_in(dir.path());
         let plan = plan_in(dir.path(), 715, "pay");
         fake.fail("agent start", "pane_busy", "not at a prompt");
@@ -1652,7 +1668,7 @@ mod tests {
         let dir = tempdir().unwrap();
         clone_under(dir.path(), "pay");
         let fake = FakeHerdr::default();
-        let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
+        let herdr = Herdr::new(Box::new(fake.clone()));
         let mut store = store_in(dir.path());
         let (session, _) = launch(&herdr, &mut store, &plan_in(dir.path(), 715, "pay")).unwrap();
         fake.state.lock().unwrap().focused = None;
@@ -1729,7 +1745,7 @@ mod tests {
     fn a_missing_clone_and_a_shared_checkout_in_use_are_refused_before_herdr_is_touched() {
         let dir = tempdir().unwrap();
         let fake = FakeHerdr::default();
-        let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
+        let herdr = Herdr::new(Box::new(fake.clone()));
         let mut store = store_in(dir.path());
         let failure = launch(&herdr, &mut store, &plan_in(dir.path(), 715, "pay")).unwrap_err();
         assert_eq!(failure.stage, Stage::Checkout);

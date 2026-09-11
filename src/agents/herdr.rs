@@ -219,33 +219,24 @@ fn list(value: &Value, key: &str) -> Vec<Value> {
 /// stale; every other refusal is an error in Herdr's own words.
 pub struct Herdr {
     api: Box<dyn HerdrApi>,
-    /// How long a prompt is given to take before the agent is looked at
-    /// again; zero in the tests, where nothing is typing.
-    settle: std::time::Duration,
 }
 
 /// How long `agent start` may wait for the CLI to come up ready. Copilot and
 /// Cursor both take a few seconds; a minute leaves room for a cold start.
 const START_TIMEOUT_MS: &str = "60000";
 
-/// How long a prompt is given to take before the agent is looked at again.
-const PROMPT_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
+/// How long `agent prompt --wait` is given. Herdr's own five-second gate for
+/// the agent to start working sits inside it; the rest is for a turn that
+/// settles at once, which is not waited for beyond this.
+const PROMPT_TIMEOUT_MS: &str = "10000";
+
+/// How long an agent nudged with Enter is given to start working.
+const NUDGE_TIMEOUT_MS: &str = "5000";
 
 impl Herdr {
     #[must_use]
     pub fn new(api: Box<dyn HerdrApi>) -> Self {
-        Self {
-            api,
-            settle: PROMPT_SETTLE,
-        }
-    }
-
-    /// The same, without the wait after a prompt, for a fake that answers
-    /// at once.
-    #[must_use]
-    pub fn without_settle(mut self) -> Self {
-        self.settle = std::time::Duration::ZERO;
-        self
+        Self { api }
     }
 
     fn lookup(&self, args: &[&str]) -> Result<Option<Value>> {
@@ -431,26 +422,54 @@ impl Herdr {
         }
     }
 
-    /// Sends `text` to the agent as one message, followed by Enter. The text
-    /// is one argv element: whatever a ticket's title holds, no shell reads it.
+    /// Sends `text` to the agent as one message, followed by Enter, and
+    /// waits for Herdr to see it taken: `working` or `blocked` within its
+    /// gate. A turn that has not settled by the timeout was taken all the
+    /// same, so `timeout` is success. The text is one argv element: whatever
+    /// a ticket's title holds, no shell reads it.
     ///
-    /// ponytail: Cursor Agent takes the pasted text but not the Enter Herdr
-    /// sends after a multi-line paste (seen live on 0.8.2), so an agent still
-    /// idle a moment later is given one Enter on its own. An agent that did
-    /// take the prompt is working by then; one that finished in a second gets
-    /// an empty line. Drop this once Herdr's prompt submits in Cursor.
-    pub fn prompt(&self, target: &str, text: &str) -> Result<()> {
-        self.api.call(&["agent", "prompt", target, text])?;
-        std::thread::sleep(self.settle);
-        if self
-            .agent(target)?
-            .is_some_and(|agent| agent.status == "idle")
-        {
-            self.api
-                .call(&["agent", "send-keys", target, "enter"])
-                .map(drop)?;
+    /// A prompt Herdr reports stalled — Cursor Agent has been seen to take a
+    /// multi-line paste but not the Enter after it — is given one Enter, and
+    /// if that is not taken either, is reported delivered but unconfirmed in
+    /// the answer rather than sent again: a stall does not prove the text
+    /// never landed, and a second copy in the box would be worse than none.
+    pub fn prompt(&self, target: &str, text: &str) -> Result<Option<String>> {
+        let refusal = |error: &anyhow::Error| herdr_error(error).map(|held| held.code.clone());
+        let sent = self.api.call(&[
+            "agent",
+            "prompt",
+            target,
+            text,
+            "--wait",
+            "--timeout",
+            PROMPT_TIMEOUT_MS,
+        ]);
+        match sent {
+            Ok(_) => return Ok(None),
+            Err(error) if refusal(&error).as_deref() == Some("timeout") => return Ok(None),
+            Err(error) if refusal(&error).as_deref() == Some("agent_prompt_stalled") => {}
+            Err(error) => return Err(error),
         }
-        Ok(())
+        self.api.call(&["agent", "send-keys", target, "enter"])?;
+        let taken = self.api.call(&[
+            "agent",
+            "wait",
+            target,
+            "--until",
+            "working",
+            "--until",
+            "blocked",
+            "--timeout",
+            NUDGE_TIMEOUT_MS,
+        ]);
+        match taken {
+            Ok(_) => Ok(None),
+            Err(error) if refusal(&error).as_deref() == Some("timeout") => Ok(Some(
+                "the prompt is in its input box but was not taken; press Enter in the pane"
+                    .to_owned(),
+            )),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn focus_agent(&self, target: &str) -> Result<()> {
@@ -545,6 +564,9 @@ pub(crate) mod fake {
         /// Whether a started agent comes up blocked: it is registered under
         /// its name, as Herdr does, but `agent start` answers `agent_not_ready`.
         pub start_blocked: bool,
+        /// Whether a prompt lands in the box without being taken: it is
+        /// recorded, and `agent prompt --wait` answers `agent_prompt_stalled`.
+        pub prompt_stalls: bool,
     }
 
     /// The fake, shared between the test and the thread under test.
@@ -829,16 +851,26 @@ pub(crate) mod fake {
                         None => unknown(),
                     }
                 }
-                ["agent", "prompt", target, text, ..] => match self
-                    .pane_by_target_mut(target)
-                    .filter(|pane| pane.agent.is_some())
-                {
-                    Some(pane) => {
-                        pane.prompts.push((*text).to_owned());
-                        Ok(json!({}))
+                ["agent", "prompt", target, text, ..] => {
+                    let stalls = self.prompt_stalls;
+                    match self
+                        .pane_by_target_mut(target)
+                        .filter(|pane| pane.agent.is_some())
+                    {
+                        Some(pane) => {
+                            pane.prompts.push((*text).to_owned());
+                            if stalls {
+                                return Err(HerdrError {
+                                    code: "agent_prompt_stalled".into(),
+                                    message: "no activity followed the prompt".into(),
+                                }
+                                .into());
+                            }
+                            Ok(json!({}))
+                        }
+                        None => unknown(),
                     }
-                    None => unknown(),
-                },
+                }
                 ["agent", "send-keys", target, ..] => match self.pane_by_target(target) {
                     Some(_) => Ok(json!({"type": "ok"})),
                     None => unknown(),
@@ -1000,7 +1032,7 @@ mod tests {
     #[test]
     fn the_fake_answers_the_argv_the_launch_uses() {
         let fake = fake::FakeHerdr::default();
-        let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
+        let herdr = Herdr::new(Box::new(fake.clone()));
         assert!(herdr.workspaces().unwrap().is_empty());
         let (workspace, tab, pane) = herdr
             .create_workspace("Payments", Path::new("/src/pay"))
@@ -1035,6 +1067,38 @@ mod tests {
         );
         assert_eq!(herdr.free_agent_name("wi-715").unwrap(), "wi-715-2");
         assert_eq!(herdr.agent("wi-999").unwrap(), None);
+
+        // A prompt that is taken, or whose turn merely has not settled, is
+        // sent once and said to be. One that stalls gets one Enter; if that
+        // is not taken either, it is still not sent again.
+        assert_eq!(herdr.prompt("wi-715", "go").unwrap(), None);
+        fake.fail("agent prompt", "timeout", "still working");
+        assert_eq!(herdr.prompt("wi-715", "go").unwrap(), None);
+        fake.clear_failure();
+        fake.state.lock().unwrap().prompt_stalls = true;
+        assert_eq!(herdr.prompt("wi-715", "go").unwrap(), None);
+        fake.fail("agent wait", "timeout", "still idle");
+        let note = herdr.prompt("wi-715", "go").unwrap().unwrap();
+        assert!(note.contains("press Enter"), "{note}");
+        fake.clear_failure();
+        fake.fail("agent prompt", "agent_blocked", "an approval is up");
+        assert!(herdr.prompt("wi-715", "go").is_err());
+        let calls = fake.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("agent prompt wi-715 go --wait --timeout"))
+                .count(),
+            5
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("agent send-keys wi-715 enter"))
+                .count(),
+            2,
+            "one Enter per stall, never more"
+        );
         let right = herdr.split_right(&pane.id, Path::new("/src/pay2")).unwrap();
         assert_eq!(right.tab_id, tab.id);
         assert!(
