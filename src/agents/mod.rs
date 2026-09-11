@@ -1620,6 +1620,37 @@ mod tests {
     }
 
     #[test]
+    fn a_start_that_fails_says_what_the_pane_shows() {
+        let dir = tempdir().unwrap();
+        clone_under(dir.path(), "pay");
+        let fake = FakeHerdr::default();
+        let herdr = Herdr::new(Box::new(fake.clone()));
+        let mut store = store_in(dir.path());
+        fake.fail(
+            "agent start",
+            "timeout",
+            "timed out waiting for agent startup",
+        );
+        fake.state.lock().unwrap().screen =
+            "❯ cursor-agent --model auto\nzsh: command not found: cursor-agent\n\n❯ ".into();
+        let failure = launch(&herdr, &mut store, &plan_in(dir.path(), 715, "pay")).unwrap_err();
+        assert_eq!(failure.stage, Stage::Agent);
+        assert!(
+            failure.session.unwrap().pane_id.is_some(),
+            "the pane stands"
+        );
+        let message = format!("{:#}", failure.error);
+        assert!(
+            message.contains("the pane shows: zsh: command not found: cursor-agent"),
+            "{message}"
+        );
+        assert!(
+            message.contains("timed out waiting for agent startup"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn a_prompt_the_agent_did_not_take_is_said_and_not_sent_again() {
         let dir = tempdir().unwrap();
         clone_under(dir.path(), "pay");

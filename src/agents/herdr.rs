@@ -150,7 +150,8 @@ impl std::error::Error for HerdrError {}
 /// and `{"id", "error": {"code", "message"}}` for a refusal — on stdout with
 /// exit 0 when the server is down, on stderr with exit 1 for most others —
 /// and a plain `unknown command` on stderr with exit 2 for an argument it
-/// could not resolve.
+/// could not resolve. `pane read` prints the pane's text itself rather than
+/// JSON; that text is the answer.
 pub fn parse_response(stdout: &str, stderr: &str, exit: Option<i32>) -> Result<Value> {
     for text in [stdout, stderr] {
         if let Ok(document) = serde_json::from_str::<Value>(text.trim()) {
@@ -165,6 +166,9 @@ pub fn parse_response(stdout: &str, stderr: &str, exit: Option<i32>) -> Result<V
                 return Ok(document.get("result").cloned().unwrap_or(Value::Null));
             }
         }
+    }
+    if exit == Some(0) && !stdout.trim().is_empty() {
+        return Ok(Value::String(stdout.to_owned()));
     }
     let message = if stderr.trim().is_empty() {
         stdout.trim()
@@ -436,8 +440,39 @@ impl Herdr {
     /// Starts `kind` in `pane` under `name`, with `args` handed to the CLI
     /// after Herdr's `--`. Herdr answers once the CLI is ready for input; one
     /// that is slower than its timeout is waited for once more, since the
-    /// name is registered either way.
+    /// name is registered either way. A start that fails says what the pane
+    /// shows — `command not found` is the usual reason a start times out.
     pub fn start_agent(&self, name: &str, kind: &str, pane: &str, args: &[String]) -> Result<()> {
+        self.start(name, kind, pane, args)
+            .map_err(|error| match self.pane_tail(pane) {
+                Some(line) => error.context(format!("the pane shows: {line}")),
+                None => error,
+            })
+    }
+
+    /// The last line of text in `pane`, if any.
+    fn pane_tail(&self, pane: &str) -> Option<String> {
+        let text = self
+            .api
+            .call(&[
+                "pane",
+                "read",
+                pane,
+                "--source",
+                "recent-unwrapped",
+                "--lines",
+                "8",
+            ])
+            .ok()?;
+        text.as_str()?
+            .lines()
+            .rev()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_owned)
+    }
+
+    fn start(&self, name: &str, kind: &str, pane: &str, args: &[String]) -> Result<()> {
         let mut argv = vec![
             "agent",
             "start",
@@ -620,6 +655,8 @@ pub(crate) mod fake {
         /// Whether a prompt lands in the box without being taken: it is
         /// recorded, and `agent prompt --wait` answers `agent_prompt_stalled`.
         pub prompt_stalls: bool,
+        /// What `pane read` shows, for every pane.
+        pub screen: String,
     }
 
     /// The fake, shared between the test and the thread under test.
@@ -849,6 +886,13 @@ pub(crate) mod fake {
                     let pane = self.panes.iter().find(|held| held.id == pane).unwrap();
                     Ok(json!({"pane": Self::pane_json(pane)}))
                 }
+                ["pane", "read", id, ..] => {
+                    if self.panes.iter().any(|pane| pane.id == *id) {
+                        Ok(Value::String(self.screen.clone()))
+                    } else {
+                        unknown()
+                    }
+                }
                 ["pane", "rename", id, label] => {
                     match self.panes.iter_mut().find(|pane| pane.id == *id) {
                         Some(pane) => {
@@ -1009,6 +1053,18 @@ mod tests {
         assert_eq!(refusal.code, "usage");
         assert!(refusal.is_not_found());
         assert_eq!(refusal.message, "unknown command: pane get wH:p9");
+
+        // A command that prints text rather than JSON answers its text.
+        let text = parse_response(
+            "❯ cursor-agent\nzsh: command not found: cursor-agent\n",
+            "",
+            Some(0),
+        )
+        .unwrap();
+        assert_eq!(
+            text.as_str().unwrap().lines().last(),
+            Some("zsh: command not found: cursor-agent")
+        );
 
         // A refusal on stderr with exit 1 keeps its own code.
         let blocked = parse_response(
