@@ -378,9 +378,27 @@ pub fn normalise_remote(remote: &str) -> Option<String> {
     }
 }
 
+/// The URL a repository is cloned from: https unless
+/// `TICKET_TUI_CLONE_PROTOCOL=ssh`, and the other one when the first is
+/// blank. `None` is a repository Azure DevOps gave no URL at all.
+#[must_use]
+pub fn clone_url(remote_url: &str, ssh_url: &str) -> Option<String> {
+    let ssh = std::env::var("TICKET_TUI_CLONE_PROTOCOL")
+        .is_ok_and(|protocol| protocol.eq_ignore_ascii_case("ssh"));
+    let (first, second) = if ssh {
+        (ssh_url, remote_url)
+    } else {
+        (remote_url, ssh_url)
+    };
+    [first, second]
+        .into_iter()
+        .find(|url| !url.is_empty())
+        .map(str::to_owned)
+}
+
 /// `git clone <url> <into>`, which is the one command that runs outside a
-/// repository.
-fn clone(url: &str, into: &Path) -> Result<String> {
+/// repository. A directory already there is refused, never cloned over.
+pub(crate) fn clone(url: &str, into: &Path) -> Result<String> {
     if into.exists() {
         anyhow::bail!("{} already exists", into.display());
     }

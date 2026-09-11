@@ -877,6 +877,7 @@ fn agent_plan(
             id: target.id.clone(),
             name: target.name.clone(),
             remote_url: target.remote_url.clone(),
+            ssh_url: target.ssh_url.clone(),
             web_url: target.web_url.clone(),
             default_branch: target.default_branch.clone(),
         },

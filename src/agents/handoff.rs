@@ -397,6 +397,7 @@ pub(crate) mod tests {
                 id: "aaa-111".into(),
                 name: "payments-api".into(),
                 remote_url: "https://dev.azure.com/jacobragsdale/Fiquants/_git/payments-api".into(),
+                ssh_url: String::new(),
                 web_url: "https://dev.azure.com/jacobragsdale/Fiquants/_git/payments-api".into(),
                 default_branch: Some("refs/heads/main".into()),
             },

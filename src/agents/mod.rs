@@ -293,6 +293,7 @@ pub struct RepoBrief {
     pub id: String,
     pub name: String,
     pub remote_url: String,
+    pub ssh_url: String,
     pub web_url: String,
     pub default_branch: Option<String>,
 }
@@ -744,29 +745,23 @@ fn fail(stage: Stage, error: anyhow::Error, session: Option<AgentSession>) -> La
     }
 }
 
-/// The checkout a plan settles on, and the message when the clone is not
-/// here.
+/// The checkout a plan settles on. A repository that is not here is cloned
+/// first, into the workspace under its own name — where `C` on the Repos tab
+/// puts it — and the note says so.
 fn settle_checkout(plan: &LaunchPlan, for_launch: bool) -> Result<Checkout> {
-    let clone = checkout::find_clone(
+    let mut cloned = None;
+    let clone = match checkout::find_clone(
         plan.workspace_root.as_deref(),
         plan.path_override.as_deref(),
         &plan.repo_key(),
-    )?
-    .with_context(|| {
-        let looked = plan.path_override.as_deref().map_or_else(
-            || {
-                plan.workspace_root.as_deref().map_or_else(
-                    || "no workspace is configured".to_owned(),
-                    |root| format!("not under {}", root.display()),
-                )
-            },
-            |path| format!("{} is not a clone", path.display()),
-        );
-        format!(
-            "{} is not cloned here ({looked}); C on the Repos tab clones it, or name its path under [herdr.paths]",
-            plan.repo.name
-        )
-    })?;
+    )? {
+        Some(clone) => clone,
+        None => {
+            let clone = clone_missing(plan)?;
+            cloned = Some(clone.clone());
+            clone
+        }
+    };
     // As git spells it, so the copy case names the same path a launch would.
     let clone = clone.canonicalize().unwrap_or(clone);
     let branch = plan.branch();
@@ -775,7 +770,7 @@ fn settle_checkout(plan: &LaunchPlan, for_launch: bool) -> Result<Checkout> {
         .default_branch
         .clone()
         .unwrap_or_else(|| "main".to_owned());
-    if for_launch {
+    let mut checkout = if for_launch {
         let checkout = checkout::settle(
             &clone,
             &plan.repo.name,
@@ -791,18 +786,51 @@ fn settle_checkout(plan: &LaunchPlan, for_launch: bool) -> Result<Checkout> {
             "{} is not a directory; the agent would start in the wrong place",
             checkout.workdir.display()
         );
-        Ok(checkout)
+        checkout
     } else {
-        // For a prompt to copy, nothing is made: the terminal the user has
-        // open is wherever it is, so the handoff names the clone.
-        Ok(Checkout {
+        // For a prompt to copy, no worktree is made: the terminal the user
+        // has open is wherever it is, so the handoff names the clone.
+        Checkout {
             workdir: clone.clone(),
             clone,
             branch,
             policy: CheckoutPolicy::Shared,
             note: "the clone; make a worktree yourself if you want one".to_owned(),
-        })
+        }
+    };
+    if let Some(path) = cloned {
+        checkout.note = format!("cloned into {}; {}", path.display(), checkout.note);
     }
+    Ok(checkout)
+}
+
+/// Clones a repository that is not here into the workspace under its own
+/// name, and answers the path. A path `[herdr.paths]` names that is not a
+/// clone is refused rather than cloned over: it was named on purpose.
+fn clone_missing(plan: &LaunchPlan) -> Result<PathBuf> {
+    if let Some(path) = &plan.path_override {
+        bail!(
+            "{} is not a clone of {}; fix or drop its [herdr.paths] entry",
+            path.display(),
+            plan.repo.name
+        );
+    }
+    let Some(root) = &plan.workspace_root else {
+        bail!(
+            "{} is not cloned here, and no workspace is configured to clone it into",
+            plan.repo.name
+        );
+    };
+    let Some(url) = crate::local::clone_url(&plan.repo.remote_url, &plan.repo.ssh_url) else {
+        bail!(
+            "{} is not cloned here, and Azure DevOps gave it no clone URL",
+            plan.repo.name
+        );
+    };
+    let into = root.join(&plan.repo.name);
+    crate::local::clone(&url, &into)
+        .with_context(|| format!("cloning {} into {}", plan.repo.name, into.display()))?;
+    Ok(into)
 }
 
 /// Writes the handoff and answers with the prompt, for the clipboard.
@@ -1219,6 +1247,7 @@ mod tests {
             id: format!("id-{repo}"),
             name: repo.into(),
             remote_url: format!("https://dev.azure.com/demo/atlas/_git/{repo}"),
+            ssh_url: String::new(),
             web_url: String::new(),
             default_branch: Some("refs/heads/main".into()),
         };
@@ -1784,23 +1813,50 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_clone_and_a_shared_checkout_in_use_are_refused_before_herdr_is_touched() {
+    fn a_missing_clone_is_cloned_first_and_a_shared_checkout_in_use_is_refused() {
         let dir = tempdir().unwrap();
         let fake = FakeHerdr::default();
         let herdr = Herdr::new(Box::new(fake.clone()));
         let mut store = store_in(dir.path());
-        let failure = launch(&herdr, &mut store, &plan_in(dir.path(), 715, "pay")).unwrap_err();
+
+        // No clone and nothing to clone from: refused before Herdr is touched.
+        let mut plan = plan_in(dir.path(), 715, "pay");
+        plan.repo.remote_url = String::new();
+        let failure = launch(&herdr, &mut store, &plan).unwrap_err();
         assert_eq!(failure.stage, Stage::Checkout);
         let message = format!("{:#}", failure.error);
-        assert!(message.contains("pay is not cloned here"), "{message}");
         assert!(
-            message.contains("C on the Repos tab clones it"),
+            message.contains("pay is not cloned here") && message.contains("no clone URL"),
             "{message}"
         );
         assert!(fake.calls().is_empty());
         assert!(store.sessions.is_empty());
 
+        // With a URL, the launch clones it into the workspace under its own
+        // name — where C on the Repos tab puts it — and carries on.
         let clone = clone_under(dir.path(), "pay");
+        std::fs::remove_dir_all(&clone).unwrap();
+        let mut plan = plan_in(dir.path(), 715, "pay");
+        plan.repo.remote_url = dir.path().join("pay.git").to_string_lossy().into_owned();
+        let (session, note) = launch(&herdr, &mut store, &plan).unwrap();
+        assert!(
+            note.starts_with(&format!("cloned into {}; worktree added", clone.display())),
+            "{note}"
+        );
+        assert!(clone.join(".git").exists());
+        assert!(session.workdir.join("README.md").exists());
+        assert_eq!(fake.state().panes[0].prompts.len(), 1);
+        // As the real thing would be: its origin is the repository.
+        run(
+            &clone,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://dev.azure.com/demo/atlas/_git/pay",
+            ],
+        );
+
         let mut shared = plan_in(dir.path(), 715, "pay");
         shared.policy = CheckoutPolicy::Shared;
         let (session, _) = launch(&herdr, &mut store, &shared).unwrap();
@@ -1814,7 +1870,7 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_to_copy_writes_the_handoff_and_makes_nothing_else() {
+    fn a_prompt_to_copy_writes_the_handoff_and_makes_no_worktree() {
         let dir = tempdir().unwrap();
         let clone = clone_under(dir.path(), "pay");
         let plan = plan_in(dir.path(), 715, "pay");
@@ -1832,6 +1888,22 @@ mod tests {
             !dir.path().join("work/.worktrees").exists(),
             "no worktree for a copy"
         );
+
+        // Without the clone, the copy clones too: the handoff has to name a
+        // path that is there.
+        std::fs::remove_dir_all(&clone).unwrap();
+        let mut plan = plan_in(dir.path(), 716, "pay");
+        plan.repo.remote_url = dir.path().join("pay.git").to_string_lossy().into_owned();
+        let (text, _) = prompt_only(&plan).unwrap();
+        assert!(clone.join(".git").exists(), "cloned for the copy");
+        assert!(
+            text.contains(&format!(
+                "checked out at {}",
+                clone.canonicalize().unwrap().display()
+            )),
+            "{text}"
+        );
+        assert!(!dir.path().join("work/.worktrees").exists());
     }
 
     #[test]

@@ -677,6 +677,35 @@ impl App {
                 self.history_forward();
                 AppAction::None
             }
+            // A launch of a repository the Repos tab is still cloning would
+            // race that clone, or build on the half of it that is there.
+            AppAction::Agent(request) => {
+                let plan = match &request {
+                    crate::agents::AgentRequest::Launch(plan)
+                    | crate::agents::AgentRequest::Prompt(plan) => Some(plan),
+                    _ => None,
+                };
+                if let Some(plan) = plan
+                    && let Some(job) = self.repos.job_for(&plan.repo.id)
+                {
+                    let message = format!(
+                        "{} is {} on the Repos tab; wait for it",
+                        plan.repo.name,
+                        job.label().trim_end_matches('\u{2026}')
+                    );
+                    self.work_items.apply_agent_event(
+                        &mut self.shell,
+                        crate::agents::AgentEvent::Failed {
+                            work_item: plan.ticket.id,
+                            stage: crate::agents::Stage::Checkout,
+                            message,
+                            session: None,
+                        },
+                    );
+                    return AppAction::None;
+                }
+                AppAction::Agent(request)
+            }
             other => other,
         }
     }

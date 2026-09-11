@@ -386,7 +386,7 @@ impl ReposScreen {
             );
             return AppAction::None;
         };
-        let Some(url) = clone_url(&row.repo) else {
+        let Some(url) = crate::local::clone_url(&row.repo.remote_url, &row.repo.ssh_url) else {
             shell.set_error(format!("Azure DevOps gave {} no clone URL", row.repo.name));
             return AppAction::None;
         };
@@ -547,24 +547,6 @@ fn repo_context(row: &RepoRow) -> crate::agent_context::RepoContext {
                     .map(|job| job.label().trim_end_matches('\u{2026}').to_owned()),
             }),
     }
-}
-
-/// What a clone reads from: https by default, because the local thread signs
-/// that with the login the sync already has, so it works before any SSH key
-/// is registered with Azure DevOps; ssh when `TICKET_TUI_CLONE_PROTOCOL=ssh`
-/// asks for it or there is no https URL on file.
-fn clone_url(repo: &Repo) -> Option<String> {
-    let ssh = std::env::var("TICKET_TUI_CLONE_PROTOCOL")
-        .is_ok_and(|protocol| protocol.eq_ignore_ascii_case("ssh"));
-    let (first, second) = if ssh {
-        (&repo.ssh_url, &repo.remote_url)
-    } else {
-        (&repo.remote_url, &repo.ssh_url)
-    };
-    [first, second]
-        .into_iter()
-        .find(|url| !url.is_empty())
-        .cloned()
 }
 
 /// How loudly a run asks to be looked at, lowest first: something broken, then

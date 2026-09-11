@@ -42,6 +42,16 @@ pub struct AgentFlow {
     pub copy_only: bool,
 }
 
+/// Whether a launch of `repo` clones it first: there is a workspace to
+/// clone into, no verified clone is in it, and config.toml names no path
+/// for it either.
+#[must_use]
+pub fn repo_needs_clone(shell: &Shell, repo: &Repo) -> bool {
+    shell.workspace().is_some()
+        && !shell.has_clone(&repo.id)
+        && shell.agent_settings.herdr.path_for(&repo.name).is_none()
+}
+
 impl WorkItemsScreen {
     /// The agent sessions on file, as the thread last reported them.
     #[must_use]
@@ -210,7 +220,25 @@ impl WorkItemsScreen {
         };
         let copy_only = self.agent_flow.copy_only;
         let id = plan.ticket.id;
-        let status = if copy_only {
+        let status = if let Some(root) = repo_needs_clone(shell, &repo)
+            .then(|| shell.workspace())
+            .flatten()
+        {
+            let then = if copy_only {
+                format!("writing the agent prompt for #{id}")
+            } else {
+                format!(
+                    "launching {} on #{id} in {}",
+                    plan.provider.label(),
+                    plan.workspace
+                )
+            };
+            format!(
+                "Cloning {} into {}, then {then}\u{2026}",
+                repo.name,
+                root.display()
+            )
+        } else if copy_only {
             format!("Writing the agent prompt for #{id}\u{2026}")
         } else {
             format!(
@@ -398,6 +426,7 @@ impl WorkItemsScreen {
                 id: repo.id.clone(),
                 name: repo.name.clone(),
                 remote_url: repo.remote_url.clone(),
+                ssh_url: repo.ssh_url.clone(),
                 web_url: repo.web_url.clone(),
                 default_branch: repo.default_branch.clone(),
             },

@@ -304,6 +304,66 @@ fn ctrl_s_on_a_workspace_remembers_the_routing_in_config_toml() {
 }
 
 #[test]
+fn w_says_it_will_clone_a_repository_that_is_not_here_and_waits_for_one_being_cloned() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = agent_app(dir.path());
+    let root = dir.path().join("dev");
+    app.shell.set_workspace(Some(root.clone()));
+    assert!(matches!(
+        press(&mut app, KeyCode::Char('w')),
+        AppAction::Agent(AgentRequest::Launch(_))
+    ));
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some(
+            format!(
+                "Cloning payments-api into {}, then launching Cursor on #715 in Payments\u{2026}",
+                root.display()
+            )
+            .as_str()
+        )
+    );
+    let free = |app: &mut App| {
+        app.work_items.apply_agent_event(
+            &mut app.shell,
+            AgentEvent::Failed {
+                work_item: 715,
+                stage: crate::agents::Stage::Checkout,
+                message: "no".into(),
+                session: None,
+            },
+        );
+    };
+    free(&mut app);
+
+    // While the Repos tab is cloning it, w waits rather than racing it.
+    app.repos
+        .set_job("aaa-111", Some(crate::model::GitJob::Cloning));
+    assert_eq!(press(&mut app, KeyCode::Char('w')), AppAction::None);
+    assert!(app.work_items.agent_busy().is_none(), "free to try again");
+    assert_eq!(
+        app.shell.notification().map(|(text, _)| text),
+        Some(
+            "#715: settling the checkout failed: payments-api is cloning on the Repos tab; wait for it"
+        )
+    );
+
+    // A verified clone here is not cloned again.
+    app.repos.set_job("aaa-111", None);
+    app.shell
+        .set_clones(std::iter::once("aaa-111".to_owned()).collect());
+    assert!(matches!(
+        press(&mut app, KeyCode::Char('w')),
+        AppAction::Agent(AgentRequest::Launch(_))
+    ));
+    assert!(
+        app.shell
+            .notification()
+            .is_some_and(|(text, _)| text.starts_with("Launching Cursor on #715")),
+    );
+}
+
+#[test]
 fn a_failed_stage_and_a_stale_agent_are_said_and_the_flow_is_free_again() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = agent_app(dir.path());
