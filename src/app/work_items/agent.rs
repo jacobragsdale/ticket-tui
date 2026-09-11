@@ -455,6 +455,7 @@ impl WorkItemsScreen {
                 .map_or_else(|| PathBuf::from("handoffs"), |dir| dir.join("handoffs")),
             force_new: flow.force_new,
             note: None,
+            prompt: None,
         })
     }
 

@@ -332,6 +332,9 @@ pub struct LaunchPlan {
     /// Start a new session even though one is live for this ticket.
     pub force_new: bool,
     pub note: Option<String>,
+    /// The prompt as edited on screen before the send; `None` sends the one
+    /// ticket-tui generates.
+    pub prompt: Option<String>,
 }
 
 impl LaunchPlan {
@@ -839,10 +842,7 @@ pub fn prompt_only(plan: &LaunchPlan) -> Result<(String, PathBuf), LaunchFailure
         settle_checkout(plan, false).map_err(|error| fail(Stage::Checkout, error, None))?;
     let files = handoff::write(&plan.handoff_dir, plan, &checkout)
         .map_err(|error| fail(Stage::Handoff, error, None))?;
-    Ok((
-        handoff::opening_prompt(plan, &checkout, &files),
-        files.context,
-    ))
+    Ok((handoff::prompt_for(plan, &checkout, &files), files.context))
 }
 
 /// The whole launch, one stage at a time, each written to the store before
@@ -905,7 +905,7 @@ pub fn launch(
         .map_err(|error| fail(Stage::Handoff, error, Some(session.clone())))?;
     session.context_path = Some(files.context.clone());
     if !session.prompt_sent {
-        session.prompt = Some(handoff::opening_prompt(plan, &checkout, &files));
+        session.prompt = Some(handoff::prompt_for(plan, &checkout, &files));
     }
     let save = |store: &mut SessionStore, session: &AgentSession, stage: Stage| {
         store
@@ -1368,7 +1368,10 @@ mod tests {
         assert_eq!(pane.label.as_deref(), Some("Copilot \u{00b7} #715"));
         assert_eq!(pane.cwd, session.workdir.to_string_lossy());
         assert_eq!(pane.prompts.len(), 1);
-        assert!(pane.prompts[0].starts_with("Work item #715 in demo/development"));
+        assert!(
+            pane.prompts[0]
+                .starts_with("/ticket-agent-workflow\nWork item #715 in demo/development")
+        );
         assert!(pane.prompts[0].contains("SKILL.md"));
         assert_eq!(state.focused.as_deref(), Some(pane.id.as_str()));
         // Persisted with Herdr's own ids.

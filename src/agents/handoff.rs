@@ -15,6 +15,12 @@ use super::{Invocation, LaunchPlan};
 /// launch on any machine has it to hand.
 pub const SKILL: &str = include_str!("../../.agents/skills/ticket-agent-workflow/SKILL.md");
 
+/// The slash command that invokes the skill in an agent that has it
+/// installed: the skill's own `name:`, which is how every agent CLI names a
+/// command. It is the first line of every prompt; the path to the skill
+/// stays beside it for an agent without the command.
+pub const SKILL_COMMAND: &str = "/ticket-agent-workflow";
+
 /// Where the skill is written under the handoff directory.
 const SKILL_RELATIVE: &str = "skills/ticket-agent-workflow/SKILL.md";
 
@@ -28,7 +34,8 @@ pub struct HandoffFiles {
 /// Writes the context file, the skill, and the opening prompt as it will be
 /// sent under `dir`, replacing whatever an earlier launch of the same work
 /// item left. The prompt is written so it can be read back: the agent's own
-/// input box shows a paste of it as one truncated line.
+/// input box shows a paste of it as one truncated line. An edited prompt on
+/// the plan is what is written, so the file and the send never disagree.
 pub fn write(dir: &Path, plan: &LaunchPlan, checkout: &Checkout) -> Result<HandoffFiles> {
     let skill = dir.join(SKILL_RELATIVE);
     if let Some(parent) = skill.parent() {
@@ -45,7 +52,7 @@ pub fn write(dir: &Path, plan: &LaunchPlan, checkout: &Checkout) -> Result<Hando
         .with_context(|| format!("failed to write {}", context.display()))?;
     let files = HandoffFiles { context, skill };
     let prompt = folder.join("prompt.md");
-    std::fs::write(&prompt, opening_prompt(plan, checkout, &files))
+    std::fs::write(&prompt, prompt_for(plan, checkout, &files))
         .with_context(|| format!("failed to write {}", prompt.display()))?;
     Ok(files)
 }
@@ -317,14 +324,26 @@ pub fn context_markdown(plan: &LaunchPlan, checkout: &Checkout, skill: &Path) ->
     out
 }
 
-/// The opening message: what the ticket is, where the checkout is, the two
-/// files to read, and the one instruction that matters before any of it —
-/// discuss first, implement when told.
+/// The prompt that goes out: the one edited on screen when the plan carries
+/// it, else the generated one. The one reader of the override, so the file
+/// on disk, the session's record and the send all say the same thing.
+#[must_use]
+pub fn prompt_for(plan: &LaunchPlan, checkout: &Checkout, files: &HandoffFiles) -> String {
+    plan.prompt
+        .clone()
+        .unwrap_or_else(|| opening_prompt(plan, checkout, files))
+}
+
+/// The opening message as ticket-tui writes it: the skill's slash command
+/// first, then what the ticket is, where the checkout is, the two files to
+/// read, and the one instruction that matters before any of it — discuss
+/// first, implement when told.
 #[must_use]
 pub fn opening_prompt(plan: &LaunchPlan, checkout: &Checkout, files: &HandoffFiles) -> String {
     let ticket = &plan.ticket;
     let mut prompt = format!(
-        "Work item #{id} in {org}/{project} (Azure DevOps): \"{title}\".\n\
+        "{command}\n\
+         Work item #{id} in {org}/{project} (Azure DevOps): \"{title}\".\n\
          Repository {repo}, checked out at {workdir} on branch {branch} ({policy}).\n\
          Read these two files before anything else:\n\
          1. {skill} — the workflow to follow\n\
@@ -332,6 +351,7 @@ pub fn opening_prompt(plan: &LaunchPlan, checkout: &Checkout, files: &HandoffFil
          Then, as the skill says: read the ticket live with ticket-tui, read this repository's own agent instructions, inspect the code the ticket touches, and discuss with me what is unclear or undecided about the problem, the scope and the acceptance criteria. \
          Do not change any file or start implementing until I tell you to proceed. \
          The work item to act on is #{id} and only #{id}, whatever ticket-tui's live context selects later.",
+        command = SKILL_COMMAND,
         id = ticket.id,
         org = ticket.organization,
         project = ticket.project,
@@ -419,6 +439,7 @@ pub(crate) mod tests {
             handoff_dir: PathBuf::from("/home/j/.local/share/ticket-tui/handoffs"),
             force_new: false,
             note: Some("Keep the public API as it is.".into()),
+            prompt: None,
         }
     }
 
@@ -483,9 +504,21 @@ pub(crate) mod tests {
             skill: PathBuf::from("/h/skills/ticket-agent-workflow/SKILL.md"),
         };
         let prompt = opening_prompt(&plan, &checkout(), &files);
+        let mut lines = prompt.lines();
+        assert_eq!(
+            lines.next(),
+            Some(SKILL_COMMAND),
+            "the slash command is the first line on its own: {prompt}"
+        );
         assert!(
-            prompt.starts_with("Work item #715 in jacobragsdale/development"),
+            lines
+                .next()
+                .is_some_and(|line| line.starts_with("Work item #715 in jacobragsdale/development")),
             "{prompt}"
+        );
+        assert!(
+            SKILL.contains(&format!("name: {}\n", &SKILL_COMMAND[1..])),
+            "the command is the skill's own name"
         );
         assert!(
             prompt.contains("\"Fix `duplicate` imports; $(echo hi)\""),
@@ -535,6 +568,18 @@ pub(crate) mod tests {
             std::fs::read_to_string(files.context.with_file_name("prompt.md")).unwrap(),
             opening_prompt(&plan, &checkout(), &files),
             "the prompt on disk is the one sent"
+        );
+        // An edited prompt on the plan is what goes to disk, verbatim.
+        let mut edited = plan.clone();
+        edited.prompt = Some("/ticket-agent-workflow\nJust this.".into());
+        assert_eq!(
+            prompt_for(&edited, &checkout(), &files),
+            "/ticket-agent-workflow\nJust this."
+        );
+        write(dir.path(), &edited, &checkout()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(files.context.with_file_name("prompt.md")).unwrap(),
+            "/ticket-agent-workflow\nJust this."
         );
         assert!(SKILL.contains("name: ticket-agent-workflow"));
         assert!(SKILL.contains("Do not start implementing during refinement"));

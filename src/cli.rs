@@ -901,6 +901,7 @@ fn agent_plan(
             .map_or_else(|| PathBuf::from("handoffs"), |dir| dir.join("handoffs")),
         force_new,
         note,
+        prompt: None,
     })
 }
 
