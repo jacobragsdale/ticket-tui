@@ -333,17 +333,27 @@ impl Herdr {
             .map(|result| pane_of(&result["pane"])))
     }
 
-    /// Whether nothing but a shell prompt is in the pane: no agent, and no
-    /// process in the foreground. A pane somebody is running a server or an
-    /// editor in is not free, whatever the agent detector says.
-    pub fn pane_is_free(&self, pane: &Pane) -> Result<bool> {
-        if pane.agent.is_some() {
+    /// Whether `pane` can take an agent for `workdir`: nothing but a shell
+    /// prompt is in it, and that shell is in `workdir`. At a prompt the shell
+    /// itself is the foreground process group (Herdr 0.9 lists it), so a pane
+    /// somebody is running a server or an editor in is not free whatever the
+    /// agent detector says. A shell somewhere else is left alone: an agent
+    /// started in it would work there, not in the checkout.
+    pub fn pane_free_in(&self, pane: &Pane, workdir: &Path) -> Result<bool> {
+        if pane.agent.is_some() || !same_directory(Path::new(&pane.cwd), workdir) {
             return Ok(false);
         }
         let Some(result) = self.lookup(&["pane", "process-info", "--pane", &pane.id])? else {
             return Ok(false);
         };
-        Ok(list(&result["process_info"], "foreground_processes").is_empty())
+        let info = &result["process_info"];
+        let shell = info["shell_pid"].as_u64();
+        Ok(match info["foreground_process_group_id"].as_u64() {
+            Some(group) => Some(group) == shell,
+            None => list(info, "foreground_processes")
+                .iter()
+                .all(|process| process["pid"].as_u64() == shell),
+        })
     }
 
     /// A new pane to the right of `pane`, opened in `cwd`.
@@ -472,6 +482,12 @@ impl Herdr {
     }
 }
 
+/// Whether two paths name one directory, as the filesystem spells them.
+fn same_directory(left: &Path, right: &Path) -> bool {
+    let spell = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    spell(left) == spell(right)
+}
+
 /// Herdr's own rule for an agent name: `[a-z][a-z0-9_-]{0,31}`. A work item
 /// number always fits it.
 #[must_use]
@@ -510,6 +526,8 @@ pub(crate) mod fake {
         /// Whether something other than a shell prompt is in the foreground.
         pub busy: bool,
         pub prompts: Vec<String>,
+        /// The shell's pid, which is the foreground process group at a prompt.
+        pub pid: u64,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -592,6 +610,7 @@ pub(crate) mod fake {
                 workspace_id: workspace,
                 agent: agent.map(str::to_owned),
                 cwd: cwd.to_owned(),
+                pid: 1000 + self.next as u64,
                 ..FakePane::default()
             });
             id
@@ -725,16 +744,19 @@ pub(crate) mod fake {
                 ["pane", "process-info", "--pane", id] => {
                     match self.panes.iter().find(|pane| pane.id == *id) {
                         Some(pane) => {
-                            let foreground: Vec<Value> = if pane.busy || pane.agent.is_some() {
-                                vec![
-                                    json!({"name": pane.agent.clone().unwrap_or_else(|| "vim".into())}),
-                                ]
-                            } else {
-                                Vec::new()
+                            // As Herdr 0.9 reports it: at a prompt the shell
+                            // itself is the foreground; else what is in it.
+                            let (name, pid) = match (&pane.agent, pane.busy) {
+                                (Some(agent), _) => (agent.clone(), pane.pid + 1),
+                                (None, true) => ("vim".to_owned(), pane.pid + 1),
+                                (None, false) => ("zsh".to_owned(), pane.pid),
                             };
-                            Ok(
-                                json!({"process_info": {"pane_id": id, "foreground_processes": foreground}}),
-                            )
+                            Ok(json!({"process_info": {
+                                "pane_id": id,
+                                "shell_pid": pane.pid,
+                                "foreground_process_group_id": pid,
+                                "foreground_processes": [{"name": name, "pid": pid}],
+                            }}))
                         }
                         None => unknown(),
                     }
@@ -975,7 +997,11 @@ mod tests {
         assert_eq!(workspace.label, "Payments");
         assert_eq!(tab.workspace_id, workspace.id);
         assert_eq!(pane.tab_id, tab.id);
-        assert!(herdr.pane_is_free(&pane).unwrap());
+        assert!(herdr.pane_free_in(&pane, Path::new("/src/pay")).unwrap());
+        assert!(
+            !herdr.pane_free_in(&pane, Path::new("/src/other")).unwrap(),
+            "a shell in another directory is not free for this one"
+        );
         herdr
             .start_agent(
                 "wi-715",
@@ -986,7 +1012,10 @@ mod tests {
             .unwrap();
         assert!(
             !herdr
-                .pane_is_free(&herdr.pane(&pane.id).unwrap().unwrap())
+                .pane_free_in(
+                    &herdr.pane(&pane.id).unwrap().unwrap(),
+                    Path::new("/src/pay")
+                )
                 .unwrap()
         );
         assert_eq!(

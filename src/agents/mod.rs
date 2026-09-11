@@ -950,7 +950,7 @@ pub fn launch(
         let mut free = None;
         for pane in &panes {
             if herdr
-                .pane_is_free(pane)
+                .pane_free_in(pane, &checkout.workdir)
                 .map_err(|error| fail(Stage::Pane, error, Some(session.clone())))?
             {
                 free = Some(pane.id.clone());
@@ -1074,7 +1074,8 @@ fn revalidate_pending(herdr: &Herdr, session: &mut AgentSession) -> Result<()> {
                 .agent(&pane.id)?
                 .is_some_and(|agent| agent.name.as_deref().is_none_or(|held| held == name)),
             (Some(pane), None) => {
-                Some(&pane.tab_id) == session.tab_id.as_ref() && herdr.pane_is_free(pane)?
+                Some(&pane.tab_id) == session.tab_id.as_ref()
+                    && herdr.pane_free_in(pane, &session.workdir)?
             }
             (None, _) => false,
         };
@@ -1364,7 +1365,7 @@ mod tests {
     #[test]
     fn a_second_ticket_in_the_same_repository_splits_to_the_right_and_a_free_pane_is_reused() {
         let dir = tempdir().unwrap();
-        clone_under(dir.path(), "pay");
+        let clone = clone_under(dir.path(), "pay").canonicalize().unwrap();
         let fake = FakeHerdr::default();
         let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
         let mut store = store_in(dir.path());
@@ -1393,16 +1394,37 @@ mod tests {
                 .any(|call| call.starts_with("pane split") && call.contains("--direction right"))
         );
 
-        // The user opens a plain shell pane in that tab: the next launch takes
-        // it rather than splitting again.
+        // The user opens a plain shell pane in that tab, somewhere else: it
+        // is left alone, and the launch splits again.
         let tab = state.tabs[0].0.clone();
-        let free = fake.state.lock().unwrap().add_pane(&tab, "/anywhere", None);
+        let elsewhere = fake.state.lock().unwrap().add_pane(&tab, "/anywhere", None);
         let (third, note) = launch(&herdr, &mut store, &plan_in(dir.path(), 730, "pay")).unwrap();
-        assert_eq!(third.pane_id.as_deref(), Some(free.as_str()));
+        assert_ne!(third.pane_id.as_deref(), Some(elsewhere.as_str()));
+        assert!(note.contains("in a new pane to the right"), "{note}");
+
+        // A shell pane already in the ticket's worktree is taken.
+        let worktree_of = |id: i64| {
+            checkout::worktree_path(
+                &clone,
+                "pay",
+                &crate::app::work_items::branch_name(id, &format!("Ticket {id}")),
+            )
+        };
+        let free =
+            fake.state
+                .lock()
+                .unwrap()
+                .add_pane(&tab, &worktree_of(731).to_string_lossy(), None);
+        let (fourth, note) = launch(&herdr, &mut store, &plan_in(dir.path(), 731, "pay")).unwrap();
+        assert_eq!(fourth.pane_id.as_deref(), Some(free.as_str()));
         assert!(note.contains("in a free pane"), "{note}");
 
-        // A pane with a process in the foreground is not free.
-        let busy = fake.state.lock().unwrap().add_pane(&tab, "/anywhere", None);
+        // A pane with a process in the foreground is not free, wherever it is.
+        let busy =
+            fake.state
+                .lock()
+                .unwrap()
+                .add_pane(&tab, &worktree_of(732).to_string_lossy(), None);
         fake.state
             .lock()
             .unwrap()
@@ -1411,8 +1433,8 @@ mod tests {
             .find(|pane| pane.id == busy)
             .unwrap()
             .busy = true;
-        let (fourth, _) = launch(&herdr, &mut store, &plan_in(dir.path(), 731, "pay")).unwrap();
-        assert_ne!(fourth.pane_id.as_deref(), Some(busy.as_str()));
+        let (fifth, _) = launch(&herdr, &mut store, &plan_in(dir.path(), 732, "pay")).unwrap();
+        assert_ne!(fifth.pane_id.as_deref(), Some(busy.as_str()));
     }
 
     #[test]
@@ -1438,13 +1460,20 @@ mod tests {
     #[test]
     fn an_existing_workspace_and_tab_are_found_by_label_and_a_duplicate_label_is_refused() {
         let dir = tempdir().unwrap();
-        clone_under(dir.path(), "pay");
+        let clone = clone_under(dir.path(), "pay").canonicalize().unwrap();
         let mut state = FakeState::default();
         let other = state.add_workspace("Other");
         state.add_tab(&other, "1");
         let payments = state.add_workspace("payments");
         let tab = state.add_tab(&payments, "Pay");
-        let root = state.add_pane(&tab, "/anywhere", None);
+        // A shell already in the ticket's worktree, as one left by an agent
+        // that exited would be.
+        let worktree = checkout::worktree_path(
+            &clone,
+            "pay",
+            &crate::app::work_items::branch_name(715, "Ticket 715"),
+        );
+        let root = state.add_pane(&tab, &worktree.to_string_lossy(), None);
         let fake = FakeHerdr::with(state);
         let herdr = Herdr::new(Box::new(fake.clone())).without_settle();
         let mut store = store_in(dir.path());
