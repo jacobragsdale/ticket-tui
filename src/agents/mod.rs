@@ -776,14 +776,22 @@ fn settle_checkout(plan: &LaunchPlan, for_launch: bool) -> Result<Checkout> {
         .clone()
         .unwrap_or_else(|| "main".to_owned());
     if for_launch {
-        checkout::settle(
+        let checkout = checkout::settle(
             &clone,
             &plan.repo.name,
             &branch,
             &base,
             plan.policy,
             plan.linked_branch.is_some() || plan.pull_request.is_some(),
-        )
+        )?;
+        // Herdr, handed a directory that is not there, opens the pane in the
+        // home directory and says nothing; better refused here.
+        anyhow::ensure!(
+            checkout.workdir.is_dir(),
+            "{} is not a directory; the agent would start in the wrong place",
+            checkout.workdir.display()
+        );
+        Ok(checkout)
     } else {
         // For a prompt to copy, nothing is made: the terminal the user has
         // open is wherever it is, so the handoff names the clone.

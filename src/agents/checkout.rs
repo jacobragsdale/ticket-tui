@@ -189,6 +189,11 @@ pub fn worktree_path(clone: &Path, repo_name: &str, branch: &str) -> PathBuf {
 /// The worktree of `clone` that has `branch` checked out — the clone itself
 /// when it does — or `None`.
 pub fn worktree_holding(clone: &Path, branch: &str) -> Result<Option<PathBuf>> {
+    // A worktree whose directory was deleted by hand stays registered: git
+    // refuses to add it again, and Herdr, handed the missing path, opens the
+    // agent in the home directory instead. Pruning forgets it; a locked one
+    // survives as `prunable` and is skipped by the parser.
+    let _ = git(clone, &["worktree", "prune"]);
     let listing = git(clone, &["worktree", "list", "--porcelain"])?;
     Ok(parse_worktrees(&listing)
         .into_iter()
@@ -197,7 +202,7 @@ pub fn worktree_holding(clone: &Path, branch: &str) -> Result<Option<PathBuf>> {
 }
 
 /// `git worktree list --porcelain`, read as (path, branch) pairs; a detached
-/// worktree has no branch.
+/// worktree has no branch, and one git calls `prunable` is not here at all.
 #[must_use]
 pub fn parse_worktrees(listing: &str) -> Vec<(PathBuf, Option<String>)> {
     let mut found = Vec::new();
@@ -217,6 +222,8 @@ pub fn parse_worktrees(listing: &str) -> Vec<(PathBuf, Option<String>)> {
                     .unwrap_or(branch)
                     .to_owned(),
             );
+        } else if line.starts_with("prunable") {
+            current = None;
         }
     }
     if let Some(done) = current {
@@ -285,7 +292,9 @@ mod tests {
     fn worktree_listings_read_as_path_and_branch() {
         let listing = "worktree /src/pay\nHEAD abc\nbranch refs/heads/main\n\n\
                        worktree /src/.worktrees/pay/715-x\nHEAD def\nbranch refs/heads/715-x\n\n\
-                       worktree /src/detached\nHEAD 123\ndetached\n";
+                       worktree /src/detached\nHEAD 123\ndetached\n\n\
+                       worktree /src/.worktrees/pay/716-gone\nHEAD 456\nbranch refs/heads/716-gone\n\
+                       prunable gitdir file points to non-existent location\n";
         assert_eq!(
             parse_worktrees(listing),
             [
@@ -355,6 +364,22 @@ mod tests {
         .unwrap();
         assert_eq!(again.workdir, first.workdir);
         assert!(again.note.contains("already on 715-fix"), "{}", again.note);
+
+        // The worktree directory is deleted by hand: git still lists it, and
+        // would refuse to add it again. The launch gets it back all the same.
+        std::fs::remove_dir_all(&first.workdir).unwrap();
+        let back = settle(
+            &clone,
+            "pay",
+            "715-fix",
+            "refs/heads/main",
+            CheckoutPolicy::Worktree,
+            false,
+        )
+        .unwrap();
+        assert_eq!(back.workdir, first.workdir);
+        assert!(back.workdir.join("README.md").exists());
+        assert!(back.note.contains("local branch 715-fix"), "{}", back.note);
 
         // The branch the clone itself is on is the clone.
         let main = settle(
