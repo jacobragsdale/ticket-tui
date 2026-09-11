@@ -1589,21 +1589,31 @@ mod tests {
         let herdr = Herdr::new(Box::new(fake.clone()));
         let mut store = store_in(dir.path());
         let plan = plan_in(dir.path(), 715, "pay");
-        // The CLI comes up but not ready — a login prompt, say — and is not
-        // ready in time either: Herdr holds the name all the same.
+        // The CLI comes up stopped at a dialog of its own — a trust question,
+        // a login. That needs a person, so it is said at once rather than
+        // waited out; Herdr holds the name all the same.
         fake.state.lock().unwrap().start_blocked = true;
-        fake.fail("agent wait", "timeout", "still not ready");
         let failure = launch(&herdr, &mut store, &plan).unwrap_err();
         assert_eq!(failure.stage, Stage::Agent);
+        let message = format!("{:#}", failure.error);
+        assert!(
+            message.contains("waiting for an answer in its pane"),
+            "{message}"
+        );
         assert_eq!(
             failure.session.unwrap().agent_name.as_deref(),
             Some("wi-715")
         );
 
-        // Once it is ready, the retry prompts that agent: no second start,
-        // no second pane.
-        fake.clear_failure();
-        fake.state.lock().unwrap().start_blocked = false;
+        // The user answers it. The retry prompts that agent: no second
+        // start, no second pane.
+        {
+            let mut state = fake.state.lock().unwrap();
+            state.start_blocked = false;
+            for pane in &mut state.panes {
+                pane.blocked = false;
+            }
+        }
         let (session, _) = launch(&herdr, &mut store, &plan).unwrap();
         assert!(session.is_complete());
         assert_eq!(session.agent_name.as_deref(), Some("wi-715"));
@@ -1640,8 +1650,9 @@ mod tests {
             "the pane stands"
         );
         let message = format!("{:#}", failure.error);
+        assert!(message.contains("the pane shows: "), "{message}");
         assert!(
-            message.contains("the pane shows: zsh: command not found: cursor-agent"),
+            message.contains("zsh: command not found: cursor-agent"),
             "{message}"
         );
         assert!(

@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 /// One `herdr` invocation, answered with the `result` object it printed.
@@ -441,16 +441,17 @@ impl Herdr {
     /// after Herdr's `--`. Herdr answers once the CLI is ready for input; one
     /// that is slower than its timeout is waited for once more, since the
     /// name is registered either way. A start that fails says what the pane
-    /// shows — `command not found` is the usual reason a start times out.
+    /// shows: `command not found` is the usual reason a start times out, and
+    /// a dialog is the usual reason it is not ready.
     pub fn start_agent(&self, name: &str, kind: &str, pane: &str, args: &[String]) -> Result<()> {
         self.start(name, kind, pane, args)
             .map_err(|error| match self.pane_tail(pane) {
-                Some(line) => error.context(format!("the pane shows: {line}")),
+                Some(tail) => error.context(format!("the pane shows: {tail}")),
                 None => error,
             })
     }
 
-    /// The last line of text in `pane`, if any.
+    /// The last few lines of text in `pane` as one line, if there are any.
     fn pane_tail(&self, pane: &str) -> Option<String> {
         let text = self
             .api
@@ -464,12 +465,16 @@ impl Herdr {
                 "8",
             ])
             .ok()?;
-        text.as_str()?
+        let mut tail: Vec<&str> = text
+            .as_str()?
             .lines()
-            .rev()
             .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(str::to_owned)
+            .filter(|line| !line.is_empty())
+            .rev()
+            .take(4)
+            .collect();
+        tail.reverse();
+        (!tail.is_empty()).then(|| tail.join(" / "))
     }
 
     fn start(&self, name: &str, kind: &str, pane: &str, args: &[String]) -> Result<()> {
@@ -493,6 +498,9 @@ impl Herdr {
             Err(error)
                 if herdr_error(&error).is_some_and(|error| error.code == "agent_not_ready") =>
             {
+                // Slow, or stopped at a dialog of its own — a trust question,
+                // a login. A dialog needs a person: it is said at once rather
+                // than waited out, and `w` carries on once it is answered.
                 self.api
                     .call(&[
                         "agent",
@@ -500,11 +508,21 @@ impl Herdr {
                         name,
                         "--until",
                         "idle",
+                        "--until",
+                        "blocked",
                         "--timeout",
                         START_TIMEOUT_MS,
                     ])
-                    .map(drop)
-                    .with_context(|| format!("{name} started but never came ready"))
+                    .with_context(|| format!("{name} started but never came ready"))?;
+                if self
+                    .agent(name)?
+                    .is_some_and(|agent| agent.status == "blocked")
+                {
+                    bail!(
+                        "{name} is waiting for an answer in its pane; answer it, then press w again"
+                    );
+                }
+                Ok(())
             }
             Err(error) => Err(error),
         }
@@ -635,6 +653,8 @@ pub(crate) mod fake {
         pub prompts: Vec<String>,
         /// The shell's pid, which is the foreground process group at a prompt.
         pub pid: u64,
+        /// Whether the agent in it is stopped at a dialog.
+        pub blocked: bool,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -740,9 +760,10 @@ pub(crate) mod fake {
         }
 
         fn pane_json(pane: &FakePane) -> Value {
+            let status = if pane.blocked { "blocked" } else { "idle" };
             json!({
                 "pane_id": pane.id, "tab_id": pane.tab_id, "workspace_id": pane.workspace_id,
-                "agent": pane.agent, "cwd": pane.cwd, "agent_status": pane.agent.as_ref().map(|_| "idle"),
+                "agent": pane.agent, "cwd": pane.cwd, "agent_status": pane.agent.as_ref().map(|_| status),
                 "name": pane.agent_name,
             })
         }
@@ -931,6 +952,7 @@ pub(crate) mod fake {
                         Some(held) if held.agent.is_none() && !held.busy => {
                             held.agent = Some(kind);
                             held.agent_name = Some(name.clone());
+                            held.blocked = blocked;
                             if blocked {
                                 return Err(HerdrError {
                                     code: "agent_not_ready".into(),
@@ -954,6 +976,11 @@ pub(crate) mod fake {
                         .pane_by_target_mut(target)
                         .filter(|pane| pane.agent.is_some())
                     {
+                        Some(pane) if pane.blocked => Err(HerdrError {
+                            code: "agent_blocked".into(),
+                            message: "the agent is blocked and requires interactive input".into(),
+                        }
+                        .into()),
                         Some(pane) => {
                             pane.prompts.push((*text).to_owned());
                             if stalls {
