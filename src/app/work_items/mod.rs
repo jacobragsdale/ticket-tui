@@ -9,8 +9,8 @@ use super::*;
 
 pub use agent::{AgentChoice, AgentFlow, AgentPicker, HandoffEditor};
 pub use compose::Composer;
-use edits::{BulkEdit, PendingEdit, UndoEntry};
 pub use edits::{DeleteConfirm, EditMenu, EditScope, PromptField, SyncTarget, TextPrompt};
+use edits::{PendingEdit, UndoEntry};
 pub use family::{ChildProgress, ChildProgressIndex};
 pub use forms::{FormField, FormFieldId, FormFieldKind, FormKind, FormOverlay, FormPicker};
 pub use link::{LinkPicker, branch_name};
@@ -175,10 +175,6 @@ const NO_SPRINT_NOTICE: [&str; 4] = [
 /// the session in its own right.
 const UNDO_DEPTH: usize = 20;
 
-/// How many refused work items a bulk change names before it counts the rest.
-/// Three is enough to act on and short enough to read in one notification.
-const NAMED_BULK_FAILURES: usize = 3;
-
 /// How many cells wide the details pane draws the bar beside the ratio.
 pub const PROGRESS_BAR_CELLS: usize = 6;
 
@@ -314,17 +310,10 @@ pub struct WorkItemsScreen {
     /// The moves waiting on Azure DevOps, each remembering the parent the work
     /// item hung under before it was made. A refusal puts that parent back.
     pending_reparents: HashMap<TicketKey, Option<TicketKey>>,
-    /// Bulk changes with answers still to come, newest last. There is normally
-    /// at most one, but a second started before the first has finished is
-    /// counted on its own rather than taking the first one's place.
-    bulk_edits: Vec<BulkEdit>,
     /// The edits this session has landed, oldest first, each one ready to be
     /// put back by `u`. Capped at [`UNDO_DEPTH`]; it is not written anywhere,
     /// so it starts empty every run.
     undo_stack: Vec<UndoEntry>,
-    /// How many dispatches this session has made, which is where an undo entry
-    /// gets the number that gathers a bulk change's work items into one.
-    undo_groups: u64,
     /// Work items with a comment posted and not answered yet. A comment is not
     /// optimistic, so this is only what stops a second one being typed on top
     /// of the first.
@@ -451,9 +440,7 @@ impl WorkItemsScreen {
             details_pending: None,
             pending_edits: HashMap::new(),
             pending_reparents: HashMap::new(),
-            bulk_edits: Vec::new(),
             undo_stack: Vec::new(),
-            undo_groups: 0,
             pending_comments: HashSet::new(),
             pending_deletes: HashSet::new(),
             delete_confirm: None,

@@ -21,13 +21,14 @@ This page describes the work-item grammar first, because it is the largest, and
 then the shorter ones. Each is used by the subcommand named beside it.
 
 A query is a sequence of `field:value` pairs and free text. Values in one field
-are ORed, different fields are ANDed, and everything left over is matched
-fuzzily and orders the rows by how well it matched.
+are ORed, different fields are ANDed, and every word left over has to appear
+in the row literally — letters together, in order — and orders the rows by how
+well it matched.
 
 ```console
 ticket-tui list --query 'state:doing state:"to do" assignee:@me'
 ticket-tui list --query 'type:Issue tag:agents changed:<7d'
-ticket-tui list --query 'type:Epic sync'          # `sync` is the fuzzy term
+ticket-tui list --query 'type:Epic sync'          # `sync` is the search term
 ```
 
 ## Work items — `ticket-tui list --query`
@@ -53,7 +54,7 @@ live in the session file, so it matches nothing from `ticket-tui list`.
 Comparisons are case-insensitive. `area:` and `iteration:` also match a bare
 last path segment, so `iteration:"Sprint 1"` finds work items whose iteration is
 `development\Sprint 1`. An unrecognized field name is not an error — it falls
-through and becomes fuzzy text.
+through and becomes search text.
 
 Values containing spaces are quoted with `"` or `'`, and `\` escapes the next
 character:
@@ -94,7 +95,7 @@ no sprint scheduled around today is refused the same way.
 
 These take a comparison rather than a value, because a date has no enumerable
 list. Anything without an operator is not a comparison and falls through to
-fuzzy text — `changed:7d` matches nothing useful; `changed:<7d` is what you
+search text — `changed:7d` matches nothing useful; `changed:<7d` is what you
 meant.
 
 | Form | Meaning |
@@ -129,11 +130,11 @@ these two fields; anything else is typed into the search box.
 
 ## Ordering
 
-Without a fuzzy term, `list` returns rows newest change first, ties broken by
-descending id — the same order the TUI's table opens on. With a fuzzy term the
-rows come back in relevance order. Fuzzy matching covers id, title, assignee,
-state, type, area, iteration, and tags; it deliberately excludes descriptions,
-so searching for a phrase from a ticket body will not find it.
+Without a search term, `list` returns rows newest change first, ties broken by
+descending id — the same order the TUI's table opens on. With a search term the
+rows come back in relevance order. Matching covers id, title, assignee, state,
+type, area, iteration, and tags; it deliberately excludes descriptions, so
+searching for a phrase from a ticket body will not find it.
 
 ## Repositories — `ticket-tui repos list --query`
 
@@ -144,7 +145,7 @@ so searching for a phrase from a ticket body will not find it.
 | `local:` | `cloned`, `missing`, `dirty`, `ahead`, `behind` — what the clone on this machine is |
 | `disabled:` | `yes` or `no` |
 
-Fuzzy text matches the name and the branch.
+Search text matches the name and the branch.
 
 ```console
 ticket-tui repos list --query 'local:dirty'
@@ -169,7 +170,7 @@ all when the workspace does not exist — every repository then reads
 | `draft:` | | `yes` or `no` |
 | `build:` | | What the branch policy's build says: `succeeded`, `running`, `failed`, `none` |
 
-Fuzzy text matches the title, the repository and both branches.
+Search text matches the title, the repository and both branches.
 
 ```console
 ticket-tui prs list --query 'reviewer:@me vote:none'     # the review queue

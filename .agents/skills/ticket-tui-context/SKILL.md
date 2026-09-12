@@ -52,8 +52,8 @@ ticket-tui show 627 --json
 `--json` prints one object per work item and `show --json` adds `description`.
 
 `--query` takes the TUI's own grammar: `field:value` pairs narrow — values in
-one field ORed, different fields ANDed — and whatever is left over is matched
-fuzzily and orders the rows. `state`, `type`, `assignee`, `priority`, `project`,
+one field ORed, different fields ANDed — and whatever is left over has to
+appear in the row literally and orders the rows. `state`, `type`, `assignee`, `priority`, `project`,
 `area`, `iteration`, `tag`, `id`, and the date comparisons `changed:<7d` and
 `created:>=2026-08-01`. `assignee:@me` is whoever the last sync signed in as.
 Every tab has its own vocabulary in the same shape:
@@ -183,8 +183,6 @@ Interpreting what comes back:
   them optimistically, so report them as in flight, not as stored.
 - **`active_tab`** is where the user is. Every other tab is still described, so
   "my pull request" is answerable from the Work items tab.
-- **`Selected`** drives the details pane; **`Checked`** is the independent
-  multi-select set used by bulk actions and can hold different work items.
 - **Visible rows** are only the rendered viewport — compare against the matching
   and total counts before saying "there are N".
 - **`work_items.tickets.finished_hidden`** means the table is leaving Done and

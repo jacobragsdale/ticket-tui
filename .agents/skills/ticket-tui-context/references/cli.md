@@ -162,7 +162,7 @@ unassigned work item shows `—`. No match prints `no matching work items` and
 exits 0.
 
 - `--query` is the filter grammar in [filters.md](filters.md), not WIQL.
-- Without a fuzzy term the rows come back newest change first, ties broken by
+- Without a search term the rows come back newest change first, ties broken by
   descending id. With one they come back in relevance order.
 - `assignee:@me` resolves to `me_display_name` from the last sync, overridden by
   `TICKET_TUI_ME`. With neither it is an error, not a silent match-everything.

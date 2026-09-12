@@ -284,7 +284,7 @@ def print_work_items(data: dict[str, object]) -> None:
 
     search = object_mapping(data.get("search"))
     print(f"Query: {search.get('query') or '(none)'}")
-    print(f"Fuzzy: {search.get('fuzzy_text') or '(none)'}")
+    print(f"Search: {search.get('fuzzy_text') or '(none)'}")
     filters = object_list(search.get("filters"))
     print(f"Filters: {', '.join(map(str, filters)) if filters else '(none)'}")
     pending = " (search pending)" if search.get("pending") else ""

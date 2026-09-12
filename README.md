@@ -4,7 +4,7 @@ A fast terminal browser for Azure DevOps work items — and for the repositories
 pull requests and pipelines beside them.
 
 `ticket-tui` keeps a local SQLite database synced from one Azure DevOps project
-and reads from that database, so navigation, sorting, filtering and fuzzy
+and reads from that database, so navigation, sorting, filtering and
 search stay instant no matter how far away the server is. Azure DevOps stays
 the source of truth: a background worker pulls the project every minute, and a
 field changed in the TUI is written straight back over the REST API. Everything
@@ -68,7 +68,7 @@ offline, browsing whatever the database already holds.
 | Key | Does |
 |---|---|
 | `1`–`4` | Work items, Repos, Pull requests, Pipelines |
-| `/` | Live fuzzy search — `state:active`, `assignee:@me`, `iteration:@past`, `id:642`, `repo:ado-helper` |
+| `/` | Live search, on the text a row literally contains — `state:active`, `assignee:@me`, `iteration:@past`, `id:642`, `repo:ado-helper` |
 | `p` / `:` | The command palette: every action the tab can take |
 | `e` | The Actions menu — edit title, state, assignee, tags, description, acceptance criteria, comment |
 | `n` / `N` | New work item, or a new child of the selected one |

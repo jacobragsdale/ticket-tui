@@ -1,5 +1,5 @@
-//! Writing to Azure DevOps: field edits, undo, bulk changes, comments,
-//! reparenting and deletion.
+//! Writing to Azure DevOps: field edits, undo, comments, reparenting and
+//! deletion.
 
 use super::*;
 
@@ -151,56 +151,39 @@ impl PendingEdit {
 /// What an edit in flight is to the undo stack.
 #[derive(Clone, Debug)]
 pub(super) enum UndoRole {
-    /// An ordinary edit, filed under the dispatch that made it once it lands.
-    /// The work items of one bulk change share a number, so they gather into
-    /// a single entry and one `u` takes the whole change back.
-    Undoable(u64),
+    /// An ordinary edit, filed on the stack once it lands.
+    Undoable,
     /// An edit that is itself an undo, which is not filed: taking one back
     /// would only put the change on again, and the edit under it on the stack
     /// would never be reached. The line is what the status says when this
-    /// lands, and is `None` for one work item of an undo whose summary speaks
-    /// for the whole of it.
-    Undoing(Option<String>),
+    /// lands.
+    Undoing(String),
 }
 
-/// One work item on the undo stack: the change that puts its field back the
-/// way it was before the edit that is being taken back.
+/// What one press of `u` takes back: the change that puts one work item's
+/// field the way it was before the edit being taken back.
 #[derive(Clone, Debug)]
-pub(super) struct UndoStep {
+pub(super) struct UndoEntry {
+    /// What the field is called, such as `State`.
+    label: String,
+    /// The value the edit wrote, which is the half of the story the headline
+    /// cannot read back off the change that restores it.
+    wrote: String,
     key: TicketKey,
     edit: FieldEdit,
 }
 
-/// Everything one press of `u` takes back: the work items one dispatch
-/// changed, under a single entry.
-#[derive(Clone, Debug)]
-pub(super) struct UndoEntry {
-    /// The dispatch these came from, so a bulk change's work items gather here
-    /// as their answers arrive rather than stacking up one entry apiece.
-    group: u64,
-    /// What the field is called, such as `State`.
-    label: String,
-    /// The value the edit wrote, which is the half of the story the work items
-    /// share however different the values they are going back to are.
-    wrote: String,
-    steps: Vec<UndoStep>,
-}
-
 impl UndoEntry {
-    /// What the status line says once the undo has landed. One work item names
-    /// the value both ways — `Undid State on #613 (Doing → To Do)`; a bulk
-    /// change put several different values back, so it counts them instead.
+    /// What the status line says once the undo has landed, naming the value
+    /// both ways — `Undid State on #613 (Doing → To Do)`.
     fn headline(&self) -> String {
-        match self.steps.as_slice() {
-            [step] => format!(
-                "Undid {} on #{} ({} → {})",
-                self.label,
-                step.key.id,
-                self.wrote,
-                step.edit.value_text()
-            ),
-            steps => format!("Undid {} on {} tickets", self.label, steps.len()),
-        }
+        format!(
+            "Undid {} on #{} ({} → {})",
+            self.label,
+            self.key.id,
+            self.wrote,
+            self.edit.value_text()
+        )
     }
 }
 
@@ -220,66 +203,6 @@ pub struct SyncTarget {
     /// Seconds between timer pulls, `0` when `--refresh 0` left the sync key
     /// as the only thing that pulls.
     pub refresh_seconds: u64,
-}
-
-/// One undo asked of several work items at once, and what has come back of
-/// it. Each edit is its own request with its own revision test, so they land
-/// one at a time; this counts the answers so the undo speaks once, when the
-/// last of them is in, rather than once a row.
-#[derive(Clone, Debug)]
-pub(super) struct BulkEdit {
-    /// What the whole undo says for itself once every answer is in.
-    headline: String,
-    /// How many work items it was asked of, answered or not.
-    total: usize,
-    /// How many of them Azure DevOps accepted.
-    updated: usize,
-    /// What went wrong, one line a work item, in the order they answered.
-    failures: Vec<String>,
-    /// The work items still waiting on an answer.
-    outstanding: HashSet<TicketKey>,
-}
-
-impl BulkEdit {
-    /// Files one answer, and says whether that was the last one outstanding.
-    fn record(&mut self, key: &TicketKey, failure: Option<String>) -> bool {
-        self.outstanding.remove(key);
-        match failure {
-            Some(failure) => self.failures.push(failure),
-            None => self.updated += 1,
-        }
-        self.outstanding.is_empty()
-    }
-
-    /// Whether anything did not land, which is what makes the summary an error
-    /// rather than a status.
-    fn failed(&self) -> bool {
-        !self.failures.is_empty()
-    }
-
-    /// The one notification the whole change leaves behind: how many landed,
-    /// and which work items did not.
-    fn notification(&self) -> String {
-        if self.failures.is_empty() {
-            return self.headline.clone();
-        }
-        let mut named: Vec<String> = self
-            .failures
-            .iter()
-            .take(NAMED_BULK_FAILURES)
-            .cloned()
-            .collect();
-        let unnamed = self.failures.len() - named.len();
-        if unnamed > 0 {
-            named.push(format!("+{unnamed} more"));
-        }
-        format!(
-            "Undid {} of {} · {}",
-            self.updated,
-            self.total,
-            named.join(" · ")
-        )
-    }
 }
 
 impl WorkItemsScreen {
@@ -303,8 +226,7 @@ impl WorkItemsScreen {
         edit: FieldEdit,
     ) -> AppAction {
         let label = edit.label().to_owned();
-        let undo = UndoRole::Undoable(self.next_undo_group());
-        match self.begin_edit(shell, key, edit, undo) {
+        match self.begin_edit(shell, key, edit, UndoRole::Undoable) {
             Ok(request) => AppAction::Edit(vec![request]),
             Err(reason) => {
                 shell.set_error(format!("#{} {label} not saved: {reason}", key.id));
@@ -377,22 +299,12 @@ impl WorkItemsScreen {
         let mut landed = format!("Updated #{} · {}", key.id, applied.edit.summary());
         if let Some(PendingEdit { original, undo, .. }) = pending {
             match undo {
-                UndoRole::Undoable(group) => self.record_undo(group, &original, &applied.edit),
-                UndoRole::Undoing(Some(line)) => landed = line,
-                UndoRole::Undoing(None) => {}
+                UndoRole::Undoable => self.record_undo(&original, &applied.edit),
+                UndoRole::Undoing(line) => landed = line,
             }
         }
         shell.flash_row(key.clone());
-        if !self.record_bulk_outcome(shell, &key, None) {
-            shell.set_status(landed);
-        }
-    }
-
-    /// A number no other dispatch shares, so the work items of one bulk change
-    /// gather under one undo entry and nothing else joins them.
-    fn next_undo_group(&mut self) -> u64 {
-        self.undo_groups += 1;
-        self.undo_groups
+        shell.set_status(landed);
     }
 
     /// Files an edit that landed on the undo stack, so `u` can put the work
@@ -400,32 +312,20 @@ impl WorkItemsScreen {
     /// carried until the write, so a field that was empty then goes back to
     /// cleared rather than emptied. An edit whose field a row does not model
     /// is not filed: nothing could be read back off it to restore.
-    fn record_undo(&mut self, group: u64, before: &Ticket, edit: &FieldEdit) {
+    fn record_undo(&mut self, before: &Ticket, edit: &FieldEdit) {
         let Some(undo) = edit.undoing(before) else {
             return;
         };
-        let step = UndoStep {
-            key: before.key.clone(),
-            edit: undo,
-        };
-        if let Some(entry) = self
-            .undo_stack
-            .iter_mut()
-            .find(|entry| entry.group == group)
-        {
-            entry.steps.push(step);
-            return;
-        }
         if self.undo_stack.len() == UNDO_DEPTH {
             // The oldest goes, so the stack stays a way back out of a
             // mis-click rather than a log of the session.
             self.undo_stack.remove(0);
         }
         self.undo_stack.push(UndoEntry {
-            group,
             label: edit.label().to_owned(),
             wrote: edit.value_text(),
-            steps: vec![step],
+            key: before.key.clone(),
+            edit: undo,
         });
     }
 
@@ -447,42 +347,22 @@ impl WorkItemsScreen {
             shell.set_status("Nothing to undo");
             return AppAction::None;
         };
-        let headline = entry.headline();
-        let mut requests = Vec::new();
-        let mut failures = Vec::new();
-        for step in &entry.steps {
-            // An undo of one work item says its line as it lands, like any
-            // other edit; an undo of several is spoken for by its summary.
-            let line = (entry.steps.len() == 1).then(|| headline.clone());
-            match self.begin_edit(shell, &step.key, step.edit.clone(), UndoRole::Undoing(line)) {
-                Ok(request) => requests.push(request),
-                Err(reason) => failures.push(format!("#{} failed: {reason}", step.key.id)),
+        let undo = UndoRole::Undoing(entry.headline());
+        match self.begin_edit(shell, &entry.key, entry.edit.clone(), undo) {
+            Ok(request) => AppAction::Edit(vec![request]),
+            Err(reason) => {
+                // It could not even be asked, so nothing was taken back: the
+                // change goes back on the stack, to try again once whatever is
+                // in the way has cleared.
+                shell.set_error(format!("#{} not undone: {reason}", entry.key.id));
+                self.undo_stack.push(entry);
+                AppAction::None
             }
         }
-        let bulk = BulkEdit {
-            headline,
-            total: requests.len() + failures.len(),
-            updated: 0,
-            failures,
-            outstanding: requests.iter().map(|request| request.key.clone()).collect(),
-        };
-        if bulk.outstanding.is_empty() {
-            // Nothing could even be asked, so nothing was taken back: the
-            // change goes back on the stack, to try again once whatever is in
-            // the way has cleared.
-            shell.set_error(bulk.notification());
-            self.undo_stack.push(entry);
-            return AppAction::None;
-        }
-        if entry.steps.len() > 1 {
-            self.bulk_edits.push(bulk);
-        }
-        AppAction::Edit(requests)
     }
 
     /// Puts a refused edit back the way it was and says which field did not
-    /// save, so a change is never dropped quietly. Only the work item named is
-    /// reverted: the others a bulk change touched are left as they are.
+    /// save, so a change is never dropped quietly.
     pub fn reject_edit(&mut self, shell: &mut Shell, rejection: &EditRejection) {
         if let Some(pending) = self.pending_edits.remove(&rejection.key)
             && let Some(index) = self.index_of(&rejection.key)
@@ -490,40 +370,7 @@ impl WorkItemsScreen {
             self.set_ticket(index, pending.original);
         }
         shell.flash_row(rejection.key.clone());
-        if !self.record_bulk_outcome(shell, &rejection.key, Some(rejection.failure())) {
-            shell.set_error(rejection.notification());
-        }
-    }
-
-    /// Files one answer against the bulk change that asked for it, and says
-    /// whether one did. A work item edited on its own belongs to no bulk
-    /// change and speaks for itself; one that belongs to a bulk change stays
-    /// quiet until the last of its work items has answered, and then the whole
-    /// tally goes up at once.
-    fn record_bulk_outcome(
-        &mut self,
-        shell: &mut Shell,
-        key: &TicketKey,
-        failure: Option<String>,
-    ) -> bool {
-        let Some(index) = self
-            .bulk_edits
-            .iter()
-            .position(|bulk| bulk.outstanding.contains(key))
-        else {
-            return false;
-        };
-        if !self.bulk_edits[index].record(key, failure) {
-            return true;
-        }
-        let bulk = self.bulk_edits.remove(index);
-        let message = bulk.notification();
-        if bulk.failed() {
-            shell.set_error(message);
-        } else {
-            shell.set_status(message);
-        }
-        true
+        shell.set_error(rejection.notification());
     }
 
     /// Puts the optimistic copies back on top of a pull that finished while an
@@ -987,21 +834,17 @@ impl WorkItemsScreen {
     pub fn apply_deleted(&mut self, shell: &mut Shell, key: &TicketKey) {
         self.pending_deletes.remove(key);
         self.forget_ticket(shell, key);
-        if !self.record_bulk_outcome(shell, key, None) {
-            shell.set_status(format!(
-                "Deleted #{} \u{b7} restore it from the Azure DevOps recycle bin",
-                key.id
-            ));
-        }
+        shell.set_status(format!(
+            "Deleted #{} \u{b7} restore it from the Azure DevOps recycle bin",
+            key.id
+        ));
     }
 
     /// A work item that is still there. Nothing was taken off the table for it,
     /// so nothing has to be put back — only the refusal has to be reported.
     pub fn reject_delete(&mut self, shell: &mut Shell, key: &TicketKey, message: &str) {
         self.pending_deletes.remove(key);
-        if !self.record_bulk_outcome(shell, key, Some(format!("#{} failed: {message}", key.id))) {
-            shell.set_error(format!("#{} not deleted: {message}", key.id));
-        }
+        shell.set_error(format!("#{} not deleted: {message}", key.id));
     }
 
     /// Drops one work item out of memory: the row, its links, its discussion,
@@ -1030,10 +873,7 @@ impl WorkItemsScreen {
         if self.details_pending.as_ref() == Some(key) {
             self.details_pending = None;
         }
-        for entry in &mut self.undo_stack {
-            entry.steps.retain(|step| step.key != *key);
-        }
-        self.undo_stack.retain(|entry| !entry.steps.is_empty());
+        self.undo_stack.retain(|entry| entry.key != *key);
         // Every row index the search documents held moved with the row, so
         // they are built again rather than patched.
         self.search.replace_tickets(&self.tickets);

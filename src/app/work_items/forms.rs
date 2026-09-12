@@ -535,8 +535,8 @@ impl WorkItemsScreen {
         };
     }
 
-    /// What a picker's frame says it is changing: the work item or the checked
-    /// rows, or the form that opened it.
+    /// What a picker's frame says it is changing: the work item, or the form
+    /// that opened it.
     #[must_use]
     pub fn scope_label(&self, scope: EditScope) -> String {
         match scope {

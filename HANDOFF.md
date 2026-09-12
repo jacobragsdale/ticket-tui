@@ -325,10 +325,10 @@ first argument after the receiver; nothing else reaches across.
         work_items/     the work items screen
             mod.rs      WorkItemsScreen, WorkItemMode, the key map, the footer
             context.rs  the JSON context file agents read
-            edits.rs    edits, undo, bulk, comments, reparenting, deletion
+            edits.rs    edits, undo, comments, reparenting, deletion
             family.rs   the family tree, its cursor, child progress
             forms.rs    the new-work-item form
-            history.rs  bookmarks, the checked set, copy, export, the session
+            history.rs  bookmarks, copy, export, the session
             pickers.rs  state, priority, assignee, parent, node, type pickers
             pointer.rs  what a click on a work-item target does
             query.rs    the search box, filters, facets, columns, commands

@@ -69,7 +69,6 @@ unchanged.
 | `sort` | object | Sort field, direction, and row density |
 | `tickets` | object | Result counts, whether finished work is hidden, viewport position, and rendered rows |
 | `selected_ticket` | ticket or null | Ticket driving the details pane |
-| `checked_tickets` | ticket array | Multi-select set used for bulk actions |
 | `family_cursor` | ticket reference or null | Keyboard cursor within the family tree |
 | `details_scroll_line` | integer | Zero-based details-pane scroll line |
 
@@ -193,7 +192,7 @@ Values in one field are ORed; different fields are ANDed. A value written with a
 leading `@` — `assignee:@me`, `assignee:@none`, `iteration:@current`,
 `state:@open` — is reported as typed and resolved as the filter runs, so read
 `me` at the top level to know who `assignee:@me` currently means.
-`search.pending` means the fuzzy result worker has not yet published its latest
+`search.pending` means the search worker has not yet published its latest
 matches, so the counts below are a moment behind the query above.
 
 `search.order` is `relevance` or `field`. `sort.field` is the column the table
@@ -227,8 +226,8 @@ does. To read finished work while it is true, use the CLI: `ticket-tui list`
 has no such rule and reads the database directly.
 
 Ticket objects carry `organization`, `project`, `id`, `work_item_type`, `title`,
-`state`, `assigned_to`, `priority`, `tags`, `web_url`, `bookmarked`, and
-`checked`. The selected one also carries `related` when it has artifact links:
+`state`, `assigned_to`, `priority`, `tags`, `web_url`, and `bookmarked`. The
+selected one also carries `related` when it has artifact links:
 one entry per pull request, commit or build the work item was worked on with,
 each with `kind` (`pull_request`, `commit`, `build`), `name` as Azure DevOps
 labels the link, `repo`, `target` (the id or the commit sha), and `in_database`

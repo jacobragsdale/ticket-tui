@@ -634,25 +634,10 @@ on screen over the rows the pull brought. There is no offline queue: without a
 configured organization an edit is refused before anything changes, and an edit
 that cannot be sent is reverted rather than saved for later.
 
-Sprint hygiene means flipping ten work items at once, so the state picker, the
-assignee picker, and the Iteration tree act on every checked row — see `Space`
-below — when two or more are checked, rather than on the row under the cursor.
-The overlay title says which it is: `State · #613` for one work item and
-`State · 5 tickets` for a bulk change, so the scope is unmistakable before
-`Enter` is pressed. Every row changes on screen at once, and one edit goes out
-a work item — no `$batch` endpoint, just sequential writes, each with its own
-revision test — which the worker takes in the order the table holds them. A
+Every editor acts on the row under the cursor, and the overlay title names it
+— `State · #613` — so the scope is unmistakable before `Enter` is pressed. A
 work item already carrying the value chosen is passed over rather than
-rewritten; a change nothing is left to do closes with `Nothing to change · State
-→ Doing`.
-
-A bulk change speaks once, when the last work item has answered:
-`Updated 5 tickets · State → Doing`, or `Updated 5 of 6 · #612 failed: the
-transition is not allowed` when something did not land, naming the first three
-refusals and counting the rest. A refusal reverts only the row it names — the
-others stay changed — and the checked set survives the whole thing, ready for
-the next change. Every other editor stays on the row under the cursor: the same
-title or the same description on ten work items is never what was meant.
+rewritten.
 
 `u` takes the last edit back. Every change is immediate, so a mis-click on the
 state picker needs a way out that is just as quick: `u` reads the value the work
@@ -664,11 +649,7 @@ and reports it the same way. When it lands the status line reads `Undid State on
 *empty* rather than to an empty value: an undone priority or assignee is the
 same `remove` the `Clear` and `Unassigned` rows send.
 
-A bulk change is one entry on the stack however many work items it touched, so
-one `u` puts all of them back and one summary reports it — `Undid State on 3
-tickets`, or `Undid 2 of 3 · #613 failed: it changed in Azure DevOps` when part
-of it did not land, so an undo is never left half done in silence. The stack
-holds the last twenty edits and is kept in memory only, so it starts empty every
+The stack holds the last twenty edits and is kept in memory only, so it starts empty every
 run and `u` with nothing on it says `Nothing to undo`. An undo is not itself
 undoable — taking one back would make `u` a toggle between the last two values,
 and the edit under it would never be reached — and a comment cannot be undone at
@@ -690,10 +671,7 @@ directly. The picker lists the states the selected work item's type allows,
 coloured by category and with the state it is in already under the cursor.
 `Enter` writes the state chosen down the path above, `Esc` changes nothing, and
 choosing the state it is already in closes without a write. A transition Azure
-DevOps refuses puts the row back and says why. Opened over checked rows it moves
-all of them; the states it offers are still the selected work item's type's,
-which is the only type it could ask about, and a state another checked work
-item's type does not allow is refused by Azure DevOps and named in the summary.
+DevOps refuses puts the row back and says why.
 
 The picker never waits for the network. It offers the states cached in
 `work_item_type_states` when a pull has fetched them, and otherwise the distinct
@@ -736,10 +714,8 @@ already there closes without a write.
 `Change assignee` in the palette, because assigning work is the edit worth
 reaching for. It opens a filterable list: type to narrow it, `↑`/`↓` to move,
 `Enter` to assign, `Esc` to change nothing. Whoever holds the work item is
-marked and under the cursor, and choosing them closes without a write — unless
-the picker was opened over checked rows, when it reassigns all of them and
-whoever holds the row under the cursor is a change worth making to the rest.
-The list runs `Unassigned` first, then you — marked `(me)` — then everybody the
+marked and under the cursor, and choosing them closes without a write. The
+list runs `Unassigned` first, then you — marked `(me)` — then everybody the
 database has ever seen a work item assigned to, sorted, and finally the rest of
 the project's teams. Nobody is offered twice, however their name is spelled.
 
@@ -764,10 +740,7 @@ rows, two spaces a level, each row naming the leaf with the rest of the path
 implied by the indent. The node the work item sits in is marked and under the
 cursor; type to narrow the tree, `↑`/`↓` to move, `Enter` to move the
 work item, `Esc` to change nothing. Choosing the node it is already in closes
-without a write. Iteration is the one of the two worth choosing for several
-work items at once — a sprint ends and its leftovers move on together — so it
-moves every checked row; Area stays on the row under the cursor. An iteration
-row also carries the days it runs between — `Aug 25 – Sep 5` — and the one
+without a write. An iteration row also carries the days it runs between — `Aug 25 – Sep 5` — and the one
 containing today (UTC) is marked `current`.
 
 `Enter` writes the full backslash path — `development\Sprint 1`, not
@@ -1190,15 +1163,6 @@ A delete is not undoable. It never reaches the `u` stack, and an edit already on
 the stack for the work item is dropped with it, because there is no longer a row
 to put anything back on. The way back is the recycle bin, in the browser.
 
-With two or more rows checked the confirmation covers all of them —
-`Delete 2 tickets?`, with their children counted together — and one `d` sends
-them, one request each, in the order the table holds them. A child going the
-same way is not an orphan, so deleting a parent and its children together warns
-about neither. The whole thing speaks once, when the last answer is in:
-`Deleted 5 tickets`, or `Deleted 4 of 5 · #612 failed: read only` when something
-did not land, naming the first three refusals and counting the rest. A work item
-that was refused stays exactly where it was.
-
 ## Sprint summary
 
 **Sprint summary** in the command palette — no default key — opens a read-only
@@ -1555,14 +1519,14 @@ anything on tab `1`.
 | `↑`/`↓`, `j`/`k` | Move the ticket selection, family row, or focused details pane |
 | `Page Up`/`Page Down` | Move ten tickets or one family page |
 | `Home`/`End` | Select the first/last ticket, family row, or details line |
-| `/` | Focus live fuzzy search |
+| `/` | Focus live search |
 | `←`/`→`, `Home`/`End` | Move the search cursor while searching |
 | `↑`/`↓` | Move the ticket selection while searching |
 | `Backspace`/`Delete`, `Ctrl-W` | Edit the query while searching |
 | `Ctrl-U` | Clear the query while searching |
 | `Ctrl-P`/`Ctrl-N` | Recall previous/next completed searches |
 | Paste | Insert sanitized pasted text into the search query |
-| `Esc` | Leave search, clear the query, or clear a multi-selection |
+| `Esc` | Leave search or clear the query |
 | `s` | Open the sort menu; use arrows and `Enter` to apply |
 | `f` | Focus the filter bar; `h`/`l` change field, `j`/`k` values, `Space` toggles |
 | `id:613 id:614` | List exactly those work items — exact, ORed like any field, and a chip like any other. It is what a jump from another tab writes |
@@ -1572,8 +1536,8 @@ anything on tab `1`.
 | `v` | Open views: five built-in ones and your own; `n` saves, `Enter` loads, `d` deletes |
 | `V` | Save the current query, sort and columns as a view |
 | `e` | Open the Actions menu of field editors; `Enter` opens the one chosen |
-| `S` | Change the selected work item's state, or every checked one; `Enter` applies, `Esc` cancels |
-| `a` | Change who the selected work item is assigned to, or every checked one; type to filter, `Enter` assigns |
+| `S` | Change the selected work item's state; `Enter` applies, `Esc` cancels |
+| `a` | Change who the selected work item is assigned to; type to filter, `Enter` assigns |
 | Palette → Toggle row density | Compact or comfortable table rows; no key of its own |
 | Palette → Toggle search order | Relevance-first or strict field ordering during search |
 | `e` → Title/Priority/Tags/Iteration/Area | Edit the title, priority, tags, iteration, or area; also `Edit title`, `Edit priority`, `Edit tags`, `Change iteration`, `Change area`, and `Change assignee` in the palette |
@@ -1583,10 +1547,9 @@ anything on tab `1`.
 | `n` | Open the new work item form; `↑`/`↓` or `Tab` moves between fields, `Enter` opens a field's picker, `Ctrl-S` creates, `Esc` keeps the draft |
 | `N` | Open the same form as a child of the selected work item: the type it breaks down into, the parent fixed, the area and iteration inherited; also `New child` in the Actions menu and the palette |
 | `+` | Quick capture, on every tab: one row, a title, `Enter`. Everything else is defaulted rather than asked — `Issue`, you, the current sprint, tagged `inbox` — and nothing moves; `Esc` leaves nothing behind |
-| `e` → Delete work item… | Send the selected work item, or every checked one, to the Azure DevOps recycle bin; `d` confirms, `Esc` cancels. No key of its own; also `Delete work item…` in the palette |
-| `u` | Undo the last edit, putting the value back; a bulk change goes back under one press |
+| `e` → Delete work item… | Send the selected work item to the Azure DevOps recycle bin; `d` confirms, `Esc` cancels. No key of its own; also `Delete work item…` in the palette |
+| `u` | Undo the last edit, putting the value back |
 | `m` | Bookmark or unbookmark the selected ticket |
-| `Space` | Toggle ticket multi-select; two or more make `S`, `a`, Iteration, and Delete act on all of them |
 | `y` | Copy selected (or current) ticket IDs |
 | `[` / `]` | Jump to the previous or next recently viewed ticket |
 | `Tab` | Toggle focus between tickets and details |
@@ -2033,10 +1996,11 @@ A `… N more siblings` line closes the level when the window cut some, and a
 cursor stop or a click target. Sibling subtrees and grandchildren are never
 drawn — every row already carries how far its own children have got, and
 selecting a row re-roots the tree on it. Click a family row, or press `Enter`
-on the family cursor, to select that ticket in the table. Fuzzy search covers
-ID, title, assignee, state, type, area, iteration, and tags; it intentionally
+on the family cursor, to select that ticket in the table. Search covers ID,
+title, assignee, state, type, area, iteration, and tags; it intentionally
 excludes descriptions. Structured `field:value` tokens are parsed out of the
-query before fuzzy matching.
+query first, and every word left over has to appear in a row literally for it
+to match — the letters have to sit together, in order.
 
 The application uses WAL mode and a busy timeout so external SQLite readers can
 query the cache while the TUI is running.
@@ -2097,8 +2061,8 @@ second. Anything that stopped the pull is an error and exits non-zero.
 without an Azure DevOps organization configured at all. `--query` takes the
 TUI's own [filter grammar](#controls): `field:value` pairs narrow,
 `assignee:@me` means whoever the last sync signed in as, and whatever is left
-over is matched fuzzily and orders the rows. Without a fuzzy term the
-rows come back newest change first. `is:bookmarked` matches nothing out here:
+over has to appear literally, and orders the rows. Without a search term
+the rows come back newest change first. `is:bookmarked` matches nothing out here:
 bookmarks live in the TUI's session file, which a one-shot read does not open.
 
 ```console
@@ -2458,9 +2422,9 @@ the tab is showing**, so an agent asked about a pull request need not ask the
 user to press `3`:
 
 - `work_items` — everything schema 2 kept at the top level, unchanged and one
-  level down: selected and checked tickets, the rows in the viewport with the
+  level down: the selected ticket, the rows in the viewport with the
   matching and total counts and whether finished work is off the table, the
-  complete query with its fuzzy text and parsed filters, and the sort order,
+  complete query with its search text and parsed filters, and the sort order,
   named view, mode, focused pane, family cursor and details scroll. The selected
   ticket also carries `related`, its artifact links.
 - `repos` — the rows on the table and the selected one, each with its default

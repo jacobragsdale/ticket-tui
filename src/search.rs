@@ -147,8 +147,8 @@ impl Drop for SearchEngine {
 }
 
 /// Highlights characters in a visible field that contribute to the current
-/// fuzzy query. Each query atom is matched independently so a multi-word
-/// search can light up different columns of the same row.
+/// query. Each word is matched as a literal substring, independently, so a
+/// multi-word search can light up different columns of the same row.
 pub struct QueryHighlighter {
     pattern: Pattern,
     matcher: Matcher,
@@ -163,7 +163,7 @@ impl QueryHighlighter {
                 query,
                 CaseMatching::Ignore,
                 Normalization::Smart,
-                AtomKind::Fuzzy,
+                AtomKind::Substring,
             ),
             matcher: Matcher::new(Config::DEFAULT),
             buf: Vec::new(),
@@ -223,13 +223,14 @@ fn search_worker(receiver: Receiver<Command>, sender: Sender<SearchResult>) {
     }
 }
 
-/// Scores prepared documents against one fuzzy query, best first.
+/// Scores prepared documents against one query, best first. Every word of
+/// the query has to appear in a document literally for it to match at all.
 fn score(documents: &[SearchDocument], query: &str, matcher: &mut Matcher) -> Vec<SearchMatch> {
     let pattern = Pattern::new(
         query,
         CaseMatching::Ignore,
         Normalization::Smart,
-        AtomKind::Fuzzy,
+        AtomKind::Substring,
     );
     let mut matches: Vec<_> = documents
         .iter()
@@ -246,7 +247,7 @@ fn score(documents: &[SearchDocument], query: &str, matcher: &mut Matcher) -> Ve
     matches
 }
 
-/// Ranks work items against a fuzzy query on the calling thread, best first.
+/// Ranks work items against a query on the calling thread, best first.
 /// The engine above does the same work off the main thread so that typing
 /// never waits for it; a one-shot read with no frames to draw has nothing to
 /// wait for and asks here instead.
@@ -316,6 +317,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_query_only_matches_work_items_that_contain_it_literally() {
+        let tickets = vec![ticket(1, "Fix ticket search", "")];
+        let mut engine = SearchEngine::from_documents(SearchDocuments::prepare(&tickets));
+
+        let generation = engine.submit("tks");
+        assert!(
+            await_result(&engine, generation).matches.is_empty(),
+            "scattered letters are not a substring of any field"
+        );
+
+        let generation = engine.submit("ket sea");
+        assert_eq!(
+            await_result(&engine, generation).matches.len(),
+            1,
+            "a literal run of characters matches wherever it sits in the word"
+        );
+    }
+
     fn match_char_indices(query: &str, haystack: &str) -> Vec<u32> {
         QueryHighlighter::new(query).indices(haystack)
     }
@@ -335,6 +355,10 @@ mod tests {
             "search"
         );
         assert!(match_char_indices("bug", "Fix ticket search").is_empty());
+        assert!(
+            match_char_indices("srch", "Fix ticket search").is_empty(),
+            "the highlighter marks literal runs, not scattered letters"
+        );
         assert_eq!(
             matched_chars("bug search", "Fix ticket search").to_ascii_lowercase(),
             "search"

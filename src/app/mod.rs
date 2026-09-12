@@ -152,10 +152,8 @@ pub enum AppAction {
     HistoryBack,
     HistoryForward,
     Sync,
-    /// Write one field back to Azure DevOps, one request per work item. An
-    /// ordinary edit carries a single request; a bulk change over the checked
-    /// rows carries one for each of them, and the worker takes them in the
-    /// order they are listed.
+    /// Write one field back to Azure DevOps, in the order the requests are
+    /// listed.
     Edit(Vec<EditRequest>),
     /// Read the project's team members, so the assignee picker can offer
     /// somebody with no work item in the database yet. Asked for once a
