@@ -57,6 +57,8 @@ pub enum TextEditor {
     /// The composer, typed into where a long-form section of the details
     /// pane is read.
     Compose,
+    /// The agent prompt editor: the modal `w` opens before a launch.
+    Handoff,
     /// The assignee picker's filter field.
     Assignee,
     /// The parent picker's filter field.
@@ -276,6 +278,8 @@ pub enum PointerTarget {
     },
     /// A form's `[Create]` and `[Cancel]` buttons.
     SubmitForm,
+    /// The prompt editor's primary button: launch, or copy.
+    SendHandoff,
     CancelForm,
     /// The delete confirmation's `[Delete]` and `[Cancel]` buttons.
     ConfirmDelete,

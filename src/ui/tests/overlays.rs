@@ -322,6 +322,74 @@ fn the_help_takes_a_share_of_a_big_screen_and_still_fits_a_small_one() {
 }
 
 #[test]
+fn the_prompt_editor_paints_the_prompt_its_caret_and_its_buttons_and_a_click_moves_the_caret() {
+    let mut app = App::new(vec![ticket()]);
+    let plan = Box::new(crate::agents::handoff::tests::plan());
+    let prompt = "/ticket-agent-workflow\nWork item #715 in jacobragsdale/development (Azure DevOps): \"Fix it\".\nRead these two files.".to_owned();
+    app.work_items.apply_agent_event(
+        &mut app.shell,
+        crate::agents::AgentEvent::Prepared {
+            plan,
+            prompt: prompt.clone(),
+            generated: prompt,
+            copy_only: false,
+        },
+    );
+    assert_eq!(app.work_items.mode, WorkItemMode::Handoff);
+    let text = render_text(120, 30, &mut app);
+    assert!(
+        text.contains("Prompt for Copilot on #715 \u{00b7} payments-api"),
+        "{text}"
+    );
+    assert!(text.contains("/ticket-agent-workflow"), "{text}");
+    assert!(
+        text.contains(" Launch ") && text.contains(" Close "),
+        "{text}"
+    );
+
+    // The caret sits after the last character of the last row.
+    let last = target_rect(&app, |target| {
+        matches!(target, PointerTarget::ComposerRow { row: 2 })
+    });
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    assert_eq!(
+        terminal.get_cursor_position().unwrap(),
+        ratatui::layout::Position::new(
+            last.x + u16::try_from("Read these two files.".len()).unwrap(),
+            last.y
+        )
+    );
+
+    // A click on the first row's fourth cell puts the caret there, and the
+    // title says edited once a key lands.
+    let first = target_rect(&app, |target| {
+        matches!(target, PointerTarget::ComposerRow { row: 0 })
+    });
+    click(&mut app, first.x + 3, first.y);
+    assert_eq!(app.work_items.handoff.as_ref().unwrap().input.cursor(), 3);
+    app.handle_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+    let text = render_text(120, 30, &mut app);
+    assert!(text.contains("/ti!cket-agent-workflow"), "{text}");
+    assert!(text.contains("\u{00b7} edited"), "{text}");
+
+    // The button launches with the text as it stands.
+    let button = target_rect(&app, |target| matches!(target, PointerTarget::SendHandoff));
+    let action = click(&mut app, button.x, button.y);
+    let crate::app::AppAction::Agent(crate::agents::AgentRequest::Launch(plan)) = action else {
+        panic!("the button launches: {action:?}");
+    };
+    assert!(
+        plan.prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.starts_with("/ti!cket-agent-workflow")),
+        "{:?}",
+        plan.prompt
+    );
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+}
+
+#[test]
 fn the_agent_prompt_overlay_shows_the_prompt_as_it_was_sent() {
     let mut app = App::new(vec![ticket()]);
     let id = app.work_items.selected_ticket().unwrap().key.id;

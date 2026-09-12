@@ -262,6 +262,12 @@ impl WorkItemsScreen {
                     composer.follow_cursor = true;
                 }
             }
+            Some(TextEditor::Handoff) => {
+                if let Some(editor) = self.handoff.as_mut() {
+                    editor.input.paste_block(pasted);
+                    editor.follow_cursor = true;
+                }
+            }
             Some(TextEditor::Form) => {
                 if let Some(field) = self.focused_form_field_mut() {
                     field.input.paste(pasted, false);
@@ -329,6 +335,7 @@ impl WorkItemsScreen {
             }
             WorkItemMode::Prompt => Some(TextEditor::Prompt),
             WorkItemMode::Compose => Some(TextEditor::Compose),
+            WorkItemMode::Handoff => Some(TextEditor::Handoff),
             WorkItemMode::AssigneePicker => Some(TextEditor::Assignee),
             WorkItemMode::ParentPicker => Some(TextEditor::Parent),
             WorkItemMode::LinkPicker => Some(TextEditor::Link),

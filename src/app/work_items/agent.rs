@@ -3,7 +3,9 @@
 //! linked to, the workspace the file routes it to, the default provider —
 //! asks through one small picker for whatever it cannot, and hands the
 //! finished plan to the agent thread. A work item with a live agent goes
-//! back to it instead.
+//! back to it instead. Nothing is sent blind: the thread prepares the
+//! prompt first and it opens here, in the prompt editor, for the user to
+//! read and change before `Ctrl-S` launches — or copies — it.
 
 use super::pickers::fuzzy_contains;
 use super::*;
@@ -11,6 +13,7 @@ use crate::agents::{
     AgentEvent, AgentRequest, AgentSession, Invocation, LaunchPlan, Provider, RelatedBrief,
     RepoBrief, TicketBrief, repository_links,
 };
+use crate::text_input::wrap_with_cursor;
 
 /// What the picker is asking for.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -40,6 +43,78 @@ pub struct AgentFlow {
     pub provider: Option<Provider>,
     pub force_new: bool,
     pub copy_only: bool,
+}
+
+/// The prompt editor: the plan a launch (or a copy) is waiting on, and the
+/// prompt as it stands. `generated` is what ticket-tui wrote, which `Ctrl-R`
+/// brings back; the text differing from it is what the title calls edited.
+#[derive(Clone, Debug)]
+pub struct HandoffEditor {
+    pub plan: Box<LaunchPlan>,
+    pub copy_only: bool,
+    pub input: TextInput,
+    pub generated: String,
+    /// The width the rows were last wrapped to, which is what `↑`/`↓` move
+    /// by. Zero until the modal has drawn once.
+    pub width: u16,
+    /// Whether the next frame scrolls to the caret: set by every key the
+    /// editor takes, cleared by the frame that obeyed it, so the wheel can
+    /// scroll away from it in between.
+    pub follow_cursor: bool,
+}
+
+impl HandoffEditor {
+    /// Whether the text differs from what ticket-tui generated.
+    #[must_use]
+    pub fn is_dirty(&self) -> bool {
+        self.input.text() != self.generated
+    }
+
+    /// The draft's key: the work item and the repository the prompt names.
+    #[must_use]
+    pub fn draft_key(&self) -> (TicketKey, String) {
+        (
+            TicketKey {
+                organization: self.plan.ticket.organization.clone(),
+                id: self.plan.ticket.id,
+            },
+            self.plan.repo.id.clone(),
+        )
+    }
+
+    /// What the modal is titled: whom the prompt is for, and whether it has
+    /// been changed.
+    #[must_use]
+    pub fn title(&self) -> String {
+        let edited = if self.is_dirty() {
+            " \u{00b7} edited"
+        } else {
+            ""
+        };
+        if self.copy_only {
+            format!(
+                " Prompt to copy for #{} \u{00b7} {}{edited} ",
+                self.plan.ticket.id, self.plan.repo.name
+            )
+        } else {
+            format!(
+                " Prompt for {} on #{} \u{00b7} {}{edited} ",
+                self.plan.provider.label(),
+                self.plan.ticket.id,
+                self.plan.repo.name
+            )
+        }
+    }
+
+    /// What the footer says while the editor is open.
+    #[must_use]
+    pub const fn hint(&self) -> &'static str {
+        if self.copy_only {
+            "Enter newline  Ctrl-S copy  Ctrl-R regenerate  Esc keep draft  Ctrl-U clear"
+        } else {
+            "Enter newline  Ctrl-S launch  Ctrl-R regenerate  Esc keep draft  Ctrl-U clear"
+        }
+    }
 }
 
 /// Whether a launch of `repo` clones it first: there is a workspace to
@@ -220,26 +295,148 @@ impl WorkItemsScreen {
         };
         let copy_only = self.agent_flow.copy_only;
         let id = plan.ticket.id;
+        // The prompt comes back to be seen before anything is launched or
+        // copied; a clone, when one is needed, happens on the way.
         let status = if let Some(root) = repo_needs_clone(shell, &repo)
             .then(|| shell.workspace())
             .flatten()
         {
-            let then = if copy_only {
-                format!("writing the agent prompt for #{id}")
-            } else {
-                format!(
-                    "launching {} on #{id} in {}",
-                    plan.provider.label(),
-                    plan.workspace
-                )
-            };
             format!(
-                "Cloning {} into {}, then {then}\u{2026}",
+                "Cloning {} into {}, then preparing the prompt for #{id}\u{2026}",
                 repo.name,
                 root.display()
             )
-        } else if copy_only {
-            format!("Writing the agent prompt for #{id}\u{2026}")
+        } else {
+            format!("Preparing the prompt for #{id}\u{2026}")
+        };
+        shell.set_status(status.clone());
+        self.agent_pending = Some(status);
+        self.agent_flow = AgentFlow::default();
+        AppAction::Agent(AgentRequest::Prepare {
+            plan: Box::new(plan),
+            copy_only,
+        })
+    }
+
+    /// Opens the prompt editor on what the thread prepared: a draft kept
+    /// for the same work item and repository first, else the prompt
+    /// offered. Whatever overlay is open closes the way `Esc` closes it,
+    /// its draft kept. The caret starts at the end, where a note goes; the
+    /// view starts at the top, where the reading does.
+    fn open_handoff(
+        &mut self,
+        shell: &mut Shell,
+        plan: Box<LaunchPlan>,
+        prompt: String,
+        generated: String,
+        copy_only: bool,
+    ) {
+        if self.mode != WorkItemMode::Browse {
+            self.close_overlay(shell);
+        }
+        let key = (
+            TicketKey {
+                organization: plan.ticket.organization.clone(),
+                id: plan.ticket.id,
+            },
+            plan.repo.id.clone(),
+        );
+        let text = self.handoff_drafts.get(&key).cloned().unwrap_or(prompt);
+        self.handoff = Some(HandoffEditor {
+            plan,
+            copy_only,
+            input: TextInput::new(text),
+            generated,
+            width: 0,
+            follow_cursor: false,
+        });
+        self.help.scroll_to(0);
+        self.mode = WorkItemMode::Handoff;
+    }
+
+    pub(super) fn handle_handoff_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        let page = self.help.viewport.max(1);
+        match key.code {
+            KeyCode::Esc => self.close_handoff(shell),
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return self.send_handoff(shell);
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(editor) = self.handoff.as_mut() {
+                    editor.input = TextInput::new(editor.generated.clone());
+                    editor.input.set_cursor(0);
+                    editor.follow_cursor = true;
+                    shell.set_status("The generated prompt is back");
+                }
+            }
+            // Nowhere to move focus to inside one box.
+            KeyCode::Tab => {}
+            _ => {
+                if let Some(editor) = self.handoff.as_mut() {
+                    let width = usize::from(editor.width);
+                    match key.code {
+                        KeyCode::Enter => editor.input.insert_newline(),
+                        KeyCode::Up => editor.input.move_up(width),
+                        KeyCode::Down => editor.input.move_down(width),
+                        // A screenful moves the caret rather than the view,
+                        // so the next keystroke does not yank the view back.
+                        KeyCode::PageUp => (0..page).for_each(|_| editor.input.move_up(width)),
+                        KeyCode::PageDown => {
+                            (0..page).for_each(|_| editor.input.move_down(width));
+                        }
+                        _ => {
+                            editor.input.handle_key(key);
+                        }
+                    }
+                    editor.follow_cursor = true;
+                }
+            }
+        }
+        AppAction::None
+    }
+
+    /// Closes the editor without sending. An edited prompt is kept as a
+    /// draft for the next `w` on the same work item and repository; one
+    /// put back to the generated text drops any draft held for it.
+    pub(super) fn close_handoff(&mut self, shell: &mut Shell) {
+        if let Some(editor) = self.handoff.take() {
+            if editor.is_dirty() {
+                shell.set_status(format!(
+                    "Prompt draft kept on #{} \u{2014} w brings it back",
+                    editor.plan.ticket.id
+                ));
+                self.handoff_drafts
+                    .insert(editor.draft_key(), editor.input.text().to_owned());
+            } else {
+                self.handoff_drafts.remove(&editor.draft_key());
+            }
+        }
+        self.mode = WorkItemMode::Browse;
+    }
+
+    /// `Ctrl-S`, and the primary button: sends the prompt as it stands — the
+    /// launch, or the copy. An empty one is refused with the editor left
+    /// open. The text is kept as a draft until the thread says it landed,
+    /// so a launch that fails at any stage gives it back.
+    pub(super) fn send_handoff(&mut self, shell: &mut Shell) -> AppAction {
+        let Some(editor) = self.handoff.take() else {
+            self.mode = WorkItemMode::Browse;
+            return AppAction::None;
+        };
+        let text = editor.input.text().to_owned();
+        if text.trim().is_empty() {
+            shell.set_error("The prompt is empty; Ctrl-R brings the generated one back");
+            self.handoff = Some(editor);
+            return AppAction::None;
+        }
+        self.mode = WorkItemMode::Browse;
+        self.handoff_drafts.insert(editor.draft_key(), text.clone());
+        let copy_only = editor.copy_only;
+        let mut plan = editor.plan;
+        plan.prompt = Some(text);
+        let id = plan.ticket.id;
+        let status = if copy_only {
+            format!("Copying the prompt for #{id}\u{2026}")
         } else {
             format!(
                 "Launching {} on #{id} in {}\u{2026}",
@@ -249,12 +446,30 @@ impl WorkItemsScreen {
         };
         shell.set_status(status.clone());
         self.agent_pending = Some(status);
-        self.agent_flow = AgentFlow::default();
         AppAction::Agent(if copy_only {
-            AgentRequest::Prompt(Box::new(plan))
+            AgentRequest::Prompt(plan)
         } else {
-            AgentRequest::Launch(Box::new(plan))
+            AgentRequest::Launch(plan)
         })
+    }
+
+    /// Puts the editor's caret where a click landed on one of its rows:
+    /// `row` is the wrapped row, `column` the cell along it.
+    pub(super) fn place_handoff_caret(&mut self, row: usize, column: u16) {
+        let Some(editor) = self.handoff.as_mut() else {
+            return;
+        };
+        let layout = wrap_with_cursor(
+            editor.input.text(),
+            editor.input.cursor(),
+            usize::from(editor.width),
+        );
+        if let Some((start, text)) = layout.rows.get(row) {
+            editor
+                .input
+                .set_cursor(start + usize::from(column).min(text.chars().count()));
+            editor.follow_cursor = true;
+        }
     }
 
     fn linked_repo_ids(&self, key: &TicketKey) -> Vec<String> {
@@ -464,10 +679,19 @@ impl WorkItemsScreen {
     pub fn apply_agent_event(&mut self, shell: &mut Shell, event: AgentEvent) -> Option<String> {
         match event {
             AgentEvent::Sessions(sessions) => self.agent_sessions = sessions,
-            // The modal that edits it comes next; nothing asks for one yet.
-            AgentEvent::Prepared { .. } => self.agent_pending = None,
+            AgentEvent::Prepared {
+                plan,
+                prompt,
+                generated,
+                copy_only,
+            } => {
+                self.agent_pending = None;
+                self.open_handoff(shell, plan, prompt, generated, copy_only);
+            }
             AgentEvent::Launched { session, note } => {
                 self.agent_pending = None;
+                self.handoff_drafts
+                    .remove(&(session.ticket_key(), session.repo_id.clone()));
                 shell.set_news(format!(
                     "{} is on #{} in {} \u{203a} {} \u{2014} {note}",
                     session.provider.label(),
@@ -507,6 +731,8 @@ impl WorkItemsScreen {
                 context,
             } => {
                 self.agent_pending = None;
+                self.handoff_drafts
+                    .retain(|(key, _), _| key.id != work_item);
                 shell.set_news(format!(
                     "Prompt for #{work_item} copied; the context is at {}",
                     context.display()

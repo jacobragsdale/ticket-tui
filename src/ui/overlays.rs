@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::columns::ColumnLayout;
+use crate::text_input::wrap_with_cursor;
 
 pub(super) fn render_sort_popup(
     frame: &mut Frame<'_>,
@@ -205,6 +206,134 @@ pub(super) fn render_agent_prompt_overlay(
     let text = Text::from(session.prompt.clone().unwrap_or_default());
     let area = ratio_rect(frame.area(), (70, 70), (100, u16::MAX), (60, 12));
     render_text_popup(frame, screen, shell, &title, area, text);
+}
+
+/// The prompt as it will be sent, open for editing before `w`'s launch or
+/// copy goes out: the rows wrapped to the box, the caret in its cell, a
+/// click on a row placing it, the wheel scrolling through the help's state
+/// as the prompt viewer does, and the two buttons under the text.
+pub(super) fn render_handoff_editor(
+    frame: &mut Frame<'_>,
+    screen: &mut WorkItemsScreen,
+    shell: &mut Shell,
+) {
+    let Some(editor) = screen.handoff.as_ref() else {
+        return;
+    };
+    let title = editor.title();
+    let copy_only = editor.copy_only;
+    let area = ratio_rect(frame.area(), (70, 70), (100, u16::MAX), (60, 12));
+    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, &title);
+    let chunks = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+    // The text keeps clear of the last column, which is the scrollbar's.
+    let body = Rect {
+        width: chunks[0].width.saturating_sub(1).max(1),
+        ..chunks[0]
+    };
+    let Some(editor) = screen.handoff.as_mut() else {
+        return;
+    };
+    let layout = wrap_with_cursor(
+        editor.input.text(),
+        editor.input.cursor(),
+        usize::from(body.width),
+    );
+    editor.width = body.width;
+    let follow = std::mem::take(&mut editor.follow_cursor);
+    let (caret_row, caret_column) = layout.cursor;
+    screen
+        .help
+        .set_viewport(usize::from(body.height), layout.rows.len());
+    if follow {
+        screen.help.ensure_visible(caret_row);
+    }
+    let offset = screen.help.offset;
+    let scroll_rows = u16::try_from(offset).unwrap_or(u16::MAX);
+    let lines: Vec<Line> = layout
+        .rows
+        .iter()
+        .skip(offset)
+        .take(usize::from(body.height))
+        .map(|(_, text)| Line::styled(text.clone(), Style::default().fg(theme().text)))
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), body);
+    for index in 0..layout.rows.len() {
+        let Some(y) = u16::try_from(index)
+            .ok()
+            .and_then(|row| super::details::visible_row_y(body, row, scroll_rows))
+        else {
+            continue;
+        };
+        shell.hit_regions.push(region(
+            Rect::new(body.x, y, body.width, 1),
+            PointerTarget::ComposerRow { row: index },
+            PointerLayer::Modal,
+            Some(SelectableSurface::Help),
+            Some(ScrollSurface::Help),
+        ));
+    }
+    if let Some(y) = u16::try_from(caret_row)
+        .ok()
+        .and_then(|row| super::details::visible_row_y(body, row, scroll_rows))
+    {
+        let x = body
+            .x
+            .saturating_add(u16::try_from(caret_column).unwrap_or(u16::MAX))
+            .min(body.x.saturating_add(body.width.saturating_sub(1)));
+        frame.set_cursor_position((x, y));
+    }
+    if layout.rows.len() > usize::from(body.height) {
+        render_scrollbar(
+            frame,
+            PointerLayer::Modal,
+            shell,
+            chunks[0],
+            ScrollSurface::Help,
+            ScrollState {
+                offset,
+                content: layout.rows.len(),
+                viewport: usize::from(body.height),
+            },
+        );
+    }
+    capture_selectable(frame, shell, SelectableSurface::Help, body, false);
+    let buttons = chunks[2];
+    let primary = if copy_only { " Copy " } else { " Launch " };
+    let primary_width = u16::try_from(primary.len()).unwrap_or(u16::MAX);
+    render_control(
+        frame,
+        shell,
+        Control {
+            area: Rect::new(buttons.x, buttons.y, primary_width, 1),
+            label: primary,
+            target: PointerTarget::SendHandoff,
+            layer: PointerLayer::Modal,
+            kind: ControlKind::Primary,
+            enabled: true,
+        },
+    );
+    render_control(
+        frame,
+        shell,
+        Control {
+            area: Rect::new(
+                buttons.x.saturating_add(primary_width).saturating_add(2),
+                buttons.y,
+                7,
+                1,
+            ),
+            label: " Close ",
+            target: PointerTarget::CloseOverlay,
+            layer: PointerLayer::Modal,
+            kind: ControlKind::Chip,
+            enabled: true,
+        },
+    );
 }
 
 /// One box of wrapped text under a title, scrolled by the help's state and

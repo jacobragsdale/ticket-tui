@@ -7,7 +7,7 @@ use crate::columns::ColumnLayout;
 
 use super::*;
 
-pub use agent::{AgentChoice, AgentFlow, AgentPicker};
+pub use agent::{AgentChoice, AgentFlow, AgentPicker, HandoffEditor};
 pub use compose::Composer;
 use edits::{BulkEdit, PendingEdit, UndoEntry};
 pub use edits::{DeleteConfirm, EditMenu, EditScope, PromptField, SyncTarget, TextPrompt};
@@ -37,6 +37,9 @@ pub enum WorkItemMode {
     /// The opening prompt the agent on the selected work item was sent,
     /// scrolled like the help.
     AgentPrompt,
+    /// The prompt as it will be sent, open for editing before the launch —
+    /// or the copy — that `w` asked for.
+    Handoff,
     /// The read-only board for one iteration: who has how much, and how much
     /// of it is finished.
     Sprint,
@@ -257,6 +260,11 @@ pub struct WorkItemsScreen {
     /// What the agent thread is doing for this screen, while it is: one
     /// launch or prompt at a time.
     agent_pending: Option<String>,
+    /// The prompt editor, while it is open.
+    pub handoff: Option<HandoffEditor>,
+    /// Prompts edited and not yet sent, by work item and repository: what
+    /// `Esc` kept, and what a launch in flight gets back if it fails.
+    handoff_drafts: HashMap<(TicketKey, String), String>,
     pub node_picker: NodePicker,
     pub type_picker: TypePicker,
     /// The title being typed into the quick capture row, empty while it is
@@ -428,6 +436,8 @@ impl WorkItemsScreen {
             agent_flow: AgentFlow::default(),
             agent_sessions: Vec::new(),
             agent_pending: None,
+            handoff: None,
+            handoff_drafts: HashMap::new(),
             node_picker: NodePicker::default(),
             prompt: None,
             composer: None,
@@ -565,6 +575,10 @@ impl WorkItemsScreen {
                 .composer
                 .as_ref()
                 .map_or("Ctrl-S save  Esc keep draft", Composer::hint),
+            WorkItemMode::Handoff => self
+                .handoff
+                .as_ref()
+                .map_or("Ctrl-S send  Esc keep draft", HandoffEditor::hint),
             WorkItemMode::AssigneePicker => {
                 "Type to filter  \u{2191}\u{2193} select  Enter assign  Esc cancel"
             }
@@ -653,6 +667,7 @@ impl WorkItemsScreen {
             WorkItemMode::TagPicker => self.handle_tag_picker_key(shell, key),
             WorkItemMode::Prompt => self.handle_prompt_key(shell, key),
             WorkItemMode::Compose => self.handle_compose_key(shell, key),
+            WorkItemMode::Handoff => self.handle_handoff_key(shell, key),
             WorkItemMode::AssigneePicker => self.handle_assignee_picker_key(shell, key),
             WorkItemMode::ParentPicker => self.handle_parent_picker_key(shell, key),
             WorkItemMode::LinkPicker => self.handle_link_picker_key(shell, key),
@@ -800,6 +815,7 @@ impl WorkItemsScreen {
             }
             WorkItemMode::Prompt => self.close_prompt(),
             WorkItemMode::Compose => self.close_composer(shell),
+            WorkItemMode::Handoff => self.close_handoff(shell),
             WorkItemMode::Form => self.cancel_form(),
             WorkItemMode::Capture => self.cancel_capture(),
             WorkItemMode::ConfirmDelete => self.cancel_delete(),
@@ -921,6 +937,7 @@ const fn mode_name(mode: WorkItemMode) -> &'static str {
         WorkItemMode::Views => "views",
         WorkItemMode::Info => "info",
         WorkItemMode::AgentPrompt => "agent-prompt",
+        WorkItemMode::Handoff => "handoff",
         WorkItemMode::Sprint => "sprint",
         WorkItemMode::Facets => "facets",
         WorkItemMode::Edit => "edit",

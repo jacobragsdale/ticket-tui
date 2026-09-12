@@ -682,7 +682,8 @@ impl App {
             AppAction::Agent(request) => {
                 let plan = match &request {
                     crate::agents::AgentRequest::Launch(plan)
-                    | crate::agents::AgentRequest::Prompt(plan) => Some(plan),
+                    | crate::agents::AgentRequest::Prompt(plan)
+                    | crate::agents::AgentRequest::Prepare { plan, .. } => Some(plan),
                     _ => None,
                 };
                 if let Some(plan) = plan

@@ -280,8 +280,13 @@ impl WorkItemsScreen {
                 let left = shell
                     .hovered_region()
                     .map_or(column, |region| region.rect.x);
-                self.place_composer_caret(row, column.saturating_sub(left));
+                if self.handoff.is_some() {
+                    self.place_handoff_caret(row, column.saturating_sub(left));
+                } else {
+                    self.place_composer_caret(row, column.saturating_sub(left));
+                }
             }
+            PointerTarget::SendHandoff => return self.send_handoff(shell),
             // The tab bar is the shell's: `App::handle_mouse` acts on a tab
             // before the click reaches a screen.
             // The work items screen draws no tree the pointer can pick a row
@@ -403,6 +408,7 @@ impl WorkItemsScreen {
             .selectable(match editor {
                 TextEditor::Search => SelectableSurface::Search,
                 TextEditor::Compose => SelectableSurface::Details,
+                TextEditor::Handoff => SelectableSurface::Help,
                 TextEditor::Palette
                 | TextEditor::ViewName
                 | TextEditor::Prompt
@@ -437,9 +443,10 @@ impl WorkItemsScreen {
             TextEditor::Node => Some(&mut self.node_picker.query),
             TextEditor::Form => self.focused_form_field_mut().map(|field| &mut field.input),
             TextEditor::Capture => Some(&mut self.capture),
-            // The composer's rows are their own targets, placed by row and
-            // column rather than through the text snapshot.
-            TextEditor::Compose => None,
+            // The composer's and the prompt editor's rows are their own
+            // targets, placed by row and column rather than through the
+            // text snapshot.
+            TextEditor::Compose | TextEditor::Handoff => None,
         };
         if let Some(input) = input {
             input.click(col, width);
