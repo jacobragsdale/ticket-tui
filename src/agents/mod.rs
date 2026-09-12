@@ -533,6 +533,13 @@ impl SessionStore {
 /// What the agent thread can be asked to do.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AgentRequest {
+    /// The first half of a launch: settle what the prompt names, write the
+    /// handoff, and answer with the prompt for the user to see and edit
+    /// before `Launch` (or `Prompt`, for `copy_only`) sends it.
+    Prepare {
+        plan: Box<LaunchPlan>,
+        copy_only: bool,
+    },
     /// Launch an agent for the plan, or carry on a launch of the same ticket
     /// and repository that stopped part way.
     Launch(Box<LaunchPlan>),
@@ -555,6 +562,16 @@ pub enum AgentRequest {
 pub enum AgentEvent {
     /// The sessions as they stand, after anything that changed them.
     Sessions(Vec<AgentSession>),
+    /// The prompt a `Prepare` settled on, to be edited and sent with the
+    /// plan handed back. `prompt` is what to open on — the unsent prompt of
+    /// a launch that stopped part way, when there is one — and `generated`
+    /// what ticket-tui wrote, for a reset.
+    Prepared {
+        plan: Box<LaunchPlan>,
+        prompt: String,
+        generated: String,
+        copy_only: bool,
+    },
     Launched {
         session: Box<AgentSession>,
         note: String,
@@ -655,6 +672,23 @@ fn work(
     while let Ok(request) = requests.recv() {
         let sent = match request {
             AgentRequest::Stop => return,
+            AgentRequest::Prepare { plan, copy_only } => {
+                let outcome = prepare(&store, &plan, copy_only);
+                events.send(match outcome {
+                    Ok((prompt, generated)) => AgentEvent::Prepared {
+                        plan,
+                        prompt,
+                        generated,
+                        copy_only,
+                    },
+                    Err(failure) => AgentEvent::Failed {
+                        work_item: plan.ticket.id,
+                        stage: failure.stage,
+                        message: format!("{:#}", failure.error),
+                        session: None,
+                    },
+                })
+            }
             AgentRequest::Launch(plan) => {
                 let outcome = launch(&herdr, &mut store, &plan);
                 let event = match outcome {
@@ -748,10 +782,20 @@ fn fail(stage: Stage, error: anyhow::Error, session: Option<AgentSession>) -> La
     }
 }
 
+/// What a checkout is settled for: a launch makes the worktree, a
+/// preparation names the one the launch would make, and a copy names the
+/// clone as it stands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Purpose {
+    Launch,
+    Prepare,
+    Copy,
+}
+
 /// The checkout a plan settles on. A repository that is not here is cloned
 /// first, into the workspace under its own name — where `C` on the Repos tab
 /// puts it — and the note says so.
-fn settle_checkout(plan: &LaunchPlan, for_launch: bool) -> Result<Checkout> {
+fn settle_checkout(plan: &LaunchPlan, purpose: Purpose) -> Result<Checkout> {
     let mut cloned = None;
     let clone = match checkout::find_clone(
         plan.workspace_root.as_deref(),
@@ -773,33 +817,37 @@ fn settle_checkout(plan: &LaunchPlan, for_launch: bool) -> Result<Checkout> {
         .default_branch
         .clone()
         .unwrap_or_else(|| "main".to_owned());
-    let mut checkout = if for_launch {
-        let checkout = checkout::settle(
-            &clone,
-            &plan.repo.name,
-            &branch,
-            &base,
-            plan.policy,
-            plan.linked_branch.is_some() || plan.pull_request.is_some(),
-        )?;
-        // Herdr, handed a directory that is not there, opens the pane in the
-        // home directory and says nothing; better refused here.
-        anyhow::ensure!(
-            checkout.workdir.is_dir(),
-            "{} is not a directory; the agent would start in the wrong place",
-            checkout.workdir.display()
-        );
-        checkout
-    } else {
+    let mut checkout = match purpose {
+        Purpose::Launch => {
+            let checkout = checkout::settle(
+                &clone,
+                &plan.repo.name,
+                &branch,
+                &base,
+                plan.policy,
+                plan.linked_branch.is_some() || plan.pull_request.is_some(),
+            )?;
+            // Herdr, handed a directory that is not there, opens the pane in
+            // the home directory and says nothing; better refused here.
+            anyhow::ensure!(
+                checkout.workdir.is_dir(),
+                "{} is not a directory; the agent would start in the wrong place",
+                checkout.workdir.display()
+            );
+            checkout
+        }
+        // The prompt names the worktree the launch will make; nothing is
+        // made until it is sent.
+        Purpose::Prepare => checkout::preview(&clone, &plan.repo.name, &branch, plan.policy)?,
         // For a prompt to copy, no worktree is made: the terminal the user
         // has open is wherever it is, so the handoff names the clone.
-        Checkout {
+        Purpose::Copy => Checkout {
             workdir: clone.clone(),
             clone,
             branch,
             policy: CheckoutPolicy::Shared,
             note: "the clone; make a worktree yourself if you want one".to_owned(),
-        }
+        },
     };
     if let Some(path) = cloned {
         checkout.note = format!("cloned into {}; {}", path.display(), checkout.note);
@@ -836,10 +884,40 @@ fn clone_missing(plan: &LaunchPlan) -> Result<PathBuf> {
     Ok(into)
 }
 
+/// The first half of a launch, so the prompt can be seen and edited before
+/// the second: the checkout named — a clone made if the repository is not
+/// here, no worktree yet — the handoff written, and the prompt answered
+/// beside the generated one. The prompt is the unsent one of a launch of
+/// the same ticket and repository that stopped part way, when there is one,
+/// so an edit outlives a Herdr stage that failed; else the generated one.
+pub fn prepare(
+    store: &SessionStore,
+    plan: &LaunchPlan,
+    copy_only: bool,
+) -> Result<(String, String), LaunchFailure> {
+    let purpose = if copy_only {
+        Purpose::Copy
+    } else {
+        Purpose::Prepare
+    };
+    let checkout =
+        settle_checkout(plan, purpose).map_err(|error| fail(Stage::Checkout, error, None))?;
+    let files = handoff::write(&plan.handoff_dir, plan, &checkout)
+        .map_err(|error| fail(Stage::Handoff, error, None))?;
+    let generated = handoff::opening_prompt(plan, &checkout, &files);
+    let prompt = (!copy_only)
+        .then(|| store.pending_for(plan))
+        .flatten()
+        .filter(|held| !held.prompt_sent)
+        .and_then(|held| held.prompt)
+        .unwrap_or_else(|| generated.clone());
+    Ok((prompt, generated))
+}
+
 /// Writes the handoff and answers with the prompt, for the clipboard.
 pub fn prompt_only(plan: &LaunchPlan) -> Result<(String, PathBuf), LaunchFailure> {
     let checkout =
-        settle_checkout(plan, false).map_err(|error| fail(Stage::Checkout, error, None))?;
+        settle_checkout(plan, Purpose::Copy).map_err(|error| fail(Stage::Checkout, error, None))?;
     let files = handoff::write(&plan.handoff_dir, plan, &checkout)
         .map_err(|error| fail(Stage::Handoff, error, None))?;
     Ok((handoff::prompt_for(plan, &checkout, &files), files.context))
@@ -854,8 +932,8 @@ pub fn launch(
     store: &mut SessionStore,
     plan: &LaunchPlan,
 ) -> Result<(AgentSession, String), LaunchFailure> {
-    let checkout =
-        settle_checkout(plan, true).map_err(|error| fail(Stage::Checkout, error, None))?;
+    let checkout = settle_checkout(plan, Purpose::Launch)
+        .map_err(|error| fail(Stage::Checkout, error, None))?;
     if plan.policy == CheckoutPolicy::Shared
         && let Some(other) = store.sessions.iter().find(|held| {
             held.repo_id == plan.repo.id
@@ -1870,6 +1948,89 @@ mod tests {
         let failure = launch(&herdr, &mut store, &other).unwrap_err();
         assert_eq!(failure.stage, Stage::Checkout);
         assert!(format!("{:#}", failure.error).contains("#715 already has a Copilot agent"));
+    }
+
+    #[test]
+    fn prepare_names_the_worktree_without_making_it_and_the_launch_lands_on_that_path() {
+        let dir = tempdir().unwrap();
+        clone_under(dir.path(), "pay");
+        let mut store = store_in(dir.path());
+        let plan = plan_in(dir.path(), 715, "pay");
+        let (prompt, generated) = prepare(&store, &plan, false).unwrap();
+        assert_eq!(prompt, generated, "nothing pending: the generated prompt");
+        let worktree = dir
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("work/.worktrees/pay/715-ticket-715");
+        assert!(prompt.starts_with("/ticket-agent-workflow\n"), "{prompt}");
+        assert!(
+            prompt.contains(&format!("checked out at {}", worktree.display())),
+            "{prompt}"
+        );
+        assert!(
+            !worktree.exists(),
+            "nothing is made before the prompt is sent"
+        );
+        let prompt_file = dir.path().join("handoffs/demo-715/prompt.md");
+        assert!(
+            dir.path().join("handoffs/demo-715/context.md").is_file(),
+            "the handoff is there to read while the prompt is edited"
+        );
+        assert_eq!(std::fs::read_to_string(&prompt_file).unwrap(), generated);
+
+        // The launch after it, with what was typed, lands on the path the
+        // prompt named and sends exactly that text.
+        let fake = FakeHerdr::default();
+        let herdr = Herdr::new(Box::new(fake.clone()));
+        let mut edited = plan.clone();
+        edited.prompt = Some("/ticket-agent-workflow\nJust #715, please.".into());
+        let (session, _) = launch(&herdr, &mut store, &edited).unwrap();
+        assert_eq!(session.workdir, worktree);
+        assert!(worktree.is_dir(), "the launch made it");
+        assert_eq!(
+            fake.state().panes[0].prompts,
+            ["/ticket-agent-workflow\nJust #715, please."]
+        );
+        assert_eq!(
+            session.prompt.as_deref(),
+            Some("/ticket-agent-workflow\nJust #715, please.")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&prompt_file).unwrap(),
+            "/ticket-agent-workflow\nJust #715, please.",
+            "the file says what was sent"
+        );
+    }
+
+    #[test]
+    fn prepare_offers_back_the_unsent_prompt_of_a_launch_that_stopped_part_way() {
+        let dir = tempdir().unwrap();
+        clone_under(dir.path(), "pay");
+        let fake = FakeHerdr::default();
+        let herdr = Herdr::new(Box::new(fake.clone()));
+        let mut store = store_in(dir.path());
+        let plan = plan_in(dir.path(), 715, "pay");
+        let mut edited = plan.clone();
+        edited.prompt = Some("/ticket-agent-workflow\nMy own words.".into());
+        fake.fail("agent start", "agent_not_ready", "copilot never came up");
+        fake.fail("agent wait", "timeout", "still not ready");
+        assert_eq!(
+            launch(&herdr, &mut store, &edited).unwrap_err().stage,
+            Stage::Agent
+        );
+
+        // The next preparation, with no edit on its plan, opens on the edit.
+        let (prompt, generated) = prepare(&store, &plan, false).unwrap();
+        assert_eq!(prompt, "/ticket-agent-workflow\nMy own words.");
+        assert!(
+            generated.starts_with("/ticket-agent-workflow\nWork item #715"),
+            "{generated}"
+        );
+        // A copy consults nothing pending: its checkout is another.
+        let (copy, copy_generated) = prepare(&store, &plan, true).unwrap();
+        assert_eq!(copy, copy_generated);
+        assert!(copy.contains("shared"), "{copy}");
     }
 
     #[test]

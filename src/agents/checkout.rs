@@ -96,6 +96,31 @@ pub fn settle(
     policy: CheckoutPolicy,
     fetch_missing: bool,
 ) -> Result<Checkout> {
+    settle_or_preview(clone, repo_name, branch, base, policy, fetch_missing, true)
+}
+
+/// What [`settle`] would settle on, adding nothing: the worktree already on
+/// the branch, else the path one would be added at. The same decision, so a
+/// launch after it lands where this said; a prompt shown before the launch
+/// can name the path without a worktree being left behind if it is not sent.
+pub fn preview(
+    clone: &Path,
+    repo_name: &str,
+    branch: &str,
+    policy: CheckoutPolicy,
+) -> Result<Checkout> {
+    settle_or_preview(clone, repo_name, branch, "", policy, false, false)
+}
+
+fn settle_or_preview(
+    clone: &Path,
+    repo_name: &str,
+    branch: &str,
+    base: &str,
+    policy: CheckoutPolicy,
+    fetch_missing: bool,
+    make: bool,
+) -> Result<Checkout> {
     // As git spells it, so a worktree read back from `git worktree list`
     // compares equal to one this made: on macOS `/var` is `/private/var`.
     let canonical = clone.canonicalize().unwrap_or_else(|_| clone.to_path_buf());
@@ -128,6 +153,15 @@ pub fn settle(
             path.display(),
             clone.display()
         );
+    }
+    if !make {
+        return Ok(Checkout {
+            clone: clone.to_path_buf(),
+            workdir: path,
+            branch: branch.to_owned(),
+            policy,
+            note: format!("a worktree to be added on {branch}"),
+        });
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)

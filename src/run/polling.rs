@@ -252,10 +252,14 @@ pub(super) fn poll_agents(app: &mut App, runtime: &mut SyncRuntime) -> bool {
     let redraw = !events.is_empty();
     for event in events {
         let stopped = matches!(event, AgentEvent::Stopped);
-        // A launch may have cloned: the workspace is not what it was.
+        // A launch, or the preparation before one, may have cloned: the
+        // workspace is not what it was.
         if matches!(
             event,
-            AgentEvent::Launched { .. } | AgentEvent::Failed { .. } | AgentEvent::Prompt { .. }
+            AgentEvent::Launched { .. }
+                | AgentEvent::Failed { .. }
+                | AgentEvent::Prompt { .. }
+                | AgentEvent::Prepared { .. }
         ) {
             runtime.local.scanned = None;
         }

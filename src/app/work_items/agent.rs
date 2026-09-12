@@ -464,6 +464,8 @@ impl WorkItemsScreen {
     pub fn apply_agent_event(&mut self, shell: &mut Shell, event: AgentEvent) -> Option<String> {
         match event {
             AgentEvent::Sessions(sessions) => self.agent_sessions = sessions,
+            // The modal that edits it comes next; nothing asks for one yet.
+            AgentEvent::Prepared { .. } => self.agent_pending = None,
             AgentEvent::Launched { session, note } => {
                 self.agent_pending = None;
                 shell.set_news(format!(
