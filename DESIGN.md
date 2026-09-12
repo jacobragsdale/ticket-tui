@@ -2360,16 +2360,20 @@ taken).
    live, so repeated presses never make duplicates.
 4. The checkout, on the agent thread: the clone the Repos tab's scan claims
    for the repository, or the path `[herdr.paths]` names. A repository with
-   no clone stops there with a message pointing at `C` on the Repos tab. By
-   default (`[agents] checkout = "worktree"`) the agent gets a git worktree
-   of its own under `<clone>/../.worktrees/<repo>/<branch>`, for the branch
-   the work item is linked to, else the open pull request's source, else
-   `{id}-{slug}` from the title: a worktree already on that branch is reused
-   (the clone itself included), a branch on origin is tracked, a branch
-   nowhere is made from the default branch, and a *linked* branch that is
-   nowhere is a refusal rather than a competing branch of the same name.
-   Nothing is reset, cleaned, deleted or pushed. `checkout = "shared"` works
-   in the clone as it stands and refuses a second managed session in it.
+   no clone is cloned into the workspace under its own name first, where
+   `C` on the Repos tab would put it. By default (`[agents] checkout =
+   "worktree"`) the agent gets a git worktree of its own under
+   `<clone>/../.worktrees/<repo>/<branch>`, for the branch the work item is
+   linked to, else the open pull request's source, else `{id}-{slug}` from
+   the title: a worktree already on that branch is reused (the clone itself
+   included), a branch on origin is tracked, a branch nowhere is made from
+   the default branch, and a *linked* branch that is nowhere is a refusal
+   rather than a competing branch of the same name. Nothing is reset,
+   cleaned, deleted or pushed. `checkout = "shared"` works in the clone as
+   it stands and refuses a second managed session in it. Before the prompt
+   has been seen the checkout is only *named* — the worktree already on the
+   branch, else the path one would be added at, by the same decision — so
+   closing the prompt leaves nothing behind.
 5. The handoff: `context.md` under `<database dir>/handoffs/<org>-<id>/`
    with the ticket in full (identity, URL, revision, title, description and
    acceptance criteria as Markdown, parent and children, its own comments,
@@ -2377,19 +2381,34 @@ taken).
    the exact `ticket-tui --database … --org … --project … --code-project …`
    invocation and the binary's path, and the user's note when there is one;
    beside it the workflow skill, written from the copy embedded in the
-   binary. Never inside a repository.
-6. Herdr: workspace, tab and pane found by the ids of an earlier session for
-   the same repository or by label, else made; `agent start <name> --kind
-   <provider> --pane <id> [-- args]`; `agent prompt` with the short opening
-   prompt as one argv element — the ticket's text goes through no shell —
-   which names the ticket, the checkout, the two files to read, and asks for
-   discussion before implementation; then `agent focus`.
+   binary, and `prompt.md`, the prompt exactly as sent. Never inside a
+   repository.
+6. The prompt, on screen: the thread hands the prompt back and it opens in
+   the prompt editor, a modal over the work items tab, as it will be sent —
+   the skill's slash command `/ticket-agent-workflow` on the first line,
+   then the ticket, the checkout, the two files to read, and the ask for
+   discussion before implementation. It is edited in place: `Enter` a
+   newline, the wheel or `↑`/`↓`/`PgUp`/`PgDn` through a long one, a click
+   placing the caret, a paste keeping its lines, `Ctrl-U` clearing,
+   `Ctrl-R` putting the generated text back. The title says `· edited` while
+   the text differs from what ticket-tui wrote. `Ctrl-S` (or **Launch**)
+   sends exactly what is shown; `Esc` (or **Close**) keeps an edited prompt
+   as a draft for this run, which the next `w` on the same work item and
+   repository opens on. An empty prompt is refused with the editor left
+   open. Nothing is launched, and no worktree is made, until `Ctrl-S`.
+7. Herdr: the checkout made for real; workspace, tab and pane found by the
+   ids of an earlier session for the same repository or by label, else
+   made; `agent start <name> --kind <provider> --pane <id> [-- args]`;
+   `agent prompt` with the prompt as one argv element — the ticket's text
+   goes through no shell; then `agent focus`.
 
 Each stage is written to `<database>.agents.json` before the next begins,
 with the ids Herdr answered with. A launch that stops part way says which
-stage failed; `w` again carries on from what was made — the same workspace,
-tab and pane, the agent started only if it was not, the prompt sent only if
-it was not. Before anything remembered is reused it is checked against Herdr
+stage failed; `w` again opens the prompt editor on the text that was sent —
+the draft kept in memory, else the unsent prompt the half-made session holds
+— and `Ctrl-S` carries on from what was made: the same workspace, tab and
+pane, the agent started only if it was not, the prompt sent only if it was
+not. Before anything remembered is reused it is checked against Herdr
 from the outside in, so a closed tab is remade without a second workspace,
 and a pane since taken by something else is left alone. **Return to agent**
 checks the pane still hosts an agent of the recorded kind and name before
@@ -2398,15 +2417,19 @@ claimed as recovered. A Herdr that does not answer is an error, not a stale
 session.
 
 `w` outside a Herdr pane says so and stops; **Copy agent prompt** writes the
-handoff and puts the prompt on the clipboard for a terminal already open, and
-needs no Herdr. `ticket-tui agent launch <id>` is the same launch from a shell
+handoff, opens the same editor with **Copy** on its button, and `Ctrl-S` puts
+the prompt as edited on the clipboard for a terminal already open; it needs
+no Herdr. `ticket-tui agent launch <id>` is the same launch from a shell
 inside a Herdr pane, `agent prompt <id>` prints the prompt, and `agent list`
 prints the sessions on file.
 
 ### The workflow skill
 
 `.agents/skills/ticket-agent-workflow/SKILL.md` is portable: it names none of
-this repository's own conventions. It asks the agent to read the handoff and
+this repository's own conventions. Its `name:` is the slash command every
+prompt opens with, `/ticket-agent-workflow`, for an agent that has the skill
+installed under that name; the path to the copy in the handoff stays on the
+next lines for one that does not. It asks the agent to read the handoff and
 the ticket live, read the repository's own agent instructions, inspect the
 code, refine the problem, scope and acceptance criteria with the user, save
 the agreed ticket text with `edit --description-file` and

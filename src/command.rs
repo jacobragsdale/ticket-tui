@@ -250,7 +250,7 @@ pub const COMMANDS: &[Command] = &[
         id: CommandId::WorkWithAgent,
         title: "Work with agent",
         keys: &[key('w')],
-        help: "A coding CLI in Herdr, or back to the one on it",
+        help: "The prompt to edit, then a coding CLI in Herdr; or back to the one on it",
         scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
@@ -264,7 +264,7 @@ pub const COMMANDS: &[Command] = &[
         id: CommandId::CopyAgentPrompt,
         title: "Copy agent prompt",
         keys: &[],
-        help: "For a terminal you already have open",
+        help: "The prompt to edit, then the clipboard, for a terminal you have open",
         scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
