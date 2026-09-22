@@ -742,6 +742,26 @@ impl WorkItemsScreen {
         self.mode = WorkItemMode::Browse;
     }
 
+    /// What the capture row says until a title is typed: what `Enter` will
+    /// make, from the same facts [`Self::submit_capture`] fills the fields
+    /// from, or why it will refuse — so the row never promises a sprint
+    /// nobody knows or an assignee nobody is signed in as.
+    #[must_use]
+    pub fn capture_hint(&self, shell: &Shell) -> String {
+        if let Some(reason) = shell.write_refusal() {
+            return format!("Nothing can be created here: {reason}");
+        }
+        let mut parts = vec![format!("New {DEFAULT_WORK_ITEM_TYPE}")];
+        if shell.me().is_some() {
+            parts.push("on you".to_owned());
+        }
+        if self.current_iteration().is_some() {
+            parts.push("this sprint".to_owned());
+        }
+        parts.push(format!("#{CAPTURE_TAG}"));
+        format!("{} \u{2014} type a title", parts.join(" \u{00b7} "))
+    }
+
     /// `Enter`: the title, and every other field defaulted rather than asked —
     /// the type `n` defaults to, `@me`, the sprint the project is in, and the
     /// one constant tag that is the triage hook. It goes out as a form filled

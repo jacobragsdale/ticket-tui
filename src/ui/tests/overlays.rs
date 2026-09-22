@@ -356,7 +356,7 @@ fn the_prompt_editor_paints_the_prompt_its_caret_and_its_buttons_and_a_click_mov
     );
     assert!(text.contains("/ticket-agent-workflow"), "{text}");
     assert!(
-        text.contains(" Launch ") && text.contains(" Close "),
+        text.contains(" Launch ") && text.contains(" Keep draft "),
         "{text}"
     );
 

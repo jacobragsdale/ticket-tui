@@ -626,7 +626,7 @@ mod tests {
         );
         assert_eq!(
             (loaded.pane_split_wide, loaded.pane_split_stacked),
-            (62, 56),
+            (62, 65),
             "a session written before the divider moved keeps the built-in split"
         );
         assert_eq!(

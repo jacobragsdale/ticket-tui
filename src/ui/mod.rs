@@ -154,6 +154,7 @@ fn render_shell_overlay(frame: &mut Frame<'_>, app: &mut App, body: Rect) {
             Rect::new(body.x, body.y, body.width, 1),
             work_items.capture.text(),
             work_items.capture.cursor(),
+            &work_items.capture_hint(shell),
         ),
         _ => {}
     }
@@ -381,7 +382,14 @@ fn render_search(
     // The capture row takes the search row's place while it is open: one row,
     // wherever the tab keeps it.
     if screen.mode == WorkItemMode::Capture {
-        render_capture_row(frame, area, screen.capture.text(), screen.capture.cursor());
+        let hint = screen.capture_hint(shell);
+        render_capture_row(
+            frame,
+            area,
+            screen.capture.text(),
+            screen.capture.cursor(),
+            &hint,
+        );
         return;
     }
     render_search_row(

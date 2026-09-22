@@ -451,7 +451,13 @@ pub(super) fn render_search_row(frame: &mut Frame<'_>, shell: &mut Shell, row: S
 /// so a capture reads as the row it replaces: the glyph, the title as it is
 /// typed, and the caret in it. Every other field is defaulted rather than
 /// asked, and the empty row names the defaults.
-pub(super) fn render_capture_row(frame: &mut Frame<'_>, area: Rect, text: &str, cursor: usize) {
+pub(super) fn render_capture_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    text: &str,
+    cursor: usize,
+    hint: &str,
+) {
     if area.width < 4 || area.height == 0 {
         return;
     }
@@ -495,13 +501,7 @@ pub(super) fn render_capture_row(frame: &mut Frame<'_>, area: Rect, text: &str, 
     if text.is_empty() {
         let fg = theme().muted_on(theme().surface);
         frame.render_widget(
-            Line::styled(
-                format!(
-                    "New {} \u{00b7} on you \u{00b7} this sprint \u{00b7} #inbox \u{2014} type a title",
-                    crate::app::work_items::DEFAULT_WORK_ITEM_TYPE
-                ),
-                Style::default().fg(fg),
-            ),
+            Line::styled(hint.to_owned(), Style::default().fg(fg)),
             field,
         );
     }

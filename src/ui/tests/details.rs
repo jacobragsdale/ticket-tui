@@ -1543,3 +1543,24 @@ fn the_family_tree_counts_off_what_the_window_and_the_cap_left_out() {
         assert!(!app.work_items.peeking(), "{summary} peeks at nothing");
     }
 }
+
+#[test]
+fn the_reason_reads_under_planning_and_leaves_the_pinned_heading_two_rows() {
+    let mut app = App::new(vec![ticket()]);
+    let text = render_text(130, 40, &mut app);
+    let row = |needle: &str| {
+        text.lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} is on screen: {text}"))
+    };
+    let below = text.lines().nth(row("#10001") + 1).unwrap_or_default();
+    assert!(
+        !below.contains("Implementation started"),
+        "the badge row does not wrap onto a reason: {text}"
+    );
+    assert!(
+        row("Reason ") > row("Planning"),
+        "the reason is a Planning field: {text}"
+    );
+    assert!(text.contains("Implementation started"), "{text}");
+}

@@ -394,7 +394,7 @@ fn dragging_the_divider_resizes_both_layouts_and_keeps_both_panes_usable() {
     render_text(90, 30, &mut stacked);
     let before = divider(&stacked);
     assert_eq!(before.height, 1, "and one border row when they are stacked");
-    assert_eq!(stacked.shell.pane_split_stacked, 56);
+    assert_eq!(stacked.shell.pane_split_stacked, 65);
     let action = drag(
         &mut stacked,
         (before.x + 5, before.y),
@@ -500,10 +500,21 @@ fn the_capture_row_takes_the_search_rows_place_on_every_tab() {
 
     let mut app = App::new(vec![ticket()]);
     app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
+    let offline = render_text(120, 20, &mut app);
+    assert!(
+        row(&offline).starts_with("+ Nothing can be created here"),
+        "offline, the row says Enter will be refused rather than promise a work item:\n{offline}"
+    );
+    app.shell.enable_sync();
+    let anonymous = render_text(120, 20, &mut app);
+    assert!(
+        row(&anonymous).starts_with("+ New Issue \u{00b7} #inbox \u{2014} type a title"),
+        "nobody signed in and no sprint known, so neither is promised:\n{anonymous}"
+    );
+    app.shell.set_me(Some("Avery Chen".into()));
     let captured = render_text(120, 20, &mut app);
     assert!(
-        row(&captured)
-            .starts_with("+ New Issue \u{00b7} on you \u{00b7} this sprint \u{00b7} #inbox"),
+        row(&captured).starts_with("+ New Issue \u{00b7} on you \u{00b7}"),
         "the glyph and what Enter will make of the title:\n{captured}"
     );
     app.handle_paste("swallowed 412");
@@ -519,6 +530,7 @@ fn the_capture_row_takes_the_search_rows_place_on_every_tab() {
     );
 
     let mut app = crate::app::pipelines::tests::pipelines_app();
+    app.shell.enable_sync();
     app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
     let over_runs = render_text(120, 20, &mut app);
     assert!(

@@ -322,6 +322,8 @@ pub(super) fn render_handoff_editor(
             enabled: true,
         },
     );
+    // `Keep draft`, like the new-item form: closing keeps the edit for the
+    // next `w`, which is what the footer's `Esc keep draft` says too.
     render_control(
         frame,
         shell,
@@ -329,10 +331,10 @@ pub(super) fn render_handoff_editor(
             area: Rect::new(
                 buttons.x.saturating_add(primary_width).saturating_add(2),
                 buttons.y,
-                7,
+                12,
                 1,
             ),
-            label: " Close ",
+            label: " Keep draft ",
             target: PointerTarget::CloseOverlay,
             layer: PointerLayer::Modal,
             kind: ControlKind::Chip,

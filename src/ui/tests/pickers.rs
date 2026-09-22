@@ -111,7 +111,7 @@ fn the_new_work_item_form_draws_every_field_and_a_click_focuses_or_drops_one_dow
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::CancelForm))
         .map(|region| (region.rect.x, region.rect.y))
-        .expect("the form offers a Close button");
+        .expect("the form offers a Keep draft button");
     click(&mut app, x, y);
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert!(app.work_items.form.is_none());

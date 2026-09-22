@@ -717,7 +717,7 @@ pub const COMMANDS: &[Command] = &[
         id: CommandId::ResetPaneSplit,
         title: "Reset pane split",
         keys: &[],
-        help: "List 62% side by side, 56% stacked",
+        help: "List 62% side by side, 65% stacked",
         scope: Scope::Global,
     },
     Command {

@@ -89,7 +89,7 @@ impl PointerUpdate {
 /// side by side, and when they are stacked.
 pub const DEFAULT_PANE_SPLIT_WIDE: u16 = 62;
 
-pub const DEFAULT_PANE_SPLIT_STACKED: u16 = 56;
+pub const DEFAULT_PANE_SPLIT_STACKED: u16 = 65;
 
 /// Percentage of the details pane given to its first half, for a tab that
 /// divides it again: the pipelines run above its log.

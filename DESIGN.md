@@ -937,7 +937,7 @@ first multi-field overlay in the app — over whatever is on screen:
 │   Priority    2                                                  │
 │   Tags        sync; infra                                        │
 │                                                                  │
-│ [Create]  [Close]                                                │
+│ [Create]  [Keep draft]                                           │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -949,11 +949,11 @@ the assignee list, each writing its choice back into the field and returning to
 the form. `Enter` on a typed field moves on to the next one; submitting is
 deliberately not bound to it, so a stray `Enter` halfway down the form never
 files a half-typed work item. `Ctrl-S` or `[Create]` files it, `Esc` or
-`[Close]` closes it — the button says close rather than cancel because what was
-typed is kept for the next `n`, and the footer says `Esc keep draft` for the
-same reason. While a required field is still empty the row above the buttons
-says which, quietly (`Title is required`), and `[Create]` stays unlit; the
-guidance goes as soon as the field says something. Clicking a typed field
+`[Keep draft]` closes it — the button says what it does rather than cancel,
+because what was typed is kept for the next `n`, and the footer says `Esc keep
+draft` for the same reason. `[Create]` is always lit: pressed with a required
+field still empty, it says which (`Title is required`) and puts the cursor on
+it, and nothing is refused before anybody has tried. Clicking a typed field
 focuses it and puts the caret where the click landed; clicking a `▾` row drops
 that picker down, because a chevron that answers only the keyboard is a chevron
 that lies. The two buttons are clickable. A value longer than its row scrolls
@@ -1038,8 +1038,7 @@ knowing what it is filing:
 │   Assignee    nobody                                           ▾ │
 │   Priority    unset — 1 to 4                                     │
 │   Tags        semicolon separated                                │
-│ Title is required                                                │
-│ [Create]  [Close]                                                │
+│ [Create]  [Keep draft]                                           │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1083,6 +1082,11 @@ showing:
 ```
 + the retry loop in sync.rs swallows the 412
 ```
+
+Until a title is typed the row says what `Enter` will make of it, built from
+the same facts the fields are filled from — `New Issue · on you · this sprint ·
+#inbox — type a title`, leaving out `on you` when nobody is signed in and `this
+sprint` when no sprint is known — or, offline, why nothing can be created.
 
 `Enter` files it, `Esc` leaves nothing behind, and an empty title is refused in
 place — `A work item needs a title` — with the row still open and the thought
@@ -1584,13 +1588,13 @@ palette lists the commands of the tab that is showing and runs its choice
 there, and the columns editor edits that tab's columns.
 
 The details pane is one document under a pinned heading. The title and a
-badge row reading `#600 · [Issue] · ✓ Done · P1 · Jacob Ragsdale  (Work
-finished)` — in the colours the table's own cells use, with the state's reason
-closing the row — stay at the top of the pane however far it is scrolled, so it
+badge row reading `#600 · [Issue] · Done · P1 · Jacob Ragsdale` — in the
+colours the table's own cells use — stay at the top of the pane however far it is scrolled, so it
 always says which work item it is. Everything under them scrolls: the tags,
 child progress, the agent already on the work item, one row of chips —
 `[w Work with agent]  [g Go to pull request]  [o Open]`, each running its key
-on a click — and then the family tree, Related, Planning, Description,
+on a click — and then the family tree, Related, Planning (where the state's
+reason reads, as `Reason`, rather than wrapping the heading), Description,
 Acceptance Criteria, Comments, and History. The project, revision and URL are
 not drawn: `o` opens the work item and `Copy URL` in the palette copies its
 link. Created, Changed and each comment read how long ago first, then the exact

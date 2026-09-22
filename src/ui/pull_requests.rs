@@ -18,20 +18,29 @@ pub(crate) fn render(
     work_item_titles: &[(i64, String)],
     area: Rect,
 ) {
-    let chip_height = u16::from(screen.closed_hidden() && screen.hidden_closed(shell) > 0);
     let sections = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(chip_height),
         Constraint::Fill(1),
         Constraint::Length(1),
     ])
     .split(area);
-    render_search(frame, screen, shell, sections[0]);
-    if chip_height > 0 {
-        render_closed_chip(frame, shell, sections[1]);
+    // The closed chip shares the search row, at its right end, the way the
+    // finished chip shares the Work items pill row: it costs the list no row.
+    let mut search = sections[0];
+    if screen.closed_hidden() && screen.hidden_closed(shell) > 0 {
+        let width = u16::try_from(CLOSED_CHIP.chars().count()).unwrap_or(u16::MAX);
+        if search.width > width.saturating_add(32) {
+            search.width -= width + 1;
+            render_closed_chip(
+                frame,
+                shell,
+                Rect::new(search.right() + 1, search.y, width, 1),
+            );
+        }
     }
-    render_content(frame, screen, shell, work_item_titles, sections[2]);
-    render_footer(frame, screen, shell, sections[3]);
+    render_search(frame, screen, shell, search);
+    render_content(frame, screen, shell, work_item_titles, sections[1]);
+    render_footer(frame, screen, shell, sections[2]);
     match screen.mode {
         PrMode::Complete => render_complete_form(frame, screen, shell),
         PrMode::ConfirmAbandon => render_abandon_confirm(frame, screen, shell),
@@ -271,12 +280,12 @@ fn render_search(
 /// worded the same way. How many is the empty table's to say, when all of
 /// them are: beside a list that has rows, the chip only needs to say that
 /// there are more and where the `×` is.
+const CLOSED_CHIP: &str = " Closed hidden \u{00d7} ";
+
 fn render_closed_chip(frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
-    let label = " Closed hidden \u{00d7} ";
-    let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
     frame.render_widget(
         Paragraph::new(Line::styled(
-            label,
+            CLOSED_CHIP,
             Style::default()
                 .fg(theme().text)
                 .bg(theme().selected_background),
@@ -284,7 +293,7 @@ fn render_closed_chip(frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
         area,
     );
     shell.hit_regions.push(region(
-        Rect::new(area.x, area.y, width.min(area.width), 1),
+        area,
         PointerTarget::ShowFinished,
         PointerLayer::Base,
         None,

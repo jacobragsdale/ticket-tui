@@ -449,7 +449,10 @@ fn the_form_closes_keeping_its_draft_and_says_what_is_missing_only_when_asked() 
     let (y, x) = text
         .lines()
         .enumerate()
-        .find_map(|(y, line)| line.find(" Create ").map(|x| (y, x)))
+        .find_map(|(y, line)| {
+            line.find(" Create ")
+                .map(|at| (y, line[..at].chars().count()))
+        })
         .unwrap();
     let cell = &terminal.backend().buffer()[(u16::try_from(x).unwrap(), u16::try_from(y).unwrap())];
     if theme().accent != Color::Reset {

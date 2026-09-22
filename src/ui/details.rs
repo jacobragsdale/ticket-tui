@@ -268,6 +268,12 @@ pub(super) fn render_details(
         &ticket.iteration_path,
         &mut highlighter,
     ));
+    // Why the work item is in its state — Azure DevOps sets one on every
+    // transition. It lives here rather than on the badge row, where it wrapped
+    // the pinned heading onto a third row at ordinary pane widths.
+    if let Some(reason) = ticket.reason.as_deref().filter(|reason| !reason.is_empty()) {
+        lines.push(field_line("Reason", reason));
+    }
     let now = Timestamp::now();
     lines.push(field_line("Created", when(ticket.created_at, now)));
     lines.push(changed_field_line(
@@ -950,16 +956,6 @@ pub(super) fn ticket_badge_line(
         Some(name) => highlight_searchable(name, Style::default(), highlighter).spans,
         None => Line::styled(UNASSIGNED_LABEL, Style::default().fg(theme().muted)).spans,
     });
-    // Why the work item is in its state — Azure DevOps sets one on every
-    // transition — closes the row rather than trailing the state it explains:
-    // a row that wraps then wraps only the reason, and Priority and Assignee
-    // stay on the columns their click targets are measured at.
-    if let Some(reason) = ticket.reason.as_deref().filter(|reason| !reason.is_empty()) {
-        spans.push(Span::styled(
-            format!("  ({reason})"),
-            Style::default().fg(theme().muted),
-        ));
-    }
     Line::from(spans)
 }
 
@@ -1025,8 +1021,7 @@ pub(super) fn columns(text: &str) -> u16 {
 pub(super) fn metadata_field_spans(ticket: &Ticket) -> Vec<FieldSpan> {
     let separator = columns(" \u{b7} ");
     let state = &ticket.state;
-    // Along the badge row: `#600 · [Issue] · Done · P1 · Jacob Ragsdale`, and
-    // the reason after the last of them.
+    // Along the badge row: `#600 · [Issue] · Done · P1 · Jacob Ragsdale`.
     let state_x = columns("#")
         .saturating_add(columns(&ticket.key.id.to_string()))
         .saturating_add(separator)
