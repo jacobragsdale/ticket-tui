@@ -501,8 +501,9 @@ fn the_capture_row_takes_the_search_rows_place_on_every_tab() {
     app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
     let captured = render_text(120, 20, &mut app);
     assert!(
-        row(&captured).starts_with("+ Title"),
-        "the glyph and what the row wants:\n{captured}"
+        row(&captured)
+            .starts_with("+ New Issue \u{00b7} on you \u{00b7} this sprint \u{00b7} #inbox"),
+        "the glyph and what Enter will make of the title:\n{captured}"
     );
     app.handle_paste("swallowed 412");
     let typed = render_text(120, 20, &mut app);
@@ -520,7 +521,7 @@ fn the_capture_row_takes_the_search_rows_place_on_every_tab() {
     app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
     let over_runs = render_text(120, 20, &mut app);
     assert!(
-        row(&over_runs).starts_with("+ Title"),
+        row(&over_runs).starts_with("+ New Issue"),
         "and it draws over the runs the same way:\n{over_runs}"
     );
 }

@@ -410,3 +410,128 @@ fn the_agent_prompt_overlay_shows_the_prompt_as_it_was_sent() {
     assert!(text.contains("Work item #715 in demo/atlas"), "{text}");
     assert!(text.contains("1. /h/SKILL.md"), "{text}");
 }
+
+/// The column and row `needle` starts at in rendered text, counted in cells.
+fn cell_of(text: &str, needle: &str) -> (u16, u16) {
+    text.lines()
+        .enumerate()
+        .find_map(|(y, line)| {
+            let byte = line.find(needle)?;
+            let x = line[..byte].chars().count();
+            Some((u16::try_from(x).ok()?, u16::try_from(y).ok()?))
+        })
+        .unwrap_or_else(|| panic!("{needle:?} is not on screen:\n{text}"))
+}
+
+#[test]
+fn the_palette_names_its_sections_and_a_name_is_not_a_command() {
+    let mut app = App::new(vec![ticket()]);
+    app.work_items
+        .run_command(&mut app.shell, CommandId::Palette);
+    let text = render_text(120, 120, &mut app);
+    for group in crate::command::PALETTE_GROUPS
+        .iter()
+        .filter(|group| !matches!(**group, "Review" | "Runs" | "Git"))
+    {
+        assert!(
+            text.contains(&format!("\u{2502} {group} ")),
+            "every section this tab has is named: {group}\n{text}"
+        );
+    }
+    let (x, y) = cell_of(&text, "\u{2502} Edit ");
+    let below = text.lines().nth(usize::from(y) + 1).unwrap_or_default();
+    assert!(
+        below.contains("\u{203a} Actions\u{2026}"),
+        "the cursor opens on the first command, under its section's name: {text}"
+    );
+    assert!(
+        text.find("Edit title") < text.find("Copy ID")
+            && text.find("Copy ID") < text.find("Configure columns"),
+        "the commands are grouped rather than listed as they are defined: {text}"
+    );
+
+    // A click on the name runs nothing and leaves the palette open.
+    click(&mut app, x + 2, y);
+    assert_eq!(app.work_items.mode, WorkItemMode::Palette);
+
+    // Filtering keeps the names of the sections something survived in.
+    for character in "export".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+    let text = render_text(120, 80, &mut app);
+    assert!(text.contains("\u{2502} Copy & export "), "{text}");
+    assert!(text.contains("Export selected as CSV"), "{text}");
+    assert!(
+        !text.contains("\u{2502} Edit ") && !text.contains("\u{2502} View "),
+        "a section with nothing left in it goes: {text}"
+    );
+}
+
+#[test]
+fn the_key_on_the_row_under_the_cursor_is_not_painted_in_the_muted_colour() {
+    let mut app = App::new(vec![ticket()]);
+    app.work_items.mode = WorkItemMode::Edit;
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let text = render_text(100, 30, &mut app);
+    let (x, y) = cell_of(&text, "\u{203a} State");
+    let row = text
+        .lines()
+        .nth(usize::from(y))
+        .unwrap_or_default()
+        .to_owned();
+    let key = x
+        + u16::try_from(
+            row.chars()
+                .skip(usize::from(x) + 2)
+                .position(|character| character == 'S')
+                .expect("the State row names its key"),
+        )
+        .unwrap()
+        + 2;
+    let cell = &terminal.backend().buffer()[(key, y)];
+    assert_eq!(cell.symbol(), "S", "{row}");
+    assert!(
+        theme().muted == Color::Reset || cell.fg != theme().muted,
+        "the selected row's ground can be the muted colour, so its key is not: {row}"
+    );
+}
+
+#[test]
+fn the_sort_popup_is_as_big_as_its_fields() {
+    let mut app = App::new(vec![ticket()]);
+    app.work_items.mode = WorkItemMode::Sort;
+    let text = render_text(120, 40, &mut app);
+    let (x, y) = cell_of(&text, "Sort tickets");
+    let top: Vec<char> = text.lines().nth(usize::from(y)).unwrap().chars().collect();
+    let width = top[usize::from(x)..]
+        .iter()
+        .position(|character| *character == '\u{256e}' || *character == '\u{2510}')
+        .expect("the top border ends");
+    assert!(width <= 30, "no wider than a field and its arrows: {width}");
+    let rows: Vec<&str> = text.lines().collect();
+    let last = rows[usize::from(y) + SortField::ALL.len()];
+    let under = rows[usize::from(y) + SortField::ALL.len() + 1];
+    assert!(last.contains("Progress"), "{text}");
+    assert!(
+        under.contains('\u{2570}') || under.contains('\u{2514}'),
+        "and no taller: {text}"
+    );
+}
+
+#[test]
+fn the_database_overlay_wraps_a_long_value_and_leaves_closing_to_the_footer() {
+    let mut app = App::new(vec![ticket()]);
+    app.shell.database_path = std::path::PathBuf::from(
+        "/home/someone/a/rather/deeply/nested/directory/that/goes/on/and/on/tickets.sqlite3",
+    );
+    app.work_items
+        .run_command(&mut app.shell, CommandId::DatabaseInfo);
+    let text = render_text(100, 30, &mut app);
+    assert!(text.contains("/home/someone/a/rather"), "{text}");
+    assert!(
+        text.contains("tickets.sqlite3"),
+        "the end of the path wraps onto the next row rather than off the edge: {text}"
+    );
+    assert!(!text.contains("Press Esc or i to close"), "{text}");
+}

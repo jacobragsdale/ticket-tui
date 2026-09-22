@@ -878,10 +878,121 @@ fn worded(command: Command, finished_hidden: bool, tab: TabId) -> Command {
     Command { title, ..command }
 }
 
+/// The palette's sections, in the order it lists them.
+pub const PALETTE_GROUPS: &[&str] = &[
+    "Edit",
+    "Agent",
+    "Review",
+    "Runs",
+    "Git",
+    "Copy & export",
+    "View",
+    "Navigate",
+    "Sync & app",
+];
+
+/// The palette section a command is listed under, one of
+/// [`PALETTE_GROUPS`]. The match has no fallback, so a new command cannot
+/// reach the palette without being given a place in it.
+#[must_use]
+pub const fn palette_group(id: CommandId) -> &'static str {
+    use CommandId as C;
+    match id {
+        C::EditMenu
+        | C::ChangeState
+        | C::EditTitle
+        | C::EditPriority
+        | C::EditTags
+        | C::EditAssignee
+        | C::EditIteration
+        | C::EditArea
+        | C::SetParent
+        | C::RemoveParent
+        | C::EditDescription
+        | C::EditDescriptionExternally
+        | C::EditAcceptanceCriteria
+        | C::AddComment
+        | C::NewWorkItem
+        | C::NewChild
+        | C::QuickCapture
+        | C::DeleteWorkItem
+        | C::UndoEdit
+        | C::LinkBranch => "Edit",
+        C::WorkWithAgent
+        | C::StartAnotherAgentSession
+        | C::CopyAgentPrompt
+        | C::ShowAgentPrompt => "Agent",
+        C::ApprovePr
+        | C::SuggestPr
+        | C::WaitPr
+        | C::RejectPr
+        | C::UndoVote
+        | C::CompletePr
+        | C::AbandonPr
+        | C::AutoCompletePr
+        | C::CommentPr
+        | C::LinkWorkItem => "Review",
+        C::RunPipeline | C::CancelRun | C::RetryRun | C::WatchRun | C::Approvals => "Runs",
+        C::CloneRepo | C::FetchRepo | C::PullRepo => "Git",
+        C::CopyId
+        | C::CopyUrl
+        | C::CopyTitle
+        | C::CopyMarkdown
+        | C::CopySummary
+        | C::ExportJson
+        | C::ExportCsv => "Copy & export",
+        C::Search
+        | C::Filters
+        | C::MoreFilters
+        | C::Columns
+        | C::Views
+        | C::SaveView
+        | C::Sort
+        | C::ToggleDensity
+        | C::ToggleDetails
+        | C::ToggleSearchOrder
+        | C::ToggleFinished
+        | C::ToggleClosedPrs
+        | C::SprintSummary
+        | C::ResetPaneSplit
+        | C::SetStaleThreshold => "View",
+        C::Open | C::Follow | C::HistoryBack | C::HistoryForward | C::ToggleBookmark => "Navigate",
+        C::Sync | C::DatabaseInfo | C::Help | C::Palette | C::Quit => "Sync & app",
+    }
+}
+
+/// Where a command's section falls in the palette.
+fn group_rank(id: CommandId) -> usize {
+    let group = palette_group(id);
+    PALETTE_GROUPS
+        .iter()
+        .position(|held| *held == group)
+        .unwrap_or(PALETTE_GROUPS.len())
+}
+
+/// The row the palette draws the command at `index` of `commands` on: its
+/// place in the list, pushed down by the header of its own section and of
+/// every section above it.
+#[must_use]
+pub fn palette_row(commands: &[Command], index: usize) -> usize {
+    let headers = commands
+        .iter()
+        .take(index.saturating_add(1))
+        .enumerate()
+        .filter(|(at, command)| {
+            *at == 0 || palette_group(commands[at - 1].id) != palette_group(command.id)
+        })
+        .count();
+    index + headers
+}
+
+/// The palette's commands for `tab`, section by section in the order of
+/// [`PALETTE_GROUPS`] and in [`COMMANDS`] order within one, less those the
+/// query does not match.
 #[must_use]
 pub fn matching_commands(query: &str, finished_hidden: bool, tab: TabId) -> Vec<Command> {
     let query = query.trim().to_ascii_lowercase();
-    COMMANDS
+    let mut commands: Vec<Command> = COMMANDS
         .iter()
         .copied()
         .filter(|command| command.scope.covers(tab))
@@ -892,7 +1003,9 @@ pub fn matching_commands(query: &str, finished_hidden: bool, tab: TabId) -> Vec<
                 || command.title.to_ascii_lowercase().contains(&query)
                 || command.key_label().to_ascii_lowercase().contains(&query)
         })
-        .collect()
+        .collect();
+    commands.sort_by_key(|command| group_rank(command.id));
+    commands
 }
 
 #[cfg(test)]
@@ -917,6 +1030,22 @@ mod tests {
                 .iter()
                 .any(|command| command.id == CommandId::Search),
             "commands that only work from browse mode stay out of the palette"
+        );
+    }
+
+    #[test]
+    fn a_palette_row_counts_the_section_names_above_it() {
+        let commands = matching_commands("", true, TabId::WorkItems);
+        assert_eq!(palette_row(&commands, 0), 1, "under the first name");
+        let second = commands
+            .iter()
+            .position(|command| palette_group(command.id) != palette_group(commands[0].id))
+            .expect("more than one section");
+        assert_eq!(palette_row(&commands, second - 1), second);
+        assert_eq!(
+            palette_row(&commands, second),
+            second + 2,
+            "the first of the next section sits under its own name"
         );
     }
 

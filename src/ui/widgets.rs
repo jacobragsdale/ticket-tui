@@ -440,8 +440,8 @@ pub(super) fn render_search_row(frame: &mut Frame<'_>, shell: &mut Shell, row: S
 
 /// The one-row quick capture `+` opens, drawn where the tab's search row sits
 /// so a capture reads as the row it replaces: the glyph, the title as it is
-/// typed, and the caret in it. There is nothing else on it — every other field
-/// is defaulted rather than asked.
+/// typed, and the caret in it. Every other field is defaulted rather than
+/// asked, and the empty row names the defaults.
 pub(super) fn render_capture_row(frame: &mut Frame<'_>, area: Rect, text: &str, cursor: usize) {
     if area.width < 4 || area.height == 0 {
         return;
@@ -476,10 +476,30 @@ pub(super) fn render_capture_row(frame: &mut Frame<'_>, area: Rect, text: &str, 
         field,
         text,
         cursor,
-        Some("Title"),
+        None,
         Style::default().fg(theme().text),
     ) {
         frame.set_cursor_position(caret);
+    }
+    // Until a title is typed the row says what Enter will make of it: the
+    // fields the capture fills in rather than asks for. The terminal palette
+    // grounds the row in its muted colour, so there the words take the body's.
+    if text.is_empty() {
+        let fg = if theme().muted == theme().surface {
+            theme().body
+        } else {
+            theme().muted
+        };
+        frame.render_widget(
+            Line::styled(
+                format!(
+                    "New {} \u{00b7} on you \u{00b7} this sprint \u{00b7} #inbox \u{2014} type a title",
+                    crate::app::work_items::DEFAULT_WORK_ITEM_TYPE
+                ),
+                Style::default().fg(fg),
+            ),
+            field,
+        );
     }
 }
 

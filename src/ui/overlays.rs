@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::columns::ColumnLayout;
+use crate::command::{PALETTE_GROUPS, palette_group, palette_row};
 use crate::text_input::wrap_with_cursor;
 
 pub(super) fn render_sort_popup(
@@ -10,7 +11,11 @@ pub(super) fn render_sort_popup(
     screen: &mut WorkItemsScreen,
     shell: &mut Shell,
 ) {
-    let area = centered_rect(frame.area(), 48, 16);
+    // As big as what it holds: a row per field, each the marker, a name
+    // padded to 14 and the arrow (18 columns), then a gap and the `[↑] [↓]`
+    // controls (7), inside the border and its gutter (3).
+    let height = u16::try_from(SortField::ALL.len() + 2).unwrap_or(u16::MAX);
+    let area = centered_rect(frame.area(), 18 + 2 + 7 + 3, height);
     let inner = render_modal_frame(frame, modal_layer(screen), shell, area, " Sort tickets ");
     let selected = screen.sort_draft.field_index;
     let rows: Vec<Line> = SortField::ALL
@@ -958,12 +963,24 @@ pub(super) fn render_palette(
     shell: &mut Shell,
 ) {
     let commands = screen.palette_commands();
+    // The commands under a muted name for each section, so fifty of them read
+    // as a handful of kinds. Only the sections a command survived the filter
+    // in are named, and a name is a row nothing can choose: it maps to no
+    // command.
+    let mut drawn: Vec<Option<usize>> = Vec::with_capacity(commands.len() + PALETTE_GROUPS.len());
+    for (index, command) in commands.iter().enumerate() {
+        let group = palette_group(command.id);
+        if index == 0 || palette_group(commands[index - 1].id) != group {
+            drawn.push(None);
+        }
+        drawn.push(Some(index));
+    }
     let area = ratio_rect(
         frame.area(),
         (70, 70),
         (
             72,
-            u16::try_from(commands.len().saturating_add(4)).unwrap_or(u16::MAX),
+            u16::try_from(drawn.len().saturating_add(4)).unwrap_or(u16::MAX),
         ),
         (56, 6),
     );
@@ -992,16 +1009,20 @@ pub(super) fn render_palette(
         render_empty_note(frame, list_area, &note);
     }
     let selected = screen.palette.selected;
-    let rows: Vec<Line> = commands
+    let rows: Vec<Line> = drawn
         .iter()
         .enumerate()
-        .map(|(index, command)| {
-            overlay_row(
-                index == selected,
-                command.title,
-                &command.key_label(),
+        .map(|(row, entry)| match entry {
+            Some(index) => overlay_row(
+                *index == selected,
+                commands[*index].title,
+                &commands[*index].key_label(),
                 overlay_row_width(list_area),
-            )
+            ),
+            None => Line::styled(
+                palette_group(commands[drawn[row + 1].unwrap_or_default()].id),
+                Style::default().fg(theme().muted),
+            ),
         })
         .collect();
     render_list_overlay(
@@ -1014,10 +1035,14 @@ pub(super) fn render_palette(
             layer: PointerLayer::Modal,
             selectable: Some(SelectableSurface::Overlay),
             capture: false,
-            selected,
+            selected: palette_row(&commands, selected),
             rows,
             row_hit_width: None,
-            target: &|index| PointerTarget::PaletteCommand { index },
+            target: &|row| {
+                drawn[row].map_or(PointerTarget::OverlayBody, |index| {
+                    PointerTarget::PaletteCommand { index }
+                })
+            },
             decorate: None,
         },
     );
@@ -1266,7 +1291,6 @@ pub(super) fn render_info_overlay(
     screen: &mut WorkItemsScreen,
     shell: &mut Shell,
 ) {
-    let area = centered_rect(frame.area(), 62, 14);
     let stale = if shell.stale { "stale" } else { "current" };
     // What the difference between the count and the total is made of, so the
     // rows the table is leaving out are a number rather than a suspicion.
@@ -1280,35 +1304,54 @@ pub(super) fn render_info_overlay(
     } else {
         shell.database_path.display().to_string()
     };
-    let text = Text::from(vec![
-        field_line("Path", path),
-        field_line("Tickets", screen.tickets().len().to_string()),
-        field_line("Visible", screen.visible_count().to_string()),
-        field_line("Finished", finished),
-        field_line("Loaded", shell.freshness_label()),
-        field_line("Freshness", stale),
-        field_line("Sync", shell.sync_summary()),
-        field_line(
+    let fields = [
+        ("Path", path),
+        ("Tickets", screen.tickets().len().to_string()),
+        ("Visible", screen.visible_count().to_string()),
+        ("Finished", finished),
+        ("Loaded", shell.freshness_label()),
+        ("Freshness", stale.to_owned()),
+        ("Sync", shell.sync_summary()),
+        (
             "Workspace",
             shell.workspace().map_or_else(
                 || "(none)".to_owned(),
                 |workspace| workspace.display().to_string(),
             ),
         ),
-        field_line(
+        (
             "Watcher",
             shell
                 .watch_state()
                 .map_or_else(|| "not running".to_owned(), str::to_owned),
         ),
-        Line::default(),
-        Line::styled(
-            "Press Esc or i to close",
-            Style::default().fg(theme().muted),
-        ),
-    ]);
+    ];
+    // A long path or sync message wraps under its own value rather than
+    // being cut at the border: all of it is what this overlay is for. The
+    // footer already says how to close it.
+    let width = 62.min(frame.area().width.saturating_sub(2));
+    let room = usize::from(
+        width
+            .saturating_sub(3)
+            .saturating_sub(super::details::FIELD_VALUE_COLUMN),
+    );
+    let mut lines = Vec::new();
+    for (label, value) in fields {
+        for (index, (_, row)) in wrap_with_cursor(&value, 0, room)
+            .rows
+            .into_iter()
+            .enumerate()
+        {
+            lines.push(Line::from(vec![
+                field_label(if index == 0 { label } else { "" }),
+                Span::raw(row),
+            ]));
+        }
+    }
+    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    let area = centered_rect(frame.area(), width, height);
     let inner = render_modal_frame(frame, modal_layer(screen), shell, area, " Database ");
-    frame.render_widget(Paragraph::new(text), inner);
+    frame.render_widget(Paragraph::new(lines), inner);
     shell.hit_regions.push(region(
         inner,
         PointerTarget::OverlayBody,
@@ -1367,8 +1410,8 @@ pub(super) fn no_matches_note(noun: &str, width: u16) -> String {
 /// and the key that runs it against the right-hand edge in the muted colour.
 ///
 /// The line's own style is set by [`overlay_line`] afterwards and patches
-/// underneath these, so the marker and the key keep their colours on the row
-/// the cursor is on.
+/// underneath these, so the marker keeps its colour on the row the cursor is
+/// on; the key there reads in the row's.
 pub(super) fn overlay_row(marked: bool, label: &str, key: &str, width: u16) -> Line<'static> {
     let marker = if marked {
         Span::styled(
@@ -1385,10 +1428,18 @@ pub(super) fn overlay_row(marked: bool, label: &str, key: &str, width: u16) -> L
         .saturating_sub(key.chars().count())
         .saturating_sub(1);
     let label: String = label.chars().take(room).collect();
+    // The key under the cursor takes the row's own colour: the ground the
+    // cursor lays is the muted colour itself in the terminal palette, and a
+    // muted key on it is not there at all.
+    let key_style = if marked {
+        Style::default()
+    } else {
+        Style::default().fg(theme().muted)
+    };
     Line::from(vec![
         marker,
         Span::raw(format!("{label:<room$}")),
         Span::raw(" "),
-        Span::styled(key.to_owned(), Style::default().fg(theme().muted)),
+        Span::styled(key.to_owned(), key_style),
     ])
 }

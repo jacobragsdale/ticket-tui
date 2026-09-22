@@ -841,8 +841,8 @@ impl WorkItemsScreen {
     }
 
     fn move_palette_selection(&mut self, delta: isize) {
-        let count = self.palette_commands().len();
-        if count == 0 {
+        let commands = self.palette_commands();
+        if commands.is_empty() {
             self.palette.selected = 0;
             return;
         }
@@ -850,8 +850,13 @@ impl WorkItemsScreen {
             .palette
             .selected
             .saturating_add_signed(delta)
-            .min(count - 1);
-        self.palette.scroll.ensure_visible(self.palette.selected);
+            .min(commands.len() - 1);
+        // The list scrolls by drawn rows, headers among them. The row above
+        // the chosen one comes into view with it: for the first command of a
+        // section that is the section's name, which it never shows without.
+        let row = crate::command::palette_row(&commands, self.palette.selected);
+        self.palette.scroll.ensure_visible(row.saturating_sub(1));
+        self.palette.scroll.ensure_visible(row);
     }
 
     pub(super) fn run_selected_command(&mut self, shell: &mut Shell) -> AppAction {
