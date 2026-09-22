@@ -8,8 +8,6 @@ const DATE_ONLY: &[time::format_description::FormatItem<'static>] =
     format_description!("[year]-[month]-[day]");
 const CALENDAR_DAY: &[time::format_description::FormatItem<'static>] =
     format_description!("[month repr:short] [day padding:none]");
-const EXACT_UTC: &[time::format_description::FormatItem<'static>] =
-    format_description!("[year]-[month]-[day] [hour]:[minute]:[second] UTC");
 const ISO_UTC: &[time::format_description::FormatItem<'static>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
 
@@ -128,11 +126,36 @@ impl Timestamp {
             .unwrap_or_else(|_| self.instant.to_string())
     }
 
+    /// The instant down to the second on the local clock, with the zone it
+    /// reads in: `2026-09-05 23:49:22 CDT`. Everything a person reads is in
+    /// local time; what a program reads — JSON, the agent context, WIQL — stays
+    /// RFC 3339 in UTC.
     #[must_use]
-    pub fn exact_utc(self) -> String {
-        self.instant
-            .format(EXACT_UTC)
-            .unwrap_or_else(|_| self.to_rfc3339())
+    pub fn exact_local(self) -> String {
+        self.exact_in(&local_zone())
+    }
+
+    fn exact_in(self, zone: &jiff::tz::TimeZone) -> String {
+        self.in_zone(zone)
+            .strftime("%Y-%m-%d %H:%M:%S %Z")
+            .to_string()
+    }
+
+    /// This instant on the local clock, in the zone the system is set to —
+    /// `TZ` first, then `/etc/localtime` — with its daylight saving rules
+    /// applied at the instant itself, so a winter timestamp read in summer
+    /// keeps its winter offset.
+    fn local(self) -> jiff::Zoned {
+        self.in_zone(&local_zone())
+    }
+
+    fn in_zone(self, zone: &jiff::tz::TimeZone) -> jiff::Zoned {
+        jiff::Timestamp::new(
+            self.instant.unix_timestamp(),
+            i32::try_from(self.instant.nanosecond()).unwrap_or(0),
+        )
+        .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+        .to_zoned(zone.clone())
     }
 
     /// The instant as an ISO 8601 UTC literal down to the second, which is the
@@ -146,12 +169,17 @@ impl Timestamp {
             .unwrap_or_else(|_| self.to_rfc3339())
     }
 
+    /// How long ago this was, as a table cell reads it: `now`, `5m`, `3h`,
+    /// `4d`, then the local calendar day — `Sep 5` this year, `2025-11-02`
+    /// before it.
     #[must_use]
     pub fn relative_to(self, now: OffsetDateTime) -> String {
         let changed = self.instant;
         let age = now - changed;
+        let local = self.local();
+        let local_date = || local.strftime("%Y-%m-%d").to_string();
         if age.is_negative() {
-            return self.calendar_date();
+            return local_date();
         }
         if age.whole_minutes() < 1 {
             return "now".into();
@@ -165,12 +193,10 @@ impl Timestamp {
         if age.whole_days() < 7 {
             return format!("{}d", age.whole_days());
         }
-        if changed.year() == now.year() {
-            return changed
-                .format(CALENDAR_DAY)
-                .unwrap_or_else(|_| self.calendar_date());
+        if local.year() == Self::from_offset_date_time(now).local().year() {
+            return local.strftime("%b %-d").to_string();
         }
-        self.calendar_date()
+        local_date()
     }
 }
 
@@ -209,6 +235,20 @@ fn has_zone_suffix(value: &str) -> bool {
     false
 }
 
+/// The zone local time reads in: the system's, looked up once. A test run
+/// reads UTC whatever machine it is on, so what it asserts does not move with
+/// the clock on the wall.
+#[cfg(not(test))]
+fn local_zone() -> jiff::tz::TimeZone {
+    static ZONE: std::sync::OnceLock<jiff::tz::TimeZone> = std::sync::OnceLock::new();
+    ZONE.get_or_init(jiff::tz::TimeZone::system).clone()
+}
+
+#[cfg(test)]
+fn local_zone() -> jiff::tz::TimeZone {
+    jiff::tz::TimeZone::UTC
+}
+
 #[cfg(test)]
 pub(crate) fn ts(raw: &str) -> Timestamp {
     Timestamp::parse(raw).unwrap_or_else(|error| panic!("{error}"))
@@ -223,7 +263,7 @@ mod tests {
     fn parse_normalizes_offsets_and_accepts_space_and_date_only_values() {
         let timestamp = ts("2026-08-26T13:00:00-05:00");
 
-        assert_eq!(timestamp.exact_utc(), "2026-08-26 18:00:00 UTC");
+        assert_eq!(timestamp.exact_local(), "2026-08-26 18:00:00 UTC");
         assert_eq!(timestamp, ts("2026-08-26T18:00:00Z"));
 
         assert_eq!(ts("2026-08-26 18:00:00"), ts("2026-08-26T18:00:00Z"));
@@ -261,6 +301,26 @@ mod tests {
         assert_eq!(
             ts("2025-07-01T22:00:00-05:00").relative_to(now),
             "2025-07-02"
+        );
+    }
+
+    #[test]
+    fn an_exact_time_reads_on_the_local_clock_with_the_offset_of_its_own_season() {
+        let chicago = jiff::tz::TimeZone::get("America/Chicago").unwrap();
+        assert_eq!(
+            ts("2026-01-15T12:00:00Z").exact_in(&chicago),
+            "2026-01-15 06:00:00 CST",
+            "a winter instant keeps standard time"
+        );
+        assert_eq!(
+            ts("2026-07-15T12:00:00Z").exact_in(&chicago),
+            "2026-07-15 07:00:00 CDT",
+            "a summer instant keeps daylight time"
+        );
+        assert_eq!(
+            ts("2026-07-15T03:00:00Z").exact_in(&chicago),
+            "2026-07-14 22:00:00 CDT",
+            "and the local day, not the UTC one"
         );
     }
 

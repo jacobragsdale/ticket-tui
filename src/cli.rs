@@ -1768,8 +1768,8 @@ fn describe(ticket: &Ticket, artifacts: &[&ArtifactLink], repos: &[Repo]) -> Str
         ("Area", ticket.area_path.clone()),
         ("Iteration", ticket.iteration_path.clone()),
         ("Tags", ticket.tags.join("; ")),
-        ("Created", ticket.created_at.to_rfc3339()),
-        ("Changed", ticket.changed_at.to_rfc3339()),
+        ("Created", ticket.created_at.exact_local()),
+        ("Changed", ticket.changed_at.exact_local()),
         ("URL", ticket.web_url.clone()),
     ] {
         if !value.is_empty() {
@@ -3226,12 +3226,12 @@ fn describe_run(run: &Run, pipeline: &str, timeline: &[TimelineRecord]) -> Strin
         format!(
             "Started         {}",
             run.start_time
-                .map_or_else(|| "—".to_owned(), |at| at.to_rfc3339())
+                .map_or_else(|| "—".to_owned(), |at| at.exact_local())
         ),
         format!(
             "Finished        {}",
             run.finish_time
-                .map_or_else(|| "—".to_owned(), |at| at.to_rfc3339())
+                .map_or_else(|| "—".to_owned(), |at| at.exact_local())
         ),
         format!("URL             {}", run.url),
     ];

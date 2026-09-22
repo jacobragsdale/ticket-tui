@@ -3125,7 +3125,7 @@ mod tests {
                 format!(
                     "r{} {} {}: {} → {}",
                     entry.revision,
-                    entry.changed_at.exact_utc(),
+                    entry.changed_at.exact_local(),
                     entry.field_name,
                     entry.old_value.as_deref().unwrap_or("—"),
                     entry.new_value.as_deref().unwrap_or("—"),

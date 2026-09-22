@@ -962,7 +962,7 @@ pub(crate) fn instant_label(instant: Option<Timestamp>, now: Timestamp) -> Strin
         |instant| {
             format!(
                 "{} ({})",
-                instant.exact_utc(),
+                instant.exact_local(),
                 relative_age(instant.seconds_until(now))
             )
         },

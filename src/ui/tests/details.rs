@@ -31,7 +31,7 @@ fn the_details_changed_line_says_how_long_a_stale_work_item_has_sat() {
     let quiet = changed_field_line(&item, false, now);
     assert_eq!(
         text(&quiet),
-        format!("Changed    21d ago · {}", item.changed_at.exact_utc()),
+        format!("Changed    21d ago · {}", item.changed_at.exact_local()),
         "an item nobody is waiting on reads its age, then the exact instant"
     );
 
@@ -40,7 +40,7 @@ fn the_details_changed_line_says_how_long_a_stale_work_item_has_sat() {
         text(&flagged),
         format!(
             "Changed    21d ago, stale · {}",
-            item.changed_at.exact_utc()
+            item.changed_at.exact_local()
         ),
         "a stale one says so beside the age rather than repeating the number"
     );

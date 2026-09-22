@@ -589,7 +589,7 @@ nothing else is reloaded and no other row moves. An accepted edit sets
 revision whose history has not been read.
 
 The history renders one line per change — `2h ago · Jacob Ragsdale · State: To
-Do → Doing`, with the exact UTC instant beside it — oldest revision first.
+Do → Doing`, with the exact local time beside it — oldest revision first.
 
 ## Editing
 
@@ -1598,7 +1598,10 @@ reason reads, as `Reason`, rather than wrapping the heading), Description,
 Acceptance Criteria, Comments, and History. The project, revision and URL are
 not drawn: `o` opens the work item and `Copy URL` in the palette copies its
 link. Created, Changed and each comment read how long ago first, then the exact
-UTC instant. Every field below the badge row reads as a muted label in a column of
+time on the local clock, with its zone (`2026-08-08 07:00:00 CDT`). Every
+person-facing time — the TUI and the CLI's text output — is local, looked up
+from `TZ` or the system zone with each instant's own daylight saving offset;
+JSON, the agent context and the database stay RFC 3339 in UTC. Every field below the badge row reads as a muted label in a column of
 its own with the value beside it, so the values line up down the pane; a label
 too wide for that column — `Default branch` on the Repos pane — pushes its
 value along instead, behind one space rather than into it. Each
@@ -1883,8 +1886,8 @@ saving a view called `Mine` is refused. `n` saves the current query, sort,
 columns, and density under a name of your own, `Enter` loads the view under the
 cursor, and `d` deletes one you saved.
 
-Changed dates use compact relative labels, and exact UTC timestamps remain
-available in details. Press `c` to switch between compact and comfortable row
+Changed dates use compact relative labels, falling back to the local calendar
+day, and exact local timestamps remain available in details. Press `c` to switch between compact and comfortable row
 density. Named views, column layout, bookmarks, the pane split, the stale
 threshold, whether finished tickets are listed, and the last query are saved
 beside the cache as `*.session.json`.
@@ -1894,7 +1897,7 @@ beside the cache as `*.session.json`.
 Work that nobody has touched for a fortnight, and that the workflow has not
 finished with, is flagged in the Changed column: the age goes warning-coloured,
 and bold where `NO_COLOR` leaves no palette to colour it. The details pane says
-so beside the age, as `Changed    21d ago, stale · 2026-08-08 12:00:00 UTC`.
+so beside the age, as `Changed    21d ago, stale · 2026-08-08 07:00:00 CDT`.
 
 Nothing dims — dim already means finished — and finished work is never flagged
 however long it has sat: nobody is waiting on a work item that is done or

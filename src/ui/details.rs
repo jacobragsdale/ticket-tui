@@ -1131,14 +1131,14 @@ pub(super) fn changed_field_line(ticket: &Ticket, stale: bool, now: Timestamp) -
         ));
     }
     line.spans
-        .push(Span::raw(format!(" \u{b7} {}", changed.exact_utc())));
+        .push(Span::raw(format!(" \u{b7} {}", changed.exact_local())));
     line
 }
 
 /// An instant as the details pane reads it: how long ago first, which is what
 /// a glance wants, then the exact UTC instant for anyone who needs one.
 fn when(instant: Timestamp, now: Timestamp) -> String {
-    format!("{} \u{b7} {}", ago(instant, now), instant.exact_utc())
+    format!("{} \u{b7} {}", ago(instant, now), instant.exact_local())
 }
 
 fn ago(instant: Timestamp, now: Timestamp) -> String {
@@ -1180,7 +1180,7 @@ pub(super) fn history_line(entry: &HistoryRecord, now: OffsetDateTime) -> Line<'
             Style::default().fg(theme().body),
         ),
         Span::styled(
-            format!("  {}", entry.changed_at.exact_utc()),
+            format!("  {}", entry.changed_at.exact_local()),
             Style::default().fg(theme().muted),
         ),
     ])
