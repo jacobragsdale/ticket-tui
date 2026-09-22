@@ -16,11 +16,11 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 
 use crate::agent_context;
+use crate::app::relative_age;
 use crate::db::{self, SqliteTicketRepository};
 use crate::filter::is_stale;
 use crate::model::{self, StateCategory, Ticket};
 use crate::timestamp::Timestamp;
-use crate::ui::pipelines::relative_age;
 
 /// What separates one segment from the next, as the TUI's own status bar
 /// separates its parts.
@@ -186,7 +186,8 @@ fn mine<'a>(tickets: &'a [Ticket], me: Option<&'a str>) -> impl Iterator<Item = 
 fn late_sync(synced_at: Option<Timestamp>, refresh_seconds: u64, now: Timestamp) -> Option<String> {
     let synced_at = synced_at?;
     let limit = i64::try_from(refresh_seconds.checked_mul(2)?).ok()?;
-    (limit > 0 && synced_at.seconds_until(now) > limit).then(|| relative_age(synced_at, now))
+    (limit > 0 && synced_at.seconds_until(now) > limit)
+        .then(|| relative_age(synced_at.seconds_until(now)))
 }
 
 /// Whether a running TUI is publishing a context file beside the database. A

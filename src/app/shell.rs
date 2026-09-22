@@ -115,16 +115,30 @@ fn remaining_wait(left: Duration) -> String {
     }
 }
 
-/// Compact relative wording shared by the freshness and sync labels.
-pub(crate) fn relative_age(age: Duration) -> String {
+/// How long ago, in the fewest characters that still read: `12s`, `3m`, `4h`,
+/// `17d`. Every age on every tab is worded by this one, so a pull request, a
+/// run and a work item that are the same age say so the same way.
+pub(crate) fn relative_age(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m", seconds / 60),
+        3600..=86_399 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+/// The same age as a phrase, for the labels that sit beside a clock rather
+/// than in a column: `3m ago`, or `just now` for the first 45 seconds, so a
+/// title that has just synced does not tick up a second at a time.
+pub(crate) fn time_ago(age: Duration) -> String {
     if age.as_secs() < 45 {
         "just now".into()
-    } else if age.as_secs() < 3600 {
-        format!("{}m ago", age.as_secs() / 60)
-    } else if age.as_secs() < 86_400 {
-        format!("{}h ago", age.as_secs() / 3600)
     } else {
-        format!("{}d ago", age.as_secs() / 86_400)
+        format!(
+            "{} ago",
+            relative_age(i64::try_from(age.as_secs()).unwrap_or(i64::MAX))
+        )
     }
 }
 
@@ -525,7 +539,7 @@ impl Shell {
             return SyncStatus::Offline;
         }
         self.synced_at.map_or(SyncStatus::Waiting, |at| {
-            SyncStatus::Synced(relative_age(at.elapsed()))
+            SyncStatus::Synced(time_ago(at.elapsed()))
         })
     }
 
@@ -684,7 +698,7 @@ impl Shell {
 
     #[must_use]
     pub fn freshness_label(&self) -> String {
-        relative_age(self.loaded_at.elapsed())
+        time_ago(self.loaded_at.elapsed())
     }
 
     pub(super) fn handle_hover(&mut self, column: u16, row: u16) -> PointerUpdate {
@@ -939,7 +953,7 @@ impl Shell {
     fn sync_state(&self) -> String {
         let last = self
             .synced_at
-            .map_or_else(|| "not yet".to_owned(), |at| relative_age(at.elapsed()));
+            .map_or_else(|| "not yet".to_owned(), |at| time_ago(at.elapsed()));
         if self.sync_pending {
             format!("in progress, last {last}")
         } else if let Some(left) = self.sync_pause_left() {

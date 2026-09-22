@@ -65,12 +65,12 @@ pub use pipelines::PipelinesScreen;
 pub use pull_requests::PullRequestsScreen;
 pub use repos::ReposScreen;
 pub use screen::{Screen, TabId};
-pub(crate) use shell::relative_age;
 pub use shell::{
     DEFAULT_PANE_SPLIT_DETAILS, DEFAULT_PANE_SPLIT_STACKED, DEFAULT_PANE_SPLIT_WIDE,
     DividerOrientation, Focus, NotificationLevel, PaneSeam, PointerUpdate, Shell, SyncStatus,
 };
 use shell::{MAX_SPLIT_PERCENT, MIN_SPLIT_PERCENT};
+pub(crate) use shell::{relative_age, time_ago};
 pub use work_items::{
     AgentChoice, BuiltinView, ChildProgress, ChildProgressIndex, ColumnOverlay, DEFAULT_STALE_DAYS,
     DeleteConfirm, EditMenu, EditScope, FacetBar, FilterOverlay, FormField, FormFieldId,

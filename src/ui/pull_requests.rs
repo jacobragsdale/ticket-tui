@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::app::pull_requests::{PrColumn, PrMode, PrRow, PullRequestsScreen};
+use crate::app::relative_age;
 use crate::command::CommandId;
 use crate::model::{Jump, PrStatus};
 use crate::ui::details::section_line;
@@ -364,7 +365,7 @@ fn pr_cell(row: &PrRow, column: PrColumn, now: Timestamp) -> Cell<'static> {
         PrColumn::Age => Cell::from(
             Line::styled(
                 row.changed_at()
-                    .map_or_else(String::new, |at| relative_age(at, now)),
+                    .map_or_else(String::new, |at| relative_age(at.seconds_until(now))),
                 plain,
             )
             .right_aligned(),
@@ -538,7 +539,9 @@ fn render_details(
                         "  {}{}",
                         thread
                             .published_at
-                            .map_or_else(String::new, |at| relative_age(at, Timestamp::now())),
+                            .map_or_else(String::new, |at| relative_age(
+                                at.seconds_until(Timestamp::now())
+                            )),
                         if thread.status.is_empty() {
                             String::new()
                         } else {
@@ -657,14 +660,4 @@ fn status_style(status: PrStatus) -> Style {
         PrStatus::Abandoned => theme().muted,
     };
     Style::default().fg(color)
-}
-
-fn relative_age(instant: Timestamp, now: Timestamp) -> String {
-    let seconds = instant.seconds_until(now).max(0);
-    match seconds {
-        0..=59 => format!("{seconds}s"),
-        60..=3599 => format!("{}m", seconds / 60),
-        3600..=86_399 => format!("{}h", seconds / 3600),
-        _ => format!("{}d", seconds / 86_400),
-    }
 }

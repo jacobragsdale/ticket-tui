@@ -288,7 +288,7 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
             // Nothing here is watched, so how old the reading is matters.
             if let Some(scanned) = screen.scanned_at() {
                 status.push(Span::styled(
-                    format!("  read {}", crate::app::relative_age(scanned.elapsed())),
+                    format!("  read {}", crate::app::time_ago(scanned.elapsed())),
                     Style::default().fg(theme().muted),
                 ));
             }

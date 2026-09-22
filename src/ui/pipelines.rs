@@ -6,6 +6,7 @@ use crate::app::pipelines::rows::{duration_label, run_glyph};
 use crate::app::pipelines::{
     Level, PipelineColumn, PipelineMode, PipelineRow, PipelinesScreen, RunColumn, RunRow,
 };
+use crate::app::relative_age;
 use crate::command::CommandId;
 use crate::model::{Jump, RunResult, RunStatus, TimelineKind, TimelineRecord};
 use crate::ui::details::section_line;
@@ -60,9 +61,9 @@ fn render_approvals(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: 
         .enumerate()
         .map(|(index, approval)| {
             let marker = if index == selected { "\u{203a}" } else { " " };
-            let age = approval
-                .requested_at
-                .map_or_else(String::new, |at| format!("  {}", relative_age(at, now)));
+            let age = approval.requested_at.map_or_else(String::new, |at| {
+                format!("  {}", relative_age(at.seconds_until(now)))
+            });
             Line::from(vec![
                 Span::styled(
                     format!("{marker} \u{25c7} "),
@@ -402,7 +403,9 @@ fn pipeline_cell(row: &PipelineRow, column: PipelineColumn, now: Timestamp) -> C
                 row.last_run
                     .as_ref()
                     .and_then(|run| run.queue_time)
-                    .map_or_else(String::new, |queued| relative_age(queued, now)),
+                    .map_or_else(String::new, |queued| {
+                        relative_age(queued.seconds_until(now))
+                    }),
             )
             .right_aligned(),
         ),
@@ -469,9 +472,9 @@ fn run_cell(row: &RunRow, column: RunColumn, now: Timestamp) -> Cell<'static> {
         ),
         RunColumn::Age => Cell::from(
             Line::styled(
-                row.run
-                    .queue_time
-                    .map_or_else(String::new, |queued| relative_age(queued, now)),
+                row.run.queue_time.map_or_else(String::new, |queued| {
+                    relative_age(queued.seconds_until(now))
+                }),
                 plain,
             )
             .right_aligned(),
@@ -911,16 +914,12 @@ fn short_commit(version: &str) -> String {
 pub(crate) fn instant_label(instant: Option<Timestamp>, now: Timestamp) -> String {
     instant.map_or_else(
         || "—".to_owned(),
-        |instant| format!("{} ({})", instant.exact_utc(), relative_age(instant, now)),
+        |instant| {
+            format!(
+                "{} ({})",
+                instant.exact_utc(),
+                relative_age(instant.seconds_until(now))
+            )
+        },
     )
-}
-
-pub(crate) fn relative_age(instant: Timestamp, now: Timestamp) -> String {
-    let seconds = instant.seconds_until(now).max(0);
-    match seconds {
-        0..=59 => format!("{seconds}s"),
-        60..=3599 => format!("{}m", seconds / 60),
-        3600..=86_399 => format!("{}h", seconds / 3600),
-        _ => format!("{}d", seconds / 86_400),
-    }
 }
