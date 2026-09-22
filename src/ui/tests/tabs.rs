@@ -295,14 +295,14 @@ fn help_palette_columns_and_database_open_over_every_tab() {
     // The popup is a screenful tall, so the tab's own section is paged to.
     let mut seen = text;
     for _ in 0..12 {
-        if seen.contains("Approve with suggestions") {
+        if seen.contains("Undo last vote") {
             break;
         }
         press(&mut app, KeyCode::PageDown);
         seen = render_text(120, 40, &mut app);
     }
     assert!(
-        seen.contains("Approve with suggestions"),
+        seen.contains("Undo last vote") && seen.contains("Vote\u{2026}"),
         "the help lists the tab's own verbs: {seen}"
     );
     press(&mut app, KeyCode::Esc);

@@ -1039,6 +1039,7 @@ impl WorkItemsScreen {
             CommandId::CloneRepo
             | CommandId::FetchRepo
             | CommandId::PullRepo
+            | CommandId::VotePr
             | CommandId::ApprovePr
             | CommandId::SuggestPr
             | CommandId::WaitPr

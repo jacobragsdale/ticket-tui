@@ -269,7 +269,7 @@ fn the_badge_counts_what_is_waiting_on_my_vote() {
 }
 
 #[test]
-fn every_vote_key_writes_its_value_and_changes_the_glyph_at_once() {
+fn every_vote_in_the_picker_writes_its_value_and_changes_the_glyph_at_once() {
     let mut app = pull_requests_app();
     app.select_tab(TabId::PullRequests);
     // The one waiting on me.
@@ -280,25 +280,72 @@ fn every_vote_key_writes_its_value_and_changes_the_glyph_at_once() {
         (KeyCode::Char('A'), 5),
         (KeyCode::Char('w'), -5),
         (KeyCode::Char('x'), -10),
+        (KeyCode::Char('r'), 0),
     ] {
-        let action = app.handle_key(crossterm::event::KeyEvent::new(
-            key,
-            crossterm::event::KeyModifiers::NONE,
-        ));
+        assert_eq!(press(&mut app, KeyCode::Char('v')), AppAction::None);
+        assert_eq!(app.pull_requests.mode, PrMode::VotePicker);
+        let action = press(&mut app, key);
         assert!(
             matches!(
                 action,
                 AppAction::VotePullRequest { id: 11, vote: sent, .. } if sent == vote
             ),
-            "{key:?} writes {vote}, got {action:?}"
+            "v then {key:?} writes {vote}, got {action:?}"
         );
         assert_eq!(
             app.pull_requests.my_vote(11, "Jacob Ragsdale"),
             vote,
             "and the glyph changes at once"
         );
+        assert_eq!(app.pull_requests.mode, PrMode::Browse, "and it closes");
         app.pull_requests.vote_accepted(11);
     }
+}
+
+#[test]
+fn the_old_vote_letters_on_the_table_publish_nothing() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(2);
+
+    for key in ['a', 'A', 'w', 'x'] {
+        let action = press(&mut app, KeyCode::Char(key));
+        assert!(
+            !matches!(action, AppAction::VotePullRequest { .. }),
+            "{key} alone votes on nothing, got {action:?}"
+        );
+    }
+    assert_eq!(app.pull_requests.my_vote(11, "Jacob Ragsdale"), 0);
+}
+
+#[test]
+fn esc_leaves_the_vote_picker_and_enter_casts_the_highlighted_row() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(2);
+
+    press(&mut app, KeyCode::Char('v'));
+    assert_eq!(press(&mut app, KeyCode::Esc), AppAction::None);
+    assert_eq!(app.pull_requests.mode, PrMode::Browse);
+    assert_eq!(app.pull_requests.my_vote(11, "Jacob Ragsdale"), 0);
+
+    // A digit is not a tab switch while the picker is up.
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('1'));
+    assert_eq!(app.tab, TabId::PullRequests);
+    press(&mut app, KeyCode::Down);
+    let action = press(&mut app, KeyCode::Enter);
+    assert!(
+        matches!(
+            action,
+            AppAction::VotePullRequest {
+                id: 11,
+                vote: 5,
+                ..
+            }
+        ),
+        "the second row approves with suggestions, got {action:?}"
+    );
 }
 
 #[test]
@@ -307,10 +354,8 @@ fn a_refused_vote_puts_the_glyph_back_and_says_why() {
     app.select_tab(TabId::PullRequests);
     app.pull_requests.cursor.focus(2);
 
-    app.handle_key(crossterm::event::KeyEvent::new(
-        KeyCode::Char('a'),
-        crossterm::event::KeyModifiers::NONE,
-    ));
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('a'));
     assert_eq!(app.pull_requests.my_vote(11, "Jacob Ragsdale"), 10);
 
     app.pull_requests
@@ -333,10 +378,8 @@ fn u_puts_the_last_vote_back() {
     app.select_tab(TabId::PullRequests);
     app.pull_requests.cursor.focus(2);
 
-    app.handle_key(crossterm::event::KeyEvent::new(
-        KeyCode::Char('a'),
-        crossterm::event::KeyModifiers::NONE,
-    ));
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('a'));
     app.pull_requests.vote_accepted(11);
     assert_eq!(app.pull_requests.my_vote(11, "Jacob Ragsdale"), 10);
 
@@ -365,10 +408,8 @@ fn voting_on_a_pull_request_i_am_not_a_reviewer_of_adds_me() {
     // The draft, which nobody has asked me to review.
     app.pull_requests.cursor.focus(1);
 
-    app.handle_key(crossterm::event::KeyEvent::new(
-        KeyCode::Char('a'),
-        crossterm::event::KeyModifiers::NONE,
-    ));
+    press(&mut app, KeyCode::Char('v'));
+    press(&mut app, KeyCode::Char('a'));
     assert_eq!(
         app.pull_requests.my_vote(12, "Jacob Ragsdale"),
         10,

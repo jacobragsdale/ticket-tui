@@ -53,8 +53,10 @@ pub enum CommandId {
     CloneRepo,
     FetchRepo,
     PullRepo,
-    /// The Pull requests tab's verbs: the four votes and their undo, and
-    /// the three ways a pull request is closed or set to close itself.
+    /// The Pull requests tab's verbs: the vote picker, the four votes it
+    /// offers and their undo, and the three ways a pull request is closed or
+    /// set to close itself.
+    VotePr,
     ApprovePr,
     SuggestPr,
     WaitPr,
@@ -295,31 +297,43 @@ pub const COMMANDS: &[Command] = &[
         help: "Fast-forward only",
         scope: Scope::Tabs(&[TabId::Repos]),
     },
+    // A vote is published the moment it is sent, so it takes two keys: `v`,
+    // then the vote. The four votes keep no key of their own, because `a`,
+    // `w` and `x` mean something else, or nothing, on the other tabs, and a
+    // stray letter on this one would otherwise publish a vote. The palette
+    // still runs them by name, which is a choice rather than a slip.
+    Command {
+        id: CommandId::VotePr,
+        title: "Vote\u{2026}",
+        keys: &[key('v')],
+        help: "Approve, suggest, wait or reject",
+        scope: Scope::Tabs(&[TabId::PullRequests]),
+    },
     Command {
         id: CommandId::ApprovePr,
         title: "Approve",
-        keys: &[key('a')],
+        keys: &[],
         help: "Vote on the pull request",
         scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::SuggestPr,
         title: "Approve with suggestions",
-        keys: &[key('A')],
+        keys: &[],
         help: "",
         scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::WaitPr,
         title: "Wait for author",
-        keys: &[key('w')],
+        keys: &[],
         help: "",
         scope: Scope::Tabs(&[TabId::PullRequests]),
     },
     Command {
         id: CommandId::RejectPr,
         title: "Reject",
-        keys: &[key('x')],
+        keys: &[],
         help: "",
         scope: Scope::Tabs(&[TabId::PullRequests]),
     },
@@ -922,7 +936,8 @@ pub const fn palette_group(id: CommandId) -> &'static str {
         | C::StartAnotherAgentSession
         | C::CopyAgentPrompt
         | C::ShowAgentPrompt => "Agent",
-        C::ApprovePr
+        C::VotePr
+        | C::ApprovePr
         | C::SuggestPr
         | C::WaitPr
         | C::RejectPr
@@ -1256,6 +1271,7 @@ mod tests {
                 CommandId::Sync,
                 CommandId::HistoryBack,
                 CommandId::HistoryForward,
+                CommandId::VotePr,
                 CommandId::ApprovePr,
                 CommandId::SuggestPr,
                 CommandId::WaitPr,

@@ -1374,7 +1374,7 @@ request is not on file. Cloning the repository — `C` on the Repos tab, or a
 The details pane holds the title and status, the author and both branches, the
 description as text, the Reviewers with each vote and whether it is required, a
 Related section, the Discussion, the Completion settings and the buttons
-`[Approve] [Suggest] [Wait] [Reject] [Complete] [Abandon]`. Related follows the
+`[Vote] [Complete] [Abandon]`. Related follows the
 repository, one line per work item the pull request closes — named as the work
 items tab has them when the database holds the row — and the run that gates it,
 each a click away and `[` back again.
@@ -1402,8 +1402,13 @@ when Azure DevOps answers, and the work item's own Related section follows at
 the next pull, which is what reads those links back. Taking a link off is a job
 for the browser.
 
-`a` approves, `A` approves with suggestions, `w` waits for the author and `x`
-rejects; `u` puts the last vote back. The glyph changes at once and a refusal
+`v` opens the vote picker — Approve, Approve with suggestions, Wait for author,
+Reject and Reset vote — where `a`, `A`, `w`, `x` and `r` cast one at once and
+`Enter` casts the highlighted row; `Esc` leaves without voting, and `u` puts
+the last vote back. A vote is published the moment it is sent, and those
+letters mean other things on other tabs, so none of them votes from the table
+by itself: one stray key on the wrong tab must not publish a vote. The palette
+still runs the four votes by name. The glyph changes at once and a refusal
 reverts it and says why. Voting on a pull request you were not asked to review
 adds you, which is what Azure DevOps does. Your own id — which a vote is
 written under, and which the work-item endpoints never report — is read once

@@ -37,6 +37,18 @@ const fn vote_verb(vote: i8) -> &'static str {
     }
 }
 
+/// What the vote picker offers, top to bottom: the row's label, the letter
+/// that picks it while the picker is open, and the vote it writes. The letters
+/// are the ones that used to vote straight from the table; behind `v` they
+/// cannot publish anything by accident.
+pub const VOTE_CHOICES: &[(&str, char, i8)] = &[
+    ("Approve", 'a', 10),
+    ("Approve with suggestions", 'A', 5),
+    ("Wait for author", 'w', -5),
+    ("Reject", 'x', -10),
+    ("Reset vote", 'r', 0),
+];
+
 /// The views the tab opens with. `@me` is whoever the last sync signed in as,
 /// so a saved view follows the person rather than the name they had.
 pub const BUILT_IN_VIEWS: &[(&str, &str)] = &[
@@ -59,6 +71,8 @@ pub enum PrMode {
     Comment,
     /// The work-item picker a link is made from.
     WorkItemPicker,
+    /// The vote picker `v` opens.
+    VotePicker,
 }
 
 pub struct PullRequestsScreen {
@@ -94,6 +108,8 @@ pub struct PullRequestsScreen {
     /// while the picker is open.
     link_query: TextInput,
     link_cursor: ListCursor,
+    /// Which row of the vote picker is highlighted.
+    vote_cursor: ListCursor,
 }
 
 impl Default for PullRequestsScreen {
@@ -118,6 +134,7 @@ impl Default for PullRequestsScreen {
             comment: TextInput::default(),
             link_query: TextInput::default(),
             link_cursor: ListCursor::default(),
+            vote_cursor: ListCursor::default(),
         }
     }
 }
@@ -695,6 +712,29 @@ impl PullRequestsScreen {
         shell.set_error(format!("Vote on !{id} refused: {refusal}"));
     }
 
+    /// `v`: the vote picker, over the pull request under the cursor.
+    pub fn open_vote_picker(&mut self, shell: &mut Shell) {
+        if self.selected(shell).is_none() {
+            shell.set_error("No pull request to vote on");
+            return;
+        }
+        self.vote_cursor = ListCursor::default();
+        self.mode = PrMode::VotePicker;
+    }
+
+    #[must_use]
+    pub const fn vote_cursor(&self) -> usize {
+        self.vote_cursor.index
+    }
+
+    /// Casts the vote on one row of the picker and closes it.
+    fn choose_vote(&mut self, shell: &mut Shell, index: usize) -> AppAction {
+        self.mode = PrMode::Browse;
+        VOTE_CHOICES
+            .get(index)
+            .map_or(AppAction::None, |(_, _, vote)| self.vote(shell, *vote))
+    }
+
     /// `u`: puts the last vote back, which is a vote of its own.
     pub fn undo_vote(&mut self, shell: &mut Shell) -> AppAction {
         let Some((id, previous)) = self.undo_votes.pop() else {
@@ -878,6 +918,27 @@ impl PullRequestsScreen {
         AppAction::None
     }
 
+    /// The vote picker: arrows and `Enter`, or a row's own letter at once.
+    fn handle_vote_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
+        match key.code {
+            KeyCode::Esc => self.mode = PrMode::Browse,
+            KeyCode::Enter => return self.choose_vote(shell, self.vote_cursor.index),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.vote_cursor.move_by(1, VOTE_CHOICES.len());
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.vote_cursor.move_by(-1, VOTE_CHOICES.len());
+            }
+            KeyCode::Char(letter) => {
+                if let Some(index) = VOTE_CHOICES.iter().position(|(_, key, _)| *key == letter) {
+                    return self.choose_vote(shell, index);
+                }
+            }
+            _ => {}
+        }
+        AppAction::None
+    }
+
     fn handle_command_key(&mut self, shell: &mut Shell, key: KeyEvent) -> AppAction {
         command_for_key(key, TabId::PullRequests)
             .map_or(AppAction::None, |id| self.run_command(shell, id))
@@ -892,6 +953,7 @@ impl PullRequestsScreen {
             CommandId::Sync => return AppAction::Sync,
             CommandId::HistoryBack => return AppAction::HistoryBack,
             CommandId::HistoryForward => return AppAction::HistoryForward,
+            CommandId::VotePr => self.open_vote_picker(shell),
             CommandId::ApprovePr => return self.vote(shell, 10),
             CommandId::SuggestPr => return self.vote(shell, 5),
             CommandId::WaitPr => return self.vote(shell, -5),
@@ -922,6 +984,7 @@ impl Screen for PullRequestsScreen {
             PrMode::ConfirmAbandon => return self.handle_abandon_key(shell, key),
             PrMode::Comment => return self.handle_comment_key(shell, key),
             PrMode::WorkItemPicker => return self.handle_link_key(shell, key),
+            PrMode::VotePicker => return self.handle_vote_key(shell, key),
             PrMode::Browse => {}
         }
         match key.code {
@@ -1002,6 +1065,7 @@ impl Screen for PullRequestsScreen {
                 self.link_cursor.focus(index);
                 return self.choose_work_item(shell);
             }
+            PointerTarget::EditMenuRow { index } => return self.choose_vote(shell, index),
             PointerTarget::NodeQuery => self.place_caret(shell, TextEditor::Node, column, row),
             _ => {}
         }
@@ -1022,7 +1086,8 @@ impl Screen for PullRequestsScreen {
     }
 
     fn modal_open(&self) -> bool {
-        self.mode == PrMode::ConfirmAbandon
+        // The vote picker too: its letters are votes, not tabs or overlays.
+        matches!(self.mode, PrMode::ConfirmAbandon | PrMode::VotePicker)
     }
 
     fn active_editor(&self) -> Option<TextEditor> {
@@ -1163,8 +1228,9 @@ impl Screen for PullRequestsScreen {
             PrMode::ConfirmAbandon => "X abandon it  Esc leave it",
             PrMode::Comment => "Type a line  Enter post  Esc cancel",
             PrMode::WorkItemPicker => "Type to filter  ↑↓ choose  Enter link it  Esc cancel",
+            PrMode::VotePicker => "a/A/w/x/r vote  ↑↓ choose  Enter vote  Esc cancel",
             PrMode::Browse => {
-                "↑↓/jk move  a/A/w/x vote  u undo  n comment  L link  C complete  X abandon  t auto  o open  ? help"
+                "↑↓/jk move  v vote  u undo  n comment  L link  C complete  X abandon  t auto  o open  ? help"
             }
         }
     }

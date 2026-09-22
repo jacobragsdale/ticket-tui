@@ -2,7 +2,7 @@
 //! about the one under the cursor on the right.
 
 use super::*;
-use crate::app::pull_requests::{PrColumn, PrMode, PrRow, PullRequestsScreen};
+use crate::app::pull_requests::{PrColumn, PrMode, PrRow, PullRequestsScreen, VOTE_CHOICES};
 use crate::app::relative_age;
 use crate::command::CommandId;
 use crate::model::{Jump, PrStatus};
@@ -37,7 +37,46 @@ pub(crate) fn render(
         PrMode::ConfirmAbandon => render_abandon_confirm(frame, screen, shell),
         PrMode::Comment => render_comment_prompt(frame, screen, shell),
         PrMode::WorkItemPicker => render_work_item_picker(frame, screen, shell),
+        PrMode::VotePicker => render_vote_picker(frame, screen, shell),
         _ => {}
+    }
+}
+
+/// The vote picker, drawn the way the Actions menu is: one row per vote with
+/// the letter that casts it at once.
+fn render_vote_picker(frame: &mut Frame<'_>, screen: &PullRequestsScreen, shell: &mut Shell) {
+    let Some(row) = screen.selected(shell) else {
+        return;
+    };
+    let title = format!(" Vote on !{} ", row.request.id);
+    let height = u16::try_from(VOTE_CHOICES.len() + 2).unwrap_or(u16::MAX);
+    let area = centered_rect(frame.area(), 40, height);
+    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, &title);
+    let selected = screen.vote_cursor();
+    let lines: Vec<Line> = VOTE_CHOICES
+        .iter()
+        .enumerate()
+        .map(|(index, (label, letter, _))| {
+            overlay_line(
+                overlay_row(
+                    index == selected,
+                    label,
+                    &letter.to_string(),
+                    overlay_row_width(inner),
+                ),
+                index == selected,
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+    for (index, y) in (0..VOTE_CHOICES.len()).zip(inner.y..inner.bottom()) {
+        shell.hit_regions.push(region(
+            Rect::new(inner.x, y, overlay_row_width(inner), 1),
+            PointerTarget::EditMenuRow { index },
+            PointerLayer::Modal,
+            None,
+            None,
+        ));
     }
 }
 
@@ -594,11 +633,9 @@ fn render_details(
     )));
     lines.push(Line::from(format!("  Merge: {}", row.request.merge_status)));
     lines.push(Line::from(""));
-    let buttons: [(&str, PointerTarget); 6] = [
-        (" Approve ", PointerTarget::RunCommand(CommandId::ApprovePr)),
-        (" Suggest ", PointerTarget::RunCommand(CommandId::SuggestPr)),
-        (" Wait ", PointerTarget::RunCommand(CommandId::WaitPr)),
-        (" Reject ", PointerTarget::RunCommand(CommandId::RejectPr)),
+    // One button for the vote, which opens the same picker `v` does.
+    let buttons: [(&str, PointerTarget); 3] = [
+        (" Vote ", PointerTarget::RunCommand(CommandId::VotePr)),
         (
             " Complete ",
             PointerTarget::RunCommand(CommandId::CompletePr),

@@ -81,7 +81,7 @@ fn the_details_pane_carries_every_section_the_epic_asks_for() {
     assert!(text.contains("Completion"), "{text}");
     assert!(text.contains("Auto-complete: off"), "{text}");
     assert!(
-        text.contains(" Approve ") && text.contains(" Abandon "),
+        text.contains(" Vote ") && text.contains(" Abandon "),
         "every button is drawn as a chip: {text}"
     );
 }
@@ -188,16 +188,25 @@ fn the_buttons_under_the_details_pane_are_the_keys_they_name() {
         .request
         .id;
 
-    let approve = target_rect(&app, |target| {
+    let vote = target_rect(&app, |target| {
         matches!(
             target,
-            PointerTarget::RunCommand(crate::command::CommandId::ApprovePr)
+            PointerTarget::RunCommand(crate::command::CommandId::VotePr)
         )
+    });
+    click(&mut app, vote.x + 2, vote.y);
+    let text = render_text(160, 50, &mut app);
+    assert!(
+        text.contains(format!(" Vote on !{selected} ").as_str()),
+        "{text}"
+    );
+    let approve = target_rect(&app, |target| {
+        matches!(target, PointerTarget::EditMenuRow { index: 0 })
     });
     let action = click(&mut app, approve.x + 2, approve.y);
     assert!(
         matches!(action, crate::app::AppAction::VotePullRequest { id, vote: 10, .. } if id == selected),
-        "the button votes on the pull request under the cursor, got {action:?}"
+        "the picker's first row approves the pull request under the cursor, got {action:?}"
     );
 
     let abandon = target_rect(&app, |target| {
