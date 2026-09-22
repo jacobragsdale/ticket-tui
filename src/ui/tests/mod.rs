@@ -187,8 +187,8 @@ fn modal_interior(text: &str) -> Option<Vec<String>> {
 }
 
 /// Whether a pane's frame says both what it is and what it holds: the name is
-/// on the top border and the count on the bottom, unless the pane is stacked
-/// over another, where the two share the top border row.
+/// on the top border and the count on the bottom, which for a pane stacked
+/// over another is the seam it shares with the one below.
 fn pane_reads(text: &str, name: &str, status: &str) -> bool {
     text.contains(name)
         && text

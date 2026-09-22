@@ -80,6 +80,8 @@ fn the_chip_bar_says_finished_work_is_hidden_and_its_cross_puts_it_back() {
         .find_target(|target| matches!(target, PointerTarget::ShowFinished))
         .map(|region| region.rect)
         .expect("the chip is clickable");
+    let pill = target_rect(&app, |target| matches!(target, PointerTarget::FacetPill(_)));
+    assert_eq!(chip.y, pill.y, "the chip sits at the end of the pill row");
     click(&mut app, chip.x, chip.y);
 
     let text = render_text(130, 24, &mut app);

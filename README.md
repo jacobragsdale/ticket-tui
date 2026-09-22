@@ -11,32 +11,31 @@ field changed in the TUI is written straight back over the REST API. Everything
 else it does is local.
 
 ```
- 1 Work items  2 Repos  3 Pull requests  4 Pipelines                                  ?
+ 1 Work items  2 Repos  3 Pull requests  4 Pipelines                       Commands  ?
 / Type / to search, or pick a filter from the bar below
  State ▾   Assignee ▾   Iteration ▾   Type ▾   Priority ▾   Tags ▾   +
-╭ Tickets 116/116 · Changed ↑ ───────────────────────────────────────────────────────╮
-│       ID      Title                       State      Type           Pri Changed↑   │
-│────────────────────────────────────────────────────────────────────────────────────│
-│  [ ]  599     Serialize session enums wit ✓ Done     [Issue]         P1         1d┃│
-│  [ ]  596     Remove demo seed data, sche ✓ Done     [Issue]         P1         1d││
-│  [ ]  602     Update README, CI, and the  ✓ Done     [Issue]         P1         1d││
-│  [ ]  633     Colour the State column by  ✓ Done     [Issue]         P1         1d││
-│  [ ]  634     Colour type badges for ever ✓ Done     [Issue]         P2         1d││
-│› [ ]  600     Factor overlay list renderi ✓ Done     [Issue]         P1         1d││
-│  [ ]  597     Introduce ScrollState and T ✓ Done     [Issue]         P1         1d││
-│  [ ]  635     Dim completed work items in ✓ Done     [Issue]         P2         1d││
-│  [ ]  636     Show the leaf of area and i ✓ Done     [Issue]         P3         1d││
-├ Details ───────────────────────────────────────────────────────────────────────────┤
-│ Factor overlay list rendering into one helper                                     ┃│
-│ #600 · [Issue] · ✓ Done · P1 · Jacob Ragsdale                                     ││
-│ Tags       [tech-debt]                                                            ││
-│ [w Work with agent]  [o Open]                                                     ││
-│                                                                                   ││
-│ ── Family ────────────────────────────────────────────────────────────────────────││
-│ 595  Epic  Tech debt and architecture foundation                                  ││
-│ └─ 600  Issue  Factor overlay list rendering into one helper current              ││
-╰────────────────────────────────────────────────────────────────────────────────────╯
- ↑↓/jk move  / search  click/drag copy  wheel scroll   development  ● Synced just now
+╭ Tickets ────────────────────────────────────────────────────────────────────────────╮
+│     ID       Title                         State       Type         Pri  Changed↑   │
+│     599      Serialize session enums wit…  Done        Issue         P1          1d┃│
+│     596      Remove demo seed data, sche…  Done        Issue         P1          1d┃│
+│     602      Update README, CI, and the …  Done        Issue         P1          1d┃│
+│     633      Colour the State column by …  Done        Issue         P1          1d││
+│     634      Colour type badges for ever…  Done        Issue         P2          1d││
+│›    600      Factor overlay list renderi…  Done        Issue         P1          1d││
+│     597      Introduce ScrollState and T…  Done        Issue         P1          1d││
+│     635      Dim completed work items in…  Done        Issue         P2          1d││
+│     636      Show the leaf of area and i…  Done        Issue         P3          1d││
+├ Details ────────────────────────────────────────────────────── 116/116 · Changed ↑ ─┤
+│ Factor overlay list rendering into one helper                                      ┃│
+│ #600 · [Issue] · Done · P1 · Jacob Ragsdale                                        ││
+│ Tags       [tech-debt]                                                             ││
+│ [w Work with agent]  [o Open]                                                      ││
+│                                                                                    ││
+│ ── Family ─────────────────────────────────────────────────────────────────────────││
+│ 595  Epic  Tech debt and architecture foundation                                   ││
+│ └─ 600  Issue  Factor overlay list rendering into one helper current               ││
+╰─────────────────────────────────────────────────────────────────────────────────────╯
+ ↑↓/jk move  / search  click/drag copy  wheel scroll     development  ● Synced just now
 ```
 
 ## Run it

@@ -167,6 +167,35 @@ fn render_split(
     panes.first(frame, shell, areas[0]);
     panes.second(frame, shell, areas[1]);
     render_seam(frame, shell, areas[0], areas[1], split, orientation);
+    if split == PaneSplit::Workspace
+        && let Some(status) = shell.seam_status.take()
+    {
+        render_seam_status(frame, areas[0], &status);
+    }
+}
+
+/// The list's status at the right end of the seam under it, where a list
+/// with a border of its own says it. The pane below may have written there —
+/// a title of its own at that end — so the words go only over bare border;
+/// failing that they go to the right end of the list's top border instead.
+fn render_seam_status(frame: &mut Frame<'_>, list: Rect, status: &str) {
+    let width = u16::try_from(display_width(status)).unwrap_or(u16::MAX);
+    let horizontal = BorderType::border_symbols(theme().border_type).horizontal_top;
+    let buffer = frame.buffer_mut();
+    // One border cell is left before the corner, as a block's own title does.
+    let Some(x) = list.right().checked_sub(width.saturating_add(2)) else {
+        return;
+    };
+    let bare = |buffer: &ratatui::buffer::Buffer, y: u16| {
+        (x..x.saturating_add(width)).all(|x| buffer[(x, y)].symbol() == horizontal)
+    };
+    let Some(y) = [list.bottom().saturating_sub(1), list.y]
+        .into_iter()
+        .find(|y| bare(buffer, *y))
+    else {
+        return;
+    };
+    buffer.set_string(x, y, status, Style::default().fg(theme().muted));
 }
 
 /// Registers the border the two panes share as the draggable seam, and gives

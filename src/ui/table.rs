@@ -71,24 +71,24 @@ pub(crate) fn render_list_table<C: ColumnId>(
     area: Rect,
     spec: &mut TableSpec<'_, C>,
 ) {
-    // A pane stacked above another shares its bottom border with it, and the
-    // pane below paints that row last: there is nowhere down there to write,
-    // so the status joins the name on the top border instead.
+    // The status sits at the right end of the bottom border whichever way
+    // the panes are arranged. A pane stacked above another shares that border
+    // with it, and the pane below paints the row last, so there the status is
+    // handed to the seam to paint once both are down.
     let shares_its_bottom_border =
         shell.divider_orientation() == Some(DividerOrientation::Horizontal);
-    let (title, status) = if spec.status.is_empty() {
-        (spec.title.clone(), String::new())
-    } else if shares_its_bottom_border {
-        (format!("{}{} ", spec.title, spec.status), String::new())
-    } else {
-        (spec.title.clone(), format!(" {} ", spec.status))
-    };
     // The scrollbar's column is padding, not a place a cell may be painted:
     // the table lays its columns out inside what is left, so the last one
     // keeps every character it was given whether or not the list overflows.
-    let mut block = focused_block(title, spec.focused).padding(Padding::right(SCROLLBAR_WIDTH));
-    if !status.is_empty() {
-        block = block.title_bottom(Line::from(status));
+    let mut block =
+        focused_block(spec.title.clone(), spec.focused).padding(Padding::right(SCROLLBAR_WIDTH));
+    if !spec.status.is_empty() {
+        let status = format!(" {} ", spec.status);
+        if shares_its_bottom_border {
+            shell.seam_status = Some(status);
+        } else {
+            block = block.title_bottom(Line::from(status).right_aligned());
+        }
     }
     let geometry = table_geometry(area, spec.row_height);
     let inner = geometry.inner;
@@ -334,7 +334,11 @@ pub(super) fn render_table(
 ) {
     let count = screen.visible_count();
     let total = screen.tickets().len();
-    let ordering = if screen.query().is_empty() || screen.search_order == SearchOrder::Field {
+    // Relevance is only a ranking while there are words to rank by: a query
+    // of filters alone keeps the field order, and says only that.
+    let fuzzy = screen.fuzzy_query();
+    let ranked = !fuzzy.is_empty();
+    let ordering = if !ranked || screen.search_order == SearchOrder::Field {
         format!("{} {}", screen.sort_field, screen.sort_direction.symbol())
     } else {
         format!(
@@ -347,7 +351,7 @@ pub(super) fn render_table(
     // the name, so the title here is what the wider ones show; what the table
     // is doing is shortened to fit the bottom border beside it.
     let (title, status) = if area.width < NARROW_BREAKPOINT {
-        let short_order = if screen.query().is_empty() {
+        let short_order = if !ranked {
             screen.sort_direction.symbol()
         } else {
             match screen.search_order {
@@ -375,7 +379,6 @@ pub(super) fn render_table(
     screen.set_table_viewport(geometry.visible_rows);
     let offset = screen.table.offset;
     let layer = current_layer(screen);
-    let fuzzy = screen.fuzzy_query();
 
     // Everything the rows on screen need, read before the table takes the
     // shell: what a row says about itself is the screen's business, and the

@@ -408,19 +408,12 @@ pub(super) fn render_chips(
 ) {
     let mut spans = Vec::new();
     let mut x = area.x;
-    // The rule the screen applies on its own leads the row, so it keeps its place
-    // however many filters are typed beside it, and reads like the rest: its
-    // `×` puts finished work back on the table.
-    let mut chips: Vec<(String, PointerTarget)> = Vec::new();
-    if screen.finished_hidden() {
-        chips.push(("Finished hidden".to_owned(), PointerTarget::ShowFinished));
-    }
-    chips.extend(
-        screen
-            .overflow_filter_tokens()
-            .into_iter()
-            .map(|(index, token)| (token.chip_label(), PointerTarget::RemoveChip { index })),
-    );
+    // Only filters whose field has no pill on the bar get a chip here; the
+    // rule the screen applies on its own sits at the end of the pill row.
+    let chips = screen
+        .overflow_filter_tokens()
+        .into_iter()
+        .map(|(index, token)| (token.chip_label(), PointerTarget::RemoveChip { index }));
     for (text, target) in chips {
         let label = format!(" {text} × ");
         let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
@@ -450,6 +443,21 @@ pub(super) fn render_chips(
 /// the width could not fit.
 const MORE_PILL_WIDTH: u16 = 5;
 
+/// The chip at the right end of the pill row while finished work is off the
+/// table. Its `×` puts it back.
+const FINISHED_CHIP: &str = " Finished hidden \u{00d7} ";
+
+/// The columns the pill row keeps for [`FINISHED_CHIP`] and the gap before
+/// it: the chip is the screen's own rule, so it outranks a pill, and a pill
+/// that loses its place is still behind `+`.
+fn finished_chip_reserve(screen: &WorkItemsScreen) -> u16 {
+    if screen.finished_hidden() {
+        u16::try_from(FINISHED_CHIP.chars().count().saturating_add(1)).unwrap_or(u16::MAX)
+    } else {
+        0
+    }
+}
+
 pub(super) fn render_facet_bar(
     frame: &mut Frame<'_>,
     screen: &mut WorkItemsScreen,
@@ -460,7 +468,8 @@ pub(super) fn render_facet_bar(
     let focused = screen.mode == WorkItemMode::Facets;
     let mut spans = Vec::new();
     let mut x = area.x;
-    let mut remaining = area.width;
+    let reserve = finished_chip_reserve(screen);
+    let mut remaining = area.width.saturating_sub(reserve);
     for (index, field) in screen.facet_bar.shown.iter().enumerate() {
         let label = facet_pill_label(*field, &filters);
         let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
@@ -498,14 +507,37 @@ pub(super) fn render_facet_bar(
         spans.push(Span::styled(more, pill_style(selected, more_count > 0)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    if reserve > 0 && area.width >= reserve {
+        let width = reserve - 1;
+        let rect = Rect::new(area.right() - width, area.y, width, 1);
+        shell.hit_regions.push(region(
+            rect,
+            PointerTarget::ShowFinished,
+            PointerLayer::Base,
+            None,
+            None,
+        ));
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                FINISHED_CHIP,
+                Style::default()
+                    .fg(theme().text)
+                    .bg(theme().selected_background),
+            )),
+            rect,
+        );
+    }
 }
 
 /// The pills the bar has room for: as many of [`FilterField::BAR`] as fit,
 /// keeping the last few columns for `More` so the way into the rest of the
-/// filters never falls off the end.
+/// filters never falls off the end, and the end of the row for the finished
+/// chip while it shows.
 pub(crate) fn bar_fields(screen: &WorkItemsScreen, width: u16) -> Vec<FilterField> {
     let filters = screen.parsed_query().filters;
-    let mut remaining = width.saturating_sub(MORE_PILL_WIDTH);
+    let mut remaining = width
+        .saturating_sub(MORE_PILL_WIDTH)
+        .saturating_sub(finished_chip_reserve(screen));
     let mut fields = Vec::new();
     for field in FilterField::BAR {
         // Each pill is followed by a space, so it costs a column more than it

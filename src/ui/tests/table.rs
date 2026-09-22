@@ -678,3 +678,34 @@ fn a_title_too_long_for_its_column_ends_in_an_ellipsis() {
     assert!(row.contains('\u{2026}'), "{row}");
     assert!(!row.contains("settlement run"), "{row}");
 }
+
+#[test]
+fn the_count_and_order_sit_on_the_bottom_border_in_both_layouts() {
+    let mut app = App::new(vec![ticket()]);
+    // Side by side, on the list's own bottom border.
+    let wide = render_text(130, 24, &mut app);
+    let bottom = wide
+        .lines()
+        .find(|line| line.contains("1/1 \u{b7} Changed"))
+        .unwrap_or_else(|| panic!("{wide}"));
+    assert!(!bottom.contains("Tickets"), "{bottom}");
+    assert!(bottom.starts_with(['\u{2570}', '\u{2514}']), "{bottom}");
+
+    // Stacked, on the seam the details pane's name opens.
+    let stacked = render_text(90, 24, &mut app);
+    let seam = stacked
+        .lines()
+        .find(|line| line.contains("1/1 \u{b7} Changed"))
+        .unwrap_or_else(|| panic!("{stacked}"));
+    assert!(seam.contains("Details"), "{seam}");
+    assert!(!seam.contains("Tickets"), "{seam}");
+
+    // Filters alone have nothing to rank by, so relevance is not claimed.
+    app.work_items
+        .set_query(&mut app.shell, "state:\"To Do\"".into());
+    await_search(&mut app);
+    assert!(!render_text(130, 24, &mut app).contains("Relevance"));
+    app.work_items.set_query(&mut app.shell, "search".into());
+    await_search(&mut app);
+    assert!(render_text(130, 24, &mut app).contains("Relevance"));
+}

@@ -212,6 +212,11 @@ pub struct Shell {
     /// The seams on screen this frame, by [`PaneSplit::index`]. Registered by
     /// the pane renderer and read by the drag.
     pub(crate) seams: [Option<PaneSeam>; PaneSplit::ALL.len()],
+    /// What a list stacked over the details says on its bottom border — how
+    /// many rows, how they are ordered. That border is the seam, and the pane
+    /// below paints it last, so the list leaves its words here for the seam
+    /// to paint once both panes are down.
+    pub(crate) seam_status: Option<String>,
     pub reload_pending: bool,
     pub should_quit: bool,
     pub session_dirty: bool,
@@ -310,6 +315,7 @@ impl Default for Shell {
             pane_split_stacked: DEFAULT_PANE_SPLIT_STACKED,
             pane_split_details: DEFAULT_PANE_SPLIT_DETAILS,
             seams: [None; PaneSplit::ALL.len()],
+            seam_status: None,
             reload_pending: false,
             should_quit: false,
             session_dirty: false,

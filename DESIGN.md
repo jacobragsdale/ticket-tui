@@ -1691,9 +1691,12 @@ Two panes side by side, or stacked, share one border rather than leaving a gap
 between them: that column is the seam, drawn as `┬` and `┴` where it meets the
 frame, painted in the neutral colour because it belongs to neither pane, and it
 is the divider you drag. A list pane says what it is on its top border and what
-it holds on the bottom one — `╰ 106/106 · Changed ↑ ─` — except where it is stacked
-over another pane, which paints that row last: there the count joins the name
-above. The table header is muted and bold with no rule under it, so the row
+it holds at the right end of the bottom one — `─ 106/106 · Changed ↑ ─╯` — in
+both layouts. Stacked over another pane, that border is the seam the pane below
+paints last, so the list hands its count to the seam, which writes it over the
+bare border once both panes are down. `Relevance →` leads the order only while
+the search box holds words to rank by; filters alone keep the field order and
+say only that. The table header is muted and bold with no rule under it, so the row
 a rule would take goes to the list, and columns stand two cells apart. The
 details pane is padded a column in from each side, with the scrollbar
 in a column of its own at the edge.
@@ -1780,8 +1783,9 @@ to. Active filters appear as removable chips.
 
 Finished work — Done, Closed, Removed, Cut, and whatever else the process
 template puts in the Completed and Removed categories — is left off the table,
-so the view you open on is the open backlog. A `Finished hidden ×` chip says so
-whenever it applies, and its `×` puts the rows back; `Show finished tickets` and
+so the view you open on is the open backlog. A `Finished hidden ×` chip at the
+right end of the pill row says so whenever it applies, taking the place of a
+pill the width cannot also fit, and its `×` puts the rows back; `Show finished tickets` and
 `Hide finished tickets` in the command palette do the same thing, and the choice
 is saved with the rest of the session. A query that names a state of its own
 takes over from the rule, so `state:done` lists the Done work whether or not the

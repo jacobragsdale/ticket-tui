@@ -8,6 +8,12 @@ and a pane stacked over another keeps its counts in its name, because the pane
 below paints the row its bottom border would have used. `HANDOFF.md` has the
 summary.
 
+A later design review (2026-09-22) changed some of what follows: the table
+header is muted with no rule under it, the type column drops its brackets,
+notifications are no longer yellow, `[Actions]` on the tab bar is `Commands`,
+and a stacked list's count is painted on the seam below it. `DESIGN.md`
+describes the app as it is.
+
 Research (2026-08-29) into what polished Ratatui apps do, how ticket-tui looks
 against them, and a sliced plan to close the gap without touching core
 behaviour. Keys, hit regions, sync, editing and the database are out of scope;

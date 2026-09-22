@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::merge::MergeStrategy;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Table, Wrap,
+    Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Table, Wrap,
 };
 use time::OffsetDateTime;
 
@@ -307,8 +307,7 @@ fn render_pass(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, shell: &mut 
     // Which fields are pills decides which filters are chips, so the bar is
     // measured before the rows are laid out.
     screen.facet_bar.shown = bar_fields(screen, area.width);
-    let chip_height =
-        u16::from(screen.finished_hidden() || !screen.overflow_filter_tokens().is_empty());
+    let chip_height = u16::from(!screen.overflow_filter_tokens().is_empty());
     let sections = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
