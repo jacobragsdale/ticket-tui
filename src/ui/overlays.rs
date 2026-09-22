@@ -1394,8 +1394,14 @@ pub(super) fn render_info_overlay(
     capture_selectable(frame, shell, SelectableSurface::Overlay, inner, false);
 }
 
-pub(super) fn overlay_line(line: Line<'_>, selected: bool) -> Line<'_> {
+pub(super) fn overlay_line(mut line: Line<'_>, selected: bool) -> Line<'_> {
     if selected {
+        let muted = theme().muted_on(theme().surface);
+        for span in &mut line.spans {
+            if span.style.fg == Some(theme().muted) {
+                span.style.fg = Some(muted);
+            }
+        }
         line.style(
             Style::default()
                 .bg(theme().surface)
@@ -1460,14 +1466,7 @@ pub(super) fn overlay_row(marked: bool, label: &str, key: &str, width: u16) -> L
         .saturating_sub(key.chars().count())
         .saturating_sub(1);
     let label: String = label.chars().take(room).collect();
-    // The key under the cursor takes the row's own colour: the ground the
-    // cursor lays is the muted colour itself in the terminal palette, and a
-    // muted key on it is not there at all.
-    let key_style = if marked {
-        Style::default()
-    } else {
-        Style::default().fg(theme().muted)
-    };
+    let key_style = Style::default().fg(theme().muted);
     Line::from(vec![
         marker,
         Span::raw(format!("{label:<room$}")),

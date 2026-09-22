@@ -279,6 +279,19 @@ impl Theme {
         }
     }
 
+    /// The colour quiet text takes on `ground`. The terminal palette paints
+    /// its muted text, its chips and its selection in the one ANSI grey, and
+    /// muted text on that ground is not there at all, so there it reads in the
+    /// body grey instead.
+    #[must_use]
+    pub fn muted_on(&self, ground: Color) -> Color {
+        if self.muted == ground {
+            self.body
+        } else {
+            self.muted
+        }
+    }
+
     /// The theme the environment asks for before any file is read: `mono`
     /// under `NO_COLOR`, otherwise whichever preset `TICKET_TUI_THEME` names,
     /// and the terminal's own colours when it names none.
@@ -457,6 +470,19 @@ teal = "#1abc9c"
 "##,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn quiet_text_stays_readable_on_a_ground_of_its_own_colour() {
+        let terminal = Theme::terminal();
+        assert_eq!(
+            terminal.muted_on(terminal.selected_background),
+            terminal.body
+        );
+        assert_eq!(terminal.muted_on(terminal.surface), terminal.body);
+        assert_eq!(terminal.muted_on(Color::Reset), terminal.muted);
+        let custom = Theme::from_palette(custom_config().theme.custom.as_ref().unwrap());
+        assert_eq!(custom.muted_on(custom.selected_background), custom.muted);
     }
 
     #[test]

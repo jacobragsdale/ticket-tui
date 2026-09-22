@@ -473,7 +473,7 @@ fn the_palette_names_its_sections_and_a_name_is_not_a_command() {
     }
     let text = render_text(120, 80, &mut app);
     assert!(text.contains("\u{2502} Copy & export "), "{text}");
-    assert!(text.contains("Export selected as CSV"), "{text}");
+    assert!(text.contains("Export current ticket as CSV"), "{text}");
     assert!(
         !text.contains("\u{2502} Edit ") && !text.contains("\u{2502} View "),
         "a section with nothing left in it goes: {text}"

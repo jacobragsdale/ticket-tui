@@ -292,8 +292,14 @@ pub(super) fn render_field_text(
     let area = Rect::new(area.x, area.y, area.width, 1);
     let (start, caret) = field_window(text, cursor, area.width);
     let line = match placeholder {
+        // Read against whatever ground the field sits on: a focused row or an
+        // active search row may be painted in the muted colour itself.
         Some(placeholder) if text.is_empty() => {
-            Line::styled(placeholder.to_owned(), Style::default().fg(theme().muted))
+            let ground = frame.buffer_mut()[(area.x, area.y)].bg;
+            Line::styled(
+                placeholder.to_owned(),
+                Style::default().fg(theme().muted_on(ground)),
+            )
         }
         _ => Line::styled(text.chars().skip(start).collect::<String>(), style),
     };
@@ -485,14 +491,9 @@ pub(super) fn render_capture_row(frame: &mut Frame<'_>, area: Rect, text: &str, 
         frame.set_cursor_position(caret);
     }
     // Until a title is typed the row says what Enter will make of it: the
-    // fields the capture fills in rather than asks for. The terminal palette
-    // grounds the row in its muted colour, so there the words take the body's.
+    // fields the capture fills in rather than asks for.
     if text.is_empty() {
-        let fg = if theme().muted == theme().surface {
-            theme().body
-        } else {
-            theme().muted
-        };
+        let fg = theme().muted_on(theme().surface);
         frame.render_widget(
             Line::styled(
                 format!(

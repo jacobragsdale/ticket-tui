@@ -234,16 +234,15 @@ pub(crate) fn render_list_table<C: ColumnId>(
             spec.row_height
                 .min(body.y.saturating_add(body.height).saturating_sub(y)),
         );
-        // Where the palette's muted text is its selection ground too, as the
-        // ANSI grey is both, the muted cells of the selected row — its id, a
-        // quiet priority, a finished row's every cell — would vanish into it.
-        // They read in the body grey there instead.
-        if spec.selected == Some(logical) && theme().muted == theme().selected_background {
+        // The muted cells of the selected row — its id, a quiet priority, a
+        // finished row's every cell — must not vanish into the selection.
+        let muted = theme().muted_on(theme().selected_background);
+        if spec.selected == Some(logical) && muted != theme().muted {
             let buffer = frame.buffer_mut();
             for position in row_rect.positions() {
                 let cell = &mut buffer[position];
                 if cell.fg == theme().muted {
-                    cell.set_fg(theme().body);
+                    cell.set_fg(muted);
                 }
             }
         }
