@@ -17,7 +17,9 @@ pub(super) const CLOSE_LABEL: &str = " × ";
 
 /// Washes out everything outside `modal` so the overlay reads as the layer in
 /// front of the screen rather than as more of it: every cell keeps its text
-/// and its ground and gives up its colour and its weight.
+/// and gives up its colour, its weight and its ground. The ground has to go
+/// too: a chip or the selected row is muted text on a muted fill, which reads
+/// as a solid blank block rather than as a dimmed word.
 ///
 /// Runs before the modal paints, so nothing it draws is touched, and the
 /// hover and selection passes come later still.
@@ -37,6 +39,7 @@ pub(super) fn dim_behind(frame: &mut Frame<'_>, modal: Rect) {
             let style = cell
                 .style()
                 .fg(muted)
+                .bg(Color::Reset)
                 .remove_modifier(Modifier::BOLD | Modifier::REVERSED);
             cell.set_style(style);
         }

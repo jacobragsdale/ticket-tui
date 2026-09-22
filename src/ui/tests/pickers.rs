@@ -35,7 +35,7 @@ fn the_new_work_item_form_draws_every_field_and_a_click_focuses_or_drops_one_dow
     );
     assert!(form.contains(" Create "), "{form}");
     assert!(
-        form.contains(" Close ") && !form.contains(" Cancel "),
+        form.contains(" Keep draft ") && !form.contains(" Cancel "),
         "closing keeps the draft, so the button does not say cancel: {form}"
     );
     assert!(

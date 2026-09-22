@@ -85,7 +85,7 @@ fn render_table(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut She
     let layout = screen.layout.clone();
     let mut cell = |index: usize, column: RepoColumn| {
         rows.get(index)
-            .map_or_else(|| Cell::from(""), |row| repo_cell(row, column))
+            .map_or_else(|| Text::from(""), |row| repo_cell(row, column))
     };
     let mut spec = TableSpec {
         title: " Repos ".to_owned(),
@@ -110,7 +110,7 @@ fn render_table(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut She
     }
 }
 
-fn repo_cell(row: &RepoRow, column: RepoColumn) -> Cell<'static> {
+fn repo_cell(row: &RepoRow, column: RepoColumn) -> Text<'static> {
     // A repository the project has switched off is still on the table, faded:
     // a link naming it should still resolve.
     let plain = if row.repo.is_disabled {
@@ -119,16 +119,16 @@ fn repo_cell(row: &RepoRow, column: RepoColumn) -> Cell<'static> {
         Style::default()
     };
     match column {
-        RepoColumn::Name => Cell::from(Line::styled(row.repo.name.clone(), plain)),
-        RepoColumn::DefaultBranch => Cell::from(Line::styled(row.branch(), plain)),
+        RepoColumn::Name => Text::from(Line::styled(row.repo.name.clone(), plain)),
+        RepoColumn::DefaultBranch => Text::from(Line::styled(row.branch(), plain)),
         RepoColumn::PullRequests => {
-            Cell::from(Line::styled(count_label(row.pull_requests), plain).right_aligned())
+            Text::from(Line::styled(count_label(row.pull_requests), plain).right_aligned())
         }
         RepoColumn::WorkItems => {
-            Cell::from(Line::styled(count_label(row.work_items), plain).right_aligned())
+            Text::from(Line::styled(count_label(row.work_items), plain).right_aligned())
         }
-        RepoColumn::Pipelines => Cell::from(pipelines_line(row, plain)),
-        RepoColumn::Local => Cell::from(local_line(row)),
+        RepoColumn::Pipelines => Text::from(pipelines_line(row, plain)),
+        RepoColumn::Local => Text::from(local_line(row)),
     }
 }
 

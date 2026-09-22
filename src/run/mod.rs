@@ -260,8 +260,8 @@ pub(super) fn run() -> Result<()> {
         } else {
             runtime.scheduler.schedule_next(now);
         }
-    } else {
-        app.shell.set_status(offline_status(database_is_empty));
+    } else if let Some(status) = offline_status(database_is_empty) {
+        app.shell.set_status(status);
     }
     // Said last, because a database held by another project is a more specific
     // reason to be offline than having no organization at all.
@@ -308,13 +308,14 @@ fn stamp_database(app: &mut App, repository: &SqliteTicketRepository) {
     );
 }
 
-/// What a run without a configured organization opens with.
-fn offline_status(database_is_empty: bool) -> &'static str {
-    if database_is_empty {
-        "Database is empty and offline; run `ticket-tui sync --org ORG --project PROJECT` to pull work items"
-    } else {
-        "Browsing the database offline; no Azure DevOps organization is configured"
-    }
+/// What a run without a configured organization opens with. A database
+/// with something in it opens with nothing: the footer already says
+/// `Offline`, and a notification saying it again with a tick reads as news.
+/// An empty one says how to fill it.
+fn offline_status(database_is_empty: bool) -> Option<&'static str> {
+    database_is_empty.then_some(
+        "Database is empty and offline; run `ticket-tui sync --org ORG --project PROJECT` to pull work items",
+    )
 }
 
 /// Why the resolved project must not sync into this database, if it must not.

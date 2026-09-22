@@ -826,19 +826,7 @@ pub(super) fn render_form(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, s
     }) else {
         return;
     };
-    let submittable = screen
-        .form
-        .as_ref()
-        .is_some_and(FormOverlay::is_submittable);
-    // Why `[Create]` is off, said quietly on the row above the buttons: the
-    // same words a refused submit would use, without the red, since nothing
-    // has been refused yet.
-    let missing = screen
-        .form
-        .as_ref()
-        .and_then(FormOverlay::first_blank_required)
-        .map(|field| format!("{} is required", field.label));
-    let height = u16::try_from(fields.len().saturating_add(4))
+    let height = u16::try_from(fields.len().saturating_add(3))
         .unwrap_or(u16::MAX)
         .min(frame.area().height);
     let area = centered_rect(frame.area(), 66, height);
@@ -849,12 +837,7 @@ pub(super) fn render_form(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, s
         area,
         &format!(" {title} "),
     );
-    let chunks = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .split(inner);
+    let chunks = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).split(inner);
     let rows = chunks[0];
     let viewport = usize::from(rows.height);
     screen
@@ -970,17 +953,10 @@ pub(super) fn render_form(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, s
     if let Some((x, y)) = caret {
         frame.set_cursor_position((x, y));
     }
-    let guidance = chunks[1];
-    if let Some(missing) = missing
-        && guidance.width > 0
-        && guidance.height > 0
-    {
-        frame.render_widget(
-            Paragraph::new(Line::styled(missing, Style::default().fg(theme().muted))),
-            guidance,
-        );
-    }
-    let buttons = chunks[2];
+    // `Create` stays lit with a required field empty: pressing it is what
+    // says which one, so nothing reads as a mistake before anybody has
+    // tried to file anything.
+    let buttons = chunks[1];
     render_control(
         frame,
         shell,
@@ -990,17 +966,18 @@ pub(super) fn render_form(frame: &mut Frame<'_>, screen: &mut WorkItemsScreen, s
             target: PointerTarget::SubmitForm,
             layer: PointerLayer::Modal,
             kind: ControlKind::Primary,
-            enabled: submittable,
+            enabled: true,
         },
     );
-    // `Close`, not `Cancel`: what was typed is kept for `n` to bring back,
-    // for as long as this run lasts.
+    // `Keep draft`, not `Cancel`: what was typed is kept for `n` to bring
+    // back, for as long as this run lasts, and the button says so as `Esc`
+    // in the footer does.
     render_control(
         frame,
         shell,
         Control {
-            area: Rect::new(buttons.x.saturating_add(9), buttons.y, 7, 1),
-            label: " Close ",
+            area: Rect::new(buttons.x.saturating_add(9), buttons.y, 12, 1),
+            label: " Keep draft ",
             target: PointerTarget::CancelForm,
             layer: PointerLayer::Modal,
             kind: ControlKind::Chip,

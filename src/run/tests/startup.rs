@@ -206,6 +206,10 @@ fn an_offline_run_explains_why_it_cannot_sync_and_says_nothing_in_the_title() {
     assert_eq!(level, NotificationLevel::Error);
     assert!(!app.shell.sync_pending);
     assert_eq!(app.shell.sync_status(), SyncStatus::Offline);
-    assert!(offline_status(true).contains("ticket-tui sync"));
-    assert!(offline_status(false).contains("offline"));
+    assert!(offline_status(true).is_some_and(|status| status.contains("ticket-tui sync")));
+    assert_eq!(
+        offline_status(false),
+        None,
+        "the footer already says Offline"
+    );
 }

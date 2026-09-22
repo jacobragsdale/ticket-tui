@@ -247,7 +247,7 @@ fn overlay_buttons_and_row_controls_run_their_commands() {
         .hit_regions
         .find_target(|target| matches!(target, PointerTarget::OpenPalette))
         .map(|region| (region.rect.x, region.rect.y))
-        .expect("Actions button");
+        .expect("Commands button");
     click(&mut app, x, y);
     assert_eq!(app.work_items.mode, WorkItemMode::Palette);
 
@@ -471,7 +471,7 @@ fn the_tab_bar_carries_the_two_controls_that_open_over_every_tab() {
     let palette = target_rect(&app, |target| matches!(target, PointerTarget::OpenPalette));
     let help = target_rect(&app, |target| matches!(target, PointerTarget::OpenHelp));
     assert_eq!((palette.y, help.y), (0, 0), "both are on the tab bar");
-    assert!(palette.right() <= help.x, "Actions then ?");
+    assert!(palette.right() <= help.x, "Commands then ?");
 
     app.select_tab(crate::app::TabId::Repos);
     render_text(120, 20, &mut app);

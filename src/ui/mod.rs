@@ -11,9 +11,9 @@ use ratatui::widgets::{
 use time::OffsetDateTime;
 
 use crate::app::{
-    App, ChildProgress, DividerOrientation, Focus, FormOverlay, HitRegions, NotificationLevel,
-    PRIORITY_CHOICES, PROGRESS_BAR_CELLS, PaneSeam, PaneSplit, RowDensity, Screen, SearchOrder,
-    Shell, SyncStatus, TabId, UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
+    App, ChildProgress, DividerOrientation, Focus, HitRegions, NotificationLevel, PRIORITY_CHOICES,
+    PROGRESS_BAR_CELLS, PaneSeam, PaneSplit, RowDensity, Screen, SearchOrder, Shell, SyncStatus,
+    TabId, UNASSIGNED_LABEL, WorkItemMode, WorkItemsScreen,
 };
 use crate::command::{COMMANDS, Command, Scope, key_label_for};
 use crate::filter::{FacetTarget, FilterField, WorkItemSchema};
@@ -247,18 +247,20 @@ fn tab_chip_style() -> Style {
     }
 }
 
-/// `Actions` and `?` at the right end of the tab bar, as far from the tabs as
+/// `Commands` and `?` at the right end of the tab bar, as far from the tabs as
 /// the row is wide. They open on every tab, so they belong to the bar rather
 /// than to one screen's search row. The narrower the terminal, the fewer of
-/// them there is room for, and neither ever paints over a tab.
+/// them there is room for, and neither ever paints over a tab. The palette's
+/// chip is named for what it opens, the Commands palette, and not `Actions`:
+/// that is the menu `e` opens.
 fn render_bar_controls(frame: &mut Frame<'_>, shell: &mut Shell, area: Rect, used: u16) {
-    const ACTIONS: &str = " Actions ";
+    const COMMANDS: &str = " Commands ";
     const HELP: &str = " ? ";
     let mut right = area.right();
     let mut spans = Vec::new();
     for (label, target) in [
         (HELP, PointerTarget::OpenHelp),
-        (ACTIONS, PointerTarget::OpenPalette),
+        (COMMANDS, PointerTarget::OpenPalette),
     ] {
         let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
         let Some(x) = right.checked_sub(width).filter(|x| *x > used) else {

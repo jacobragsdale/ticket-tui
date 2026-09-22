@@ -261,13 +261,6 @@ impl FormOverlay {
             .iter()
             .find(|field| field.required && field.is_blank())
     }
-
-    /// Whether every required field says something, which is what leaves the
-    /// `[Create]` button lit rather than greyed.
-    #[must_use]
-    pub fn is_submittable(&self) -> bool {
-        self.first_blank_required().is_none()
-    }
 }
 
 /// What one form field holding a whole number says, or a refusal naming it. An

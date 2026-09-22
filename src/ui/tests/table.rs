@@ -354,7 +354,7 @@ fn the_list_table_draws_another_screens_columns_and_sorts_by_their_keys() {
                     RepoColumn::Pipelines => 4,
                     RepoColumn::Local => 5,
                 };
-                Cell::from(repositories[row][index])
+                Text::from(repositories[row][index])
             };
             let mut spec = crate::ui::table::TableSpec {
                 title: " Repos ".to_owned(),
@@ -665,4 +665,19 @@ fn the_sprint_column_says_where_a_row_sits_against_the_sprint_and_sorts_by_the_c
         ],
         "a leftover is flagged, this sprint is lit, the rest recedes"
     );
+}
+
+#[test]
+fn a_title_too_long_for_its_column_ends_in_an_ellipsis() {
+    let mut long = ticket();
+    long.title =
+        "Audit the refund limit on the vault dispute token before the next settlement run".into();
+    let mut app = App::new(vec![long]);
+    let text = render_text(90, 24, &mut app);
+    let row = text
+        .lines()
+        .find(|line| line.contains("Audit the refund"))
+        .expect("the row is on screen");
+    assert!(row.contains('\u{2026}'), "{row}");
+    assert!(!row.contains("settlement run"), "{row}");
 }

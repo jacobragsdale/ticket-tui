@@ -315,7 +315,8 @@ fn help_palette_columns_and_database_open_over_every_tab() {
         press(&mut app, KeyCode::Char(character));
     }
     let text = render_text(120, 40, &mut app);
-    assert!(text.contains(" Commands "), "{text}");
+    // The palette's frame title, not the tab bar's chip of the same name.
+    assert!(text.contains(" Commands \u{2500}"), "{text}");
     assert!(text.contains("Wait for author"), "{text}");
     let selected = app
         .pull_requests
@@ -328,7 +329,7 @@ fn help_palette_columns_and_database_open_over_every_tab() {
         matches!(action, crate::app::AppAction::VotePullRequest { id, vote: -5, .. } if id == selected),
         "the palette's choice runs on the tab it was opened for, got {action:?}"
     );
-    assert!(!render_text(120, 40, &mut app).contains(" Commands "));
+    assert!(!render_text(120, 40, &mut app).contains(" Commands \u{2500}"));
 
     // `c`: the columns editor edits this tab's columns, not the work items'.
     press(&mut app, KeyCode::Char('c'));

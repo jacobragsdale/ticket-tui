@@ -296,7 +296,7 @@ fn render_pipeline_table(
     let layout = screen.pipelines_layout.clone();
     let mut cell = |index: usize, column: PipelineColumn| {
         rows.get(index)
-            .map_or_else(|| Cell::from(""), |row| pipeline_cell(row, column, now))
+            .map_or_else(|| Text::from(""), |row| pipeline_cell(row, column, now))
     };
     let watched: Vec<bool> = rows
         .iter()
@@ -371,7 +371,7 @@ fn render_run_table(
     let marker = |index: usize| watch_marker(watched.get(index).copied().unwrap_or_default());
     let mut cell = |index: usize, column: RunColumn| {
         rows.get(index)
-            .map_or_else(|| Cell::from(""), |row| run_cell(row, column, now))
+            .map_or_else(|| Text::from(""), |row| run_cell(row, column, now))
     };
     let mut spec = TableSpec {
         title,
@@ -406,22 +406,22 @@ fn watch_marker(watched: bool) -> Line<'static> {
     }
 }
 
-fn pipeline_cell(row: &PipelineRow, column: PipelineColumn, now: Timestamp) -> Cell<'static> {
+fn pipeline_cell(row: &PipelineRow, column: PipelineColumn, now: Timestamp) -> Text<'static> {
     match column {
-        PipelineColumn::Name => Cell::from(row.pipeline.name.clone()),
-        PipelineColumn::Folder => Cell::from(folder_label(&row.pipeline.folder)),
+        PipelineColumn::Name => Text::from(row.pipeline.name.clone()),
+        PipelineColumn::Folder => Text::from(folder_label(&row.pipeline.folder)),
         PipelineColumn::LastRun => row.last_run.as_ref().map_or_else(
-            || Cell::from(Line::styled("—", Style::default().fg(theme().muted))),
+            || Text::from(Line::styled("—", Style::default().fg(theme().muted))),
             |run| {
                 let row = RunRow {
                     run: run.clone(),
                     pipeline: row.pipeline.name.clone(),
                 };
-                Cell::from(last_run_line(&row, now))
+                Text::from(last_run_line(&row, now))
             },
         ),
-        PipelineColumn::Branch => Cell::from(row.branch()),
-        PipelineColumn::Age => Cell::from(
+        PipelineColumn::Branch => Text::from(row.branch()),
+        PipelineColumn::Age => Text::from(
             Line::from(
                 row.last_run
                     .as_ref()
@@ -456,7 +456,7 @@ fn last_run_line(row: &RunRow, now: Timestamp) -> Line<'static> {
     Line::from(spans)
 }
 
-fn run_cell(row: &RunRow, column: RunColumn, now: Timestamp) -> Cell<'static> {
+fn run_cell(row: &RunRow, column: RunColumn, now: Timestamp) -> Text<'static> {
     let faded = matches!(row.run.result, Some(RunResult::Canceled));
     let plain = if faded {
         Style::default().fg(theme().muted)
@@ -464,24 +464,24 @@ fn run_cell(row: &RunRow, column: RunColumn, now: Timestamp) -> Cell<'static> {
         Style::default()
     };
     match column {
-        RunColumn::Run => Cell::from(Line::from(vec![
+        RunColumn::Run => Text::from(Line::from(vec![
             Span::styled(
                 format!("{} ", run_glyph(row.run.status, row.run.result)),
                 run_style(row.run.status, row.run.result),
             ),
             Span::styled(row.run.build_number.clone(), plain),
         ])),
-        RunColumn::Result => Cell::from(Line::styled(
+        RunColumn::Result => Text::from(Line::styled(
             result_word(row),
             run_style(row.run.status, row.run.result),
         )),
-        RunColumn::Branch => Cell::from(Line::styled(row.branch(), plain)),
-        RunColumn::Reason => Cell::from(Line::styled(reason_label(&row.run.reason), plain)),
-        RunColumn::By => Cell::from(Line::styled(
+        RunColumn::Branch => Text::from(Line::styled(row.branch(), plain)),
+        RunColumn::Reason => Text::from(Line::styled(reason_label(&row.run.reason), plain)),
+        RunColumn::By => Text::from(Line::styled(
             row.run.requested_for.clone().unwrap_or_default(),
             plain,
         )),
-        RunColumn::Duration => Cell::from(
+        RunColumn::Duration => Text::from(
             Line::styled(
                 row.duration_seconds(now)
                     .map_or_else(String::new, duration_label),
@@ -493,7 +493,7 @@ fn run_cell(row: &RunRow, column: RunColumn, now: Timestamp) -> Cell<'static> {
             )
             .right_aligned(),
         ),
-        RunColumn::Age => Cell::from(
+        RunColumn::Age => Text::from(
             Line::styled(
                 row.run.queue_time.map_or_else(String::new, |queued| {
                     relative_age(queued.seconds_until(now))

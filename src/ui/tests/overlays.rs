@@ -272,13 +272,18 @@ fn a_modal_washes_out_what_is_behind_it_and_leaves_nothing_behind_when_it_closes
         terminal.draw(|frame| render(frame, app)).unwrap();
         let body = table_body(app);
         let cell = &terminal.backend().buffer()[(body.x + 7, body.y)];
-        (cell.fg, cell.modifier)
+        (cell.fg, cell.modifier, cell.bg)
     };
-    let (before, _) = sample(&mut app);
+    let (before, _, ground) = sample(&mut app);
+    assert_eq!(
+        ground,
+        theme().selected_background,
+        "the row is the selected one"
+    );
     assert_eq!(before, theme().link, "the id cell reads as a link");
 
     app.work_items.mode = WorkItemMode::Palette;
-    let (behind, modifier) = sample(&mut app);
+    let (behind, modifier, ground) = sample(&mut app);
     assert_eq!(
         behind,
         theme().muted,
@@ -287,6 +292,11 @@ fn a_modal_washes_out_what_is_behind_it_and_leaves_nothing_behind_when_it_closes
     assert!(
         !modifier.contains(Modifier::BOLD),
         "and gives up its weight"
+    );
+    assert_eq!(
+        ground,
+        Color::Reset,
+        "and its ground, so it does not read as a blank block"
     );
 
     app.work_items.mode = WorkItemMode::Browse;

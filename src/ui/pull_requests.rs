@@ -345,7 +345,7 @@ fn render_table(
     let layout = screen.layout.clone();
     let mut cell = |index: usize, column: PrColumn| {
         rows.get(index)
-            .map_or_else(|| Cell::from(""), |row| pr_cell(row, column, now))
+            .map_or_else(|| Text::from(""), |row| pr_cell(row, column, now))
     };
     let mut spec = TableSpec {
         title: " Pull requests ".to_owned(),
@@ -398,7 +398,7 @@ fn empty_reason(screen: &PullRequestsScreen, shell: &Shell) -> Option<String> {
     })
 }
 
-fn pr_cell(row: &PrRow, column: PrColumn, now: Timestamp) -> Cell<'static> {
+fn pr_cell(row: &PrRow, column: PrColumn, now: Timestamp) -> Text<'static> {
     let faded = row.is_closed();
     let plain = if faded {
         Style::default().fg(theme().muted)
@@ -406,17 +406,17 @@ fn pr_cell(row: &PrRow, column: PrColumn, now: Timestamp) -> Cell<'static> {
         Style::default()
     };
     match column {
-        PrColumn::Id => Cell::from(Line::styled(format!("!{}", row.request.id), plain)),
+        PrColumn::Id => Text::from(Line::styled(format!("!{}", row.request.id), plain)),
         PrColumn::Title => {
             let mut spans = vec![Span::styled(row.request.title.clone(), plain)];
             if row.request.is_draft {
                 spans.push(Span::styled(" [draft]", Style::default().fg(theme().muted)));
             }
-            Cell::from(Line::from(spans))
+            Text::from(Line::from(spans))
         }
-        PrColumn::Repo => Cell::from(Line::styled(row.repo.clone(), plain)),
-        PrColumn::Branches => Cell::from(Line::styled(row.branches(), plain)),
-        PrColumn::Author => Cell::from(Line::styled(
+        PrColumn::Repo => Text::from(Line::styled(row.repo.clone(), plain)),
+        PrColumn::Branches => Text::from(Line::styled(row.branches(), plain)),
+        PrColumn::Author => Text::from(Line::styled(
             row.request.created_by.display_name.clone(),
             plain,
         )),
@@ -430,10 +430,10 @@ fn pr_cell(row: &PrRow, column: PrColumn, now: Timestamp) -> Cell<'static> {
                 }
                 spans.push(Span::styled(glyph, vote_style(vote)));
             }
-            Cell::from(Line::from(spans))
+            Text::from(Line::from(spans))
         }
-        PrColumn::Build => Cell::from(build_line(row)),
-        PrColumn::Age => Cell::from(
+        PrColumn::Build => Text::from(build_line(row)),
+        PrColumn::Age => Text::from(
             Line::styled(
                 row.changed_at()
                     .map_or_else(String::new, |at| relative_age(at.seconds_until(now))),

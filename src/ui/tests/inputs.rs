@@ -1,6 +1,6 @@
 //! The one-row text fields: a caret that stays on its row however long the
 //! text, measured in columns rather than characters; lists that say when they
-//! have nothing; the form's wording and guidance; and a footer that keeps the
+//! have nothing; the form's wording; and a footer that keeps the
 //! way out at any width.
 
 use ratatui::layout::Position;
@@ -430,7 +430,7 @@ fn an_empty_list_says_so_without_a_row_to_pick() {
 }
 
 #[test]
-fn the_form_closes_keeping_its_draft_and_says_why_create_is_off() {
+fn the_form_closes_keeping_its_draft_and_says_what_is_missing_only_when_asked() {
     let mut app = App::new(vec![ticket()]);
     app.shell.enable_sync();
     key(&mut app, KeyCode::Char('n'));
@@ -439,45 +439,31 @@ fn the_form_closes_keeping_its_draft_and_says_why_create_is_off() {
     let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
     let text = render_text(90, 24, &mut app);
-    assert!(text.contains("Title is required"), "{text}");
-    assert!(text.contains(" Close "), "{text}");
+    assert!(
+        !text.contains("is required"),
+        "nothing is refused before anybody tries: {text}"
+    );
+    assert!(text.contains(" Keep draft "), "{text}");
     assert!(text.contains("Esc keep draft"), "{text}");
     assert!(!text.contains("Esc cancel"), "{text}");
     let (y, x) = text
         .lines()
         .enumerate()
-        .find_map(|(y, line)| line.find("Title is required").map(|x| (y, x)))
+        .find_map(|(y, line)| line.find(" Create ").map(|x| (y, x)))
         .unwrap();
     let cell = &terminal.backend().buffer()[(u16::try_from(x).unwrap(), u16::try_from(y).unwrap())];
-    assert_eq!(cell.fg, theme().muted, "guidance, not an error");
-    assert!(
-        app.shell
-            .hit_regions
-            .find_target(|target| matches!(target, PointerTarget::SubmitForm))
-            .is_none(),
-        "Create is off while the guidance says why"
-    );
-    assert!(
-        app.shell.notification().is_none(),
-        "nothing has been refused yet"
-    );
-
-    // Filling the field takes the guidance away and lights the button.
-    key(&mut app, KeyCode::Down);
-    type_text(&mut app, "Hello");
-    let text = render_text(90, 24, &mut app);
-    assert!(!text.contains("is required"), "{text}");
-    assert!(
-        app.shell
-            .hit_regions
-            .find_target(|target| matches!(target, PointerTarget::SubmitForm))
-            .is_some()
-    );
-    // Emptying it again brings the guidance back.
-    for _ in 0..5 {
-        key(&mut app, KeyCode::Backspace);
+    if theme().accent != Color::Reset {
+        assert_eq!(cell.bg, theme().accent, "Create is the primary button");
     }
-    assert!(render_text(90, 24, &mut app).contains("Title is required"));
+    let create = target_rect(&app, |target| matches!(target, PointerTarget::SubmitForm));
+
+    // Pressing it with the title empty is what says so.
+    click(&mut app, create.x, create.y);
+    assert_eq!(app.work_items.mode, WorkItemMode::Form);
+    assert_eq!(
+        app.shell.notification().map(|(message, _)| message),
+        Some("Title is required")
+    );
     type_text(&mut app, "Hello");
 
     // Esc keeps the draft for `n` to bring back; so does the button.
@@ -507,7 +493,7 @@ fn the_form_closes_keeping_its_draft_and_says_why_create_is_off() {
     // A short terminal still shows the field under the caret and the buttons.
     let (text, caret) = render_with_caret(60, 11, &mut app);
     assert!(
-        text.contains(" Create ") && text.contains(" Close "),
+        text.contains(" Create ") && text.contains(" Keep draft "),
         "{text}"
     );
     assert!(caret.x < 60 && caret.y < 11, "{caret:?}");

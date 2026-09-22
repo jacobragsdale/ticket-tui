@@ -1674,7 +1674,7 @@ surface ground while it has the keyboard, a braille spinner in the prompt cell
 while a search is still running, and a `[×]` at the right end once there is a
 query to clear. Where a tab is searching inside something — a saved pull
 request view, the runs of one pipeline — that name reads muted at the right end
-of the row. `Actions` and `?` are chips at the right end of the tab bar rather
+of the row. `Commands` and `?` are chips at the right end of the tab bar rather
 than titles on the search box, because both open over every tab; the shell
 answers them, as it does a click on a tab. On the bar itself the tab showing
 reads in the accent on the surface ground, bold — reversed under `NO_COLOR`,

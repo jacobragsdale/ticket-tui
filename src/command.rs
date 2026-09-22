@@ -568,7 +568,7 @@ pub const COMMANDS: &[Command] = &[
         id: CommandId::ToggleDetails,
         title: "Toggle details pane",
         keys: &[key('d')],
-        help: "Below 70 columns",
+        help: "Swap list and details under 70 columns",
         scope: Scope::Global,
     },
     Command {
@@ -626,7 +626,7 @@ pub const COMMANDS: &[Command] = &[
         id: CommandId::CopyId,
         title: "Copy ID",
         keys: &[key('y')],
-        help: "Selected or current tickets",
+        help: "The row under the cursor",
         scope: Scope::Tabs(&[TabId::WorkItems, TabId::Repos]),
     },
     Command {
@@ -659,14 +659,14 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         id: CommandId::ExportJson,
-        title: "Export selected as JSON",
+        title: "Export current ticket as JSON",
         keys: &[],
         help: "",
         scope: Scope::Tabs(&[TabId::WorkItems]),
     },
     Command {
         id: CommandId::ExportCsv,
-        title: "Export selected as CSV",
+        title: "Export current ticket as CSV",
         keys: &[],
         help: "",
         scope: Scope::Tabs(&[TabId::WorkItems]),
@@ -717,7 +717,7 @@ pub const COMMANDS: &[Command] = &[
         id: CommandId::ResetPaneSplit,
         title: "Reset pane split",
         keys: &[],
-        help: "Restore the 62/56 layout",
+        help: "List 62% side by side, 56% stacked",
         scope: Scope::Global,
     },
     Command {

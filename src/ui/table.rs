@@ -62,7 +62,7 @@ pub(crate) struct TableSpec<'a, C: ColumnId> {
     /// goes with it.
     pub marker: Option<&'a dyn Fn(usize) -> Line<'static>>,
     /// One cell, by row and column. Called only for the rows on screen.
-    pub cell: &'a mut dyn FnMut(usize, C) -> Cell<'static>,
+    pub cell: &'a mut dyn FnMut(usize, C) -> Text<'static>,
 }
 
 pub(crate) fn render_list_table<C: ColumnId>(
@@ -129,6 +129,28 @@ pub(crate) fn render_list_table<C: ColumnId>(
         .height(1)
         .bottom_margin(1);
 
+    // Where each column lands, worked out the way the table works it out:
+    // a cell is cut to its column's width before it is drawn, so a title too
+    // long for its column ends in `…` rather than stopping mid-word, and the
+    // header's sort targets land on the same cells.
+    let header_area = Rect::new(
+        inner.x.saturating_add(SELECTION_WIDTH),
+        inner.y,
+        inner
+            .width
+            .saturating_sub(SELECTION_WIDTH)
+            .saturating_sub(SCROLLBAR_WIDTH),
+        1,
+    );
+    let header_columns = Layout::horizontal(constraints.clone())
+        .spacing(COLUMN_SPACING)
+        .split(header_area);
+    let column_areas: Vec<Rect> = header_columns
+        .iter()
+        .copied()
+        .skip(usize::from(spec.marker.is_some()))
+        .collect();
+
     let visible_rows = geometry.visible_rows;
     // A palette that names the colour a selected row reads in lends it to the
     // cells that have none of their own; the state, type and priority cells
@@ -139,7 +161,9 @@ pub(crate) fn render_list_table<C: ColumnId>(
         if let Some(marker) = spec.marker {
             cells.push(Cell::from(marker(index)));
         }
-        cells.extend(columns.iter().map(|column| (spec.cell)(index, column.id)));
+        cells.extend(columns.iter().zip(&column_areas).map(|(column, area)| {
+            Cell::from(ellipsize((spec.cell)(index, column.id), area.width))
+        }));
         let row = Row::new(cells).height(spec.row_height);
         if selection_fg == Color::Reset || spec.selected != Some(index) {
             row
@@ -147,7 +171,7 @@ pub(crate) fn render_list_table<C: ColumnId>(
             row.style(Style::default().fg(selection_fg))
         }
     });
-    let table = Table::new(rows, constraints.clone())
+    let table = Table::new(rows, constraints)
         .header(header)
         .block(block)
         .column_spacing(COLUMN_SPACING)
@@ -188,23 +212,6 @@ pub(crate) fn render_list_table<C: ColumnId>(
         ),
         Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 1),
     );
-    let header_area = Rect::new(
-        inner.x.saturating_add(SELECTION_WIDTH),
-        inner.y,
-        inner
-            .width
-            .saturating_sub(SELECTION_WIDTH)
-            .saturating_sub(SCROLLBAR_WIDTH),
-        1,
-    );
-    let header_columns = Layout::horizontal(constraints)
-        .spacing(COLUMN_SPACING)
-        .split(header_area);
-    let column_areas: Vec<Rect> = header_columns
-        .iter()
-        .copied()
-        .skip(usize::from(spec.marker.is_some()))
-        .collect();
     for (header_rect, column) in column_areas.iter().zip(columns.iter()) {
         shell.hit_regions.push(region(
             *header_rect,
@@ -282,6 +289,39 @@ pub(crate) fn render_list_table<C: ColumnId>(
         );
     }
     capture_selectable(frame, shell, spec.selectable, body, overflow);
+}
+
+/// Cuts each line of `text` wider than `width` columns so it ends in `…`: a
+/// clipped title that simply stops reads as the whole title.
+fn ellipsize(mut text: Text<'static>, width: u16) -> Text<'static> {
+    let width = usize::from(width);
+    for line in &mut text.lines {
+        if line.width() <= width {
+            continue;
+        }
+        let mut room = width.saturating_sub(1);
+        let mut kept = Vec::new();
+        for span in std::mem::take(&mut line.spans) {
+            let mut content = String::new();
+            let mut whole = true;
+            for character in span.content.chars() {
+                let cells = display_width(character.encode_utf8(&mut [0; 4]));
+                if cells > room {
+                    whole = false;
+                    break;
+                }
+                room -= cells;
+                content.push(character);
+            }
+            kept.push(Span::styled(content, span.style));
+            if !whole {
+                kept.push(Span::styled("\u{2026}", span.style));
+                break;
+            }
+        }
+        line.spans = kept;
+    }
+    text
 }
 
 pub(super) fn render_table(
@@ -389,7 +429,7 @@ pub(super) fn render_table(
     };
     let mut cell = |index: usize, column: SortField| {
         rows.get(index.saturating_sub(offset)).map_or_else(
-            || Cell::from(""),
+            || Text::from(""),
             |row| {
                 table_cell(
                     row.ticket,
@@ -569,7 +609,7 @@ pub(super) fn table_cell(
     density: RowDensity,
     row: RowContext,
     highlighter: &mut QueryHighlighter,
-) -> Cell<'static> {
+) -> Text<'static> {
     let RowContext {
         tone,
         mine,
@@ -635,12 +675,12 @@ pub(super) fn table_cell(
     };
 
     if density == RowDensity::Comfortable && field == SortField::Title {
-        Cell::from(Text::from(vec![
+        Text::from(vec![
             line,
             Line::from(tag_badge_spans(&ticket.tags, tone, highlighter)),
-        ]))
+        ])
     } else {
-        Cell::from(line)
+        Text::from(line)
     }
 }
 
