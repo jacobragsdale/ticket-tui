@@ -29,12 +29,12 @@ else it does is local.
 ├ Details ───────────────────────────────────────────────────────────────────────────┤
 │ Factor overlay list rendering into one helper                                     ┃│
 │ #600 · [Issue] · ✓ Done · P1 · Jacob Ragsdale                                     ││
-│ Family     Epic 595  Tech debt and architecture foundation › this                 ││
 │ Tags       [tech-debt]                                                            ││
-│ Project    jacobragsdale / development · r5                                       ││
-│ https://dev.azure.com/jacobragsdale/development/_workitems/edit/600               ││
+│ [w Work with agent]  [o Open]                                                     ││
 │                                                                                   ││
 │ ── Family ────────────────────────────────────────────────────────────────────────││
+│ 595  Epic  Tech debt and architecture foundation                                  ││
+│ └─ 600  Issue  Factor overlay list rendering into one helper current              ││
 ╰────────────────────────────────────────────────────────────────────────────────────╯
  ↑↓/jk move  / search  click/drag copy  wheel scroll   development  ● Synced just now
 ```

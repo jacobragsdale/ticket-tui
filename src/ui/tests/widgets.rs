@@ -101,9 +101,13 @@ fn the_details_thumb_finishes_on_the_last_row_of_its_track() {
     let track = metrics.track;
     let pane = details_pane(&app);
     assert_eq!(
-        (track.y, track.height),
-        (pane.y, pane.height),
-        "the track spans everything inside the border, heading included"
+        track.y + track.height,
+        pane.y + pane.height,
+        "the track runs to the bottom border"
+    );
+    assert!(
+        track.y > pane.y,
+        "and starts under the pinned heading, which does not scroll"
     );
     let thumb = metrics.thumb().expect("the description overflows the pane");
     assert_eq!(

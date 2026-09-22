@@ -912,7 +912,7 @@ fn the_agent_picker_asks_its_question_and_the_details_pane_offers_the_chip() {
     app.shell
         .set_clones(std::iter::once("aaa-111".to_owned()).collect());
     let text = render_text(100, 30, &mut app);
-    assert!(text.contains("[Work with agent]"), "{text}");
+    assert!(text.contains("[w Work with agent]"), "{text}");
 
     app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
     let text = render_text(100, 30, &mut app);

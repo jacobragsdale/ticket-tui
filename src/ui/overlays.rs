@@ -1253,15 +1253,6 @@ pub(super) fn summary_line(row: &SummaryRow, selected: bool) -> Line<'static> {
     }
 }
 
-pub(super) fn link_line(text: String) -> Line<'static> {
-    terminate_underline(Line::from(Span::styled(
-        text,
-        Style::default()
-            .fg(theme().link)
-            .add_modifier(Modifier::UNDERLINED),
-    )))
-}
-
 pub(super) fn terminate_underline(mut line: Line<'static>) -> Line<'static> {
     line.spans.push(Span::styled(
         " ",

@@ -20,27 +20,36 @@ fn a_field_name_keeps_a_space_between_it_and_its_value_however_long_it_is() {
 #[test]
 fn the_details_changed_line_says_how_long_a_stale_work_item_has_sat() {
     let item = ticket();
+    let now = item.changed_at.plus_seconds(21 * 86_400 + 3_600);
+    let text = |line: &Line<'_>| {
+        line.spans
+            .iter()
+            .map(|span| &*span.content)
+            .collect::<String>()
+    };
 
-    let quiet = changed_field_line(&item, None);
+    let quiet = changed_field_line(&item, false, now);
     assert_eq!(
-        quiet.spans.len(),
-        2,
-        "an item nobody is waiting on gets no suffix"
+        text(&quiet),
+        format!("Changed    21d ago · {}", item.changed_at.exact_utc()),
+        "an item nobody is waiting on reads its age, then the exact instant"
     );
 
-    let flagged = changed_field_line(&item, Some(21));
-    let suffix = flagged.spans.last().expect("a suffix span");
-    assert_eq!(suffix.content, " (stale 21d)");
+    let flagged = changed_field_line(&item, true, now);
+    assert_eq!(
+        text(&flagged),
+        format!(
+            "Changed    21d ago, stale · {}",
+            item.changed_at.exact_utc()
+        ),
+        "a stale one says so beside the age rather than repeating the number"
+    );
+    let suffix = &flagged.spans[2];
+    assert_eq!(suffix.content, ", stale");
     assert_eq!(suffix.style.fg, Some(theme().warning));
     assert!(
         suffix.style.add_modifier.contains(Modifier::BOLD),
         "the suffix reads under NO_COLOR too"
-    );
-    assert!(
-        flagged.spans[1]
-            .content
-            .contains(&item.changed_at.exact_utc()),
-        "the exact instant is still there to read: {flagged:?}"
     );
 }
 
@@ -54,7 +63,7 @@ fn the_details_pane_flags_a_neglected_work_item_beside_its_changed_instant() {
     app.shell.focus = Focus::Details;
 
     assert!(
-        render_text(60, 44, &mut app).contains("(stale "),
+        render_text(60, 44, &mut app).contains(", stale"),
         "the details pane says the work item has been sitting"
     );
 
@@ -65,7 +74,7 @@ fn the_details_pane_flags_a_neglected_work_item_beside_its_changed_instant() {
     finished.shell.narrow_details = true;
     finished.shell.focus = Focus::Details;
     assert!(
-        !render_text(60, 44, &mut finished).contains("(stale "),
+        !render_text(60, 44, &mut finished).contains(", stale"),
         "and says nothing about work that is over"
     );
 }
@@ -640,7 +649,10 @@ fn details_render_family_tree_without_other_links() {
     assert_eq!(app.work_items.selected_ticket().unwrap().key.id, 10_002);
 
     let text = render_text(60, 36, &mut app);
-    assert!(text.contains("Family     Feature 10001  Auth rewrite › this"));
+    assert!(
+        !text.contains("› this"),
+        "the tree is the family; no breadcrumb repeats it above: {text}"
+    );
     assert!(text.contains("0/1 closed"));
     assert!(text.contains("10001"));
     assert!(text.contains("10002"));
@@ -993,12 +1005,10 @@ fn every_details_field_is_clickable_on_its_own_value() {
 }
 
 #[test]
-fn planning_fields_follow_the_details_scroll_and_a_breadcrumb_shifts_the_rest() {
+fn planning_fields_follow_the_details_scroll() {
     let mut app = auth_family_app_with_long_details();
     let mut terminal = Terminal::new(TestBackend::new(60, 25)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
-    // A work item with a family carries a breadcrumb line, so the
-    // assignment and tags lines sit one row lower than they otherwise do.
     assert_eq!(
         text_at(&terminal, edit_field_rect(&app, EditableField::Assignee)),
         "Avery Chen"
@@ -1026,65 +1036,189 @@ fn planning_fields_follow_the_details_scroll_and_a_breadcrumb_shifts_the_rest() 
 }
 
 #[test]
-fn the_heading_scrolls_away_and_its_fields_travel_with_it() {
+fn the_title_and_badge_row_stay_pinned_while_the_rest_scrolls_under_them() {
     let mut app = auth_family_app_with_long_details();
     let mut terminal = Terminal::new(TestBackend::new(60, 25)).unwrap();
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
-    let before = edit_field_rect(&app, EditableField::Assignee);
-    assert_eq!(text_at(&terminal, before), "Avery Chen");
+    let title = edit_field_rect(&app, EditableField::Title);
+    let assignee = edit_field_rect(&app, EditableField::Assignee);
+    let tags = edit_field_rect(&app, EditableField::Tags);
+    assert_eq!(text_at(&terminal, assignee), "Avery Chen");
 
-    // The badge row is the second line of the heading, so one row of scroll
-    // is as far as it goes before it is off the top of the pane.
     app.work_items.details.scroll_to(1);
     terminal.draw(|frame| render(frame, &mut app)).unwrap();
-    let after = edit_field_rect(&app, EditableField::Assignee);
+    assert_eq!(edit_field_rect(&app, EditableField::Title), title);
     assert_eq!(
-        after.y + 1,
-        before.y,
-        "the heading scrolls with everything under it"
+        edit_field_rect(&app, EditableField::Assignee),
+        assignee,
+        "the badge row does not move with the scroll"
     );
-    assert_eq!(text_at(&terminal, after), "Avery Chen");
-    click(&mut app, after.x, after.y);
+    assert_eq!(text_at(&terminal, assignee), "Avery Chen");
+    assert!(
+        app.shell
+            .hit_regions
+            .edit_field(EditableField::Tags)
+            .is_none(),
+        "the tags line, first under the heading, is what scrolled away"
+    );
+    assert_ne!(
+        text_at(&terminal, tags),
+        "[rust] [search]",
+        "and it is not drawn where it was"
+    );
+    click(&mut app, assignee.x, assignee.y);
     assert_eq!(
         app.work_items.mode,
         WorkItemMode::AssigneePicker,
-        "a scrolled value still opens its editor"
+        "a pinned value still opens its editor"
     );
-    assert_eq!(app.shell.overlay_anchor, OverlayAnchor::Below(after));
+    assert_eq!(app.shell.overlay_anchor, OverlayAnchor::Below(assignee));
 
     let mut app = auth_family_app_with_long_details();
     render_text(60, 24, &mut app);
+    let title = edit_field_rect(&app, EditableField::Title);
     app.work_items
         .details
         .scroll_to(app.work_items.details.max_offset());
-    render_text(60, 24, &mut app);
+    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    assert_eq!(
+        edit_field_rect(&app, EditableField::Title),
+        title,
+        "scrolled to the end, the title is still where it was"
+    );
+    assert_eq!(text_at(&terminal, title), "Login form");
+    let assignee = edit_field_rect(&app, EditableField::Assignee);
+    let track = app
+        .shell
+        .hit_regions
+        .scroll(ScrollSurface::Details)
+        .expect("the long description overflows")
+        .track;
+    let pane = details_pane(&app);
     assert!(
+        track.y > assignee.y && track.y + track.height == pane.y + pane.height,
+        "the scrollbar measures only what scrolls: {track:?} under {assignee:?}"
+    );
+}
+
+#[test]
+fn the_composer_caret_scrolls_into_view_below_the_pinned_heading() {
+    let mut long = ticket();
+    long.description = "line\n".repeat(60);
+    let mut app = App::new(vec![long]);
+    app.shell.enable_sync();
+    app.work_items.set_table_viewport(1);
+    render_text(120, 30, &mut app);
+    let assignee = edit_field_rect(&app, EditableField::Assignee);
+    app.work_items
+        .details
+        .scroll_to(app.work_items.details.max_offset());
+    render_text(120, 30, &mut app);
+    let add = target_rect(&app, |target| {
+        matches!(target, PointerTarget::Compose(ComposeTarget::NewComment))
+    });
+    click(&mut app, add.x + 2, add.y);
+    app.work_items.details.scroll_to(0);
+    for character in "typed".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+    }
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+    let caret = terminal
+        .get_cursor_position()
+        .expect("the composer places the caret");
+    let pane = details_pane(&app);
+    assert!(
+        app.work_items.details.offset > 0,
+        "typing brought the composer back into view"
+    );
+    assert!(
+        assignee.y < caret.y && caret.y < pane.y + pane.height,
+        "the caret sits under the heading, inside the pane: {caret:?}"
+    );
+    let row = text_at(&terminal, Rect::new(pane.x, caret.y, pane.width, 1));
+    assert!(row.contains("typed"), "and on the row it types into: {row}");
+}
+
+#[test]
+fn the_chips_share_one_row_and_each_runs_its_own_key() {
+    use crate::model::{ArtifactKind, ArtifactLink, PrStatus};
+
+    let item = ticket();
+    let mut app = App::new(vec![item.clone()]);
+    app.shell.set_repos(vec![crate::app::repos::tests::repo(
+        "aaa-111",
+        "ticket-tui",
+        false,
+    )]);
+    app.shell.set_artifact_labels(
+        vec![(42, "Split the files".to_owned(), PrStatus::Active)],
+        Vec::new(),
+    );
+    app.work_items.set_workspace_graph(
+        &mut app.shell,
+        TicketGraph {
+            artifacts: vec![ArtifactLink {
+                work_item: item.key,
+                kind: ArtifactKind::PullRequest {
+                    repo_id: "aaa-111".into(),
+                    id: 42,
+                },
+                name: "Pull Request".to_owned(),
+            }],
+            ..TicketGraph::default()
+        },
+    );
+    let mut terminal = Terminal::new(TestBackend::new(150, 40)).unwrap();
+    terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+    let work = target_rect(&app, |target| {
+        matches!(target, PointerTarget::RunCommand(CommandId::WorkWithAgent))
+    });
+    let open = target_rect(&app, |target| {
+        matches!(target, PointerTarget::OpenSelectedUrl)
+    });
+    let pane = details_pane(&app);
+    let row = text_at(&terminal, Rect::new(pane.x, work.y, pane.width, 1));
+    assert!(
+        row.contains("[w Work with agent]  [g Go to pull request]  [o Open]"),
+        "{row}"
+    );
+    assert_eq!(open.y, work.y, "one row");
+    assert_eq!(text_at(&terminal, work), "[w Work with agent]");
+    assert_eq!(text_at(&terminal, open), "[o Open]");
+    let go = pane.x + u16::try_from(row.find("[g").expect("the g chip")).unwrap();
+    assert!(matches!(
         app.shell
             .hit_regions
-            .edit_field(EditableField::Title)
-            .is_none(),
-        "a heading value scrolled off the pane is not clickable"
-    );
+            .resolve(go + 3, work.y)
+            .map(|region| &region.target),
+        Some(PointerTarget::Follow(Jump::PullRequest { id: 42, .. }))
+    ));
     assert!(
-        app.shell
-            .hit_regions
-            .edit_field(EditableField::Assignee)
-            .is_none(),
-        "and neither is the assignee beside it"
+        !matches!(
+            app.shell
+                .hit_regions
+                .resolve(work.x + work.width, work.y)
+                .map(|region| &region.target),
+            Some(PointerTarget::RunCommand(_) | PointerTarget::Follow(_))
+        ),
+        "the gap between two chips runs neither"
     );
-    assert!(
-        detail_url(&app).is_none(),
-        "the link line scrolls off with the rest of the heading"
-    );
+    assert!(matches!(
+        click(&mut app, open.x + 1, open.y),
+        crate::app::AppAction::OpenUrl(_)
+    ));
 }
 
 #[test]
 fn the_family_cursor_scrolls_itself_back_into_view_below_the_heading() {
     let mut app = auth_family_app_with_long_details();
     app.shell.focus = Focus::Family;
-    render_text(60, 14, &mut app);
-    let pane = details_pane(&app);
-    let fold = usize::from(pane.height.saturating_sub(2));
+    render_text(60, 12, &mut app);
+    let fold = app.work_items.details.viewport;
     assert_eq!(
         app.work_items.details.offset, 0,
         "a fresh selection starts at the top"
@@ -1092,12 +1226,12 @@ fn the_family_cursor_scrolls_itself_back_into_view_below_the_heading() {
     let tree_start = app.work_items.family_rows.first().copied().unwrap_or(0);
     assert!(
         tree_start >= fold,
-        "the heading fills this pane, so the tree starts below the fold: \
-             {tree_start} rows down, {fold} visible"
+        "the tags and chips fill this pane under the pinned heading, so the \
+             tree starts below the fold: {tree_start} rows down, {fold} visible"
     );
 
     app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-    render_text(60, 14, &mut app);
+    render_text(60, 12, &mut app);
     assert!(
         app.work_items.details.offset > 0,
         "the pane scrolled down to the family cursor"
@@ -1105,7 +1239,7 @@ fn the_family_cursor_scrolls_itself_back_into_view_below_the_heading() {
     assert_cursor_row_visible(&app);
 
     app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-    render_text(60, 14, &mut app);
+    render_text(60, 12, &mut app);
     assert_cursor_row_visible(&app);
 }
 

@@ -2,14 +2,16 @@
 //! tree, its history and its comments.
 
 use super::*;
+use crate::app::relative_age;
 use crate::command::CommandId;
 use crate::model::same_text;
 use crate::text_input::{WrapLayout, wrap_with_cursor};
 
-/// The details pane is one scrolling document: the heading, the family tree,
-/// Planning, Description, Acceptance Criteria, Comments, and History are lines
-/// of a single paragraph, so the title scrolls away with everything under it
-/// and the scrollbar measures the whole pane.
+/// The details pane is one document: the heading, the family tree, Planning,
+/// Description, Acceptance Criteria, Comments, and History are lines of a
+/// single paragraph. Its first two lines, the title and the badge row, are
+/// pinned to the top of the pane so a scrolled pane still says which work item
+/// it is; everything under them scrolls, and the scrollbar measures that.
 pub(super) fn render_details(
     frame: &mut Frame<'_>,
     screen: &mut WorkItemsScreen,
@@ -72,8 +74,9 @@ pub(super) fn render_details(
     let mut line_links: Vec<(u16, TicketKey)> = Vec::new();
     // The artifact lines that go somewhere: the line and where.
     let mut artifact_links: Vec<(u16, Jump)> = Vec::new();
-    // The chips that stand for a key: the line and the command.
-    let mut command_chips: Vec<(u16, CommandId)> = Vec::new();
+    // The chips that stand for a key: the line, the column the chip starts
+    // in, how wide it is, and what a click on it does.
+    let mut chip_hits: Vec<(u16, u16, u16, PointerTarget)> = Vec::new();
     // Every click target is a line of the one paragraph, so each is recorded
     // against its logical line and placed once the scroll offset is known.
     let mut field_hits: Vec<(u16, EditableField, u16, u16)> = Vec::new();
@@ -90,18 +93,8 @@ pub(super) fn render_details(
         shell.is_mine(&ticket),
         &mut highlighter,
     ));
-    if has_family {
-        lines.push(family_breadcrumb_line(screen, &family));
-    }
     lines.push(tags_field_line(&ticket.tags, &mut highlighter));
-    lines.push(field_line(
-        "Project",
-        format!(
-            "{} / {} · r{}",
-            ticket.key.organization, ticket.project, ticket.revision
-        ),
-    ));
-    for span in metadata_field_spans(&ticket, has_family) {
+    for span in metadata_field_spans(&ticket) {
         field_hits.push((span.line, span.field, span.x, span.width));
     }
     // Below the editable fields, so nothing a click aims at moves when a
@@ -109,46 +102,63 @@ pub(super) fn render_details(
     if let Some(progress) = screen.child_progress(&ticket.key) {
         lines.push(child_progress_line(progress));
     }
-    let url_line = u16::try_from(lines.len()).ok();
-    lines.push(link_line(ticket.web_url.clone()));
-    // The chip that stands for `g`: what carried this work item, when
-    // anything did. It follows on a click like the artifact lines below.
-    if let Some((line, jump)) = follow_chip(&*screen, shell)
-        && let Ok(index) = u16::try_from(lines.len())
-    {
-        artifact_links.push((index, jump));
-        lines.push(line);
+    // The agent already on the work item, when there is one. A peeked
+    // relative is read-only, so neither it nor `w` is drawn.
+    let live_agent = screen.live_agent_for(&ticket.key).filter(|_| !peeking);
+    if let Some(session) = live_agent {
+        lines.push(field_line(
+            "Agent",
+            format!(
+                "{} \u{00b7} {} \u{203a} {} \u{00b7} {}",
+                session.provider.label(),
+                session.workspace,
+                session.repo_name,
+                session.branch
+            ),
+        ));
     }
-    // The chip that stands for `w`, and the agent already on the work item
-    // when there is one. A peeked relative is read-only, so neither is drawn.
+    // The chips that stand for a key: `w`, `g` when anything carried this
+    // work item, and `o`. They are laid out here rather than wrapped by the
+    // paragraph, so each chip's columns are known and a click runs the one
+    // under the pointer; a pane too narrow for all of them breaks the row
+    // between two chips, never inside one.
+    let mut chips: Vec<(String, PointerTarget)> = Vec::new();
     if !peeking {
-        if let Some(session) = screen.live_agent_for(&ticket.key) {
-            lines.push(field_line(
-                "Agent",
-                format!(
-                    "{} \u{00b7} {} \u{203a} {} \u{00b7} {}",
-                    session.provider.label(),
-                    session.workspace,
-                    session.repo_name,
-                    session.branch
-                ),
-            ));
-        }
-        let label = if screen.live_agent_for(&ticket.key).is_some() {
-            "[Return to agent]"
+        let label = if live_agent.is_some() {
+            "[w Return to agent]"
         } else {
-            "[Work with agent]"
+            "[w Work with agent]"
         };
-        if let Ok(index) = u16::try_from(lines.len()) {
-            command_chips.push((index, CommandId::WorkWithAgent));
-            lines.push(Line::styled(
-                label,
-                Style::default()
-                    .fg(theme().link)
-                    .add_modifier(Modifier::UNDERLINED),
-            ));
-        }
+        chips.push((
+            label.to_owned(),
+            PointerTarget::RunCommand(CommandId::WorkWithAgent),
+        ));
     }
+    if let Ok((jump, noun)) = screen.follow_target(shell) {
+        chips.push((format!("[g Go to {noun}]"), PointerTarget::Follow(jump)));
+    }
+    chips.push(("[o Open]".to_owned(), PointerTarget::OpenSelectedUrl));
+    let chip_style = Style::default()
+        .fg(theme().link)
+        .add_modifier(Modifier::UNDERLINED);
+    let mut chip_row: Vec<Span> = Vec::new();
+    let mut x = 0u16;
+    for (label, target) in chips {
+        let chip_width = columns(&label);
+        if x > 0 && x.saturating_add(2).saturating_add(chip_width) > width {
+            lines.push(Line::from(std::mem::take(&mut chip_row)));
+            x = 0;
+        }
+        if x > 0 {
+            chip_row.push(Span::raw("  "));
+            x = x.saturating_add(2);
+        }
+        let line = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+        chip_hits.push((line, x, chip_width, target));
+        chip_row.push(Span::styled(label, chip_style));
+        x = x.saturating_add(chip_width);
+    }
+    lines.push(Line::from(chip_row));
     lines.push(Line::default());
 
     if has_family {
@@ -258,15 +268,16 @@ pub(super) fn render_details(
         &ticket.iteration_path,
         &mut highlighter,
     ));
-    lines.push(field_line("Created", ticket.created_at.exact_utc()));
-    lines.push(changed_field_line(&ticket, screen.stale_age_days(&ticket)));
+    let now = Timestamp::now();
+    lines.push(field_line("Created", when(ticket.created_at, now)));
+    lines.push(changed_field_line(
+        &ticket,
+        screen.stale_age_days(&ticket).is_some(),
+        now,
+    ));
 
     lines.push(Line::default());
     lines.push(section_line("Description", width));
-    if let Some(reason) = ticket.reason.as_deref() {
-        lines.push(field_line("Reason", reason));
-        lines.push(Line::default());
-    }
     // The composer, when it is open on this work item: its rows stand where
     // the section it edits would be, wrapped here — a column short of the
     // pane, so no row ever re-wraps — so every row is one screen row and the
@@ -323,7 +334,7 @@ pub(super) fn render_details(
         let who = comment.author.as_deref().unwrap_or("unknown");
         lines.push(Line::from(format!(
             "  {who} · {}",
-            comment.created_at.exact_utc()
+            when(comment.created_at, now)
         )));
         let body: Vec<Line> = comment
             .text
@@ -366,7 +377,7 @@ pub(super) fn render_details(
         .chain(family_hits.iter().map(|hit| hit.line))
         .chain(line_links.iter().map(|(line, _)| *line))
         .chain(artifact_links.iter().map(|(line, _)| *line))
-        .chain(url_line)
+        .chain(chip_hits.iter().map(|(line, ..)| *line))
         .max();
     let upto = if peeking && composing.is_none() {
         last_hit.map_or(0, |last| usize::from(last).saturating_add(1))
@@ -374,16 +385,35 @@ pub(super) fn render_details(
         lines.len()
     };
     let rows = wrapped_row_starts(&lines, width, upto);
+    // The pinned heading's height: the title may wrap, so it is measured, and
+    // a pane shorter than the heading gives it every row there is. Rows are
+    // counted from the top of the document everywhere below; the scrolling
+    // rest starts `head_rows` down it and `head_height` down the pane.
+    let head_rows = rows.get(PINNED_LINES).copied().unwrap_or(0);
+    let head_height = head_rows.min(inner.height);
+    let body_area = Rect::new(
+        inner.x,
+        inner.y.saturating_add(head_height),
+        inner.width,
+        inner.height.saturating_sub(head_height),
+    );
     screen.family_rows = family_lines
         .iter()
-        .map(|line| rows.get(usize::from(*line)).copied().map_or(0, usize::from))
+        .map(|line| {
+            rows.get(usize::from(*line))
+                .map_or(0, |row| usize::from(row.saturating_sub(head_rows)))
+        })
         .collect();
 
-    let paragraph = Paragraph::new(Text::from(lines))
+    let body = lines.split_off(PINNED_LINES.min(lines.len()));
+    let heading = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(theme().body));
+    let paragraph = Paragraph::new(Text::from(body))
         .wrap(Wrap { trim: false })
         .style(Style::default().fg(theme().body));
     let line_count = paragraph.line_count(width);
-    let viewport = usize::from(inner.height);
+    let viewport = usize::from(body_area.height);
     screen.details.set_viewport(viewport, line_count);
     // The composer's caret: the row the composer starts on, plus the row the
     // caret is on within it. The frame after a key brings it into view; the
@@ -401,7 +431,9 @@ pub(super) fn render_details(
     if let Some((row, _)) = caret
         && composing.as_ref().is_some_and(|composing| composing.follow)
     {
-        screen.details.ensure_visible(row);
+        screen
+            .details
+            .ensure_visible(row.saturating_sub(usize::from(head_rows)));
     }
     if let Some(composer) = screen.composer.as_mut() {
         composer.width = u16::try_from(wrap_width).unwrap_or(u16::MAX);
@@ -409,11 +441,24 @@ pub(super) fn render_details(
     }
     let scroll = screen.details.offset;
     let scroll_rows = u16::try_from(scroll).unwrap_or(u16::MAX);
-    frame.render_widget(paragraph.scroll((scroll_rows, 0)), inner);
+    frame.render_widget(
+        heading,
+        Rect::new(inner.x, inner.y, inner.width, head_height),
+    );
+    frame.render_widget(paragraph.scroll((scroll_rows, 0)), body_area);
 
+    // Where a row of the document is on screen, if it is: the heading's
+    // where they are drawn, the rest under it and moved up by the scroll.
+    let row_y = |row: u16| -> Option<u16> {
+        if row < head_rows {
+            (row < head_height).then(|| inner.y.saturating_add(row))
+        } else {
+            visible_row_y(body_area, row - head_rows, scroll_rows)
+        }
+    };
     let row_of = |logical: u16| -> Option<u16> {
         let row = rows.get(usize::from(logical)).copied()?;
-        visible_row_y(inner, row, scroll_rows)
+        row_y(row)
     };
     // The composer's rows: the surface ground under each, so the editor reads
     // as a field; a target on each that puts the caret where a click lands;
@@ -421,9 +466,10 @@ pub(super) fn render_details(
     if let (Some(first), Some(composing)) = (sections.composer_first, composing.as_ref()) {
         let first_row = rows.get(usize::from(first)).copied().unwrap_or(0);
         for index in 0..composing.layout.rows.len() {
-            let Some(y) = u16::try_from(index).ok().and_then(|index| {
-                visible_row_y(inner, first_row.saturating_add(index), scroll_rows)
-            }) else {
+            let Some(y) = u16::try_from(index)
+                .ok()
+                .and_then(|index| row_y(first_row.saturating_add(index)))
+            else {
                 continue;
             };
             let buffer = frame.buffer_mut();
@@ -439,9 +485,7 @@ pub(super) fn render_details(
             ));
         }
         if let Some((row, column)) = caret
-            && let Some(y) = u16::try_from(row)
-                .ok()
-                .and_then(|row| visible_row_y(inner, row, scroll_rows))
+            && let Some(y) = u16::try_from(row).ok().and_then(row_y)
         {
             let x = inner
                 .x
@@ -450,14 +494,10 @@ pub(super) fn render_details(
             frame.set_cursor_position((x, y));
         }
     }
-    if let Some(y) = url_line.and_then(row_of) {
-        shell.hit_regions.push(region(
-            Rect::new(inner.x, y, inner.width, 1),
-            PointerTarget::OpenSelectedUrl,
-            PointerLayer::Base,
-            Some(SelectableSurface::Details),
-            Some(ScrollSurface::Details),
-        ));
+    for (logical, x, chip_width, target) in chip_hits {
+        if let Some(y) = row_of(logical) {
+            register_span(shell, inner, target, y, x, chip_width);
+        }
     }
     for hit in family_hits {
         if !hit.jumpable {
@@ -495,28 +535,20 @@ pub(super) fn render_details(
             ));
         }
     }
-    for (logical, id) in command_chips {
-        if let Some(y) = row_of(logical) {
-            shell.hit_regions.push(region(
-                Rect::new(inner.x, y, inner.width, 1),
-                PointerTarget::RunCommand(id),
-                PointerLayer::Base,
-                Some(SelectableSurface::Details),
-                Some(ScrollSurface::Details),
-            ));
-        }
-    }
     if !peeking {
         for (logical, field, x, span_width) in field_hits {
             if let Some(y) = row_of(logical) {
-                register_edit_field(shell, inner, field, y, x, span_width);
+                let target = PointerTarget::EditField { field };
+                register_span(shell, inner, target, y, x, span_width);
             }
         }
         // Every row a section's body takes opens the composer on it.
         let row_end = |logical: u16| -> u16 {
             rows.get(usize::from(logical).saturating_add(1))
                 .copied()
-                .unwrap_or_else(|| u16::try_from(line_count).unwrap_or(u16::MAX))
+                .unwrap_or_else(|| {
+                    head_rows.saturating_add(u16::try_from(line_count).unwrap_or(u16::MAX))
+                })
         };
         for (first, count, target) in &sections.targets {
             for logical in *first..first.saturating_add(*count) {
@@ -524,7 +556,7 @@ pub(super) fn render_details(
                     break;
                 };
                 for row in start..row_end(logical) {
-                    if let Some(y) = visible_row_y(inner, row, scroll_rows) {
+                    if let Some(y) = row_y(row) {
                         shell.hit_regions.push(region(
                             Rect::new(inner.x, y, inner.width, 1),
                             PointerTarget::Compose(*target),
@@ -543,7 +575,7 @@ pub(super) fn render_details(
             frame,
             current_layer(screen),
             shell,
-            pane,
+            Rect::new(pane.x, body_area.y, pane.width, body_area.height),
             ScrollSurface::Details,
             ScrollState {
                 offset: scroll,
@@ -822,24 +854,6 @@ pub(super) fn pack_family_row(
     take_chars(head, width)
 }
 
-pub(super) fn family_breadcrumb_line(
-    screen: &WorkItemsScreen,
-    family: &FamilySnapshot,
-) -> Line<'static> {
-    let mut spans = vec![field_label("Family")];
-    if let Some(parent) = family.parent() {
-        let ticket = screen.ticket_by_key(parent);
-        let type_label = ticket.map_or("?", |ticket| ticket.work_item_type.as_str());
-        let title = ticket.map_or("missing ticket", |ticket| ticket.title.as_str());
-        spans.push(Span::raw(format!("{type_label} ")));
-        spans.push(Span::raw(parent.id.to_string()));
-        spans.push(Span::raw(format!("  {title} › this")));
-    } else {
-        spans.push(Span::raw("this"));
-    }
-    Line::from(spans)
-}
-
 pub(super) fn family_member_line(
     prefix: &str,
     key: &TicketKey,
@@ -936,6 +950,16 @@ pub(super) fn ticket_badge_line(
         Some(name) => highlight_searchable(name, Style::default(), highlighter).spans,
         None => Line::styled(UNASSIGNED_LABEL, Style::default().fg(theme().muted)).spans,
     });
+    // Why the work item is in its state — Azure DevOps sets one on every
+    // transition — closes the row rather than trailing the state it explains:
+    // a row that wraps then wraps only the reason, and Priority and Assignee
+    // stay on the columns their click targets are measured at.
+    if let Some(reason) = ticket.reason.as_deref().filter(|reason| !reason.is_empty()) {
+        spans.push(Span::styled(
+            format!("  ({reason})"),
+            Style::default().fg(theme().muted),
+        ));
+    }
     Line::from(spans)
 }
 
@@ -994,13 +1018,15 @@ pub(super) fn columns(text: &str) -> u16 {
 /// Where each editable value sits on the pane's heading, measured from the same
 /// text [`ticket_identity_line`], [`ticket_assignment_line`], and
 /// [`tags_field_line`] build their lines out of, so a click lands on the value
-/// rather than anywhere on its line. The heading opens the pane's one scrolling
-/// paragraph, so these are the content's first lines. Assignee and Priority
-/// share a line and are two separate spans on it.
-pub(super) fn metadata_field_spans(ticket: &Ticket, has_family: bool) -> Vec<FieldSpan> {
+/// rather than anywhere on its line. The heading opens the pane's one
+/// paragraph, so these are the content's first lines: the title, the badge
+/// row, then the tags. Assignee and Priority share a line and are two separate
+/// spans on it.
+pub(super) fn metadata_field_spans(ticket: &Ticket) -> Vec<FieldSpan> {
     let separator = columns(" \u{b7} ");
     let state = &ticket.state;
-    // Along the badge row: `#600 · [Issue] · Done · P1 · Jacob Ragsdale`.
+    // Along the badge row: `#600 · [Issue] · Done · P1 · Jacob Ragsdale`, and
+    // the reason after the last of them.
     let state_x = columns("#")
         .saturating_add(columns(&ticket.key.id.to_string()))
         .saturating_add(separator)
@@ -1015,9 +1041,6 @@ pub(super) fn metadata_field_spans(ticket: &Ticket, has_family: bool) -> Vec<Fie
     let assignee_x = priority_x
         .saturating_add(columns(&priority))
         .saturating_add(separator);
-    // The breadcrumb sits under the badge row whenever the work item has a
-    // family, and the tags under whichever of the two came last.
-    let tags = 2u16.saturating_add(has_family.into());
     vec![
         FieldSpan {
             field: EditableField::Title,
@@ -1045,7 +1068,7 @@ pub(super) fn metadata_field_spans(ticket: &Ticket, has_family: bool) -> Vec<Fie
         },
         FieldSpan {
             field: EditableField::Tags,
-            line: tags,
+            line: 2,
             x: FIELD_VALUE_COLUMN,
             width: tags_run_width(&ticket.tags),
         },
@@ -1076,17 +1099,11 @@ fn body_lines(text: &str, empty: &'static str) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// One editable value's hit region on a row already on screen, clipped to the
-/// pane and dropped when the value starts past its right edge. It stays part of
-/// the details text surface, so dragging across it still selects and copies.
-pub(super) fn register_edit_field(
-    shell: &mut Shell,
-    area: Rect,
-    field: EditableField,
-    y: u16,
-    x: u16,
-    width: u16,
-) {
+/// One editable value's or one chip's hit region on a row already on screen,
+/// clipped to the pane and dropped when it starts past the right edge. It stays
+/// part of the details text surface, so dragging across it still selects and
+/// copies.
+fn register_span(shell: &mut Shell, area: Rect, target: PointerTarget, y: u16, x: u16, width: u16) {
     if x >= area.width || width == 0 {
         return;
     }
@@ -1097,27 +1114,40 @@ pub(super) fn register_edit_field(
             width.min(area.width.saturating_sub(x)),
             1,
         ),
-        PointerTarget::EditField { field },
+        target,
         PointerLayer::Base,
         Some(SelectableSurface::Details),
         Some(ScrollSurface::Details),
     ));
 }
 
-/// The details pane's `Changed` line: the exact instant, and — when nobody has
-/// touched the work item past the threshold — how many whole days it has been
-/// sitting, in the same warning colour the column uses.
-pub(super) fn changed_field_line(ticket: &Ticket, stale_for: Option<i64>) -> Line<'static> {
-    let mut line = field_line("Changed", ticket.changed_at.exact_utc());
-    if let Some(days) = stale_for {
+/// The details pane's `Changed` line: how long ago, then the exact instant,
+/// and — when nobody has touched the work item past the threshold — `stale`
+/// beside the age it qualifies, in the same warning colour the column uses.
+pub(super) fn changed_field_line(ticket: &Ticket, stale: bool, now: Timestamp) -> Line<'static> {
+    let changed = ticket.changed_at;
+    let mut line = field_line("Changed", ago(changed, now));
+    if stale {
         line.spans.push(Span::styled(
-            format!(" (stale {days}d)"),
+            ", stale",
             Style::default()
                 .fg(theme().warning)
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    line.spans
+        .push(Span::raw(format!(" \u{b7} {}", changed.exact_utc())));
     line
+}
+
+/// An instant as the details pane reads it: how long ago first, which is what
+/// a glance wants, then the exact UTC instant for anyone who needs one.
+fn when(instant: Timestamp, now: Timestamp) -> String {
+    format!("{} \u{b7} {}", ago(instant, now), instant.exact_utc())
+}
+
+fn ago(instant: Timestamp, now: Timestamp) -> String {
+    format!("{} ago", relative_age(instant.seconds_until(now)))
 }
 
 pub(super) fn field_line<'a>(label: &'a str, value: impl Into<String>) -> Line<'a> {
@@ -1276,3 +1306,7 @@ pub(super) fn section_line(title: &str, width: u16) -> Line<'static> {
 /// The column a field's value starts in. Labels and values line up down the
 /// pane rather than every value starting wherever its own label ended.
 pub(super) const FIELD_VALUE_COLUMN: u16 = 11;
+
+/// The lines at the head of the details pane that stay put while the rest
+/// scrolls: the title and the badge row under it.
+const PINNED_LINES: usize = 2;

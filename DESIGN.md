@@ -658,8 +658,8 @@ all, being a post rather than a field.
 Every editor is reachable two ways. Clicking a field's value in the details
 pane opens that field's editor where the value is, as a dropdown anchored under
 it — one click, not two — and `Enter` does the same for the value under the
-pointer while the details pane is focused, with the link line still opening the
-work item. The keyboard opens the same editors centred, and both paths run the
+pointer while the details pane is focused, with the `[o Open]` chip still
+opening the work item. The keyboard opens the same editors centred, and both paths run the
 same command and write the same edit; only the placement differs. The
 long-form fields — the description, the acceptance criteria, and a comment —
 open no dropdown: a click opens the composer where they are read, described
@@ -1247,7 +1247,8 @@ request, else the pipeline that builds it: the one that ran most recently, else
 the first by name. A row with nowhere to go says what it looked for
 rather than switching to an empty tab, and the footer only offers `g` when
 there is somewhere to go. Each details pane carries the same jump as a
-`[Go to …]` chip in its header, so the mouse follows what the key would.
+`[Go to …]` chip in its header (`[g Go to …]` on the Work items pane), so the
+mouse follows what the key would.
 
 `[` and `]` walk back and forward through everywhere the run has been,
 switching tabs as they go: a work item, then its repository, then back. A place
@@ -1575,22 +1576,27 @@ request or a run. `?`, `p`/`:`, `c` and `i` open on every tab: the
 palette lists the commands of the tab that is showing and runs its choice
 there, and the columns editor edits that tab's columns.
 
-The details pane is one scrolling document rather than a pinned heading over a
-scrolling body. Its heading — the title, then a badge row reading
-`#600 · [Issue] · ✓ Done · P1 · Jacob Ragsdale` in the colours the table's own
-cells use, then the family breadcrumb, tags, project and revision, child
-progress, and the work-item URL — scrolls away with everything under it, in
-this order: the family tree, Related, Planning, Description, Acceptance
-Criteria, Comments, and History. Every field below the badge row reads as a muted label in a column of
+The details pane is one document under a pinned heading. The title and a
+badge row reading `#600 · [Issue] · ✓ Done · P1 · Jacob Ragsdale  (Work
+finished)` — in the colours the table's own cells use, with the state's reason
+closing the row — stay at the top of the pane however far it is scrolled, so it
+always says which work item it is. Everything under them scrolls: the tags,
+child progress, the agent already on the work item, one row of chips —
+`[w Work with agent]  [g Go to pull request]  [o Open]`, each running its key
+on a click — and then the family tree, Related, Planning, Description,
+Acceptance Criteria, Comments, and History. The project, revision and URL are
+not drawn: `o` opens the work item and `Copy URL` in the palette copies its
+link. Created, Changed and each comment read how long ago first, then the exact
+UTC instant. Every field below the badge row reads as a muted label in a column of
 its own with the value beside it, so the values line up down the pane; a label
 too wide for that column — `Default branch` on the Repos pane — pushes its
 value along instead, behind one space rather than into it. Each
 section is headed by a rule (`── Planning ────`) rather than by another bold
 line, which is what tells a heading from a field name without colour. The scrollbar
-therefore measures the whole pane and its thumb reaches the bottom, `End` lands
-on the last comment, and a field value stays clickable wherever the scroll has
-carried it. Moving the family cursor scrolls the tree back into view when the
-heading has pushed it below the fold.
+runs from under the pinned heading to the bottom border and measures what
+scrolls, `End` lands on the last comment, and a field value stays clickable
+wherever the scroll has carried it. Moving the family cursor scrolls the tree
+back into view when the lines above it have pushed it below the fold.
 
 Related lists what the work item was worked on with, from the `ArtifactLink`
 relations Azure DevOps stores: its pull requests, the commits that named it, and
@@ -1867,7 +1873,7 @@ beside the cache as `*.session.json`.
 Work that nobody has touched for a fortnight, and that the workflow has not
 finished with, is flagged in the Changed column: the age goes warning-coloured,
 and bold where `NO_COLOR` leaves no palette to colour it. The details pane says
-how long, as `Changed: 2026-08-08 12:00:00 UTC (stale 21d)`.
+so beside the age, as `Changed    21d ago, stale · 2026-08-08 12:00:00 UTC`.
 
 Nothing dims — dim already means finished — and finished work is never flagged
 however long it has sat: nobody is waiting on a work item that is done or

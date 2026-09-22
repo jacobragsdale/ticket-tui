@@ -176,8 +176,12 @@ fn my_own_work_items_stand_out_in_the_table_and_the_details_pane() {
         assert_ne!(their_fg, theme().accent);
     }
 
-    // The badge row's last span is the assignee, whoever it is.
-    let ticket = ticket();
+    // The badge row's last span is the assignee, whoever it is, when no
+    // reason trails it.
+    let ticket = Ticket {
+        reason: None,
+        ..ticket()
+    };
     let mut highlighter = QueryHighlighter::new("");
     let mine = ticket_badge_line(&ticket, true, &mut highlighter);
     let theirs = ticket_badge_line(&ticket, false, &mut highlighter);

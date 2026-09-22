@@ -472,7 +472,7 @@ impl WorkItemsScreen {
         let Some(index) = tree.iter().position(|entry| entry.key == cursor) else {
             return;
         };
-        // The tree sits below a heading that scrolls with it and a `… N more`
+        // The tree sits below lines that scroll with it and a `… N more`
         // line can sit between its rows, so the row it was last drawn on is
         // where the cursor has to be kept. Before the first frame there is no
         // such row, and the position in the tree is the best guess there is.
