@@ -1693,8 +1693,9 @@ frame, painted in the neutral colour because it belongs to neither pane, and it
 is the divider you drag. A list pane says what it is on its top border and what
 it holds on the bottom one — `╰ 106/106 · Changed ↑ ─` — except where it is stacked
 over another pane, which paints that row last: there the count joins the name
-above. A rule under the table header separates the column names from the rows,
-and the details pane is padded a column in from each side, with the scrollbar
+above. The table header is muted and bold with no rule under it, so the row
+a rule would take goes to the list, and columns stand two cells apart. The
+details pane is padded a column in from each side, with the scrollbar
 in a column of its own at the edge.
 
 Every tab is arranged by the same pane system, so all four look and behave
@@ -1796,7 +1797,7 @@ The command palette copies
 IDs, URLs, titles, Markdown links, or summaries, edits the title, priority,
 tags, iteration, area, or description, leaves a comment, shows or hides finished
 tickets, opens the [sprint summary](#sprint-summary), and exports the
-selection as JSON or CSV. Press `i` for database path, row counts, how many
+ticket under the cursor as JSON or CSV. Press `i` for database path, row counts, how many
 finished rows are hidden, freshness, and the last
 sync. A database another process writes reloads automatically; the table title
 shows `Stale` until that reload finishes, and `Syncing…`, `Synced 2m ago`, or
@@ -1804,17 +1805,22 @@ shows `Stale` until that reload finishes, and `Syncing…`, `Synced 2m ago`, or
 
 States are coloured by category: New, To Do, and Proposed blue; Active, Doing,
 and In Progress yellow; Resolved magenta; Done and Closed green; Removed grey;
-a state outside those groups stays plain. Work-item types carry fixed badge
+a state outside those groups stays plain. Work-item types carry fixed
 colours — Epic yellow, Feature magenta, Issue, User Story, and Product Backlog
-Item blue, Task cyan, Bug and Impediment red, Test Case green — priority 1 is
-red, 2 yellow, 3 and 4 blue, and each tag is hashed onto a stable badge colour
-so one tag reads the same everywhere. Completed and removed rows are dimmed
+Item blue, Task cyan, Bug and Impediment red, Test Case green — worn as a
+bracketed badge in the details pane and as the bare word down the Type column.
+Priority 1 is red and 2 yellow; in the table 3 and 4 are muted, so only the
+two that want attention stand out. The ID column is muted text rather than a
+link painted down every row, and the Assignee column is plain whoever it is;
+the details pane is where your own work is marked. Each tag is hashed onto a
+stable badge colour so one tag reads the same everywhere. Completed and removed rows are dimmed
 wherever they are shown — once the toggle above lists them, and in the family
 tree, which never leaves them out — the Area column shows only the last path
 segment and the Sprint column the iteration's last segment behind a marker
 saying where it sits against today (below), while details keeps the full path,
-the Pri cell reads `P1`–`P4`, and matched search characters are underlined in
-visible results. ID, Title, State, Type, Pri, Assignee, and Sprint are the
+the Pri cell reads `P1`–`P4`, and matched search characters are underlined and
+bold in visible results, in the accent where the cell has no colour of its own
+— never yellow, which already means Active, P2 and stale. ID, Title, State, Type, Pri, Assignee, and Sprint are the
 columns a fresh session shows; Area, Created, Tags, Repo, and Progress are
 there under `c` and stay hidden until they are switched on, after which the
 choice is saved with the rest of the layout. A table that cannot fit the columns it has been given drops the

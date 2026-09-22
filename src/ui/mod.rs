@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols::merge::MergeStrategy;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Table, Wrap,
+    Block, Borders, Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Table, Wrap,
 };
 use time::OffsetDateTime;
 
@@ -43,7 +43,7 @@ mod tests;
 pub mod theme;
 mod widgets;
 
-use details::{assigned_to_me_style, field_label, field_line, render_details};
+use details::{field_label, field_line, render_details};
 use overlays::{
     ListOverlay, bar_fields, column_rows, no_matches_note, overlay_line, overlay_row,
     overlay_row_width, pill_style, render_agent_prompt_overlay, render_chips,

@@ -136,13 +136,16 @@ fn states_and_types_stay_distinct_while_completed_rows_fade() {
     if theme().muted == Color::Reset {
         assert!(selected_modifier.contains(Modifier::DIM));
     } else {
-        assert_eq!(selected_fg, theme().muted);
         assert_eq!(selected_bg, theme().selected_background);
+        assert_ne!(
+            selected_fg, selected_bg,
+            "the faded text does not vanish into the selection ground"
+        );
     }
 }
 
 #[test]
-fn my_own_work_items_stand_out_in_the_table_and_the_details_pane() {
+fn my_own_work_items_stand_out_in_the_details_pane_and_not_down_the_table() {
     let mut mine = ticket_at(10_002, "Mine", "Issue", "To Do", "2026-03-02T00:00:00Z");
     // Azure DevOps is inconsistent about casing; "mine" should survive it.
     mine.assigned_to = Some("avery chen".into());
@@ -160,21 +163,14 @@ fn my_own_work_items_stand_out_in_the_table_and_the_details_pane() {
     let assignee_x = column_x(&app, SortField::Assignee);
     // Row 0 is selected, and the selection highlight bolds it either way.
     let body = table_body(&app);
-    let (mine_fg, _, mine_modifier) = painted_cell(&terminal, assignee_x, body.y + 1);
-    let (their_fg, _, their_modifier) = painted_cell(&terminal, assignee_x, body.y + 2);
-
-    assert!(
-        mine_modifier.contains(Modifier::BOLD),
-        "my own assignee cell should be bold"
+    let mine_cell = painted_cell(&terminal, assignee_x, body.y + 1);
+    let their_cell = painted_cell(&terminal, assignee_x, body.y + 2);
+    // A column where every row is somebody's reads plainly for all of them.
+    assert_eq!(
+        mine_cell, their_cell,
+        "my assignee cell is painted as theirs"
     );
-    assert!(
-        !their_modifier.contains(Modifier::BOLD),
-        "someone else's assignee cell should stay plain"
-    );
-    assert_eq!(mine_fg, theme().accent);
-    if theme().accent != Color::Reset {
-        assert_ne!(their_fg, theme().accent);
-    }
+    assert!(!mine_cell.2.contains(Modifier::BOLD));
 
     // The badge row's last span is the assignee, whoever it is, when no
     // reason trails it.
@@ -291,7 +287,7 @@ fn find_buffer_text(
 }
 
 #[test]
-fn underlines_mark_search_matches_and_stop_after_the_id_digits() {
+fn underlines_mark_search_matches_and_leave_the_id_plain() {
     let mut app = App::new(vec![ticket()]);
     app.work_items.set_query(&mut app.shell, "search".into());
     await_search(&mut app);
@@ -315,22 +311,20 @@ fn underlines_mark_search_matches_and_stop_after_the_id_digits() {
         );
     }
 
+    // The id is muted text, not a link painted down every row: nothing on
+    // it is underlined until the pointer rests there.
     let area = target_rect(&app, |target| {
         matches!(target, PointerTarget::OpenInBrowser { index: 0 })
     });
     let (x, y) = find_buffer_text_in(buffer, area, "10001").expect("id visible in table");
-    for offset in 0..5 {
+    for offset in 0..6 {
         assert!(
-            buffer[(x + offset, y)]
+            !buffer[(x + offset, y)]
                 .modifier
                 .contains(Modifier::UNDERLINED),
-            "digit {offset} should be underlined"
+            "id cell {offset} should not be underlined"
         );
     }
-    assert!(
-        !buffer[(x + 5, y)].modifier.contains(Modifier::UNDERLINED),
-        "padding after the id must not stay underlined"
-    );
 }
 
 #[test]
@@ -655,6 +649,9 @@ fn the_sprint_column_says_where_a_row_sits_against_the_sprint_and_sorts_by_the_c
         .map(|ticket| ticket.key.id)
         .collect();
     assert_eq!(order, [4, 3, 1, 2], "leftovers, this sprint, next, backlog");
+    // The selection lifts muted text off its ground, so it sits on a row the
+    // colours below are not about.
+    app.work_items.select_row(&mut app.shell, 0);
     assert_eq!(
         column_cell_colors(&mut app, SortField::Iteration, 4),
         [

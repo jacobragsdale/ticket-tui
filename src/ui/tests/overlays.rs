@@ -271,7 +271,8 @@ fn a_modal_washes_out_what_is_behind_it_and_leaves_nothing_behind_when_it_closes
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();
         let body = table_body(app);
-        let cell = &terminal.backend().buffer()[(body.x + 7, body.y)];
+        // The selection's `›`, at the left edge where no modal reaches.
+        let cell = &terminal.backend().buffer()[(body.x, body.y)];
         (cell.fg, cell.modifier, cell.bg)
     };
     let (before, _, ground) = sample(&mut app);
@@ -280,7 +281,7 @@ fn a_modal_washes_out_what_is_behind_it_and_leaves_nothing_behind_when_it_closes
         theme().selected_background,
         "the row is the selected one"
     );
-    assert_eq!(before, theme().link, "the id cell reads as a link");
+    assert_eq!(before, theme().accent, "the selection marker is accented");
 
     app.work_items.mode = WorkItemMode::Palette;
     let (behind, modifier, ground) = sample(&mut app);

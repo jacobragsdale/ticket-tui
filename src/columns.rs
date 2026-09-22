@@ -17,8 +17,9 @@ pub const MARKER_WIDTH: u16 = 1;
 /// sideways as rows arrive.
 pub const SCROLLBAR_WIDTH: u16 = 1;
 
-/// The blank column between two neighbouring cells.
-pub const COLUMN_SPACING: u16 = 1;
+/// The blank columns between two neighbouring cells. Two, not one: at one a
+/// right-aligned priority and the name beside it read as one word, `P3 Jacob`.
+pub const COLUMN_SPACING: u16 = 2;
 
 /// The fewest characters a flexible column is squeezed to before the table
 /// starts dropping optional columns from the right, unless that column asks

@@ -42,7 +42,8 @@ fn the_table_thumb_is_painted_where_it_can_be_grabbed_and_reaches_the_bottom() {
     for offset in [0, 45, 90] {
         app.work_items.table.offset = offset;
         // 30 rows of terminal, less the tab bar, the search row, the facet
-        // row and the footer, leave the table body exactly 22 rows tall.
+        // row, the footer, the frame and the column header, leave the table
+        // body exactly 23 rows tall.
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let metrics = app
@@ -50,10 +51,10 @@ fn the_table_thumb_is_painted_where_it_can_be_grabbed_and_reaches_the_bottom() {
             .hit_regions
             .scroll(ScrollSurface::Table)
             .expect("an overflowing table registers its scrollbar");
-        assert_eq!((metrics.content, metrics.viewport), (100, 22));
+        assert_eq!((metrics.content, metrics.viewport), (100, 23));
         let track = metrics.track;
-        assert_eq!(track.height, 22);
-        let thumb = metrics.thumb().expect("100 rows overflow 22");
+        assert_eq!(track.height, 23);
+        let thumb = metrics.thumb().expect("100 rows overflow 23");
         assert_eq!(
             painted_thumb(&terminal, track),
             Some((track.y + thumb.y, thumb.height)),

@@ -973,9 +973,8 @@ impl crate::columns::ColumnId for SortField {
             Self::Id => 7,
             Self::Progress => 9,
             Self::Changed | Self::Created | Self::State => 10,
-            // Wide enough for the badge around the longest type Azure DevOps
-            // ships, `[User Story]`.
-            Self::Type => 12,
+            // Wide enough for the longest type Azure DevOps ships, `User Story`.
+            Self::Type => 10,
             Self::Assignee => 14,
             Self::Area | Self::Iteration | Self::Tags | Self::Repo => 16,
         }

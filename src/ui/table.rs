@@ -11,7 +11,7 @@ use crate::columns::{
 pub(crate) struct TableGeometry {
     /// Inside the border.
     pub inner: Rect,
-    /// The rows, below the header and its blank line.
+    /// The rows, straight below the header.
     pub body: Rect,
     pub visible_rows: usize,
 }
@@ -24,11 +24,11 @@ pub(crate) fn table_geometry(area: Rect, row_height: u16) -> TableGeometry {
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     );
-    let body_height = inner.height.saturating_sub(2);
+    let body_height = inner.height.saturating_sub(1);
     let visible_rows = usize::from(body_height / row_height.max(1)).max(1);
     TableGeometry {
         inner,
-        body: Rect::new(inner.x, inner.y.saturating_add(2), inner.width, body_height),
+        body: Rect::new(inner.x, inner.y.saturating_add(1), inner.width, body_height),
         visible_rows,
     }
 }
@@ -120,14 +120,15 @@ pub(crate) fn render_list_table<C: ColumnId>(
             line
         })
     }));
+    // The column names are muted and bold with no rule under them: they read
+    // as a heading by weight alone, and the row a rule took goes to the list.
     let header = Row::new(header_cells)
         .style(
             Style::default()
-                .fg(theme().header)
+                .fg(theme().muted)
                 .add_modifier(Modifier::BOLD),
         )
-        .height(1)
-        .bottom_margin(1);
+        .height(1);
 
     // Where each column lands, worked out the way the table works it out:
     // a cell is cut to its column's width before it is drawn, so a title too
@@ -200,18 +201,6 @@ pub(crate) fn render_list_table<C: ColumnId>(
     if inner.height < 2 {
         return;
     }
-    // The blank row the header's bottom margin leaves, drawn as a rule: the
-    // column names read as a heading over the rows rather than as a first row
-    // among them.
-    frame.render_widget(
-        Line::styled(
-            BorderType::border_symbols(theme().border_type)
-                .horizontal_top
-                .repeat(usize::from(inner.width)),
-            Style::default().fg(theme().border),
-        ),
-        Rect::new(inner.x, inner.y.saturating_add(1), inner.width, 1),
-    );
     for (header_rect, column) in column_areas.iter().zip(columns.iter()) {
         shell.hit_regions.push(region(
             *header_rect,
@@ -245,6 +234,19 @@ pub(crate) fn render_list_table<C: ColumnId>(
             spec.row_height
                 .min(body.y.saturating_add(body.height).saturating_sub(y)),
         );
+        // Where the palette's muted text is its selection ground too, as the
+        // ANSI grey is both, the muted cells of the selected row — its id, a
+        // quiet priority, a finished row's every cell — would vanish into it.
+        // They read in the body grey there instead.
+        if spec.selected == Some(logical) && theme().muted == theme().selected_background {
+            let buffer = frame.buffer_mut();
+            for position in row_rect.positions() {
+                let cell = &mut buffer[position];
+                if cell.fg == theme().muted {
+                    cell.set_fg(theme().body);
+                }
+            }
+        }
         shell.hit_regions.push(region(
             row_rect,
             PointerTarget::TableRow { index: logical },
@@ -403,7 +405,6 @@ pub(super) fn render_table(
             flashing: shell.flashing_row(&ticket.key),
             context: RowContext {
                 tone: RowTone::of(&ticket.state),
-                mine: shell.is_mine(ticket),
                 repo: repos
                     .as_ref()
                     .and_then(|repos| repos.get(&ticket.key.id))
@@ -575,12 +576,10 @@ impl RowTone {
 }
 
 /// What a row knows about itself beyond the work item: how strongly it is
-/// painted, whether it is the signed-in user's, and how far its children have
-/// got.
+/// painted and how far its children have got.
 #[derive(Clone)]
 pub(super) struct RowContext {
     tone: RowTone,
-    mine: bool,
     progress: Option<ChildProgress>,
     /// The first repository the work item is linked to, read only while the
     /// Repo column is showing.
@@ -612,27 +611,27 @@ pub(super) fn table_cell(
 ) -> Text<'static> {
     let RowContext {
         tone,
-        mine,
         progress,
         repo,
         sprint,
     } = row;
     let plain = tone.apply(Style::default());
     let line = match field {
-        SortField::Type => Line::from(type_badge_spans(&ticket.work_item_type, tone, highlighter)),
+        // The word in its type's colour, without the brackets the details pane
+        // wears: down a column every row is a badge, so the frame adds nothing.
+        SortField::Type => highlight_searchable(
+            &ticket.work_item_type,
+            tone.apply(type_style(&ticket.work_item_type).add_modifier(Modifier::BOLD)),
+            highlighter,
+        ),
         SortField::Title => highlight_searchable(&ticket.title, plain, highlighter),
-        SortField::Id => {
-            let style = tone.apply(
-                Style::default()
-                    .fg(theme().link)
-                    .add_modifier(Modifier::UNDERLINED),
-            );
-            terminate_underline(highlight_searchable(
-                &ticket.key.id.to_string(),
-                style,
-                highlighter,
-            ))
-        }
+        // Muted rather than painted as a link down every row: the pointer's
+        // hover underlines the one it is on, and a click still opens it.
+        SortField::Id => highlight_searchable(
+            &ticket.key.id.to_string(),
+            tone.apply(Style::default().fg(theme().muted)),
+            highlighter,
+        ),
         // Finished rows recede whole: the state cell fades with the rest of
         // the row rather than staying bright against muted neighbours.
         SortField::State => highlight_searchable(
@@ -640,22 +639,25 @@ pub(super) fn table_cell(
             tone.apply(state_style(&ticket.state)),
             highlighter,
         ),
+        // Plain whoever it is: a column of `me` rows all in the accent drowns
+        // the colours that mean something. The details pane still marks mine.
         SortField::Assignee => match ticket.assigned_to.as_deref() {
-            Some(name) if mine => {
-                highlight_searchable(name, tone.apply(assigned_to_me_style()), highlighter)
-            }
             Some(name) => highlight_searchable(name, plain, highlighter),
             None => Line::styled("Unassigned", tone.apply(Style::default().fg(theme().muted))),
         },
         // `P1` rather than a bare `1`: a number alone in a narrow column reads
-        // as a count, and the header has no room to say what it counts.
+        // as a count, and the header has no room to say what it counts. Only
+        // the two that want attention are coloured; the rest recede.
         SortField::Priority => Line::from(
             ticket
                 .priority
                 .map_or_else(|| "—".into(), |priority| format!("P{priority}")),
         )
         .right_aligned()
-        .style(tone.apply(priority_style(ticket.priority))),
+        .style(tone.apply(match ticket.priority {
+            Some(1 | 2) => priority_style(ticket.priority),
+            _ => Style::default().fg(theme().muted),
+        })),
         SortField::Changed => Line::from(ticket.changed_at.relative_to(now))
             .right_aligned()
             .style(plain),

@@ -39,6 +39,8 @@ pub struct Theme {
     /// A dimmer wash than `selected_background`, laid under a hovered row so
     /// its colour-coded cells keep their own foregrounds.
     pub hover_background: Color,
+    /// A notification's colour. Not yellow: yellow already says Active, P2,
+    /// stale and waiting, and a plain notice is none of those.
     pub info: Color,
     pub success: Color,
     /// What the Changed column paints work nobody has touched in weeks. It is
@@ -47,6 +49,9 @@ pub struct Theme {
     pub warning: Color,
     pub error: Color,
     pub scrollbar: Color,
+    /// What a search match is painted in where its cell has no colour of its
+    /// own. The underline and the weight carry the match; the colour is the
+    /// accent's rather than a state's, so a match never reads as a state.
     pub search_match: Color,
     pub state_proposed: Color,
     pub state_in_progress: Color,
@@ -87,12 +92,12 @@ impl Theme {
             selected_background: Color::DarkGray,
             selection_fg: Color::Reset,
             hover_background: Color::Indexed(237),
-            info: Color::Yellow,
+            info: Color::Cyan,
             success: Color::Green,
             warning: Color::Yellow,
             error: Color::Red,
             scrollbar: Color::DarkGray,
-            search_match: Color::Yellow,
+            search_match: Color::Cyan,
             state_proposed: Color::Blue,
             state_in_progress: Color::Yellow,
             state_resolved: Color::Magenta,
@@ -144,7 +149,7 @@ impl Theme {
             warning: AMBER,
             error: Color::Red,
             scrollbar: Color::Gray,
-            search_match: AMBER,
+            search_match: Color::Blue,
             state_proposed: Color::Blue,
             state_in_progress: AMBER,
             state_resolved: Color::Magenta,
@@ -241,12 +246,12 @@ impl Theme {
             selected_background: palette.overlay.into(),
             selection_fg: palette.fg.into(),
             hover_background: hover.into(),
-            info: palette.yellow.into(),
+            info: palette.accent.into(),
             success: palette.green.into(),
             warning: palette.yellow.into(),
             error: palette.red.into(),
             scrollbar: palette.overlay.into(),
-            search_match: palette.yellow.into(),
+            search_match: palette.accent.into(),
             state_proposed: palette.blue.into(),
             state_in_progress: palette.yellow.into(),
             state_resolved: palette.accent.into(),
