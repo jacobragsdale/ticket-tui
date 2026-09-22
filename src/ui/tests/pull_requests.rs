@@ -28,9 +28,34 @@ fn the_table_draws_a_row_per_pull_request_with_its_votes_and_build() {
         "a merge that cannot happen is what the Build column says: {text}"
     );
     assert!(
-        text.contains("Closed hidden (1)"),
-        "the chip says what is being left out: {text}"
+        text.contains(" Closed hidden \u{00d7} "),
+        "the chip says what is being left out, worded as the finished one is: {text}"
     );
+}
+
+#[test]
+fn an_empty_table_says_why_and_the_details_pane_claims_nothing() {
+    let mut app = pull_requests_app();
+    app.pull_requests.set_query("nothing like this".to_owned());
+    let text = tab_text(160, 24, &mut app);
+    assert!(
+        text.contains("No pull requests match this search"),
+        "{text}"
+    );
+    assert!(!text.contains("Select a"), "{text}");
+
+    // On file, but on no repository cloned here.
+    app.pull_requests.set_query(String::new());
+    app.shell.set_clones(std::collections::HashSet::new());
+    let text = tab_text(160, 24, &mut app);
+    assert!(
+        text.contains("No pull requests on a repository cloned"),
+        "{text}"
+    );
+
+    let mut app = App::new(Vec::new());
+    let text = tab_text(160, 24, &mut app);
+    assert!(text.contains("Offline: no pull requests synced"), "{text}");
 }
 
 #[test]

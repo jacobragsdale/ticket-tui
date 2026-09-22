@@ -7,7 +7,9 @@ use crate::app::relative_age;
 use crate::command::CommandId;
 use crate::model::{Jump, PrStatus};
 use crate::ui::details::section_line;
-use crate::ui::table::{TableSpec, render_list_table, table_geometry};
+use crate::ui::table::{
+    TableSpec, empty_list_message, render_empty_message, render_list_table, table_geometry,
+};
 
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -26,7 +28,7 @@ pub(crate) fn render(
     .split(area);
     render_search(frame, screen, shell, sections[0]);
     if chip_height > 0 {
-        render_closed_chip(frame, screen, shell, sections[1]);
+        render_closed_chip(frame, shell, sections[1]);
     }
     render_content(frame, screen, shell, work_item_titles, sections[2]);
     render_footer(frame, screen, shell, sections[3]);
@@ -226,14 +228,12 @@ fn render_search(
     );
 }
 
-/// The same chip finished work items get, saying what is being left out.
-fn render_closed_chip(
-    frame: &mut Frame<'_>,
-    screen: &PullRequestsScreen,
-    shell: &mut Shell,
-    area: Rect,
-) {
-    let label = format!(" Closed hidden ({}) \u{00d7} ", screen.hidden_closed(shell));
+/// The same chip finished work items get, saying what is being left out, and
+/// worded the same way. How many is the empty table's to say, when all of
+/// them are: beside a list that has rows, the chip only needs to say that
+/// there are more and where the `×` is.
+fn render_closed_chip(frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
+    let label = " Closed hidden \u{00d7} ";
     let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
     frame.render_widget(
         Paragraph::new(Line::styled(
@@ -325,6 +325,38 @@ fn render_table(
         cell: &mut cell,
     };
     render_list_table(frame, shell, area, &mut spec);
+    if rows.is_empty() {
+        let message = empty_list_message(
+            shell,
+            screen.query(),
+            "pull requests",
+            empty_reason(screen, shell),
+        );
+        render_empty_message(frame, geometry.inner, &message);
+    }
+}
+
+/// Why the table is empty when the tab's own rules are the reason: every pull
+/// request it would show is closed and hidden, or none of those on file is on
+/// a repository with a clone here.
+fn empty_reason(screen: &PullRequestsScreen, shell: &Shell) -> Option<String> {
+    let hidden = screen.hidden_closed(shell);
+    if hidden > 0 {
+        return Some(format!(
+            "All {hidden} pull requests here are closed and hidden \u{2014} click the chip's \u{00d7} or use the palette to show them"
+        ));
+    }
+    (screen.on_file() > 0).then(|| {
+        shell.workspace().map_or_else(
+            || "No pull requests on a repository cloned here".to_owned(),
+            |workspace| {
+                format!(
+                    "No pull requests on a repository cloned in {}",
+                    workspace.display()
+                )
+            },
+        )
+    })
 }
 
 fn pr_cell(row: &PrRow, column: PrColumn, now: Timestamp) -> Cell<'static> {
@@ -420,12 +452,9 @@ fn render_details(
     let pane = inside_border(area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    // The cursor is always on a row when there are any, so no row means an
+    // empty list, which says why itself: the pane stays blank.
     let Some(row) = screen.selected(shell) else {
-        frame.render_widget(
-            Paragraph::new("Select a pull request to see it here")
-                .style(Style::default().fg(theme().muted)),
-            inner,
-        );
         return;
     };
     // Work-item lines read as the work items tab has them when the database

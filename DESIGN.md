@@ -1492,8 +1492,10 @@ reads its timeline every five seconds; a finished run's is read once and kept.
 
 Under the timeline is the log of the node the tree cursor is on — or, with
 nobody chosen, of the deepest task still running, which moves on as tasks
-finish. `l` gives the log the whole pane and gives it back. The title reads
-`Log · Build and test · 1,204 lines · following`. The ISO timestamp every line
+finish. `l` gives the log the whole pane and gives it back. The title names
+the node and only what is not the ordinary case: `Log · Build and test ·
+⠋ following` while the run is going, `· scrolled` once scrolled away from the
+tail, and plain `Log` while nothing is chosen. The ISO timestamp every line
 carries is dimmed rather than dropped, because a slow step is easiest to spot
 by its clock, and the `##[…]` markers are painted rather than printed:
 `##[section]` bold in the accent colour, `##[group]` and `##[endgroup]` bold

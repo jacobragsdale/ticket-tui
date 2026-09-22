@@ -190,6 +190,13 @@ impl PullRequestsScreen {
             .count()
     }
 
+    /// How many pull requests are on file, whether or not their repository
+    /// has a clone here to put them on the table.
+    #[must_use]
+    pub fn on_file(&self) -> usize {
+        self.requests.len()
+    }
+
     /// Every pull request the query leaves, in the order the table draws them.
     #[must_use]
     pub fn visible(&self, shell: &Shell) -> Vec<PrRow> {

@@ -421,7 +421,7 @@ pub(super) fn render_table(
     render_list_table(frame, shell, area, &mut spec);
 
     let inner = geometry.inner;
-    if count == 0 && inner.height > 2 {
+    if count == 0 {
         // Counting the hidden rows is a pass over every ticket, so it happens
         // on the one branch that says the number and nowhere else.
         let hidden_finished_message;
@@ -446,17 +446,50 @@ pub(super) fn render_table(
         } else {
             "No tickets match this search"
         };
-        frame.render_widget(
-            Paragraph::new(message)
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(theme().muted)),
-            Rect::new(
-                inner.x,
-                inner.y.saturating_add(inner.height / 2),
-                inner.width,
-                1,
-            ),
-        );
+        render_empty_message(frame, inner, message);
+    }
+}
+
+/// Why a list has no rows, centred in the muted colour where the rows would
+/// be. Every tab's table says it the same way, so an empty pane is never just
+/// a border with a `0` on it.
+pub(crate) fn render_empty_message(frame: &mut Frame<'_>, inner: Rect, message: &str) {
+    if inner.height <= 2 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(message)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme().muted)),
+        Rect::new(
+            inner.x,
+            inner.y.saturating_add(inner.height / 2),
+            inner.width,
+            1,
+        ),
+    );
+}
+
+/// What an empty list on the Repos, Pull requests or Pipelines tab says, the
+/// most pressing reason first: a sync still coming, a search that matched
+/// nothing, the tab's own reason when it has one, and otherwise that nothing
+/// is on file — which, offline, is because nothing was ever pulled.
+pub(crate) fn empty_list_message(
+    shell: &Shell,
+    query: &str,
+    noun: &str,
+    own: Option<String>,
+) -> String {
+    if shell.sync_pending {
+        "Syncing with Azure DevOps\u{2026}".to_owned()
+    } else if !query.trim().is_empty() {
+        format!("No {noun} match this search")
+    } else if let Some(own) = own {
+        own
+    } else if shell.sync_status() == SyncStatus::Offline {
+        format!("Offline: no {noun} synced")
+    } else {
+        format!("No {noun} in this database")
     }
 }
 

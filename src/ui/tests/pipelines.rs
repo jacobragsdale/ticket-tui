@@ -365,6 +365,30 @@ fn logging_app() -> App {
 }
 
 #[test]
+fn an_empty_tab_says_why_and_its_panes_claim_nothing() {
+    let mut app = App::new(Vec::new());
+    let text = pipelines_text(160, 30, &mut app);
+    assert!(text.contains("Offline: no pipelines synced"), "{text}");
+    assert!(
+        !text.contains("Select a") && !text.contains("nothing chosen"),
+        "{text}"
+    );
+    assert!(
+        text.contains(" Log ") && !text.contains("No log yet"),
+        "with nothing chosen the log is just its name: {text}"
+    );
+
+    // On file, but building no repository cloned here.
+    let mut app = pipelines_app();
+    app.shell.set_clones(std::collections::HashSet::new());
+    let text = pipelines_text(160, 30, &mut app);
+    assert!(
+        text.contains("No pipelines build a repository cloned"),
+        "{text}"
+    );
+}
+
+#[test]
 fn the_log_pane_paints_every_marker_and_says_what_it_is_following() {
     let mut app = logging_app();
     let run = app.pipelines.focused_run().expect("a run");
@@ -388,9 +412,8 @@ fn the_log_pane_paints_every_marker_and_says_what_it_is_following() {
 
     let text = render_text(140, 60, &mut app);
     assert!(
-        text.contains("Log \u{00b7} cargo test \u{00b7} 7 lines \u{00b7} ")
-            && text.contains(" following "),
-        "the title names the node, the size and the state: {text}"
+        text.contains("Log \u{00b7} cargo test") && !text.contains(" lines "),
+        "the title names the node and nothing that goes without saying: {text}"
     );
     assert!(text.contains("Starting: cargo test"), "{text}");
     assert!(

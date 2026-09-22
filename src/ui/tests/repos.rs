@@ -34,6 +34,20 @@ fn the_table_draws_every_repository_with_its_counts_and_local_state() {
 }
 
 #[test]
+fn an_empty_table_says_why_and_the_details_pane_claims_nothing() {
+    let mut app = App::new(Vec::new());
+    app.select_tab(TabId::Repos);
+    let text = render_text(160, 24, &mut app);
+    assert!(text.contains("Offline: no repositories synced"), "{text}");
+    assert!(!text.contains("Select a"), "{text}");
+
+    let mut app = repos_app();
+    app.repos.set_query("nothing like this".to_owned());
+    let text = render_text(160, 24, &mut app);
+    assert!(text.contains("No repositories match this search"), "{text}");
+}
+
+#[test]
 fn the_pipelines_column_says_how_the_pipelines_last_went() {
     let mut app = crossed_app();
     let text = render_text(150, 24, &mut app);

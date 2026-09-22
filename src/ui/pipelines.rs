@@ -10,7 +10,9 @@ use crate::app::relative_age;
 use crate::command::CommandId;
 use crate::model::{Jump, RunResult, RunStatus, TimelineKind, TimelineRecord};
 use crate::ui::details::section_line;
-use crate::ui::table::{TableSpec, render_list_table, table_geometry};
+use crate::ui::table::{
+    TableSpec, empty_list_message, render_empty_message, render_list_table, table_geometry,
+};
 
 /// The whole tab: the search box, the table, the details pane and the footer.
 pub(crate) fn render(
@@ -322,6 +324,23 @@ fn render_pipeline_table(
         cell: &mut cell,
     };
     render_list_table(frame, shell, area, &mut spec);
+    if rows.is_empty() {
+        // The tab's own reason: pipelines on file, none of them building a
+        // repository with a clone here.
+        let unbuilt = (!screen.pipelines().is_empty()).then(|| {
+            shell.workspace().map_or_else(
+                || "No pipelines build a repository cloned here".to_owned(),
+                |workspace| {
+                    format!(
+                        "No pipelines build a repository cloned in {}",
+                        workspace.display()
+                    )
+                },
+            )
+        });
+        let message = empty_list_message(shell, screen.query(), "pipelines", unbuilt);
+        render_empty_message(frame, geometry.inner, &message);
+    }
 }
 
 fn render_run_table(
@@ -371,6 +390,10 @@ fn render_run_table(
         cell: &mut cell,
     };
     render_list_table(frame, shell, area, &mut spec);
+    if rows.is_empty() {
+        let message = empty_list_message(shell, screen.query(), "runs of this pipeline", None);
+        render_empty_message(frame, geometry.inner, &message);
+    }
 }
 
 /// The gutter of a watched row: a filled circle, the way a bookmarked work
@@ -521,12 +544,17 @@ fn render_run_details(
         focused_block(" Run ", shell.focus == Focus::Details).padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    // An empty list says why itself, and leaves the pane blank. A pipeline
+    // that has never run is the one row the cursor can be on with no run to
+    // describe.
     let Some(row) = screen.selected_run(shell) else {
-        frame.render_widget(
-            Paragraph::new("Select a pipeline or a run to see it here")
-                .style(Style::default().fg(theme().muted)),
-            inner,
-        );
+        if screen.level() == Level::Pipelines && !screen.visible_pipelines(shell).is_empty() {
+            frame.render_widget(
+                Paragraph::new("This pipeline has not run yet")
+                    .style(Style::default().fg(theme().muted)),
+                inner,
+            );
+        }
         return;
     };
     let timeline = screen.timeline(row.run.id).to_vec();
@@ -737,23 +765,40 @@ fn render_log(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut S
     let running = screen
         .selected_run(shell)
         .is_some_and(|row| row.run.status == RunStatus::InProgress);
-    let following = match (screen.log_following(), running) {
-        (true, true) => format!("{} following", spinner_frame()),
-        (true, false) => "following".to_owned(),
-        (false, _) => "scrolled".to_owned(),
+    // The title names the step and says only what is not the ordinary case:
+    // a live tail spins, and a log scrolled away from its tail says so. With
+    // nothing chosen it is just the pane's name.
+    let title = match node {
+        None => " Log ".to_owned(),
+        Some(node) => {
+            let state = match (screen.log_following(), running) {
+                (true, true) => format!(" \u{00b7} {} following", spinner_frame()),
+                (true, false) => String::new(),
+                (false, _) => " \u{00b7} scrolled".to_owned(),
+            };
+            format!(" Log \u{00b7} {node}{state} ")
+        }
     };
-    let title = format!(
-        " Log \u{00b7} {} \u{00b7} {} lines \u{00b7} {following} ",
-        node.unwrap_or_else(|| "nothing chosen".to_owned()),
-        lines.len(),
-    );
     let block = focused_block(title, shell.focus == Focus::Details).padding(Padding::horizontal(1));
     let pane = inside_border(area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if lines.is_empty() {
+        // A step that has a log but no lines of it yet; a run whose steps
+        // are on screen but none of them chosen or running, which is a
+        // choice to make; and nothing at all when there is no run.
+        let note = if screen.log_target().is_some() {
+            "No log yet"
+        } else if screen
+            .focused_run()
+            .is_some_and(|run| !screen.timeline(run).is_empty())
+        {
+            "Choose a step in the timeline to read its log"
+        } else {
+            ""
+        };
         frame.render_widget(
-            Paragraph::new("No log yet").style(Style::default().fg(theme().muted)),
+            Paragraph::new(note).style(Style::default().fg(theme().muted)),
             inner,
         );
         return;

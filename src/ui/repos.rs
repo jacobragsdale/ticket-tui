@@ -10,7 +10,9 @@ use crate::command::CommandId;
 use crate::model::Jump;
 use crate::ui::details::section_line;
 use crate::ui::pipelines::run_style;
-use crate::ui::table::{TableSpec, render_list_table, table_geometry};
+use crate::ui::table::{
+    TableSpec, empty_list_message, render_empty_message, render_list_table, table_geometry,
+};
 
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -102,6 +104,10 @@ fn render_table(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut She
         cell: &mut cell,
     };
     render_list_table(frame, shell, area, &mut spec);
+    if rows.is_empty() {
+        let message = empty_list_message(shell, screen.query(), "repositories", None);
+        render_empty_message(frame, geometry.inner, &message);
+    }
 }
 
 fn repo_cell(row: &RepoRow, column: RepoColumn) -> Cell<'static> {
@@ -206,12 +212,9 @@ fn render_details(frame: &mut Frame<'_>, screen: &mut ReposScreen, shell: &mut S
     let pane = inside_border(area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    // The cursor is always on a row when there are any, so no row means an
+    // empty list, which says why itself: the pane stays blank.
     let Some(row) = screen.selected(shell) else {
-        frame.render_widget(
-            Paragraph::new("Select a repository to see it here")
-                .style(Style::default().fg(theme().muted)),
-            inner,
-        );
         return;
     };
     let jumps = screen.jumps(shell);
