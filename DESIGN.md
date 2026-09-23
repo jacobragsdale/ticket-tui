@@ -163,7 +163,8 @@ fall back to the default.
 
 ### `--stale-days` and `TICKET_TUI_STALE_DAYS`
 
-How long a work item may sit untouched before the Changed column flags it:
+How long a work item may sit untouched before the details pane's Changed line
+flags it:
 
 ```console
 cargo run --release -- --stale-days 21
@@ -1200,7 +1201,7 @@ waiting on work that is only ready for test.
 **The counts are taken over every work item on file, not over the rows the
 table is showing.** The table hides finished work by default, and a sprint
 summary that inherited that would report a Done column that never filled up.
-The `4 stale` figure is the same rule the Changed column paints — see
+The `4 stale` figure is the same rule the details pane's Changed line flags — see
 [Stale-item highlighting](#stale-item-highlighting) — rather than a second
 definition of old.
 
@@ -1896,9 +1897,10 @@ beside the cache as `*.session.json`.
 ### Stale-item highlighting
 
 Work that nobody has touched for a fortnight, and that the workflow has not
-finished with, is flagged in the Changed column: the age goes warning-coloured,
-and bold where `NO_COLOR` leaves no palette to colour it. The details pane says
-so beside the age, as `Changed    21d ago, stale · 2026-08-08 07:00:00 CDT`.
+finished with, is flagged on the details pane's Changed line, beside the age,
+as `Changed    21d ago, stale · 2026-08-08 07:00:00 CDT`: `stale` is
+warning-coloured and bold, so it still stands out where `NO_COLOR` leaves no
+palette.
 
 Nothing dims — dim already means finished — and finished work is never flagged
 however long it has sat: nobody is waiting on a work item that is done or
@@ -2041,8 +2043,9 @@ query the cache while the TUI is running.
 A bare `ticket-tui` opens the TUI. Every subcommand does one thing and exits,
 which is what lets an agent — or a script — read and change work items without
 a terminal to drive. `--database`, `--org`, `--project`, `--code-project`,
-and `--workspace` apply to all of them and may be written either side of the
-subcommand. Every one of them falls back
+`--team`, `--workspace`, `--refresh` and `--stale-days` apply to all of them and
+may be written either side of the subcommand; the WIQL `--query` goes before
+it. Every one of them falls back
 to `config.toml`, so a shop that has edited that file writes none of them.
 
 ```console

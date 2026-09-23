@@ -43,7 +43,8 @@ pub struct Theme {
     /// stale and waiting, and a plain notice is none of those.
     pub info: Color,
     pub success: Color,
-    /// What the Changed column paints work nobody has touched in weeks. It is
+    /// What the details pane's Changed line paints `stale` in, for work nobody
+    /// has touched in weeks. It is
     /// deliberately not one of the state colours: staleness is a fact about
     /// the clock, not about where the work item sits in the workflow.
     pub warning: Color,

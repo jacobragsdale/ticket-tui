@@ -73,7 +73,8 @@ These are global: valid on every subcommand, either side of it.
 | `--project PROJECT` | Azure DevOps project; else `TICKET_TUI_PROJECT`, else `az devops configure` defaults |
 | `--workspace PATH` | Where `repos` looks for clones; else `TICKET_TUI_WORKSPACE`, else `~/dev` |
 
-`--query WIQL`, `--refresh SECONDS`, and `--stale-days DAYS` are **not** global. They must be written before the subcommand, and `ticket-tui sync
+`--refresh SECONDS` and `--stale-days DAYS` are global too. `--query WIQL` is
+**not**: it must be written before the subcommand, and `ticket-tui sync
 --query …` is rejected as an unexpected argument:
 
 ```console
@@ -88,8 +89,9 @@ and narrows what a **pull** asks Azure DevOps for, while `list --query` takes
 the filter grammar and narrows what is **printed** from rows already stored.
 
 `--refresh SECONDS` and `--stale-days DAYS` only mean anything to a run that
-opens the TUI; `--stale-days` (or `TICKET_TUI_STALE_DAYS`) sets how long a work
-item may sit untouched before the Changed column flags it, which is the
+opens the TUI and to `status`; `--stale-days` (or `TICKET_TUI_STALE_DAYS`) sets
+how long a work item may sit untouched before the details pane flags it, which
+is the
 `changed:>Nd state:@open` the **Stale** view asks for. `ticket-tui sync` is the
 subcommand that pulls and exits.
 

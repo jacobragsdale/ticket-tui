@@ -173,8 +173,8 @@ const fn details_split() -> u16 {
     crate::app::DEFAULT_PANE_SPLIT_DETAILS
 }
 
-/// Sessions written before the Changed column flagged neglected work carry no
-/// threshold, so they fall back to the built-in fortnight.
+/// Sessions written before stale work was flagged carry no threshold, so they
+/// fall back to the built-in fortnight.
 const fn stale_days() -> u16 {
     crate::app::DEFAULT_STALE_DAYS
 }

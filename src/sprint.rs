@@ -119,7 +119,7 @@ pub struct SprintSummary {
     /// Work item types and how many of each, commonest first.
     pub types: Vec<(String, usize)>,
     /// How many work items have sat untouched past the stale threshold, by the
-    /// same rule the Changed column paints: [`is_stale`].
+    /// same rule the details pane's Changed line flags: [`is_stale`].
     pub stale: usize,
 }
 

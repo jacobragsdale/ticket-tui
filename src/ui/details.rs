@@ -1118,7 +1118,7 @@ fn register_span(shell: &mut Shell, area: Rect, target: PointerTarget, y: u16, x
 
 /// The details pane's `Changed` line: how long ago, then the exact instant,
 /// and — when nobody has touched the work item past the threshold — `stale`
-/// beside the age it qualifies, in the same warning colour the column uses.
+/// beside the age it qualifies, in the warning colour.
 pub(super) fn changed_field_line(ticket: &Ticket, stale: bool, now: Timestamp) -> Line<'static> {
     let changed = ticket.changed_at;
     let mut line = field_line("Changed", ago(changed, now));
@@ -1164,7 +1164,7 @@ pub(super) fn field_label(label: &str) -> Span<'static> {
 }
 
 /// One change on one revision: how long ago it landed, who made it, and what
-/// moved. The relative age is the wording the Changed column uses, with the
+/// moved. The relative age is the wording the Changed line uses, with the
 /// exact instant beside it in muted text for anyone who needs one.
 pub(super) fn history_line(entry: &HistoryRecord, now: OffsetDateTime) -> Line<'static> {
     let who = entry.changed_by.as_deref().unwrap_or("unknown");

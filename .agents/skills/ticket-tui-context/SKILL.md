@@ -29,8 +29,9 @@ things a pull stores.
 `ticket-tui` if it is installed, else `cargo run -q --release --` from the root
 of a checkout of this repository — which is also where the `uv run .agents/…`
 paths below resolve from. Every example writes `ticket-tui`. `--database`,
-`--org`, `--project`, `--code-project` and `--workspace` are global and may be
-written either side of the subcommand. Each falls back to `TICKET_TUI_*` and
+`--org`, `--project`, `--code-project`, `--team`, `--workspace`, `--refresh`
+and `--stale-days` are global and may be written either side of the
+subcommand. Each falls back to `TICKET_TUI_*` and
 then to `~/.config/ticket-tui/config.toml`, which is where a machine says its
 organization and its projects once, so none of them normally needs writing. Errors go to stderr as `error: …` and exit 1.
 

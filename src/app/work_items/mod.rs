@@ -81,7 +81,7 @@ pub enum WorkItemMode {
     ConfirmDelete,
 }
 
-/// How long a work item may sit untouched before the Changed column flags it,
+/// How long a work item may sit untouched before the details pane flags it,
 /// when neither a flag, a variable, nor the session says otherwise.
 pub const DEFAULT_STALE_DAYS: u16 = 14;
 

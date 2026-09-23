@@ -66,10 +66,11 @@ pub struct Cli {
     pub code_project: Option<String>,
     /// Seconds between background pulls from Azure DevOps, 0 to turn the timer
     /// off; defaults to TICKET_TUI_REFRESH or 60
-    #[arg(long, value_name = "SECONDS")]
+    #[arg(long, global = true, value_name = "SECONDS")]
     pub refresh: Option<u64>,
     /// Extra WIQL condition ANDed into every pull, narrowing a large project;
-    /// defaults to TICKET_TUI_QUERY, then config.toml
+    /// defaults to TICKET_TUI_QUERY, then config.toml. Write it before the
+    /// subcommand, since `list --query` is another flag
     #[arg(long, value_name = "WIQL")]
     pub query: Option<String>,
     /// A team whose slice of the project to work in, repeatable: their areas
@@ -78,10 +79,10 @@ pub struct Cli {
     /// separated), then config.toml
     #[arg(long, global = true, value_name = "TEAM", value_delimiter = ',')]
     pub team: Vec<String>,
-    /// Days a work item may sit untouched before the Changed column flags it
-    /// as stale; defaults to TICKET_TUI_STALE_DAYS, then whatever the session
-    /// remembers, then 14
-    #[arg(long, value_name = "DAYS")]
+    /// Days a work item may sit untouched before the details pane's Changed
+    /// line flags it as stale; defaults to TICKET_TUI_STALE_DAYS, then
+    /// whatever the session remembers, then 14
+    #[arg(long, global = true, value_name = "DAYS")]
     pub stale_days: Option<u16>,
     /// Colour theme: terminal, terminal-light, mono, or custom (the palette in
     /// config.toml); defaults to TICKET_TUI_THEME, then what config.toml says
@@ -141,9 +142,9 @@ impl Cli {
     }
 }
 
-/// One thing to do and then exit. The flags above still apply: `--database`,
-/// `--org`, `--project` and `--code-project` may be written either side of the
-/// subcommand, and what none of them says `config.toml` answers for.
+/// One thing to do and then exit. The flags above still apply: all of them but
+/// `--query` and `--theme` may be written either side of the subcommand, and
+/// what none of them says `config.toml` answers for.
 #[derive(Clone, Debug, Subcommand)]
 pub enum Command {
     /// Pull work items from Azure DevOps into the database and exit
@@ -976,7 +977,7 @@ pub fn resolve_refresh(flag: Option<u64>, env: Option<String>) -> Result<u64> {
         .with_context(|| format!("TICKET_TUI_REFRESH is not a number of seconds: {trimmed}"))
 }
 
-/// How long a work item may sit untouched before the Changed column flags it:
+/// How long a work item may sit untouched before the details pane flags it:
 /// `--stale-days`, then `TICKET_TUI_STALE_DAYS`, and `None` when neither was
 /// given, which leaves whatever the session remembers standing. A variable
 /// that is not a number of days is a startup error naming it, the way
@@ -3743,6 +3744,14 @@ mod tests {
         let flagged = Cli::parse_from(["ticket-tui", "--refresh", "300"]);
         assert!(flagged.command.is_none());
         assert_eq!(flagged.refresh, Some(300));
+
+        let after = Cli::try_parse_from(["ticket-tui", "status", "--stale-days", "3"])
+            .expect("--stale-days may follow the subcommand");
+        assert_eq!(after.stale_days, Some(3));
+        assert!(matches!(
+            after.command,
+            Some(Command::Status { json: false })
+        ));
 
         let before = Cli::parse_from([
             "ticket-tui",
