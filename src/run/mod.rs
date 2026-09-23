@@ -64,12 +64,15 @@ use polling::*;
 mod tests;
 
 pub(super) fn run() -> Result<()> {
-    // One file behind every run: the flags and the TICKET_TUI_* variables
-    // still win over it, and a file that will not parse stops the TUI and
-    // every subcommand alike rather than starting somewhere nobody asked for.
-    // The mid-run reload keeps reporting a broken file in the footer instead.
+    // One file behind every run, read once the command line is parsed so that
+    // --help and --version answer whatever state it is in. The flags and the
+    // TICKET_TUI_* variables still win over it, and a file that will not
+    // parse stops the TUI and every subcommand alike rather than starting
+    // somewhere nobody asked for. The mid-run reload keeps reporting a broken
+    // file in the footer instead.
+    let cli = Cli::parse();
     let file = ticket_tui::config::load(&ticket_tui::config::default_path())?;
-    let cli = Cli::parse().with_file_defaults(&file, |key| std::env::var(key).ok());
+    let cli = cli.with_file_defaults(&file, |key| std::env::var(key).ok());
     // Every subcommand does its one thing and exits; only a bare invocation
     // opens the TUI.
     if let Some(command) = &cli.command {
