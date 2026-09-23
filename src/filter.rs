@@ -252,13 +252,6 @@ impl FilterField {
         Self::Created,
     ];
 
-    /// Whether the Filters overlay offers a list of this field's values. An id
-    /// has as many values as there are rows, which is a list nobody wants.
-    #[must_use]
-    pub const fn enumerable(self) -> bool {
-        !matches!(self, Self::Id)
-    }
-
     #[must_use]
     pub const fn key(self) -> &'static str {
         match self {

@@ -506,11 +506,6 @@ impl Snapshot {
         &self.repos
     }
 
-    #[must_use]
-    pub fn repo_count(&self) -> usize {
-        self.repos.len()
-    }
-
     /// The pipelines and runs read alongside these rows.
     #[must_use]
     pub fn with_pipelines(mut self, pipelines: Vec<Pipeline>, runs: Vec<Run>) -> Self {

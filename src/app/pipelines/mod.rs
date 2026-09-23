@@ -705,16 +705,6 @@ impl PipelinesScreen {
             .max_by_key(|run| run.id)
     }
 
-    /// The runs still going, which is what the watcher is asked to follow.
-    #[must_use]
-    pub fn live_run_ids(&self) -> Vec<i64> {
-        self.runs
-            .iter()
-            .filter(|run| run.status.is_live())
-            .map(|run| run.id)
-            .collect()
-    }
-
     #[must_use]
     pub const fn level(&self) -> Level {
         self.level
@@ -1758,15 +1748,6 @@ impl PipelinesScreen {
     #[must_use]
     pub fn selected_approval(&self) -> Option<&Approval> {
         self.approvals.get(self.approval_cursor.index)
-    }
-
-    /// The approval gating the run on screen, if one is.
-    #[must_use]
-    pub fn approval_for_focused_run(&self) -> Option<&Approval> {
-        let run = self.focused_run()?;
-        self.approvals
-            .iter()
-            .find(|approval| approval.run_id == Some(run))
     }
 
     /// Starts answering one approval: the comment prompt opens over it, and
