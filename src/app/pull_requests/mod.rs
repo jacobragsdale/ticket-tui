@@ -1265,7 +1265,7 @@ impl Screen for PullRequestsScreen {
     fn render(&mut self, frame: &mut Frame<'_>, shell: &mut Shell, area: Rect) {
         // What the linked work items are called comes from the shell, which
         // is where every tab reads what another tab's rows are named.
-        let titles = shell.work_item_titles().to_vec();
+        let titles = std::sync::Arc::clone(&shell.work_item_titles);
         crate::ui::pull_requests::render(frame, self, shell, &titles, area);
     }
 }

@@ -247,8 +247,9 @@ pub struct Shell {
     /// The Pull requests and Pipelines tabs show nothing outside them.
     pub(crate) clones: HashSet<String>,
     /// What each work item is called, by id, so the tabs that only carry ids
-    /// — a pull request's linked items, a run's — can name them.
-    pub(crate) work_item_titles: Vec<(i64, String)>,
+    /// — a pull request's linked items, a run's — can name them. Shared, so
+    /// a frame can hold them while it draws without copying every title.
+    pub(crate) work_item_titles: Arc<[(i64, String)]>,
     /// What each pull request and run is called, for the work items tab, whose
     /// artifact links hold nothing but ids. Filled from the same snapshot the
     /// other tabs draw, so a link names what the database holds and says
@@ -331,7 +332,7 @@ impl Default for Shell {
             repos: Vec::new(),
             workspace: None,
             clones: HashSet::new(),
-            work_item_titles: Vec::new(),
+            work_item_titles: Arc::from([]),
             pull_request_labels: Vec::new(),
             pull_request_sources: Vec::new(),
             run_labels: Vec::new(),
@@ -360,7 +361,7 @@ impl Shell {
     /// What the work items on file are called, for the tabs that name them by
     /// id.
     pub fn set_work_item_titles(&mut self, titles: Vec<(i64, String)>) {
-        self.work_item_titles = titles;
+        self.work_item_titles = titles.into();
     }
 
     #[must_use]
