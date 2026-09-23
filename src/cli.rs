@@ -207,6 +207,7 @@ pub enum Command {
     Prs(PrsCommand),
     /// Print the project's build definitions
     Pipelines {
+        /// Print the rows as a JSON array rather than as a table
         #[arg(long)]
         json: bool,
     },
@@ -256,20 +257,25 @@ pub enum AgentCommand {
         /// A line for the agent from you, carried in the handoff
         #[arg(long, value_name = "TEXT")]
         note: Option<String>,
+        /// Print the outcome as a JSON object rather than as lines
         #[arg(long)]
         json: bool,
     },
     /// Write the handoff for a work item and print the opening prompt, for
     /// a terminal you already have open
     Prompt {
+        /// The work item
         id: i64,
+        /// The repository, by name; left out, the one the work item is linked to
         #[arg(long, value_name = "NAME")]
         repo: Option<String>,
+        /// A line for the agent from you, carried in the handoff
         #[arg(long, value_name = "TEXT")]
         note: Option<String>,
     },
     /// Print the agent sessions on file
     List {
+        /// Print the rows as a JSON array rather than as a table
         #[arg(long)]
         json: bool,
     },
@@ -289,17 +295,21 @@ pub enum RunsCommand {
         /// `branch:`, `by:` and `reason:`
         #[arg(long, value_name = "QUERY")]
         query: Option<String>,
+        /// Print the rows as a JSON array rather than as a table
         #[arg(long)]
         json: bool,
     },
     /// Print one run and its timeline
     Show {
+        /// The run's id
         id: i64,
+        /// Print it as a JSON object rather than as a block of text
         #[arg(long)]
         json: bool,
     },
     /// Print one node's log
     Logs {
+        /// The run's id
         id: i64,
         /// The job whose log to print, by name
         #[arg(long, value_name = "NAME", conflicts_with = "task")]
@@ -323,30 +333,44 @@ pub enum RunsCommand {
         follow: bool,
     },
     /// Stop one run
-    Cancel { id: i64 },
+    Cancel {
+        /// The run's id
+        id: i64,
+    },
     /// Retry the jobs that failed in one run
-    Retry { id: i64 },
+    Retry {
+        /// The run's id
+        id: i64,
+    },
     /// Wait for one run to finish, exiting 0 succeeded, 1 failed, 2 canceled,
     /// 3 partially succeeded
-    Wait { id: i64 },
+    Wait {
+        /// The run's id
+        id: i64,
+    },
 }
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum ApprovalsCommand {
     /// Print the approvals the project is waiting on
     List {
+        /// Print the rows as a JSON array rather than as a table
         #[arg(long)]
         json: bool,
     },
     /// Approve one
     Approve {
+        /// The approval's id, as `approvals list` prints it
         id: String,
+        /// A comment to leave with the answer
         #[arg(long, value_name = "TEXT")]
         comment: Option<String>,
     },
     /// Reject one
     Reject {
+        /// The approval's id, as `approvals list` prints it
         id: String,
+        /// A comment to leave with the answer
         #[arg(long, value_name = "TEXT")]
         comment: Option<String>,
     },
@@ -362,6 +386,7 @@ pub enum ReposCommand {
         /// `disabled:`; anything else has to appear literally, ignoring case
         #[arg(long, value_name = "QUERY")]
         query: Option<String>,
+        /// Print the rows as a JSON array rather than as a table
         #[arg(long)]
         json: bool,
     },
@@ -369,6 +394,7 @@ pub enum ReposCommand {
     Show {
         /// The repository's name, as the project spells it
         name: String,
+        /// Print it as a JSON object rather than as a block of text
         #[arg(long)]
         json: bool,
     },
@@ -388,23 +414,28 @@ pub enum PrsCommand {
         /// ignoring case
         #[arg(long, value_name = "QUERY")]
         query: Option<String>,
+        /// Print the rows as a JSON array rather than as a table
         #[arg(long)]
         json: bool,
     },
     /// Print one pull request: its reviewers, work items, build and discussion
     Show {
+        /// The pull request's id
         id: i64,
+        /// Print it as a JSON object rather than as a block of text
         #[arg(long)]
         json: bool,
     },
     /// Record your own vote
     Vote {
+        /// The pull request's id
         id: i64,
         /// `approve`, `suggest`, `wait`, `reject`, or `none` to withdraw
         vote: String,
     },
     /// Complete it, merging the source branch into the target
     Complete {
+        /// The pull request's id
         id: i64,
         /// How to merge: `squash` (the default), `merge` or `rebase`
         #[arg(long, value_name = "STRATEGY")]
@@ -417,21 +448,27 @@ pub enum PrsCommand {
         no_transition: bool,
     },
     /// Abandon it
-    Abandon { id: i64 },
+    Abandon {
+        /// The pull request's id
+        id: i64,
+    },
     /// Turn auto-complete on or off
     Autocomplete {
+        /// The pull request's id
         id: i64,
         /// `on` or `off`
         state: String,
     },
     /// Link a work item to it, so it closes with the merge
     Link {
+        /// The pull request's id
         id: i64,
         /// The work item to link
         work_item: i64,
     },
     /// Leave one comment, as a thread of its own
     Comment {
+        /// The pull request's id
         id: i64,
         /// What the comment says, as plain text. `-` reads the body from
         /// standard input instead, as does leaving it out when something is
@@ -454,6 +491,7 @@ pub struct PrCreateArgs {
     /// The branch to merge into; left out, the repository's default branch
     #[arg(long, value_name = "BRANCH")]
     pub target: Option<String>,
+    /// The pull request's title
     #[arg(long, value_name = "TITLE")]
     pub title: String,
     /// A file of Markdown for the description; left out, it is empty
