@@ -468,11 +468,12 @@ pub(super) fn render_table(
         // Counting the hidden rows is a pass over every ticket, so it happens
         // on the one branch that says the number and nowhere else.
         let hidden_finished_message;
+        let query = screen.parsed_query();
         let message = if shell.sync_pending {
             "Syncing with Azure DevOps…"
         } else if shell.reload_pending {
             "Reloading tickets…"
-        } else if !screen.parsed_query().is_active() {
+        } else if !query.is_active() {
             match screen.hidden_finished(shell) {
                 0 => "No tickets in this database",
                 // Everything on file is finished and hidden: say so, and how
@@ -486,6 +487,15 @@ pub(super) fn render_table(
             }
         } else if screen.search_pending {
             "Searching…"
+        } else if query.fuzzy.is_empty()
+            && let hidden @ 1.. = screen.hidden_finished(shell)
+        {
+            // The filters alone, the default Mine view among them, left only
+            // finished work: that is not the same as nothing matching.
+            hidden_finished_message = format!(
+                "All {hidden} matching tickets are finished and hidden \u{2014} click the chip's \u{00d7} or use the palette to show them"
+            );
+            &hidden_finished_message
         } else {
             "No tickets match this search"
         };

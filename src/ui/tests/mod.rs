@@ -326,6 +326,26 @@ fn the_database_overlay_counts_the_finished_rows_the_table_is_leaving_out() {
 }
 
 #[test]
+fn a_filtered_view_of_only_finished_work_says_it_is_hidden_not_unmatched() {
+    let mut theirs = ticket_at(10_003, "Theirs", "Issue", "To Do", "2026-03-01T00:00:00Z");
+    theirs.assigned_to = Some("Jordan Patel".into());
+    let mut app = App::new(vec![
+        ticket_at(10_001, "Alpha", "Issue", "Done", "2026-03-03T00:00:00Z"),
+        ticket_at(10_002, "Beta", "Issue", "Closed", "2026-03-02T00:00:00Z"),
+        theirs,
+    ]);
+    app.shell.set_me(Some("Avery Chen".into()));
+    app.work_items
+        .set_query(&mut app.shell, "assignee:@me".into());
+
+    let mine = render_text(120, 24, &mut app);
+    assert!(
+        mine.contains("All 2 matching tickets are finished and hidden"),
+        "{mine}"
+    );
+}
+
+#[test]
 fn empty_reloading_and_no_result_states_render_with_a_usable_search_field() {
     let mut app = App::new(Vec::new());
     let empty = render_text(90, 24, &mut app);
