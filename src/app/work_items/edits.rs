@@ -286,6 +286,16 @@ impl WorkItemsScreen {
         !self.pending_edits.is_empty()
     }
 
+    /// What quitting now would lose, as the drafts held in memory — the
+    /// composers', the form's and the prompts' — and the edits still waiting
+    /// on Azure DevOps.
+    #[must_use]
+    pub fn unsent(&self) -> (usize, usize) {
+        let drafts =
+            self.drafts.len() + usize::from(self.form_draft.is_some()) + self.handoff_drafts.len();
+        (drafts, self.pending_edits.len())
+    }
+
     /// Swaps in the copy Azure DevOps stored, so the row shows the revision and
     /// changed date the server settled on rather than the optimistic guess.
     pub fn apply_edit(&mut self, shell: &mut Shell, applied: EditApplied) {

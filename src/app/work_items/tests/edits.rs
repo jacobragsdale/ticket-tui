@@ -848,6 +848,37 @@ fn esc_keeps_a_comment_draft_until_it_is_posted() {
 }
 
 #[test]
+fn q_with_a_draft_kept_asks_again_before_quitting() {
+    let mut app = edit_app();
+    open_menu(&mut app, CommandId::AddComment);
+    type_text(&mut app, "half a thought");
+    press(&mut app, KeyCode::Esc);
+
+    press(&mut app, KeyCode::Char('q'));
+    assert!(!app.shell.should_quit, "the draft holds the first q back");
+    let (message, _) = app.shell.notification().expect("and it says why");
+    assert_eq!(message, "1 draft not sent \u{2014} q again to quit");
+    press(&mut app, KeyCode::Char('q'));
+    assert!(app.shell.should_quit, "the second q quits anyway");
+}
+
+#[test]
+fn q_with_an_edit_out_asks_again_and_another_key_stands_it_down() {
+    let mut app = editing_app();
+    edit_request(&mut app, FieldEdit::state("Doing"));
+
+    press(&mut app, KeyCode::Char('q'));
+    assert!(!app.shell.should_quit);
+    let (message, _) = app.shell.notification().expect("the edit is named");
+    assert_eq!(message, "1 edit not sent \u{2014} q again to quit");
+    press(&mut app, KeyCode::Char('j'));
+    press(&mut app, KeyCode::Char('q'));
+    assert!(!app.shell.should_quit, "a key between the two disarms it");
+    press(&mut app, KeyCode::Char('q'));
+    assert!(app.shell.should_quit);
+}
+
+#[test]
 fn acceptance_criteria_save_as_html_and_unchanged_ones_close_quietly() {
     let mut app = edit_app();
 

@@ -79,7 +79,7 @@ offline, browsing whatever the database already holds.
 | `w` | On Work items: work with a coding agent — the prompt opens on screen to read and edit, then `Ctrl-S` launches Copilot or Cursor in a Herdr pane, in the work item's repository, with the ticket in front of it; or back to the agent already on it. **Start another agent session**, **Copy agent prompt** and **Show agent prompt** are in the Actions menu and the palette |
 | `g` | Go to what the row points at: a work item's pull request, build or the repository its branch is in; a pull request's work items; a run's pull request; a repository's open pull request, its linked work items or, with none, the pipeline that builds it |
 | `[` / `]` | Back and forward through everywhere you have been, across tabs |
-| `q` | Quit |
+| `q` | Quit (a second `q` if drafts or edits are not sent yet) |
 
 The mouse works throughout: click a field to edit it, drag the divider, scroll
 a pane, click a tab.

@@ -271,6 +271,9 @@ pub struct App {
     /// that has landed from a pull that changed nothing. `None` until the
     /// first snapshot of the run, which is the baseline rather than news.
     pull_request_marks: Option<PrMarks>,
+    /// Set by a `q` that was held back because it would have lost drafts or
+    /// edits: the next `q` quits, and any other key stands it down.
+    quit_armed: bool,
 }
 
 impl App {
@@ -296,6 +299,7 @@ impl App {
             pull_requests: PullRequestsScreen::default(),
             pipelines: PipelinesScreen::default(),
             pull_request_marks: None,
+            quit_armed: false,
         }
     }
 
@@ -926,9 +930,32 @@ impl App {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> AppAction {
         let before = self.here_now();
+        let armed = std::mem::take(&mut self.quit_armed);
         let action = self.dispatch_key(key);
+        self.hold_quit(key, armed);
         self.record_move(before);
         action
+    }
+
+    /// Holds back a quit that would drop what the work items screen has not
+    /// sent: its drafts live in memory only, and an edit still out may never
+    /// land. A second `q` quits anyway; `Ctrl-C` always does.
+    fn hold_quit(&mut self, key: KeyEvent, armed: bool) {
+        if !self.shell.should_quit || armed || key.modifiers.contains(KeyModifiers::CONTROL) {
+            return;
+        }
+        let count = |n: usize, noun: &str| format!("{n} {noun}{}", if n == 1 { "" } else { "s" });
+        let (drafts, edits) = self.work_items.unsent();
+        let lost = match (drafts, edits) {
+            (0, 0) => return,
+            (drafts, 0) => count(drafts, "draft"),
+            (0, edits) => count(edits, "edit"),
+            (drafts, edits) => format!("{} and {}", count(drafts, "draft"), count(edits, "edit")),
+        };
+        self.shell.should_quit = false;
+        self.quit_armed = true;
+        self.shell
+            .set_status(format!("{lost} not sent \u{2014} q again to quit"));
     }
 
     fn dispatch_key(&mut self, key: KeyEvent) -> AppAction {

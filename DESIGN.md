@@ -1573,7 +1573,7 @@ anything on tab `1`.
 | `g` | Go to what the row points at: a work item's pull request, a pull request's work items, a run's pull request, a repository's newest open pull request or, with none, the pipeline that builds it |
 | `i` | Show database path, row counts, hidden finished rows, and sync freshness |
 | `?` | Show the in-app help; use arrows or page keys to scroll it |
-| `q`, `Ctrl-C` | Quit |
+| `q`, `Ctrl-C` | Quit; while a draft or an edit is not sent, `q` says how many and quits on a second `q`, and `Ctrl-C` quits at once |
 
 The help overlay's key sections and the palette's key labels are generated from
 the same command table these keys are bound in, so a binding reads the same way
