@@ -502,7 +502,17 @@ impl SessionStore {
             .with_context(|| format!("writing {}", self.path.display()))
     }
 
+    /// The file as it is now, before a change goes on top of it: the CLI and
+    /// another TUI write it too, and a store held since startup would write
+    /// their sessions away. One that will not read keeps what is held.
+    fn reload(&mut self) {
+        if let Ok(store) = Self::load(&self.path) {
+            self.sessions = store.sessions;
+        }
+    }
+
     pub fn upsert(&mut self, session: AgentSession) -> Result<()> {
+        self.reload();
         match self.sessions.iter_mut().find(|held| held.id == session.id) {
             Some(held) => *held = session,
             None => self.sessions.push(session),
@@ -511,6 +521,7 @@ impl SessionStore {
     }
 
     pub fn remove(&mut self, id: &str) -> Result<()> {
+        self.reload();
         self.sessions.retain(|held| held.id != id);
         self.save()
     }
@@ -1365,6 +1376,19 @@ mod tests {
             prompt_sent: false,
             started_at: "2026-09-07T09:00:00Z".into(),
         }
+    }
+
+    #[test]
+    fn a_write_keeps_the_sessions_another_process_wrote() {
+        let dir = tempdir().unwrap();
+        let mut tui = store_in(dir.path());
+        let mut cli = store_in(dir.path());
+        tui.upsert(session_for("s1", 715)).unwrap();
+        cli.upsert(session_for("s2", 722)).unwrap();
+        assert_eq!(
+            store_in(dir.path()).sessions,
+            [session_for("s1", 715), session_for("s2", 722)]
+        );
     }
 
     #[test]
