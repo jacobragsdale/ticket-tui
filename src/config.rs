@@ -691,15 +691,24 @@ ansi = ["#0b0d14"]
         );
     }
 
-    /// The file the README tells people to copy is the file this build reads.
+    /// The file the README tells people to copy is the file this build reads,
+    /// and it runs no notify command until the one for the system is
+    /// uncommented.
     #[test]
-    fn the_example_file_parses_and_its_notify_command_is_the_documented_one() {
-        let config = parse(include_str!("../config.example.toml")).unwrap();
-        let command = config.notify.command.unwrap();
-        assert!(
-            command.contains("{title}") && command.contains("{body}"),
-            "{command}"
-        );
+    fn the_example_file_parses_and_leaves_each_notify_command_commented_out() {
+        let example = include_str!("../config.example.toml");
+        assert_eq!(parse(example).unwrap().notify.command, None);
+        let commands: Vec<&str> = example
+            .lines()
+            .filter(|line| line.starts_with("# command = "))
+            .collect();
+        assert_eq!(commands.len(), 2, "{commands:?}");
+        for command in commands {
+            assert!(
+                command.contains("{title}") && command.contains("{body}"),
+                "{command}"
+            );
+        }
     }
 
     #[test]

@@ -53,12 +53,12 @@ teal = "#29e0c8"
 #
 # {title} and {body} are replaced by the text as one complete single-quoted
 # shell word — `it's` goes in as `'it'\''s'` — so write them where an argument
-# goes and put no quotes of your own around them. Left out, there is no
-# [notify] table and nothing is ever run.
+# goes and put no quotes of your own around them. With no command, nothing
+# is ever run: uncomment the one for your system.
 [notify]
 # macOS. The two values go through argv rather than into the AppleScript
 # source, so a title holding a quote is still one string when it gets there.
-command = "osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' {title} {body}"
+# command = "osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' {title} {body}"
 
 # Linux:
 # command = "notify-send {title} {body}"
