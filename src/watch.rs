@@ -582,21 +582,50 @@ pub struct WatchHandle {
 }
 
 impl WatchHandle {
-    /// Starts the watcher on its own thread with its own client.
+    /// Starts the watcher on its own thread with its own client. A client that
+    /// will not connect — `az` failing at launch, say — is reported once and
+    /// tried again every minute, and what was asked of the watcher meanwhile
+    /// is handed to it once it connects.
     pub fn spawn(config: crate::azure::AzureConfig) -> Result<Self> {
         let (request_sender, request_receiver) = mpsc::channel();
         let (event_sender, event_receiver) = mpsc::channel();
         thread::Builder::new()
             .name("ticket-watch".into())
             .spawn(move || {
-                let Ok(source) = crate::azure::AzureClient::connect(config) else {
-                    return;
+                let mut held = Vec::new();
+                let mut reported = false;
+                let source = loop {
+                    let error = match crate::azure::AzureClient::connect(config.clone()) {
+                        Ok(source) => break source,
+                        Err(error) => error,
+                    };
+                    if !reported {
+                        reported = true;
+                        if event_sender
+                            .send(WatchEvent::Failed(format!("{error:#}")))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    let retry_at = Instant::now() + Duration::from_secs(60);
+                    loop {
+                        match request_receiver
+                            .recv_timeout(retry_at.saturating_duration_since(Instant::now()))
+                        {
+                            Ok(WatchRequest::Stop) | Err(RecvTimeoutError::Disconnected) => {
+                                return;
+                            }
+                            Ok(request) => held.push(request),
+                            Err(RecvTimeoutError::Timeout) => break,
+                        }
+                    }
                 };
-                watch(
-                    Watcher::new(Box::new(source)),
-                    &request_receiver,
-                    &event_sender,
-                );
+                let mut watcher = Watcher::new(Box::new(source));
+                for request in &held {
+                    watcher.handle(request);
+                }
+                watch(watcher, &request_receiver, &event_sender);
             })
             .context("failed to start the pipeline watcher")?;
         Ok(Self {
