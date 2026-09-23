@@ -121,10 +121,14 @@ impl Notifier {
 }
 
 /// The command with `{title}` and `{body}` filled in, each as one shell word.
+/// Filled in one pass, so a title holding `{body}` is never filled again.
 fn fill(command: &str, title: &str, body: &str) -> String {
+    let body = quote(body);
     command
-        .replace("{title}", &quote(title))
-        .replace("{body}", &quote(body))
+        .split("{title}")
+        .map(|part| part.replace("{body}", &body))
+        .collect::<Vec<_>>()
+        .join(&quote(title))
 }
 
 /// One value as a single `sh` word: wrapped in single quotes, with every
@@ -290,6 +294,27 @@ mod tests {
         ] {
             assert_eq!(round_trip(value), value, "{value}");
         }
+    }
+
+    /// A title holding `{body}` stays the title: the body is not spliced into
+    /// its quotes, where it would reach `sh` as bare words.
+    #[test]
+    fn a_placeholder_inside_a_value_is_not_filled_again() {
+        let template = "printf '%s|' {title} {body}";
+        let (title, body) = ("x{body}", "$(echo PWNED)");
+        assert_eq!(
+            fill(template, title, body),
+            "printf '%s|' 'x{body}' '$(echo PWNED)'"
+        );
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(fill(template, title, body))
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            "x{body}|$(echo PWNED)|"
+        );
     }
 
     /// The words the documented command hands over, read back out of `sh`
