@@ -511,15 +511,22 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<
 /// Reads the file, or the default configuration when there is none.
 pub fn load(path: &Path) -> Result<Config> {
     match std::fs::read_to_string(path) {
-        Ok(source) => parse(&source),
+        Ok(source) => parse(&source).with_context(|| format!("in {}", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
         Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
     }
 }
 
 pub fn parse(source: &str) -> Result<Config> {
-    let mut config: Config =
-        toml::from_str(source).map_err(|error| anyhow::anyhow!("{}", error.message()))?;
+    // The message alone, on one line with the line it is about: the whole
+    // error draws the offending line under it, and the footer is one row.
+    let mut config: Config = toml::from_str(source).map_err(|error| match error.span() {
+        Some(span) => {
+            let line = source[..span.start].matches('\n').count() + 1;
+            anyhow::anyhow!("line {line}: {}", error.message())
+        }
+        None => anyhow::anyhow!("{}", error.message()),
+    })?;
     // A value written blank is a mistake rather than an opinion: it would
     // otherwise mask the flag, the variable and the CLI default behind it.
     for (key, value) in [
@@ -720,6 +727,19 @@ ansi = ["#0b0d14"]
             load(&dir.path().join("config.toml")).unwrap(),
             Config::default()
         );
+    }
+
+    #[test]
+    fn a_file_that_will_not_parse_is_named_with_the_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[devops]\norg = 5").unwrap();
+        let error = format!("{:#}", load(&path).unwrap_err());
+        assert!(
+            error.contains(&path.display().to_string()) && error.contains("line 2: "),
+            "{error}"
+        );
+        assert!(!error.contains('\n'), "{error}");
     }
 
     #[test]
