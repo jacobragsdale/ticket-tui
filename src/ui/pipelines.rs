@@ -751,15 +751,12 @@ fn node_style(record: &TimelineRecord) -> Style {
 /// scrolling up by any means leaves it, and `End` goes back.
 fn render_log(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut Shell, area: Rect) {
     let node = screen.log_node_name();
-    let lines: Vec<String> = screen
+    // The held log can run to 20,000 lines, so only its length is read here
+    // and only the rows on screen are painted below.
+    let log = screen
         .log_target()
-        .map(|target| {
-            screen
-                .focused_run()
-                .map(|run| screen.log(run, target.log_id).iter().cloned().collect())
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
+        .and_then(|target| Some((screen.focused_run()?, target.log_id)));
+    let len = log.map_or(0, |(run, log_id)| screen.log(run, log_id).len());
     // A log following a run that is still going spins; one following a run
     // that has finished has nothing left to wait for and says so plainly.
     let running = screen
@@ -783,7 +780,7 @@ fn render_log(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut S
     let pane = inside_border(area);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if lines.is_empty() {
+    let Some((run, log_id)) = log.filter(|_| len > 0) else {
         // A step that has a log but no lines of it yet; a run whose steps
         // are on screen but none of them chosen or running, which is a
         // choice to make; and nothing at all when there is no run.
@@ -802,22 +799,23 @@ fn render_log(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut S
             inner,
         );
         return;
-    }
+    };
     let viewport = usize::from(inner.height).max(1);
-    screen.log_scroll.set_viewport(viewport, lines.len());
+    screen.log_scroll.set_viewport(viewport, len);
     if screen.log_following() {
-        let tail = lines.len().saturating_sub(viewport);
+        let tail = len.saturating_sub(viewport);
         screen.log_scroll.scroll_to(tail);
     }
     let offset = screen.log_scroll.offset;
-    let painted: Vec<Line<'static>> = lines
+    let painted: Vec<Line<'static>> = screen
+        .log(run, log_id)
         .iter()
         .skip(offset)
         .take(viewport)
         .map(|line| log_line(line))
         .collect();
     frame.render_widget(Paragraph::new(painted), inner);
-    if lines.len() > viewport {
+    if len > viewport {
         render_scrollbar(
             frame,
             PointerLayer::Base,
@@ -826,7 +824,7 @@ fn render_log(frame: &mut Frame<'_>, screen: &mut PipelinesScreen, shell: &mut S
             ScrollSurface::Details,
             ScrollState {
                 offset,
-                content: lines.len(),
+                content: len,
                 viewport,
             },
         );
