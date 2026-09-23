@@ -606,7 +606,9 @@ impl WorkItemsScreen {
                 self.focus_facet_value(self.facet_bar.value_index.saturating_sub(1));
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let count = self.focused_bar_facets(shell).len();
+                let count = self
+                    .focused_bar_field()
+                    .map_or(0, |field| self.facet_count(shell, field));
                 if count > 0 {
                     self.focus_facet_value((self.facet_bar.value_index + 1).min(count - 1));
                 }
@@ -632,6 +634,15 @@ impl WorkItemsScreen {
             .shown
             .get(self.facet_bar.field_index)
             .copied()
+    }
+
+    /// How many values a field's facet list has: what the last frame drew for
+    /// it, or a count taken now when no frame has drawn that field yet.
+    fn facet_count(&self, shell: &Shell, field: FilterField) -> usize {
+        match self.drawn_facets {
+            Some((drawn, count)) if drawn == field => count,
+            _ => self.facets_for(shell, field).len(),
+        }
     }
 
     fn focused_bar_facets(&self, shell: &Shell) -> Vec<FacetValue> {
@@ -691,7 +702,7 @@ impl WorkItemsScreen {
 
     fn move_filter_cursor(&mut self, shell: &mut Shell, delta: isize) {
         let index = if self.filter_overlay.showing_values {
-            let count = self.current_facets(shell).len();
+            let count = self.facet_count(shell, self.facet_field());
             if count == 0 {
                 return;
             }

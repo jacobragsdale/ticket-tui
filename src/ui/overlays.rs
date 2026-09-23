@@ -718,6 +718,7 @@ pub(super) fn render_facet_menu(
         return;
     };
     let facets = screen.facets_for(shell, field);
+    screen.drawn_facets = Some((field, facets.len()));
     let pill = shell
         .hit_regions
         .facet_pill(FacetTarget::Field(field.key()));
@@ -803,8 +804,9 @@ pub(super) fn render_filter_overlay(
         screen.filter_overlay.field_index
     };
     let rows: Vec<Line> = if showing_values {
-        screen
-            .current_facets(shell)
+        let facets = screen.current_facets(shell);
+        screen.drawn_facets = Some((screen.facet_field(), facets.len()));
+        facets
             .into_iter()
             .enumerate()
             .map(|(index, facet)| {

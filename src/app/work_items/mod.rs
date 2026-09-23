@@ -241,6 +241,10 @@ pub struct WorkItemsScreen {
     pub views_overlay: ViewsOverlay,
     pub sprint_overlay: SprintOverlay,
     pub facet_bar: FacetBar,
+    /// How many values the facet menu or the Filters overlay last drew, and
+    /// for which field, so a cursor key clamps against them rather than
+    /// counting every work item again.
+    pub drawn_facets: Option<(FilterField, usize)>,
     pub edit_menu: EditMenu,
     pub state_picker: StatePicker,
     pub priority_picker: PriorityPicker,
@@ -414,6 +418,7 @@ impl WorkItemsScreen {
             views_overlay: ViewsOverlay::default(),
             sprint_overlay: SprintOverlay::default(),
             facet_bar: FacetBar::default(),
+            drawn_facets: None,
             edit_menu: EditMenu::default(),
             state_picker: StatePicker::default(),
             priority_picker: PriorityPicker::default(),
