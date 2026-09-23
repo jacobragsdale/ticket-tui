@@ -435,7 +435,9 @@ impl AzureClient {
 
     /// Read the named work items, relations and all, in batches the endpoint
     /// accepts, whatever the scope says about them. An empty id list makes no
-    /// request at all.
+    /// request at all. A deleted or unreadable id is left out rather than
+    /// failing the batch it rides in, so one Epic in an area nobody can read
+    /// does not stop every pull.
     pub fn fetch_work_items(&self, ids: &[i64]) -> Result<SyncBatch> {
         let mut batch = SyncBatch::default();
         for chunk in ids.chunks(BATCH_SIZE) {
@@ -445,20 +447,10 @@ impl AzureClient {
                 .collect::<Vec<_>>()
                 .join(",");
             let url = format!(
-                "{}/_apis/wit/workitems?ids={joined}&$expand=relations&api-version={API_VERSION}",
+                "{}/_apis/wit/workitems?ids={joined}&$expand=relations&errorPolicy=Omit&api-version={API_VERSION}",
                 self.config.base_url()
             );
-            let response = self.get(&url)?;
-            let items = response
-                .get("value")
-                .and_then(Value::as_array)
-                .context("work item batch response has no value array")?;
-            for item in items {
-                let (ticket, relations, artifacts) = parse_work_item(item, &self.config)?;
-                batch.tickets.push(ticket);
-                batch.relations.extend(relations);
-                batch.artifacts.extend(artifacts);
-            }
+            extend_batch(&mut batch, &self.get(&url)?, &self.config)?;
         }
         Ok(batch)
     }
@@ -2482,6 +2474,22 @@ fn hidden_type_names(response: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Adds one batch read's work items to `batch`. With `errorPolicy=Omit` the
+/// ids the endpoint would not answer for come back as `null`, and are skipped.
+fn extend_batch(batch: &mut SyncBatch, response: &Value, config: &AzureConfig) -> Result<()> {
+    let items = response
+        .get("value")
+        .and_then(Value::as_array)
+        .context("work item batch response has no value array")?;
+    for item in items.iter().filter(|item| !item.is_null()) {
+        let (ticket, relations, artifacts) = parse_work_item(item, config)?;
+        batch.tickets.push(ticket);
+        batch.relations.extend(relations);
+        batch.artifacts.extend(artifacts);
+    }
+    Ok(())
+}
+
 /// Map one `/_apis/wit/workitems` entry onto a ticket and its relations.
 pub fn parse_work_item(
     item: &Value,
@@ -3058,6 +3066,23 @@ mod tests {
         assert_eq!(relations[0].kind, RelationKind::Parent);
         assert_eq!(relations[0].to.id, 11);
         assert_eq!(relations[1].kind, RelationKind::Related);
+    }
+
+    #[test]
+    fn a_batch_read_skips_the_ids_it_was_not_allowed_to_answer_for() {
+        let response = json!({"count": 2, "value": [
+            null,
+            {"id": 12, "rev": 1, "fields": {
+                "System.WorkItemType": "Task",
+                "System.Title": "Kept",
+                "System.CreatedDate": "2026-05-16T20:16:20Z",
+                "System.ChangedDate": "2026-05-16T20:16:20Z"
+            }},
+        ]});
+        let mut batch = SyncBatch::default();
+        extend_batch(&mut batch, &response, &config()).unwrap();
+        assert_eq!(batch.tickets.len(), 1);
+        assert_eq!(batch.tickets[0].key.id, 12);
     }
 
     fn key(id: i64) -> TicketKey {

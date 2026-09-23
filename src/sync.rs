@@ -1920,8 +1920,8 @@ impl Worker {
     /// nor `held` — what the database already has — holds, and their parents
     /// in turn, so a family tree reaches its Epic even when the scope stops at
     /// one team's area. Each round is one batched read of a handful of
-    /// Features and Epics, and a parent the source cannot answer with is
-    /// asked for once.
+    /// Features and Epics, and a parent the source cannot answer with, deleted
+    /// or in an area nobody can read, is asked for once a pull and left out.
     fn with_ancestors(
         &mut self,
         batch: &mut SyncBatch,
