@@ -3485,7 +3485,17 @@ fn columns(cells: &[Vec<String>]) -> String {
 fn emit(text: &str) {
     use std::io::Write;
     let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "{text}");
+    let _ = writeln!(out, "{}", printable(text));
+}
+
+/// `text` without the control characters a terminal would act on, keeping
+/// only newlines and tabs. A description can carry `&#27;`, which decodes to a
+/// real escape, and printed as it is that could set the clipboard or retitle
+/// the window.
+fn printable(text: &str) -> String {
+    text.chars()
+        .filter(|&c| !c.is_control() || c == '\n' || c == '\t')
+        .collect()
 }
 
 #[cfg(test)]
@@ -5204,6 +5214,17 @@ mod tests {
             vec![LIVE_RUNS_CADENCE, LIVE_RUNS_CADENCE],
             "and waited the watcher's own cadence between asks"
         );
+    }
+
+    #[test]
+    fn printed_text_keeps_no_control_characters_but_newlines_and_tabs() {
+        let decoded = crate::html::html_to_text("a&#27;]52;c;eA==&#7;b");
+        assert!(
+            decoded.contains('\u{1b}'),
+            "the entity decodes to an escape"
+        );
+        assert_eq!(printable(&decoded), "a]52;c;eA==b");
+        assert_eq!(printable("one\ttwo\nthree\r"), "one\ttwo\nthree");
     }
 
     #[test]
