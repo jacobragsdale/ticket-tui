@@ -487,13 +487,18 @@ fn run_remote(mut command: Command, remote: &str) -> Result<String> {
 
 /// The ssh git runs, told never to ask anything: an unknown key or a missing
 /// one fails at once, with ssh's own words, instead of waiting on a prompt
-/// nobody can see. Whatever `GIT_SSH_COMMAND` already says is kept in front.
+/// nobody can see. `http.lowSpeed*` does not reach ssh, so a server that goes
+/// quiet after connecting is dropped by keepalives about a minute later
+/// instead of holding the local thread for hours. Whatever `GIT_SSH_COMMAND`
+/// already says is kept in front.
 fn batch_ssh_command() -> String {
     let base = std::env::var("GIT_SSH_COMMAND")
         .ok()
         .filter(|command| !command.trim().is_empty())
         .unwrap_or_else(|| "ssh".to_owned());
-    format!("{base} -o BatchMode=yes -o ConnectTimeout=20")
+    format!(
+        "{base} -o BatchMode=yes -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+    )
 }
 
 /// `https://host` for an Azure DevOps remote reached over https — the scope
@@ -544,6 +549,19 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn ssh_never_prompts_and_drops_a_server_gone_quiet() {
+        let command = batch_ssh_command();
+        for option in [
+            "BatchMode=yes",
+            "ConnectTimeout=20",
+            "ServerAliveInterval=15",
+            "ServerAliveCountMax=4",
+        ] {
+            assert!(command.contains(&format!("-o {option}")), "{command}");
+        }
+    }
 
     #[test]
     fn every_way_a_remote_is_spelled_reads_as_one_repository() {
