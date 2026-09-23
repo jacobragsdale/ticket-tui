@@ -1872,7 +1872,7 @@ coming, then the backlog, Sprint 9 before Sprint 10 — and the path breaks the
 ties. Until the iteration tree has been read once the cell is the bare last
 segment and the sort is by name, as they always were.
 
-`V` opens the views. Seven built-in ones are listed under a **Built-in**
+`v` opens the views, and `v` or `Esc` closes them. Seven built-in ones are listed under a **Built-in**
 heading, above whatever you have saved: **Mine** (`assignee:@me`),
 **Unassigned** (`assignee:@none`), **Doing** (`state:doing`), **Stale**
 (`changed:>14d state:@open`, oldest first, leaving out work that is finished),

@@ -58,7 +58,7 @@ Azure CLI to answer.
 
 The first `sync` fills the database; every run after it opens immediately and
 pulls in the background. The Work items tab opens on **Mine** — the rows
-assigned to you — until a session remembers something else; `V` picks another
+assigned to you — until a session remembers something else; `v` picks another
 view. Without a configured organization the TUI runs
 offline, browsing whatever the database already holds.
 
@@ -125,7 +125,7 @@ query = "[System.State] <> 'Closed' OR [System.ChangedDate] > @today-90"
 ```
 
 `[notify]` is one command, run through `sh -c` when something worth
-interrupting for happens: a run you pressed `w` on finishes, a vote lands on a
+interrupting for happens: a run you pressed `W` on finishes, a vote lands on a
 pull request you wrote, one turns up wanting your review, an approval lands on
 a run. The status line says the same words
 whether or not the table is there, so this is the copy you get when ticket-tui

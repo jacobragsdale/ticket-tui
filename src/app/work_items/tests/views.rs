@@ -242,6 +242,15 @@ fn the_views_cursor_opens_on_the_first_built_in_and_steps_over_the_headings() {
     );
 }
 
+#[test]
+fn v_closes_the_views_it_opened() {
+    let mut app = views_app();
+    press(&mut app, KeyCode::Char('v'));
+    assert_eq!(app.work_items.mode, WorkItemMode::Views);
+    press(&mut app, KeyCode::Char('v'));
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+}
+
 /// `TICKET_TUI_ME` is resolved against the last sync's display name by
 /// `resolve_me` before the app is told who it is, so a different name here
 /// is exactly what the override produces.

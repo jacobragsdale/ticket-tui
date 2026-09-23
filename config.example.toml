@@ -47,7 +47,7 @@ orange = "#ff9e5e"
 teal = "#29e0c8"
 
 # A desktop notification when something worth interrupting for happens: a run
-# you pressed `w` on finishes, a vote lands on a pull request you wrote, one
+# you pressed `W` on finishes, a vote lands on a pull request you wrote, one
 # turns up wanting your review, an approval lands on a run. The command is run through `sh -c`, detached, with its output
 # thrown away, and the status line says the same words either way.
 #

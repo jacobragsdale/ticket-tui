@@ -302,7 +302,7 @@ impl WorkItemsScreen {
             return AppAction::None;
         }
         match key.code {
-            KeyCode::Esc | KeyCode::Char('V') => self.mode = WorkItemMode::Browse,
+            KeyCode::Esc | KeyCode::Char('v' | 'V') => self.mode = WorkItemMode::Browse,
             KeyCode::Up | KeyCode::Char('k') => self.move_view_focus(false),
             KeyCode::Down | KeyCode::Char('j') => self.move_view_focus(true),
             KeyCode::Enter => self.apply_view_at(shell, self.views_overlay.index),
