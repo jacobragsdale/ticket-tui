@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 
 use super::rows::{PipelineRow, RunRow};
 use crate::columns::ColumnId;
+use crate::model::compare_text;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PipelineColumn {
@@ -200,8 +201,4 @@ pub(super) fn compare_runs(left: &RunRow, right: &RunRow, column: RunColumn) -> 
             (None, None) => Ordering::Equal,
         },
     }
-}
-
-fn compare_text(left: &str, right: &str) -> Ordering {
-    left.to_lowercase().cmp(&right.to_lowercase())
 }

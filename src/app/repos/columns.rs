@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 
 use super::rows::RepoRow;
 use crate::columns::ColumnId;
+use crate::model::compare_text;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoColumn {
@@ -86,15 +87,8 @@ impl ColumnId for RepoColumn {
 
 pub(super) fn compare(left: &RepoRow, right: &RepoRow, column: RepoColumn) -> Ordering {
     match column {
-        RepoColumn::Name => left
-            .repo
-            .name
-            .to_lowercase()
-            .cmp(&right.repo.name.to_lowercase()),
-        RepoColumn::DefaultBranch => left
-            .branch()
-            .to_lowercase()
-            .cmp(&right.branch().to_lowercase()),
+        RepoColumn::Name => compare_text(&left.repo.name, &right.repo.name),
+        RepoColumn::DefaultBranch => compare_text(&left.branch(), &right.branch()),
         RepoColumn::PullRequests => left.pull_requests.cmp(&right.pull_requests),
         RepoColumn::WorkItems => left.work_items.cmp(&right.work_items),
         RepoColumn::Pipelines => left.pipelines.cmp(&right.pipelines),

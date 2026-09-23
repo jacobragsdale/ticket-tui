@@ -1831,7 +1831,7 @@ pub fn compare_tickets(
 
 /// Case-insensitive, without building two lowercase copies per comparison:
 /// a sort over 35k rows by title calls this half a million times.
-fn compare_text(left: &str, right: &str) -> Ordering {
+pub(crate) fn compare_text(left: &str, right: &str) -> Ordering {
     left.chars()
         .flat_map(char::to_lowercase)
         .cmp(right.chars().flat_map(char::to_lowercase))

@@ -4,6 +4,7 @@ use std::cmp::Ordering;
 
 use super::rows::PrRow;
 use crate::columns::ColumnId;
+use crate::model::compare_text;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrColumn {
@@ -91,20 +92,16 @@ impl ColumnId for PrColumn {
 pub(super) fn compare(left: &PrRow, right: &PrRow, column: PrColumn) -> Ordering {
     match column {
         PrColumn::Id => left.request.id.cmp(&right.request.id),
-        PrColumn::Title => text(&left.request.title, &right.request.title),
-        PrColumn::Repo => text(&left.repo, &right.repo),
-        PrColumn::Branches => text(&left.source_branch(), &right.source_branch()),
-        PrColumn::Author => text(
+        PrColumn::Title => compare_text(&left.request.title, &right.request.title),
+        PrColumn::Repo => compare_text(&left.repo, &right.repo),
+        PrColumn::Branches => compare_text(&left.source_branch(), &right.source_branch()),
+        PrColumn::Author => compare_text(
             &left.request.created_by.display_name,
             &right.request.created_by.display_name,
         ),
         // Most approved first, so what is ready to go rises.
         PrColumn::Votes => left.vote_total().cmp(&right.vote_total()),
-        PrColumn::Build => text(&left.build_word(), &right.build_word()),
+        PrColumn::Build => compare_text(&left.build_word(), &right.build_word()),
         PrColumn::Age => left.changed_at().cmp(&right.changed_at()),
     }
-}
-
-fn text(left: &str, right: &str) -> Ordering {
-    left.to_lowercase().cmp(&right.to_lowercase())
 }
