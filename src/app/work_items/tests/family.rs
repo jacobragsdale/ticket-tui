@@ -109,13 +109,23 @@ fn sorting_by_progress_runs_least_finished_first_and_leaves_childless_rows_last(
 
 #[test]
 fn a_bar_fills_only_on_a_whole_ratio_and_never_reads_empty_once_work_has_landed() {
-    let bar = |done, total| ChildProgress { done, total }.filled_cells(PROGRESS_BAR_CELLS);
+    let bar = |done, total| ChildProgress { done, total }.filled_eighths(PROGRESS_BAR_CELLS);
+    let full = PROGRESS_BAR_CELLS * 8;
 
     assert_eq!(bar(0, 7), 0);
-    assert_eq!(bar(1, 40), 1, "a single closed child still shows one cell");
-    assert_eq!(bar(3, 7), 2);
-    assert_eq!(bar(39, 40), 5, "an unfinished parent never fills the bar");
-    assert_eq!(bar(7, 7), PROGRESS_BAR_CELLS);
+    assert_eq!(
+        bar(1, 1000),
+        1,
+        "a single closed child still shows an eighth"
+    );
+    assert_eq!(bar(3, 7), 20);
+    assert_eq!(bar(4, 7), 27, "a step apart where whole cells would tie");
+    assert_eq!(
+        bar(999, 1000),
+        full - 1,
+        "an unfinished parent never fills the bar"
+    );
+    assert_eq!(bar(7, 7), full);
 }
 
 #[test]

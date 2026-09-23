@@ -29,17 +29,13 @@ impl ChildProgress {
         format!("{}/{}", self.done, self.total)
     }
 
-    /// How many cells of a bar `width` wide are filled. Rounding never lies at
-    /// either end: any progress at all fills one cell, and only a whole ratio
-    /// fills the last one.
-    #[must_use]
     /// How many eighths of `width` cells are filled. The bar is drawn in
     /// fractional blocks, so `3/7` and `4/7` are visibly different over six
     /// cells where whole blocks would round them together.
     ///
-    /// Work that has started always shows something and work that is not
-    /// finished never fills the bar, which is the rule
-    /// [`Self::filled_cells`] follows a cell at a time.
+    /// Rounding never lies at either end: work that has started always shows
+    /// something and work that is not finished never fills the bar.
+    #[must_use]
     pub const fn filled_eighths(self, width: usize) -> usize {
         let steps = width * 8;
         if steps == 0 || self.total == 0 || self.done == 0 {
@@ -53,23 +49,6 @@ impl ChildProgress {
             1
         } else if scaled >= steps {
             steps - 1
-        } else {
-            scaled
-        }
-    }
-
-    pub const fn filled_cells(self, width: usize) -> usize {
-        if width == 0 || self.total == 0 || self.done == 0 {
-            return 0;
-        }
-        if self.done >= self.total {
-            return width;
-        }
-        let scaled = self.done * width / self.total;
-        if scaled == 0 {
-            1
-        } else if scaled >= width {
-            width - 1
         } else {
             scaled
         }
