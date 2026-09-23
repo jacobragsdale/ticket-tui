@@ -548,11 +548,11 @@ impl MatchContext {
 /// The repositories each work item is linked to, named through `name_of`:
 /// the ones its branches are in first, then the ones its pull requests and
 /// commits are in, each once. This is what `repo:` matches and the Repo
-/// column shows.
+/// column shows. A repository `name_of` does not know goes by its id.
 #[must_use]
-pub fn repos_by_item(
+pub fn repos_by_item<'n>(
     artifacts: &[ArtifactLink],
-    name_of: impl Fn(&str) -> String,
+    name_of: impl Fn(&str) -> Option<&'n str>,
 ) -> BTreeMap<i64, Vec<String>> {
     let mut repos: BTreeMap<i64, Vec<String>> = BTreeMap::new();
     let branches = artifacts
@@ -565,10 +565,10 @@ pub fn repos_by_item(
         let Some(repo_id) = link.kind.repo_id() else {
             continue;
         };
-        let name = name_of(repo_id);
+        let name = name_of(repo_id).unwrap_or(repo_id);
         let names = repos.entry(link.work_item.id).or_default();
-        if !names.contains(&name) {
-            names.push(name);
+        if !names.iter().any(|known| known == name) {
+            names.push(name.to_owned());
         }
     }
     repos
@@ -1290,7 +1290,11 @@ mod tests {
                 ),
                 link(2, ArtifactKind::Build(3)),
             ],
-            |id| format!("repo-{id}"),
+            |id| match id {
+                "aaa" => Some("repo-aaa"),
+                "bbb" => Some("repo-bbb"),
+                _ => None,
+            },
         );
         assert_eq!(
             repos.get(&1).map(Vec::as_slice),

@@ -3,7 +3,7 @@
 //! to make at the head of its default branch.
 
 use super::pickers::fuzzy_contains;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::*;
 
@@ -204,7 +204,12 @@ impl WorkItemsScreen {
     /// artifact links: what `repo:` matches and the Repo column shows.
     #[must_use]
     pub fn repos_by_item(&self, shell: &Shell) -> BTreeMap<i64, Vec<String>> {
-        crate::filter::repos_by_item(&self.graph.artifacts, |id| shell.repo_name(id))
+        let names: HashMap<&str, &str> = shell
+            .repos()
+            .iter()
+            .map(|repo| (repo.id.as_str(), repo.name.as_str()))
+            .collect();
+        crate::filter::repos_by_item(&self.graph.artifacts, |id| names.get(id).copied())
     }
 
     /// Every artifact link the graph holds, for the Repos tab to count and

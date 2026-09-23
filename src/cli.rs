@@ -1229,7 +1229,7 @@ fn match_context(
         repos
             .iter()
             .find(|repo| repo.id == id)
-            .map_or_else(|| id.to_owned(), |repo| repo.name.clone())
+            .map(|repo| repo.name.as_str())
     };
     Ok((
         MatchContext::now()
