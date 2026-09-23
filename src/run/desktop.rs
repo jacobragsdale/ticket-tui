@@ -22,7 +22,7 @@ fn clipboard_commands() -> Vec<Command> {
     }
 }
 
-fn command(program: &str, args: &[&str]) -> Command {
+pub(super) fn command(program: &str, args: &[&str]) -> Command {
     let mut command = Command::new(program);
     command.args(args);
     command
@@ -30,7 +30,7 @@ fn command(program: &str, args: &[&str]) -> Command {
 
 /// Runs `commands` in turn, each fed `stdin`, until one exits cleanly. The
 /// error reported is the last one's: the command nearest to working.
-fn first_that_works(commands: Vec<Command>, stdin: &str, what: &str) -> Result<()> {
+pub(super) fn first_that_works(commands: Vec<Command>, stdin: &str, what: &str) -> Result<()> {
     let mut last_error = None;
     for command in commands {
         match write_to_command(command, stdin) {
@@ -59,7 +59,24 @@ fn write_to_command(mut command: Command, text: &str) -> Result<()> {
             .write_all(text.as_bytes())
             .with_context(|| format!("failed to write to {program}"))?;
     }
-    let status = child.wait().with_context(|| format!("{program} stopped"))?;
+    // A launcher still running after a moment has started what it was for:
+    // with no desktop behind it, `xdg-open` runs the browser in the
+    // foreground until it closes. A thread reaps it rather than the screen
+    // freezing for as long as the browser is open.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("{program} stopped"))?
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            thread::spawn(move || child.wait());
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
     if status.success() {
         Ok(())
     } else {

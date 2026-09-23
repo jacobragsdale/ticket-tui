@@ -16,6 +16,17 @@ fn only_well_formed_https_urls_reach_the_launcher() {
 }
 
 #[test]
+fn a_launcher_that_stays_up_is_left_running_rather_than_waited_on() {
+    let started = Instant::now();
+    first_that_works(vec![command("sleep", &["10"])], "", "browser").unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn mouse_pointer_sequences_set_and_reset_link_hover() {
     assert_eq!(
         mouse_pointer_for_hover(Some(&PointerTarget::OpenSelectedUrl), None),
