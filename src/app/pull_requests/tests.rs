@@ -516,6 +516,25 @@ fn x_asks_before_abandoning_and_t_toggles_auto_complete() {
 }
 
 #[test]
+fn a_paste_lands_in_whichever_field_is_open() {
+    let mut app = pull_requests_app();
+    app.select_tab(TabId::PullRequests);
+    app.pull_requests.cursor.focus(2);
+
+    // Quick capture is the work items screen's, painted over this tab.
+    press(&mut app, KeyCode::Char('+'));
+    assert!(app.shell_overlay_open());
+    app.handle_paste("x");
+    assert_eq!(app.work_items.capture.text(), "x");
+    assert_eq!(app.pull_requests.query(), "", "not the search behind it");
+    press(&mut app, KeyCode::Esc);
+
+    press(&mut app, KeyCode::Char('n'));
+    app.handle_paste("LGTM\nonce CI is green");
+    assert_eq!(app.pull_requests.comment_text(), "LGTM once CI is green");
+}
+
+#[test]
 fn n_posts_one_comment_and_it_joins_the_discussion() {
     let mut app = pull_requests_app();
     app.select_tab(TabId::PullRequests);

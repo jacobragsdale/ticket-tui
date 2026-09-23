@@ -1028,8 +1028,17 @@ impl Screen for PullRequestsScreen {
     }
 
     fn handle_paste(&mut self, _shell: &mut Shell, pasted: &str) {
-        if self.mode == PrMode::Search {
-            self.query.paste(pasted, true);
+        match self.mode {
+            PrMode::Search => {
+                self.query.paste(pasted, true);
+                self.cursor.reset();
+            }
+            PrMode::Comment => self.comment.paste(pasted, true),
+            PrMode::WorkItemPicker => {
+                self.link_query.paste(pasted, true);
+                self.link_cursor.reset();
+            }
+            _ => {}
         }
     }
 

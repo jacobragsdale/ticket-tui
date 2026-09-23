@@ -1036,8 +1036,17 @@ impl Screen for PipelinesScreen {
     }
 
     fn handle_paste(&mut self, _shell: &mut Shell, pasted: &str) {
-        if self.mode == PipelineMode::Search {
-            self.query_mut().paste(pasted, true);
+        match self.mode {
+            PipelineMode::Search => {
+                self.query_mut().paste(pasted, true);
+                self.cursor_mut().reset();
+            }
+            PipelineMode::BranchPicker => {
+                self.branch_picker.query.paste(pasted, true);
+                self.branch_picker.cursor.reset();
+            }
+            PipelineMode::ApprovalComment => self.approval_comment.paste(pasted, true),
+            _ => {}
         }
     }
 

@@ -1033,6 +1033,12 @@ impl App {
     }
 
     pub fn handle_paste(&mut self, pasted: &str) {
+        // A shared overlay is the work items screen's, whichever tab it is
+        // over, the way its keys are.
+        if self.shell_overlay_open() {
+            self.work_items.handle_paste(&mut self.shell, pasted);
+            return;
+        }
         let (shell, screen) = self.screen();
         screen.handle_paste(shell, pasted);
     }
