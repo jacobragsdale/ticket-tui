@@ -95,7 +95,16 @@ fn render_complete_form(frame: &mut Frame<'_>, screen: &mut PullRequestsScreen, 
     let options = screen.completion();
     let focused = screen.completion_field();
     let area = centered_rect(frame.area(), 56, 9);
-    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, " Complete ");
+    let verb = if screen.auto_completing() {
+        "Auto-complete"
+    } else {
+        "Complete"
+    };
+    let Some(id) = screen.selected(shell).map(|row| row.request.id) else {
+        return;
+    };
+    let title = format!(" {verb} !{id} ");
+    let inner = render_modal_frame(frame, PointerLayer::Modal, shell, area, &title);
     let row = |index: usize, label: &str, value: String| {
         let marker = if index == focused { "\u{203a}" } else { " " };
         Line::from(vec![

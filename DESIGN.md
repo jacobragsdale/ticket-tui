@@ -1389,7 +1389,9 @@ merges it. It is refused before the request goes out, naming what is wrong and
 suggesting `o`, when the merge has conflicts or the build policy is failing.
 `X` asks `Abandon !123?` and a second `X` abandons it; reactivating one is a
 job for the browser. `t` toggles auto-complete, taking the same form the first
-time it is turned on, since that is what auto-complete will do when it fires.
+time it is turned on, titled `Auto-complete !123` rather than `Complete !123`,
+and sending what it picks, since that is what auto-complete will do when it
+fires.
 `n` opens a one-line prompt and posts it as a thread of its own; the Discussion
 section lists the first comment of each thread — author, age, status and the
 text — and replies and line comments are `o`. All four are non-optimistic: the

@@ -507,7 +507,7 @@ fn x_asks_before_abandoning_and_t_toggles_auto_complete() {
         matches!(
             action,
             AppAction::PullRequestAction {
-                action: crate::sync::PrAction::AutoComplete(true),
+                action: crate::sync::PrAction::AutoCompleteWith(_),
                 ..
             }
         ),

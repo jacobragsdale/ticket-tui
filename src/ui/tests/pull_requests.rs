@@ -260,6 +260,22 @@ fn the_details_header_carries_the_chip_g_would_follow_and_the_footer_names_it() 
 }
 
 #[test]
+fn the_completion_form_says_whether_it_merges_now_or_sets_auto_complete() {
+    let mut app = pull_requests_app();
+    tab_text(160, 40, &mut app);
+    app.pull_requests.cursor.focus(2);
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE));
+    let text = render_text(160, 40, &mut app);
+    assert!(text.contains(" Complete !11 "), "{text}");
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+    let text = render_text(160, 40, &mut app);
+    assert!(text.contains(" Auto-complete !11 "), "{text}");
+}
+
+#[test]
 fn l_draws_the_work_item_picker_and_a_click_links_the_row_it_lands_on() {
     let mut app = pull_requests_app();
     app.shell.set_work_item_titles(vec![

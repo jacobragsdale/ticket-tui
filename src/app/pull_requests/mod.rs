@@ -411,6 +411,13 @@ impl PullRequestsScreen {
         self.completion_field
     }
 
+    /// Whether the open completion form sets auto-complete rather than
+    /// merging now.
+    #[must_use]
+    pub const fn auto_completing(&self) -> bool {
+        self.auto_completing
+    }
+
     /// Sends the completion.
     pub fn complete(&mut self, shell: &mut Shell) -> AppAction {
         self.mode = PrMode::Browse;
@@ -858,7 +865,7 @@ impl PullRequestsScreen {
                     return AppAction::PullRequestAction {
                         repo_id: row.request.repo_id.clone(),
                         id: row.request.id,
-                        action: PrAction::AutoComplete(true),
+                        action: PrAction::AutoCompleteWith(self.completion.clone()),
                     };
                 }
                 return self.complete(shell);

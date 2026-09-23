@@ -70,8 +70,10 @@ pub enum PrAction {
     /// Merge it, with the options the form named.
     Complete(CompletionOptions),
     Abandon,
-    /// Turn auto-complete on or off.
+    /// Turn auto-complete on or off, leaving how it lands as it was.
     AutoComplete(bool),
+    /// Turn auto-complete on, landing with the options the form named.
+    AutoCompleteWith(CompletionOptions),
 }
 
 /// The document one pull-request action is written as. Completing carries the
@@ -94,6 +96,14 @@ pub fn pull_request_patch(action: &PrAction, me: Option<&str>) -> Value {
             serde_json::json!({ "autoCompleteSetBy": { "id": me.unwrap_or_default() } })
         }
         PrAction::AutoComplete(false) => serde_json::json!({ "autoCompleteSetBy": null }),
+        PrAction::AutoCompleteWith(options) => serde_json::json!({
+            "autoCompleteSetBy": { "id": me.unwrap_or_default() },
+            "completionOptions": {
+                "mergeStrategy": options.strategy.as_api(),
+                "deleteSourceBranch": options.delete_source,
+                "transitionWorkItems": options.transition_work_items,
+            },
+        }),
     }
 }
 
@@ -2001,7 +2011,7 @@ impl Worker {
         events: &Sender<SyncEvent>,
     ) -> Result<Box<PullRequest>, String> {
         let me = match action {
-            PrAction::AutoComplete(true) => self
+            PrAction::AutoComplete(true) | PrAction::AutoCompleteWith(_) => self
                 .my_reviewer_id(events)
                 .map_err(|error| format!("{error:#}"))?,
             _ => None,
@@ -4193,6 +4203,12 @@ mod tests {
             PrAction::Abandon,
             PrAction::AutoComplete(true),
             PrAction::AutoComplete(false),
+            PrAction::AutoCompleteWith(CompletionOptions {
+                strategy: crate::model::MergeStrategy::Rebase,
+                delete_source: false,
+                transition_work_items: false,
+                last_merge_source_commit: String::new(),
+            }),
         ] {
             handle
                 .send(SyncRequest::PullRequestAction {
@@ -4221,6 +4237,15 @@ mod tests {
             sent[3].contains("\"autoCompleteSetBy\":null"),
             "turning it off sends a null: {}",
             sent[3]
+        );
+        assert!(
+            sent[4].contains("me-guid")
+                && sent[4].contains("\"mergeStrategy\":\"rebase\"")
+                && sent[4].contains("\"deleteSourceBranch\":false")
+                && sent[4].contains("\"transitionWorkItems\":false")
+                && !sent[4].contains("lastMergeSourceCommit"),
+            "auto-complete lands the way the form said: {}",
+            sent[4]
         );
     }
 
