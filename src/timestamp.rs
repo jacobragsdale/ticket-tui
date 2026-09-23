@@ -82,6 +82,21 @@ impl Timestamp {
         self.instant.date()
     }
 
+    /// The calendar day this instant falls on by the local clock, which is
+    /// what "today" is when a sprint is read against it: in Chicago a sprint
+    /// finishing on September 5th is still current at 8 pm that evening, when
+    /// the UTC day is already the 6th.
+    #[must_use]
+    pub fn local_date(self) -> Date {
+        self.date_in(&local_zone())
+    }
+
+    fn date_in(self, zone: &jiff::tz::TimeZone) -> Date {
+        let offset = UtcOffset::from_whole_seconds(self.in_zone(zone).offset().seconds())
+            .unwrap_or(UtcOffset::UTC);
+        self.instant.to_offset(offset).date()
+    }
+
     /// The compact day an iteration's date range reads in, such as `Aug 25`.
     #[must_use]
     pub fn calendar_day(self) -> String {
@@ -321,6 +336,18 @@ mod tests {
             ts("2026-07-15T03:00:00Z").exact_in(&chicago),
             "2026-07-14 22:00:00 CDT",
             "and the local day, not the UTC one"
+        );
+    }
+
+    #[test]
+    fn a_local_date_is_the_day_on_the_local_calendar() {
+        let chicago = jiff::tz::TimeZone::get("America/Chicago").unwrap();
+        let evening = ts("2026-09-06T01:00:00Z");
+        assert_eq!(evening.date(), time::macros::date!(2026 - 09 - 06));
+        assert_eq!(
+            evening.date_in(&chicago),
+            time::macros::date!(2026 - 09 - 05),
+            "8 pm in Chicago is still the 5th"
         );
     }
 

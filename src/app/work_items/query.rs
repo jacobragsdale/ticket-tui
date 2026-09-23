@@ -511,7 +511,7 @@ impl WorkItemsScreen {
         // sprint, what is coming, backlog; the text comparison breaks the ties.
         let sprint_keys = (field == SortField::Iteration).then(|| {
             let calendar = self.sprint_calendar();
-            let today = crate::timestamp::Timestamp::now().date();
+            let today = crate::timestamp::Timestamp::now().local_date();
             tickets
                 .iter()
                 .map(|ticket| calendar.sort_key(&ticket.iteration_path, today))

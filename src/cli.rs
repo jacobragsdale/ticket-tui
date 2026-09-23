@@ -1214,7 +1214,7 @@ fn match_context(
     repository: &SqliteTicketRepository,
     me: Option<String>,
 ) -> Result<(MatchContext, IterationTree)> {
-    let today = Timestamp::now().date();
+    let today = Timestamp::now().local_date();
     let nodes = repository.load_classification_nodes()?;
     let tree = if nodes.iter().any(|node| node.kind == NodeKind::Iteration) {
         IterationTree::Cached

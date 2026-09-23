@@ -396,7 +396,7 @@ pub(super) fn render_table(
         .iter()
         .any(|column| column.visible && column.id == SortField::Iteration)
         .then(|| screen.sprint_calendar());
-    let today = now.date();
+    let today = crate::timestamp::Timestamp::from_offset_date_time(now).local_date();
     let rows: Vec<PaintedRow<'_>> = screen
         .visible_tickets()
         .skip(offset)

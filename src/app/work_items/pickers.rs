@@ -988,7 +988,7 @@ impl WorkItemsScreen {
         if !self.team_iterations.is_empty() {
             return self.team_iterations.clone();
         }
-        classification::current_iteration(&self.classification_nodes, Timestamp::now().date())
+        classification::current_iteration(&self.classification_nodes, Timestamp::now().local_date())
             .map(|node| node.path.clone())
             .into_iter()
             .collect()
@@ -1015,7 +1015,7 @@ impl WorkItemsScreen {
     /// in the tree it is planned into — so the cursor has somewhere to start.
     #[must_use]
     fn node_rows(&self, kind: NodeKind) -> Vec<NodeRow> {
-        let today = Timestamp::now().date();
+        let today = Timestamp::now().local_date();
         let rows: Vec<NodeRow> = self
             .classification_nodes
             .iter()

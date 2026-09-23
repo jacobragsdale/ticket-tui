@@ -741,7 +741,7 @@ implied by the indent. The node the work item sits in is marked and under the
 cursor; type to narrow the tree, `↑`/`↓` to move, `Enter` to move the
 work item, `Esc` to change nothing. Choosing the node it is already in closes
 without a write. An iteration row also carries the days it runs between — `Aug 25 – Sep 5` — and the one
-containing today (UTC) is marked `current`.
+containing today, by the local calendar, is marked `current`.
 
 `Enter` writes the full backslash path — `development\Sprint 1`, not
 `Sprint 1` — to `System.IterationPath` or `System.AreaPath`. The Area column

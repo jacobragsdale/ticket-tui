@@ -166,7 +166,7 @@ impl FilterSchema for WorkItemSchema {
         let in_bucket = |bucket: SprintBucket| {
             context
                 .sprints
-                .bucket(&row.iteration_path, context.now.date())
+                .bucket(&row.iteration_path, context.now.local_date())
                 == Some(bucket)
         };
         match sentinel {
