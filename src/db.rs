@@ -1202,9 +1202,22 @@ impl SqliteTicketRepository {
             return Ok(0);
         }
 
-        let transaction = self.connection.transaction()?;
+        let mut by_organization: HashMap<&str, Vec<i64>> = HashMap::new();
         for (organization, id) in &missing {
-            forget_work_item(&transaction, organization, *id)?;
+            by_organization.entry(organization).or_default().push(*id);
+        }
+        let transaction = self.connection.transaction()?;
+        for (organization, ids) in &by_organization {
+            transaction.execute(
+                "DELETE FROM work_item_relations
+                 WHERE organization = ?1
+                   AND (from_id IN (SELECT value FROM json_each(?2))
+                        OR to_id IN (SELECT value FROM json_each(?2)))",
+                params![organization, serde_json::to_string(ids)?],
+            )?;
+        }
+        for (organization, id) in &missing {
+            forget_work_item_rows(&transaction, organization, *id)?;
         }
         transaction
             .commit()
@@ -1596,12 +1609,19 @@ impl std::error::Error for InvalidTimestamp {
 /// asked for leave the file this way.
 fn forget_work_item(transaction: &Transaction<'_>, organization: &str, id: i64) -> Result<()> {
     transaction.execute(
-        "DELETE FROM work_items WHERE organization = ?1 AND work_item_id = ?2",
-        params![organization, id],
-    )?;
-    transaction.execute(
         "DELETE FROM work_item_relations
          WHERE organization = ?1 AND (from_id = ?2 OR to_id = ?2)",
+        params![organization, id],
+    )?;
+    forget_work_item_rows(transaction, organization, id)
+}
+
+/// Everything [`forget_work_item`] drops but the links. `to_id` has no index,
+/// so a caller dropping many work items deletes their links in one statement
+/// rather than scanning the relations once for each.
+fn forget_work_item_rows(transaction: &Transaction<'_>, organization: &str, id: i64) -> Result<()> {
+    transaction.execute(
+        "DELETE FROM work_items WHERE organization = ?1 AND work_item_id = ?2",
         params![organization, id],
     )?;
     transaction.execute(

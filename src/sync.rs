@@ -4846,11 +4846,20 @@ mod tests {
         let doomed = ticket(2, "Two").key;
         let graph = TicketGraph {
             artifacts: Vec::new(),
-            relations: vec![RelationRecord {
-                from: doomed.clone(),
-                to: ticket(1, "One").key,
-                kind: RelationKind::Parent,
-            }],
+            // One link leading out of the vanished work item and one leading
+            // into it: both go.
+            relations: vec![
+                RelationRecord {
+                    from: doomed.clone(),
+                    to: ticket(1, "One").key,
+                    kind: RelationKind::Parent,
+                },
+                RelationRecord {
+                    from: ticket(1, "One").key,
+                    to: doomed.clone(),
+                    kind: RelationKind::Related,
+                },
+            ],
             comments: vec![CommentRecord {
                 ticket: doomed.clone(),
                 comment_id: 5,
