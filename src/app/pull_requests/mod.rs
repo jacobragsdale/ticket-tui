@@ -103,6 +103,9 @@ pub struct PullRequestsScreen {
     /// than completing now.
     auto_completing: bool,
     comment: TextInput,
+    /// The pull request the comment prompt's text is for. The text stays
+    /// until it is posted, so a refused comment is not typed twice.
+    comment_for: Option<i64>,
     /// The work-item picker's filter and where its cursor is. The pull request
     /// a link goes to is whichever the table's cursor is on, which cannot move
     /// while the picker is open.
@@ -132,6 +135,7 @@ impl Default for PullRequestsScreen {
             completion_field: 0,
             auto_completing: false,
             comment: TextInput::default(),
+            comment_for: None,
             link_query: TextInput::default(),
             link_cursor: ListCursor::default(),
             vote_cursor: ListCursor::default(),
@@ -474,11 +478,14 @@ impl PullRequestsScreen {
 
     /// `n`: the one-line comment prompt.
     pub fn open_comment(&mut self, shell: &mut Shell) {
-        if self.selected(shell).is_none() {
+        let Some(row) = self.selected(shell) else {
             shell.set_error("No pull request to comment on");
             return;
+        };
+        if self.comment_for != Some(row.request.id) {
+            self.comment = TextInput::default();
+            self.comment_for = Some(row.request.id);
         }
-        self.comment = TextInput::default();
         self.mode = PrMode::Comment;
     }
 
@@ -626,6 +633,10 @@ impl PullRequestsScreen {
     pub fn apply_comment(&mut self, shell: &mut Shell, id: i64, thread: crate::model::PrThread) {
         if let Some(request) = self.requests.iter_mut().find(|request| request.id == id) {
             request.threads.push(thread);
+        }
+        if self.comment_for == Some(id) {
+            self.comment = TextInput::default();
+            self.comment_for = None;
         }
         shell.set_status(format!("Commented on !{id}"));
     }

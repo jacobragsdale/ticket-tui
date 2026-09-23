@@ -558,6 +558,10 @@ fn n_posts_one_comment_and_it_joins_the_discussion() {
         ),
         "got {action:?}"
     );
+    // Until it lands the text is kept: a refusal is not typed twice.
+    press(&mut app, KeyCode::Char('n'));
+    assert_eq!(app.pull_requests.comment_text(), "LGTM once CI is green");
+    press(&mut app, KeyCode::Esc);
 
     app.pull_requests.apply_comment(
         &mut app.shell,
@@ -572,6 +576,12 @@ fn n_posts_one_comment_and_it_joins_the_discussion() {
     );
     let row = app.pull_requests.selected(&app.shell).expect("a row");
     assert_eq!(row.request.threads.len(), 1);
+    press(&mut app, KeyCode::Char('n'));
+    assert_eq!(
+        app.pull_requests.comment_text(),
+        "",
+        "a posted comment is gone"
+    );
 }
 
 #[test]
