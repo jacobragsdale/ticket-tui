@@ -7,7 +7,25 @@ use super::*;
 fn reload_engine_loads_and_prepares_tickets_in_the_background() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("tickets.sqlite3");
-    drop(seeded_repository(&path));
+    let mut repository = seeded_repository(&path);
+    repository
+        .replace_pipelines(&[ticket_tui::model::Pipeline {
+            id: 4,
+            name: "Nightly".to_owned(),
+            folder: "\\".to_owned(),
+            repo_id: None,
+            default_branch: None,
+            url: String::new(),
+            queue_status: "enabled".to_owned(),
+        }])
+        .unwrap();
+    repository
+        .replace_pull_requests(&[super::notify::authored_by_me_with(0)])
+        .unwrap();
+    repository
+        .set_meta(db::TEAM_ITERATION_KEY, "atlas\\Sprint 7")
+        .unwrap();
+    drop(repository);
     let mut reloader = ReloadEngine::default();
 
     assert!(reloader.start(&path).unwrap());
@@ -22,6 +40,17 @@ fn reload_engine_loads_and_prepares_tickets_in_the_background() {
         thread::yield_now();
     };
     assert_eq!(snapshot.ticket_count(), 3);
+
+    // Another process wrote the database: the reload keeps every tab and the
+    // team's sprint rather than emptying them.
+    let mut app = App::new(Vec::new());
+    app.apply_snapshot(snapshot);
+    assert_eq!(app.pipelines.pipelines().len(), 1);
+    assert_eq!(app.pull_requests.repo_of(812), Some("repo"));
+    assert_eq!(
+        app.work_items.current_iterations(),
+        vec!["atlas\\Sprint 7".to_owned()]
+    );
 }
 
 #[test]

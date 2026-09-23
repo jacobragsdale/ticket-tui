@@ -751,8 +751,9 @@ impl App {
 
     /// A vote landing on one you wrote, one of yours closing, or one turning
     /// up wanting your review: news wherever you are, whichever tab is
-    /// showing. A snapshot with no pull requests in it at all — the database
-    /// reload carries none — says nothing about them and is left alone.
+    /// showing. A snapshot with no pull requests in it at all — a database
+    /// that has not pulled them yet — says nothing about them and is left
+    /// alone.
     pub fn announce_pull_requests(&mut self, pull_requests: &[PullRequest]) {
         if pull_requests.is_empty() {
             return;

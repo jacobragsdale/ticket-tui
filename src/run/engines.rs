@@ -297,17 +297,9 @@ impl ReloadEngine {
         thread::Builder::new()
             .name("ticket-reload".into())
             .spawn(move || {
-                let result = (|| -> Result<Snapshot> {
-                    let repository = SqliteTicketRepository::open_existing(&path)?;
-                    let tickets = repository.load_all()?;
-                    let graph = repository.load_graph()?;
-                    let states = repository.load_type_states()?;
-                    let repos = repository.load_repos()?;
-                    Ok(Snapshot::with_graph(tickets, graph)
-                        .with_states(states)
-                        .with_repos(repos))
-                })()
-                .map_err(|error| format!("{error:#}"));
+                let result = SqliteTicketRepository::open_existing(&path)
+                    .and_then(|repository| Snapshot::load(&repository))
+                    .map_err(|error| format!("{error:#}"));
                 let _ = sender.send(result);
             })
             .context("failed to start database reload worker")?;

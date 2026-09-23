@@ -451,6 +451,26 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Everything the database holds that the screens show, read in one go.
+    /// The sync worker and the watcher's reload both come through here, so a
+    /// reload after another process wrote keeps the tabs and the team sprint.
+    pub fn load(repository: &SqliteTicketRepository) -> Result<Self> {
+        let tickets = repository.load_all()?;
+        let graph = repository.load_graph()?;
+        let states = repository.load_type_states()?;
+        let repos = repository.load_repos()?;
+        let pipelines = repository.load_pipelines()?;
+        let runs = repository.load_runs()?;
+        let pull_requests = repository.load_pull_requests()?;
+        let team_iterations = db::team_iterations(repository.meta(db::TEAM_ITERATION_KEY)?);
+        Ok(Self::with_graph(tickets, graph)
+            .with_states(states)
+            .with_repos(repos)
+            .with_pipelines(pipelines, runs)
+            .with_pull_requests(pull_requests)
+            .with_team_iterations(team_iterations))
+    }
+
     #[must_use]
     pub fn new(tickets: Vec<Ticket>) -> Self {
         Self::with_graph(tickets, TicketGraph::default())
@@ -2236,21 +2256,7 @@ impl Worker {
     /// The rows, their graph, and the states they allow, all out of the same
     /// read, so what the main thread shows is what the database holds.
     fn reload(&mut self) -> Result<Snapshot> {
-        let repository = self.repository()?;
-        let tickets = repository.load_all()?;
-        let graph = repository.load_graph()?;
-        let states = repository.load_type_states()?;
-        let repos = repository.load_repos()?;
-        let pipelines = repository.load_pipelines()?;
-        let runs = repository.load_runs()?;
-        let pull_requests = repository.load_pull_requests()?;
-        let team_iterations = db::team_iterations(repository.meta(db::TEAM_ITERATION_KEY)?);
-        Ok(Snapshot::with_graph(tickets, graph)
-            .with_states(states)
-            .with_repos(repos)
-            .with_pipelines(pipelines, runs)
-            .with_pull_requests(pull_requests)
-            .with_team_iterations(team_iterations))
+        Snapshot::load(self.repository()?)
     }
 
     /// The work item types in a batch whose states nobody has read yet, in the
