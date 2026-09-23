@@ -49,15 +49,6 @@ pub const VOTE_CHOICES: &[(&str, char, i8)] = &[
     ("Reset vote", 'r', 0),
 ];
 
-/// The views the tab opens with. `@me` is whoever the last sync signed in as,
-/// so a saved view follows the person rather than the name they had.
-pub const BUILT_IN_VIEWS: &[(&str, &str)] = &[
-    ("To review", "reviewer:@me vote:none status:active"),
-    ("Mine", "author:@me"),
-    ("Active", "status:active"),
-    ("Recently closed", "status:completed status:abandoned"),
-];
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PrMode {
     #[default]
@@ -88,7 +79,6 @@ pub struct PullRequestsScreen {
     /// Whether closed pull requests are on the table. Off by default, the way
     /// finished work items are.
     show_closed: bool,
-    pub active_view: Option<String>,
     /// How many are waiting on the signed-in user, worked out when the list
     /// is set so the tab bar can ask for it without a shell.
     /// Votes out on the wire, with what they were before, so a refusal can put
@@ -128,7 +118,6 @@ impl Default for PullRequestsScreen {
             cursor: ListCursor::default(),
             details: ScrollState::default(),
             show_closed: false,
-            active_view: None,
             pending_votes: Vec::new(),
             undo_votes: Vec::new(),
             completion: CompletionOptions::default(),
@@ -356,17 +345,6 @@ impl PullRequestsScreen {
             .iter()
             .find(|request| request.id == id)
             .map(|request| request.repo_id.as_str())
-    }
-
-    /// Loads one of the built-in views, which are queries and nothing more.
-    pub fn apply_view(&mut self, name: &str) {
-        if let Some((name, query)) = BUILT_IN_VIEWS
-            .iter()
-            .find(|(view, _)| view.eq_ignore_ascii_case(name))
-        {
-            self.set_query((*query).to_owned());
-            self.active_view = Some((*name).to_owned());
-        }
     }
 
     /// `C`: the completion form, refused here rather than at Azure DevOps
@@ -1030,7 +1008,6 @@ impl Screen for PullRequestsScreen {
             KeyCode::Tab => shell.toggle_focus(),
             KeyCode::Esc if !self.query.is_empty() => {
                 self.query.clear();
-                self.active_view = None;
                 self.cursor.reset();
             }
             _ => return self.handle_command_key(shell, key),
@@ -1201,7 +1178,6 @@ impl Screen for PullRequestsScreen {
             // which is cleared rather than reported as a missing row.
             None => {
                 self.query.clear();
-                self.active_view = None;
                 match position(self) {
                     Some(index) => index,
                     None => return false,
@@ -1233,7 +1209,6 @@ impl Screen for PullRequestsScreen {
             query: self.query.text().to_owned(),
             sort_field: <PrColumn as crate::columns::ColumnId>::key(self.sort.0).to_owned(),
             columns: self.layout.to_session_columns(),
-            active_view: self.active_view.clone(),
             ..TabSession::default()
         }
     }
@@ -1245,7 +1220,6 @@ impl Screen for PullRequestsScreen {
             self.sort = (column, self.sort.1);
         }
         self.layout = TableLayout::from_session_columns(&session.columns);
-        self.active_view = session.active_view;
     }
 
     fn footer_hint(&self, _shell: &Shell) -> &str {

@@ -1422,10 +1422,9 @@ from `_apis/connectionData` and kept with the sync settings.
 
 Its grammar: `repo:`, `author:` and `reviewer:` (both take `@me`), `vote:`
 (`approved`, `suggestions`, `waiting`, `rejected`, `none`), `status:`,
-`target:`, `source:`, `draft:` and `build:`. Four built-in views open on the
-questions worth asking — **To review** (`reviewer:@me vote:none status:active`),
-**Mine**, **Active** and **Recently closed** — and the tab badge is the To
-review count.
+`target:`, `source:`, `draft:` and `build:`. The questions worth asking are
+queries — to review is `reviewer:@me vote:none status:active` — and the tab
+badge is that count.
 
 ## Pipelines
 

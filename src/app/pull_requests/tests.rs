@@ -190,10 +190,11 @@ fn a_pull_request_in_a_repository_not_cloned_here_stays_off_the_tab_and_a_jump_s
 }
 
 #[test]
-fn the_built_in_views_ask_the_questions_the_epic_names() {
+fn the_questions_the_epic_names_are_queries() {
     let mut app = pull_requests_app();
 
-    app.pull_requests.apply_view("To review");
+    app.pull_requests
+        .set_query("reviewer:@me vote:none status:active".to_owned());
     assert_eq!(
         app.pull_requests
             .visible(&app.shell)
@@ -204,7 +205,7 @@ fn the_built_in_views_ask_the_questions_the_epic_names() {
         "the one I am a reviewer on and have not voted"
     );
 
-    app.pull_requests.apply_view("Mine");
+    app.pull_requests.set_query("author:@me".to_owned());
     assert_eq!(
         app.pull_requests
             .visible(&app.shell)
@@ -214,10 +215,11 @@ fn the_built_in_views_ask_the_questions_the_epic_names() {
         [12]
     );
 
-    app.pull_requests.apply_view("Active");
+    app.pull_requests.set_query("status:active".to_owned());
     assert_eq!(app.pull_requests.visible(&app.shell).len(), 3);
 
-    app.pull_requests.apply_view("Recently closed");
+    app.pull_requests
+        .set_query("status:completed status:abandoned".to_owned());
     assert_eq!(
         app.pull_requests
             .visible(&app.shell)
@@ -667,10 +669,10 @@ fn esc_leaves_the_work_item_picker_without_linking_anything() {
 }
 
 #[test]
-fn a_completed_pull_request_leaves_the_active_view() {
+fn a_completed_pull_request_leaves_a_status_active_search() {
     let mut app = pull_requests_app();
     app.select_tab(TabId::PullRequests);
-    app.pull_requests.apply_view("Active");
+    app.pull_requests.set_query("status:active".to_owned());
     assert_eq!(app.pull_requests.visible(&app.shell).len(), 3);
 
     let mut landed = pull_request(11, "Split the files", "Avery", PrStatus::Completed);
@@ -719,14 +721,14 @@ fn a_pull_keeps_the_cursor_on_the_same_pull_request_and_a_jump_beats_the_query()
         "the hand stays on the pull request it was on, one row down"
     );
 
-    // A view that leaves !11 off the table does not stop a reference to it.
-    app.pull_requests.apply_view("Mine");
+    // A query that leaves !11 off the table does not stop a reference to it.
+    app.pull_requests.set_query("author:@me".to_owned());
     assert!(
         app.pull_requests
             .visible(&app.shell)
             .iter()
             .all(|row| row.request.id != 11),
-        "the view hides it"
+        "the query hides it"
     );
     assert!(app.follow(&crate::app::Jump::PullRequest {
         repo: "ticket-tui".into(),
@@ -739,7 +741,7 @@ fn a_pull_keeps_the_cursor_on_the_same_pull_request_and_a_jump_beats_the_query()
         Some(11)
     );
     assert!(
-        app.pull_requests.query().is_empty() && app.pull_requests.active_view.is_none(),
+        app.pull_requests.query().is_empty(),
         "the query is cleared rather than the reference refused"
     );
 }

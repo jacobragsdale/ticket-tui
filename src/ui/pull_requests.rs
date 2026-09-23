@@ -275,10 +275,7 @@ fn render_search(
             active: screen.mode == PrMode::Search,
             pending: false,
             clearable: false,
-            trailer: screen
-                .active_view
-                .as_ref()
-                .map_or_else(String::new, |view| format!("\u{2022} {view}")),
+            trailer: String::new(),
             layer: PointerLayer::Modal,
             selectable: SelectableSurface::Overlay,
         },
