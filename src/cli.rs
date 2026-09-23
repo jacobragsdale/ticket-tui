@@ -164,7 +164,8 @@ pub enum Command {
     /// Print work items from the database, without touching the network
     List {
         /// The TUI's own filter grammar, such as `state:doing assignee:@me`;
-        /// anything that is not a `field:value` pair is matched fuzzily
+        /// anything that is not a `field:value` pair has to appear literally,
+        /// ignoring case
         #[arg(long, value_name = "QUERY")]
         query: Option<String>,
         /// Print the rows as a JSON array rather than as a table
@@ -357,7 +358,7 @@ pub enum ReposCommand {
     /// Print the project's repositories
     List {
         /// The Repos tab's filter grammar: `name:`, `branch:`, `local:` and
-        /// `disabled:`; anything else is matched fuzzily
+        /// `disabled:`; anything else has to appear literally, ignoring case
         #[arg(long, value_name = "QUERY")]
         query: Option<String>,
         #[arg(long)]
@@ -382,7 +383,8 @@ pub enum PrsCommand {
     List {
         /// The Pull requests tab's filter grammar: `repo:`, `author:`,
         /// `reviewer:` (`@me`), `vote:`, `status:`, `target:`, `source:`,
-        /// `draft:` and `build:`; anything else is matched fuzzily
+        /// `draft:` and `build:`; anything else has to appear literally,
+        /// ignoring case
         #[arg(long, value_name = "QUERY")]
         query: Option<String>,
         #[arg(long)]
@@ -1165,8 +1167,8 @@ fn run_list(database: &Path, query: Option<&str>, json: bool) -> Result<()> {
 
 /// The work items one `--query` names, newest change first so the same
 /// invocation twice running answers in the same order. The grammar is the
-/// TUI's own: `field:value` pairs narrow, and whatever is left over is matched
-/// fuzzily and orders the rows by how well it matched.
+/// TUI's own: `field:value` pairs narrow, and whatever is left over has to
+/// appear literally, ignoring case, and orders the rows by how well it matched.
 fn select(
     tickets: Vec<Ticket>,
     query: Option<&str>,
@@ -4000,7 +4002,7 @@ mod tests {
         assert_eq!(
             fuzzy.iter().map(|ticket| ticket.key.id).collect::<Vec<_>>(),
             vec![1],
-            "whatever is left over after the field filters is matched fuzzily"
+            "whatever is left over after the field filters has to appear in the row"
         );
     }
 
