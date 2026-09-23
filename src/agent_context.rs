@@ -14,10 +14,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use crate::model::{RowDensity, SearchOrder, SortDirection, SortField};
+use crate::timestamp::Timestamp;
 
 pub const SCHEMA_VERSION: u8 = 4;
 
@@ -378,9 +377,7 @@ pub fn save(path: &Path, context: &AgentContext) -> Result<()> {
     let document = ContextDocument {
         schema_version: SCHEMA_VERSION,
         process_id: std::process::id(),
-        updated_at: OffsetDateTime::now_utc()
-            .format(&Rfc3339)
-            .context("failed to format agent context time")?,
+        updated_at: Timestamp::now().to_rfc3339(),
         context,
     };
     let mut raw =
