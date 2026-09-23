@@ -2969,13 +2969,12 @@ fn run_runs(cli: &Cli, database: &Path, command: &RunsCommand) -> Result<()> {
             follow,
         } => {
             let client = connect(cli)?;
-            print_log(
-                &client,
-                *id,
-                job.as_deref().or(task.as_deref()),
-                *follow,
-                &sleep,
-            )
+            let node = match (job, task) {
+                (Some(name), _) => Some((TimelineKind::Job, name.as_str())),
+                (None, Some(name)) => Some((TimelineKind::Task, name.as_str())),
+                (None, None) => None,
+            };
+            print_log(&client, *id, node, *follow, &sleep)
         }
         RunsCommand::Trigger {
             pipeline,
@@ -3063,11 +3062,13 @@ fn wait_for_run(source: &dyn PipelineSource, id: i64, rest: &dyn Fn(Duration)) -
 /// is what the tab's own log pane shows — and, while following, moves on to
 /// the next node as each finishes, so `--follow` reads the whole run rather
 /// than its first task. A run that has not written anything yet is waited
-/// for rather than refused: one just queued has no timeline at all.
+/// for rather than refused: one just queued has no timeline at all. A named
+/// node is a job or a task, since a stage usually shares its only job's name
+/// and has no log of its own.
 fn print_log(
     source: &dyn PipelineSource,
     run_id: i64,
-    node: Option<&str>,
+    node: Option<(TimelineKind, &str)>,
     follow: bool,
     rest: &dyn Fn(Duration),
 ) -> Result<()> {
@@ -3078,9 +3079,9 @@ fn print_log(
     loop {
         let timeline = source.timeline(run_id)?;
         let record = match node {
-            Some(name) => timeline
+            Some((kind, name)) => timeline
                 .iter()
-                .find(|record| same_text(&record.name, name))
+                .find(|record| record.kind == kind && same_text(&record.name, name))
                 .with_context(|| format!("run {run_id} has no node called {name}"))?,
             None => {
                 let chosen = timeline
@@ -3089,8 +3090,9 @@ fn print_log(
                     .or_else(|| timeline.iter().rfind(|record| record.log_id.is_some()));
                 match chosen {
                     Some(record) => record,
-                    None if follow && timeline.iter().all(|record| record.state.is_live())
-                        || (follow && timeline.is_empty()) =>
+                    None if follow
+                        && (timeline.is_empty()
+                            || timeline.iter().any(|record| record.state.is_live())) =>
                     {
                         rest(LOG_CADENCE);
                         continue;
@@ -3102,6 +3104,9 @@ fn print_log(
         let Some(log_id) = record.log_id else {
             if !follow {
                 bail!("{} has written no log", record.name);
+            }
+            if !record.state.is_live() {
+                bail!("{} finished without a log", record.name);
             }
             rest(LOG_CADENCE);
             continue;
@@ -5251,7 +5256,14 @@ mod tests {
         let counter = Arc::clone(&rested);
         let rest = move |_: Duration| *rested.lock().unwrap() += 1;
 
-        print_log(&source, 14, Some("Build"), true, &rest).unwrap();
+        print_log(
+            &source,
+            14,
+            Some((TimelineKind::Task, "Build")),
+            true,
+            &rest,
+        )
+        .unwrap();
 
         assert_eq!(
             *counter.lock().unwrap(),
@@ -5278,9 +5290,59 @@ mod tests {
             vec![vec![scripted_node("Build", RunStatus::Completed)]],
             Vec::new(),
         );
-        let refused = print_log(&source, 14, Some("Deploy"), false, &|_| ()).unwrap_err();
+        let refused = print_log(
+            &source,
+            14,
+            Some((TimelineKind::Task, "Deploy")),
+            false,
+            &|_| (),
+        )
+        .unwrap_err();
         assert!(
             refused.to_string().contains("no node called Deploy"),
+            "{refused}"
+        );
+    }
+
+    #[test]
+    fn a_named_log_is_the_job_or_task_asked_for_and_one_never_written_is_not_waited_on() {
+        use crate::model::RunStatus;
+
+        // The usual YAML shape: a stage and its one job share a name, and only
+        // the job has a log.
+        let mut stage = scripted_node("Build", RunStatus::Completed);
+        stage.kind = TimelineKind::Stage;
+        stage.log_id = None;
+        let mut job = scripted_node("Build", RunStatus::Completed);
+        job.kind = TimelineKind::Job;
+        let source = ScriptedRuns::new(
+            Vec::new(),
+            vec![vec![stage, job]],
+            vec![vec!["compiling".to_owned()]],
+        );
+        print_log(
+            &source,
+            14,
+            Some((TimelineKind::Job, "Build")),
+            false,
+            &|_| (),
+        )
+        .expect("the job's log, not the stage's absence of one");
+
+        // A task that finished without writing is said, not followed for ever.
+        let mut silent = scripted_node("Lint", RunStatus::Completed);
+        silent.log_id = None;
+        let source = ScriptedRuns::new(Vec::new(), vec![vec![silent]], Vec::new());
+        let rests = Mutex::new(0usize);
+        let rest = |_: Duration| {
+            let mut rests = rests.lock().unwrap();
+            *rests += 1;
+            assert!(*rests <= 5, "it kept waiting on a finished task");
+        };
+        let refused =
+            print_log(&source, 14, Some((TimelineKind::Task, "Lint")), true, &rest).unwrap_err();
+        assert!(
+            refused.to_string().contains("finished without a log"),
             "{refused}"
         );
     }

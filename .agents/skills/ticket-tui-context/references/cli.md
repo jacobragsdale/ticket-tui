@@ -428,8 +428,8 @@ TUI uses — `✓` succeeded, `✗` failed, `◐` running, `◑` partly succeede
 canceled, `○` not started. `--json` prints the run plus a flat `timeline` array
 where each node names its `parent_id`, which is what a tree is on the wire.
 
-`runs logs ID` prints one node's log. `--job NAME` or `--task NAME` names it;
-with neither it takes the deepest node still running, which is what the TUI's
+`runs logs ID` prints one node's log. `--job NAME` names a job and `--task NAME`
+a task, so a stage of the same name is passed over; with neither it takes the deepest node still running, which is what the TUI's
 log pane shows. `--follow` keeps printing what is new, sending the line count it
 already holds so each poll fetches only the tail, and returns when the node
 finishes.

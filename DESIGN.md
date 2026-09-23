@@ -2234,10 +2234,12 @@ Timeline
       ✓ Wait briefly  59s
 ```
 
-`runs logs` prints one node's log — `--job` or `--task` names it, and with
-neither it takes the deepest node still running, which is what the tab's log
-pane shows. `--follow` keeps printing as the node writes, at the watcher's own
-cadence and honouring the same throttling, and returns when the node finishes.
+`runs logs` prints one node's log — `--job` names a job and `--task` a task, so
+a stage sharing its job's name is passed over, and with neither it takes the
+deepest node still running, which is what the tab's log pane shows. `--follow`
+keeps printing as the node writes, at the watcher's own cadence and honouring
+the same throttling, and returns when the node finishes; a node that finished
+without writing a log is said rather than waited on.
 
 The blocking pair is what an agent wants: `runs trigger <pipeline> --branch main
 --follow` starts a build, tails its log, and exits when it stops; `runs wait
