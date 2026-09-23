@@ -2098,6 +2098,9 @@ TUI's own [filter grammar](#controls): `field:value` pairs narrow,
 over has to appear literally, and orders the rows. Without a search term
 the rows come back newest change first. `is:bookmarked` matches nothing out here:
 bookmarks live in the TUI's session file, which a one-shot read does not open.
+A `word:value` whose word names no field is searched for as text, as in the
+TUI, and every `--query` in the CLI says so on stderr — ``note: `stat:` is not
+a filter field; matched as text`` — so a typo does not pass for an empty answer.
 
 ```console
 ticket-tui list --query 'state:doing assignee:@me' --json

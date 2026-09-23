@@ -1180,6 +1180,7 @@ fn select(
         return Ok(by_recency(tickets));
     };
     let parsed = parse_query::<WorkItemSchema>(query);
+    warn_unknown_fields::<WorkItemSchema>(&parsed.fuzzy);
     refuse_unresolvable_sentinels(&parsed, context, tree)?;
     let matching: Vec<Ticket> = tickets
         .into_iter()
@@ -1194,6 +1195,35 @@ fn select(
         .into_iter()
         .map(|found| matching[found.ticket_index].clone())
         .collect())
+}
+
+/// Says on stderr, for each term, that a `word:value` whose word names no
+/// field was searched for as text. Otherwise `stat:doing` quietly matches
+/// nothing and exits 0, which reads as "nothing is in progress".
+fn warn_unknown_fields<S: filter::FilterSchema>(text: &str) {
+    for note in unknown_fields::<S>(text) {
+        eprintln!("{note}");
+    }
+}
+
+/// The notes [`warn_unknown_fields`] prints. Only a term that opens with a
+/// bare word, a colon and a value counts, so `fix: x` in a title and a URL
+/// are left alone.
+fn unknown_fields<S: filter::FilterSchema>(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter_map(|term| term.split_once(':'))
+        .filter(|(word, value)| {
+            !word.is_empty()
+                && word
+                    .chars()
+                    .all(|character| character.is_ascii_alphabetic())
+                && !value.is_empty()
+                && !value.starts_with('/')
+                && !word.eq_ignore_ascii_case("is")
+                && S::parse(word).is_none()
+        })
+        .map(|(word, _)| format!("note: `{word}:` is not a filter field; matched as text"))
+        .collect()
 }
 
 /// Newest change first, and by id when two work items changed in the same
@@ -2119,6 +2149,7 @@ fn filter_repos(rows: Vec<RepoRow>, query: Option<&str>) -> Vec<RepoRow> {
         return rows;
     };
     let parsed = parse_query::<RepoSchema>(query);
+    warn_unknown_fields::<RepoSchema>(&parsed.fuzzy);
     let context = MatchContext::now();
     rows.into_iter()
         .filter(|row| {
@@ -2326,6 +2357,7 @@ fn filter_pull_requests(
         return Ok(rows);
     };
     let parsed = parse_query::<PrSchema>(query);
+    warn_unknown_fields::<PrSchema>(&parsed.fuzzy);
     let context = MatchContext::now().with_me(me);
     if context.me.is_none() && query.contains("@me") {
         bail!(
@@ -3191,6 +3223,9 @@ fn filter_runs(
 ) -> Vec<RunRow> {
     let context = MatchContext::now().with_me(me);
     let parsed = query.map(parse_query::<RunSchema>);
+    if let Some(parsed) = &parsed {
+        warn_unknown_fields::<RunSchema>(&parsed.fuzzy);
+    }
     rows.into_iter()
         .filter(|row| pipeline.is_none_or(|name| same_text(&row.pipeline, name)))
         .filter(|row| {
@@ -3734,6 +3769,21 @@ mod tests {
         );
         assert_eq!(resolve_me(None, None), None);
         assert_eq!(resolve_me(Some(String::new()), None), None);
+    }
+
+    #[test]
+    fn a_query_word_that_names_no_field_is_noted_as_text() {
+        let parsed = parse_query::<PrSchema>("reviewr:@me fix: x https://dev.azure.com");
+        assert_eq!(
+            unknown_fields::<PrSchema>(&parsed.fuzzy),
+            vec!["note: `reviewr:` is not a filter field; matched as text"]
+        );
+        let parsed = parse_query::<WorkItemSchema>("stat:doing state:doing");
+        assert_eq!(
+            unknown_fields::<WorkItemSchema>(&parsed.fuzzy),
+            vec!["note: `stat:` is not a filter field; matched as text"]
+        );
+        assert!(unknown_fields::<RunSchema>("result:failed deploy").is_empty());
     }
 
     #[test]
