@@ -212,6 +212,7 @@ impl WorkItemsScreen {
         self.sort_visible(shell);
         self.restore_selection(shell, selected.as_ref());
         self.search_pending = false;
+        self.close_orphaned_composer(shell);
         true
     }
 

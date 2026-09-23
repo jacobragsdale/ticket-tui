@@ -167,6 +167,19 @@ impl WorkItemsScreen {
         self.mode = WorkItemMode::Browse;
     }
 
+    /// Closes the composer, keeping its draft, once the work item it writes to
+    /// is no longer the one the details pane shows: a pull that took it out of
+    /// the list would otherwise leave typing going nowhere and `Ctrl-S` saving
+    /// onto a work item that has gone.
+    pub(super) fn close_orphaned_composer(&mut self, shell: &mut Shell) {
+        if self.composer.as_ref().is_some_and(|composer| {
+            self.detail_ticket()
+                .is_none_or(|ticket| ticket.key != composer.key)
+        }) {
+            self.close_composer(shell);
+        }
+    }
+
     /// Saves what the composer holds: the acceptance criteria go down the
     /// field-edit path as HTML, a comment is posted. An empty comment is
     /// refused with the composer left open, criteria saved back as they were

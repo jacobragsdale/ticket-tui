@@ -307,6 +307,7 @@ impl WorkItemsScreen {
         shell.stale = false;
         if self.fuzzy_query().is_empty() {
             self.show_all(shell, selected.as_ref());
+            self.close_orphaned_composer(shell);
         } else {
             self.pending_selection = selected;
             self.visible.clear();

@@ -848,6 +848,26 @@ fn esc_keeps_a_comment_draft_until_it_is_posted() {
 }
 
 #[test]
+fn a_composer_closes_with_its_draft_kept_when_its_work_item_leaves_the_list() {
+    let mut app = edit_app();
+    open_menu(&mut app, CommandId::AddComment);
+    type_text(&mut app, "half a thought");
+
+    app.work_items.replace_tickets(
+        &mut app.shell,
+        vec![
+            ticket(1, "Alpha", "2026-01-01T00:00:00Z"),
+            ticket(2, "Beta", "2026-02-01T00:00:00Z"),
+        ],
+    );
+    assert_eq!(app.work_items.mode, WorkItemMode::Browse);
+    assert!(app.work_items.composer.is_none(), "nothing is typed blind");
+    assert_eq!(app.work_items.unsent(), (1, 0), "the draft is kept");
+    let (message, _) = app.shell.notification().expect("and it says where");
+    assert_eq!(message, "Draft kept on #3");
+}
+
+#[test]
 fn q_with_a_draft_kept_asks_again_before_quitting() {
     let mut app = edit_app();
     open_menu(&mut app, CommandId::AddComment);
