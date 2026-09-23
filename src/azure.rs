@@ -122,15 +122,11 @@ impl AzureConfig {
         let organization = organization
             .or_else(|| std::env::var("TICKET_TUI_ORG").ok())
             .or_else(|| defaults.0.clone())
-            .context(
-                "no Azure DevOps organization; pass --org, set TICKET_TUI_ORG, or run `az devops configure --defaults organization=...`",
-            )?;
+            .with_context(|| unconfigured("organization", "org"))?;
         let project = project
             .or_else(|| std::env::var("TICKET_TUI_PROJECT").ok())
             .or_else(|| defaults.1.clone())
-            .context(
-                "no Azure DevOps project; pass --project, set TICKET_TUI_PROJECT, or run `az devops configure --defaults project=...`",
-            )?;
+            .with_context(|| unconfigured("project", "project"))?;
         let code_project = settled_code_project(
             code_project.or_else(|| std::env::var("TICKET_TUI_CODE_PROJECT").ok()),
             &project,
@@ -153,6 +149,16 @@ impl AzureConfig {
     pub fn work_item_url(&self, id: i64) -> String {
         format!("{}/{}/_workitems/edit/{id}", self.base_url(), self.project)
     }
+}
+
+/// Every way to name the organization or project nobody named, config.toml
+/// first among them because it is the one file a setup writes.
+fn unconfigured(what: &str, key: &str) -> String {
+    format!(
+        "no Azure DevOps {what}; set devops.{key} in {}, pass --{key}, set TICKET_TUI_{}, or run `az devops configure --defaults {what}=...`",
+        crate::config::default_path().display(),
+        key.to_uppercase()
+    )
 }
 
 /// Where the repositories, pull requests and pipelines live: whatever was
@@ -2891,6 +2897,15 @@ mod tests {
             "the variable lists several with commas"
         );
         assert!(teams_named(Vec::new(), None).is_empty());
+    }
+
+    #[test]
+    fn a_missing_organization_or_project_points_at_config_toml() {
+        let organization = unconfigured("organization", "org");
+        assert!(organization.contains("devops.org in "), "{organization}");
+        assert!(organization.contains("config.toml"), "{organization}");
+        assert!(organization.contains("--org, set TICKET_TUI_ORG"));
+        assert!(unconfigured("project", "project").contains("devops.project in "));
     }
 
     /// A client that never reaches the network, for the URLs it builds.

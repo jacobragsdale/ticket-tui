@@ -69,8 +69,9 @@ asks Azure DevOps for; both are under
 
 Without a configured organization the TUI runs offline: it browses the database,
 never contacts the network, and `r` reports the missing organization. An empty
-database then opens to the status line ``Database is empty and offline; run
-`ticket-tui sync --org ORG --project PROJECT` to pull work items``.
+database then opens to a status line that says to set `devops.org` and
+`devops.project` in `config.toml` (naming its path) or run
+`ticket-tui sync --org ORG --project PROJECT` to pull work items.
 
 To use another database file:
 

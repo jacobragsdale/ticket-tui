@@ -312,10 +312,13 @@ fn stamp_database(app: &mut App, repository: &SqliteTicketRepository) {
 /// with something in it opens with nothing: the footer already says
 /// `Offline`, and a notification saying it again with a tick reads as news.
 /// An empty one says how to fill it.
-fn offline_status(database_is_empty: bool) -> Option<&'static str> {
-    database_is_empty.then_some(
-        "Database is empty and offline; run `ticket-tui sync --org ORG --project PROJECT` to pull work items",
-    )
+fn offline_status(database_is_empty: bool) -> Option<String> {
+    database_is_empty.then(|| {
+        format!(
+            "Database is empty and offline; set devops.org and devops.project in {}, or run `ticket-tui sync --org ORG --project PROJECT` to pull work items",
+            ticket_tui::config::default_path().display()
+        )
+    })
 }
 
 /// Why the resolved project must not sync into this database, if it must not.
