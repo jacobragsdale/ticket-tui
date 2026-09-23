@@ -3047,13 +3047,28 @@ fn report_run(run: &Run) -> ! {
 /// Polls one run until it stops, at the watcher's own live cadence.
 fn wait_for_run(source: &dyn PipelineSource, id: i64, rest: &dyn Fn(Duration)) -> Result<Run> {
     loop {
-        let run = source
-            .run(id)?
-            .with_context(|| format!("Azure DevOps has no run {id}"))?;
+        let Some(run) = unless_throttled(source.run(id), rest)? else {
+            continue;
+        };
+        let run = run.with_context(|| format!("Azure DevOps has no run {id}"))?;
         if !run.status.is_live() {
             return Ok(run);
         }
         rest(source.throttled_for().unwrap_or(LIVE_RUNS_CADENCE));
+    }
+}
+
+/// A read's answer, or `None` once the wait a throttled read asked for is
+/// over, so a blocking command asks again rather than exiting 1, which says
+/// the run failed. Every other error still stops it.
+fn unless_throttled<T>(read: Result<T>, rest: &dyn Fn(Duration)) -> Result<Option<T>> {
+    match read {
+        Ok(answer) => Ok(Some(answer)),
+        Err(error) => {
+            let wait = crate::azure::throttle_delay(&error).ok_or(error)?;
+            rest(wait);
+            Ok(None)
+        }
     }
 }
 
@@ -3077,7 +3092,9 @@ fn print_log(
     // and says whose it is.
     let mut printing: Option<i64> = None;
     loop {
-        let timeline = source.timeline(run_id)?;
+        let Some(timeline) = unless_throttled(source.timeline(run_id), rest)? else {
+            continue;
+        };
         let record = match node {
             Some((kind, name)) => timeline
                 .iter()
@@ -3118,7 +3135,11 @@ fn print_log(
             printing = Some(log_id);
             from_line = 0;
         }
-        for line in source.log_lines(run_id, log_id, from_line)? {
+        let Some(lines) = unless_throttled(source.log_lines(run_id, log_id, from_line), rest)?
+        else {
+            continue;
+        };
+        for line in lines {
             emit(&line);
             from_line += 1;
         }
@@ -5230,6 +5251,42 @@ mod tests {
         );
         assert_eq!(printable(&decoded), "a]52;c;eA==b");
         assert_eq!(printable("one\ttwo\nthree\r"), "one\ttwo\nthree");
+    }
+
+    #[test]
+    fn waiting_sits_out_a_throttled_read_rather_than_calling_the_run_failed() {
+        use crate::model::RunStatus;
+
+        struct ThrottledOnce(Mutex<usize>);
+        impl PipelineSource for ThrottledOnce {
+            fn live_runs(&self) -> Result<Vec<Run>> {
+                Ok(Vec::new())
+            }
+
+            fn run(&self, _run_id: i64) -> Result<Option<Run>> {
+                let mut calls = self.0.lock().unwrap();
+                *calls += 1;
+                if *calls == 1 {
+                    return Err(anyhow::Error::new(crate::azure::Throttled::new(
+                        Duration::from_secs(7),
+                        429,
+                        "https://dev.azure.com/demo",
+                        "slow down",
+                    )));
+                }
+                Ok(Some(scripted_run(
+                    RunStatus::Completed,
+                    Some(RunResult::Succeeded),
+                )))
+            }
+        }
+
+        let rested = Mutex::new(Vec::new());
+        let rest = |wait: Duration| rested.lock().unwrap().push(wait);
+        let run = wait_for_run(&ThrottledOnce(Mutex::new(0)), 14, &rest).unwrap();
+
+        assert_eq!(run.result, Some(RunResult::Succeeded));
+        assert_eq!(*rested.lock().unwrap(), vec![Duration::from_secs(7)]);
     }
 
     #[test]

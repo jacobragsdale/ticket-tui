@@ -2245,7 +2245,9 @@ The blocking pair is what an agent wants: `runs trigger <pipeline> --branch main
 --follow` starts a build, tails its log, and exits when it stops; `runs wait
 <id>` just waits. Both exit with the result rather than making you parse
 anything — **0** succeeded, **1** failed, **2** canceled, **3** partially
-succeeded — so a script can branch on `$?`.
+succeeded — so a script can branch on `$?`. A read Azure DevOps turns away to
+shed load is waited out for as long as it asks rather than reported, so a
+throttled poll never reads as a failed run.
 
 ```console
 $ ticket-tui runs trigger 'ticket-tui CI' --branch main --follow
