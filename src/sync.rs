@@ -1956,7 +1956,7 @@ impl Worker {
     fn sync_team_sprint(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
         let sprint = match self.source(events)?.team_current_iterations() {
             Ok(found) => found.join("\n"),
-            Err(error) => return Ok(Self::warn(events, "Team sprint", &error)),
+            Err(error) => return Ok(self.warn(events, "Team sprint", &error)),
         };
         let repository = self.repository()?;
         if repository.meta(db::TEAM_ITERATION_KEY)?.unwrap_or_default() == sprint {
@@ -1967,8 +1967,10 @@ impl Worker {
     }
 
     /// Reports a read on the side of a pull that failed, and answers that
-    /// nothing was written.
-    fn warn(events: &Sender<SyncEvent>, what: &str, error: &anyhow::Error) -> bool {
+    /// nothing was written. A read that was throttled holds the next pull off
+    /// too.
+    fn warn(&mut self, events: &Sender<SyncEvent>, what: &str, error: &anyhow::Error) -> bool {
+        self.note_throttle(error);
         let _ = events.send(SyncEvent::Warning(format!("{what}: {error:#}")));
         false
     }
@@ -1980,7 +1982,7 @@ impl Worker {
     fn sync_repos(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
         let (repos, project_id) = match self.source(events)?.repositories() {
             Ok(found) => found,
-            Err(error) => return Ok(Self::warn(events, "Repos", &error)),
+            Err(error) => return Ok(self.warn(events, "Repos", &error)),
         };
         let repository = self.repository()?;
         let written = repository.replace_repos(&repos)?;
@@ -1999,11 +2001,11 @@ impl Worker {
     fn sync_pipelines(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
         let pipelines = match self.source(events)?.pipelines() {
             Ok(found) => found,
-            Err(error) => return Ok(Self::warn(events, "Pipelines", &error)),
+            Err(error) => return Ok(self.warn(events, "Pipelines", &error)),
         };
         let runs = match self.source(events)?.runs() {
             Ok(found) => found,
-            Err(error) => return Ok(Self::warn(events, "Pipeline runs", &error)),
+            Err(error) => return Ok(self.warn(events, "Pipeline runs", &error)),
         };
         let repository = self.repository()?;
         let stored_pipelines = repository.replace_pipelines(&pipelines)?;
@@ -2133,14 +2135,14 @@ impl Worker {
     /// with a list missing that page would drop every pull request on it.
     /// Each extra starts from what was read before and is replaced only by a
     /// read that answered — an empty answer included — and a pull request read
-    /// in part, or passed over by the budget, is noted so the next pull reads
-    /// it again whether or not its head has moved.
+    /// in part, or passed over by the budget or a throttle, is noted so the
+    /// next pull reads it again whether or not its head has moved.
     fn sync_pull_requests(&mut self, events: &Sender<SyncEvent>) -> Result<bool> {
         let mut requests = Vec::new();
         for (status, top) in [("active", 200), ("completed", 50), ("abandoned", 50)] {
             match self.source(events)?.pull_requests(status, top) {
                 Ok(found) => requests.extend(found),
-                Err(error) => return Ok(Self::warn(events, "Pull requests", &error)),
+                Err(error) => return Ok(self.warn(events, "Pull requests", &error)),
             }
         }
         let stored = self.repository()?.load_pull_requests()?;
@@ -2150,6 +2152,7 @@ impl Worker {
         let mut refreshed = 0;
         let mut failed = 0;
         let mut last_error = None;
+        let mut throttled = false;
         for request in &mut requests {
             let held = stored.iter().find(|held| held.id == request.id);
             if let Some(held) = held {
@@ -2174,7 +2177,9 @@ impl Worker {
             if (unchanged && !was_pending.contains(&request.id)) || request.status.is_closed() {
                 continue;
             }
-            if refreshed >= PR_REFRESH_BUDGET {
+            // Once Azure DevOps has asked for a wait, the rest keep what they
+            // had and are read by a later pull rather than refused one by one.
+            if throttled || refreshed >= PR_REFRESH_BUDGET {
                 pending.insert(request.id);
                 continue;
             }
@@ -2207,6 +2212,9 @@ impl Worker {
             if !complete {
                 failed += 1;
                 pending.insert(request.id);
+                throttled = last_error
+                    .as_ref()
+                    .is_some_and(|error| self.note_throttle(error));
             }
         }
         if let Some(error) = last_error {
@@ -2599,6 +2607,8 @@ mod tests {
         /// work items read answers with instead of the usual one.
         pr_failing: Arc<Mutex<Vec<i64>>>,
         pr_work_items: Arc<Mutex<Option<Vec<i64>>>>,
+        /// The waits a pull request's work items read is turned away with.
+        pr_throttles: Arc<Mutex<Vec<Duration>>>,
         /// Who this source says is signed in, how often it was asked, and
         /// every vote it took.
         my_id: Option<String>,
@@ -2944,6 +2954,9 @@ mod tests {
             self.pr_extras.lock().unwrap().push(id);
             if self.pr_failing.lock().unwrap().contains(&id) {
                 return Err(anyhow!("HTTP 500 for pullRequests/{id}/workitems"));
+            }
+            if let Some(refusal) = throttled(&self.pr_throttles) {
+                return Err(refusal);
             }
             Ok(self
                 .pr_work_items
@@ -4073,6 +4086,75 @@ mod tests {
                 .as_deref(),
             Some("[]"),
             "and nothing is noted for the pull after"
+        );
+    }
+
+    #[test]
+    fn a_throttled_pull_request_read_leaves_the_rest_as_they_were_until_the_next_pull() {
+        let directory = tempdir().unwrap();
+        let path = seeded_database(&directory);
+        let active = Arc::new(Mutex::new(vec![
+            pull_request(7, "commit-a", PrStatus::Active),
+            pull_request(8, "commit-a", PrStatus::Active),
+        ]));
+        let source = FakeSource {
+            pull_requests: Arc::clone(&active),
+            ..FakeSource::with(quiet_pulls(2))
+        };
+        let extras = Arc::clone(&source.pr_extras);
+        let throttles = Arc::clone(&source.pr_throttles);
+        let handle = SyncHandle::spawn(path.clone(), Box::new(source)).unwrap();
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        pulled_with_warnings(&handle);
+        let mut repository = SqliteTicketRepository::open_existing(&path).unwrap();
+        let mut stored = repository.load_pull_requests().unwrap();
+        let thread = PrThread {
+            id: 1,
+            author: "Avery".into(),
+            text: "Looks good".into(),
+            published_at: None,
+            status: "active".into(),
+        };
+        stored
+            .iter_mut()
+            .find(|request| request.id == 8)
+            .unwrap()
+            .threads = vec![thread.clone()];
+        repository.replace_pull_requests(&stored).unwrap();
+
+        // Both heads move, and the first read is turned away for a minute.
+        extras.lock().unwrap().clear();
+        *throttles.lock().unwrap() = vec![Duration::from_secs(60)];
+        *active.lock().unwrap() = vec![
+            pull_request(7, "commit-b", PrStatus::Active),
+            pull_request(8, "commit-b", PrStatus::Active),
+        ];
+        handle.send(SyncRequest::Pull(PullOrigin::Timer)).unwrap();
+        let pause = loop {
+            match next_event(&handle) {
+                SyncEvent::Finished { pause, .. } => break pause,
+                SyncEvent::Warning(_) | SyncEvent::DisplayName(_) => {}
+                other => panic!("expected a finished pull, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            *extras.lock().unwrap(),
+            vec![7],
+            "nothing is asked after the throttle"
+        );
+        assert_eq!(pause, Some(Duration::from_secs(60)));
+        let stored = stored_pull_requests(&path);
+        let eight = stored.iter().find(|request| request.id == 8).unwrap();
+        assert_eq!(eight.last_merge_source_commit, "commit-b");
+        assert_eq!(eight.work_items, vec![10_001]);
+        assert_eq!(eight.threads, vec![thread]);
+        assert_eq!(
+            repository
+                .meta(db::PR_REFRESH_PENDING_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("[7,8]"),
+            "both are read again next pull"
         );
     }
 
