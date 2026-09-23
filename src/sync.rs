@@ -198,8 +198,6 @@ pub enum SyncRequest {
         new_parent: Option<i64>,
     },
     /// Move one work item to the project's recycle bin, and forget it here.
-    /// A set of checked rows sends one of these each, which the worker takes
-    /// in the order they were queued.
     Delete(TicketKey),
 }
 
@@ -333,8 +331,7 @@ pub struct CreateRejection {
 }
 
 /// A work item that is still there. It names the one the delete was for, so the
-/// row can stop waiting on it and the summary of a checked-set delete can say
-/// which of them stayed.
+/// row can stop waiting on it.
 #[derive(Clone, Debug)]
 pub struct DeleteRejection {
     pub key: TicketKey,

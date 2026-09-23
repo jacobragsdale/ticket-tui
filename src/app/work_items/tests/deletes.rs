@@ -126,7 +126,7 @@ fn a_delete_that_lands_takes_the_row_and_its_links_and_moves_the_cursor_on() {
 
     let action = press(&mut app, KeyCode::Char('d'));
 
-    assert_eq!(action, AppAction::Delete(vec![family_key(3)]));
+    assert_eq!(action, AppAction::Delete(family_key(3)));
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert!(app.work_items.deletes_pending());
     assert_eq!(
@@ -236,13 +236,13 @@ fn a_refused_delete_says_so_and_leaves_the_row_on_the_table() {
 fn a_delete_never_reaches_the_undo_stack() {
     let mut app = deleting_app();
     app.work_items.select_row(&mut app.shell, 2);
-    let AppAction::Edit(requests) = app
+    let AppAction::Edit(request) = app
         .work_items
         .edit_selected(&mut app.shell, FieldEdit::state("Doing"))
     else {
         panic!("an ordinary edit should dispatch a request");
     };
-    accept(&mut app, &only(requests));
+    accept(&mut app, &request);
     assert_eq!(app.work_items.undo_stack.len(), 1, "an edit is undoable");
 
     open_delete_menu(&mut app);

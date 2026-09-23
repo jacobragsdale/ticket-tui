@@ -243,15 +243,9 @@ fn editing_app() -> App {
 
 fn edit_request(app: &mut App, edit: FieldEdit) -> EditRequest {
     match app.work_items.edit_selected(&mut app.shell, edit) {
-        AppAction::Edit(requests) => only(requests),
+        AppAction::Edit(request) => request,
         other => panic!("expected an edit to be dispatched, got {other:?}"),
     }
-}
-
-/// The one request an edit of a single work item dispatches.
-fn only(requests: Vec<EditRequest>) -> EditRequest {
-    assert_eq!(requests.len(), 1, "one work item, one request");
-    requests.into_iter().next().expect("the request is there")
 }
 
 /// The work item as Azure DevOps hands it back: the field written, and the
@@ -268,10 +262,10 @@ fn stored_copy(app: &App, key: &TicketKey, state: &str) -> Ticket {
     ticket
 }
 
-/// One press of `u`, and the requests it dispatched.
-fn undo(app: &mut App) -> Vec<EditRequest> {
+/// One press of `u`, and the request it dispatched.
+fn undo(app: &mut App) -> EditRequest {
     match press(app, KeyCode::Char('u')) {
-        AppAction::Edit(requests) => requests,
+        AppAction::Edit(request) => request,
         other => panic!("an undo should be dispatched like any other edit, got {other:?}"),
     }
 }

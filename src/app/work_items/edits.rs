@@ -227,7 +227,7 @@ impl WorkItemsScreen {
     ) -> AppAction {
         let label = edit.label().to_owned();
         match self.begin_edit(shell, key, edit, UndoRole::Undoable) {
-            Ok(request) => AppAction::Edit(vec![request]),
+            Ok(request) => AppAction::Edit(request),
             Err(reason) => {
                 shell.set_error(format!("#{} {label} not saved: {reason}", key.id));
                 AppAction::None
@@ -333,9 +333,7 @@ impl WorkItemsScreen {
     /// goes to the value it carried before, sent down the ordinary edit path
     /// with a fresh revision test, so a work item that has moved on in Azure
     /// DevOps since refuses the undo exactly as it would refuse any other
-    /// edit. An undo of several work items is gathered like a bulk change, so
-    /// one that only partly lands says which rows are still where they were
-    /// rather than leaving it half done in silence.
+    /// edit.
     ///
     /// An undo is not itself undoable. Filing one would make `u` a toggle
     /// between the last two values, and the edit under it on the stack would
@@ -349,7 +347,7 @@ impl WorkItemsScreen {
         };
         let undo = UndoRole::Undoing(entry.headline());
         match self.begin_edit(shell, &entry.key, entry.edit.clone(), undo) {
-            Ok(request) => AppAction::Edit(vec![request]),
+            Ok(request) => AppAction::Edit(request),
             Err(reason) => {
                 // It could not even be asked, so nothing was taken back: the
                 // change goes back on the stack, to try again once whatever is
@@ -809,7 +807,7 @@ impl WorkItemsScreen {
         };
         shell.set_status(format!("Deleting #{}\u{2026}", confirm.key.id));
         self.pending_deletes.insert(confirm.key.clone());
-        AppAction::Delete(vec![confirm.key])
+        AppAction::Delete(confirm.key)
     }
 
     /// Closes the confirmation without deleting anything. Nothing was written

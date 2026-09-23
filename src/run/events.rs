@@ -207,20 +207,8 @@ pub(super) fn handle_action(
         | AppAction::HistoryForward
         | AppAction::RunCommand(_) => {}
         AppAction::Sync => start_sync(app, runtime),
-        // A bulk change over the checked rows hands over several: the worker
-        // takes them in this order, each with its own revision test.
-        AppAction::Edit(requests) => {
-            for request in requests {
-                start_edit(app, runtime, request);
-            }
-        }
-        // One request a work item, taken in the order the confirmation listed
-        // them, so a checked-set delete runs sequentially like a bulk edit.
-        AppAction::Delete(keys) => {
-            for key in keys {
-                start_delete(app, runtime, key);
-            }
-        }
+        AppAction::Edit(request) => start_edit(app, runtime, request),
+        AppAction::Delete(key) => start_delete(app, runtime, key),
         // The pickers and the form are already open over what the database
         // holds, so a worker that is gone changes nothing and says nothing.
         AppAction::FetchIdentities => drop(runtime.send(SyncRequest::Identities)),

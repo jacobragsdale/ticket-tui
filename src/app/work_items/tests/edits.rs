@@ -246,7 +246,7 @@ fn an_undo_puts_the_value_back_and_writes_it_to_azure_devops_to_do_it() {
     let key = request.key.clone();
     accept_edit(&mut app, &request);
 
-    let undone = only(undo(&mut app));
+    let undone = undo(&mut app);
     assert_eq!(undone.key, key, "the work item the edit was made on");
     assert_eq!(
         undone.document(),
@@ -294,7 +294,7 @@ fn undoing_an_edit_of_a_field_that_was_empty_clears_it_rather_than_emptying_it()
     accept_edit(&mut app, &request);
     assert_eq!(app.work_items.tickets()[0].priority, Some(1));
 
-    let undone = only(undo(&mut app));
+    let undone = undo(&mut app);
     assert_eq!(
         undone.document(),
         vec![
@@ -362,7 +362,7 @@ fn a_refused_undo_is_reported_like_any_other_conflict() {
     let key = request.key.clone();
     accept_edit(&mut app, &request);
 
-    let undone = only(undo(&mut app));
+    let undone = undo(&mut app);
     app.work_items.reject_edit(
         &mut app.shell,
         &EditRejection {
@@ -404,16 +404,15 @@ fn the_undo_stack_remembers_twenty_edits_and_forgets_the_ones_before_them() {
 
     for round in 1..=UNDO_DEPTH + 1 {
         let title = FieldEdit::title(&format!("Alpha {round}"));
-        let AppAction::Edit(requests) = app.work_items.edit_ticket(&mut app.shell, &key, title)
+        let AppAction::Edit(request) = app.work_items.edit_ticket(&mut app.shell, &key, title)
         else {
             panic!("a rename should be dispatched");
         };
-        let request = only(requests);
         accept_edit(&mut app, &request);
     }
 
     for _ in 0..UNDO_DEPTH {
-        let request = only(undo(&mut app));
+        let request = undo(&mut app);
         accept_edit(&mut app, &request);
     }
 
@@ -508,10 +507,9 @@ fn the_title_prompt_opens_on_the_current_title_and_saves_a_trimmed_one() {
     assert_eq!(prompt_text(&app), "Gamma", "the prompt opens prefilled");
 
     type_over(&mut app, "  Renamed gamma  ");
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("a new title should dispatch an edit");
     };
-    let request = only(requests);
 
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert!(app.work_items.prompt.is_none());
@@ -602,10 +600,9 @@ fn the_tag_picker_offers_the_tags_in_use_and_puts_one_on_or_takes_one_off() {
     );
 
     press(&mut app, KeyCode::Down);
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("choosing a tag the work item lacks should dispatch an edit");
     };
-    let request = only(requests);
     assert_eq!(
         request.document(),
         vec![
@@ -628,11 +625,11 @@ fn the_tag_picker_offers_the_tags_in_use_and_puts_one_on_or_takes_one_off() {
     accept(&mut app, &request);
 
     open_editor(&mut app, 3);
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("choosing a tag the work item holds should take it off");
     };
     assert_eq!(
-        only(requests).document()[1]["value"],
+        request.document()[1]["value"],
         "TUI",
         "the tag under the cursor comes off and the rest stay"
     );
@@ -874,10 +871,9 @@ fn acceptance_criteria_save_as_html_and_unchanged_ones_close_quietly() {
     type_text(&mut app, "- Green build");
     press(&mut app, KeyCode::Enter);
     type_text(&mut app, "- Docs updated");
-    let AppAction::Edit(requests) = save(&mut app) else {
+    let AppAction::Edit(request) = save(&mut app) else {
         panic!("new criteria should dispatch an edit");
     };
-    let request = only(requests);
     assert_eq!(request.key.id, 3);
     assert_eq!(
         request.document()[1],

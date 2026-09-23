@@ -318,11 +318,11 @@ fn the_assignee_picker_renders_a_filter_field_over_the_people_it_offers() {
         .find_target(|target| matches!(target, PointerTarget::AssigneeOption { index: 0 }))
         .map(|region| (region.rect.x, region.rect.y))
         .expect("the person left should be clickable");
-    let crate::app::AppAction::Edit(requests) = click(&mut app, x, y) else {
+    let crate::app::AppAction::Edit(request) = click(&mut app, x, y) else {
         panic!("clicking somebody else should dispatch an edit");
     };
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
-    assert_eq!(requests[0].edit.value_text(), "Priya Nair");
+    assert_eq!(request.edit.value_text(), "Priya Nair");
 }
 
 #[test]
@@ -464,12 +464,12 @@ fn the_iteration_picker_renders_an_indented_tree_with_dates_and_the_current_spri
         .find_target(|target| matches!(target, PointerTarget::NodeOption { index: 0 }))
         .map(|region| (region.rect.x, region.rect.y))
         .expect("the node left should be clickable");
-    let crate::app::AppAction::Edit(requests) = click(&mut app, x, y) else {
+    let crate::app::AppAction::Edit(request) = click(&mut app, x, y) else {
         panic!("clicking another node should dispatch an edit");
     };
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(
-        requests[0].edit.value_text(),
+        request.edit.value_text(),
         "development\\Q3\\Sprint 7",
         "the write carries the full path even though the row showed the leaf"
     );
@@ -573,10 +573,10 @@ fn the_edit_menu_and_the_state_picker_render_their_rows_and_state_colours() {
     // Clicking another state writes it, the same as Enter would.
     let (x, y) = rows[1];
     let action = click(&mut app, x, y);
-    let crate::app::AppAction::Edit(requests) = action else {
+    let crate::app::AppAction::Edit(request) = action else {
         panic!("clicking a state should dispatch an edit, got {action:?}");
     };
-    assert_eq!(requests[0].edit.summary(), "State \u{2192} Doing");
+    assert_eq!(request.edit.summary(), "State \u{2192} Doing");
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
 }
 

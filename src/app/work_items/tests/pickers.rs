@@ -372,10 +372,9 @@ fn the_state_picker_opens_on_the_current_state_and_enter_writes_the_one_chosen()
     );
 
     press(&mut app, KeyCode::Down);
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("choosing another state should dispatch an edit");
     };
-    let request = only(requests);
 
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(request.key.id, 3);
@@ -449,10 +448,9 @@ fn the_priority_picker_opens_on_the_current_value_and_writes_the_one_chosen() {
 
     open_editor(&mut app, 2);
     press(&mut app, KeyCode::Down);
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("another priority should dispatch an edit");
     };
-    let request = only(requests);
     assert_eq!(
         request.document(),
         vec![
@@ -479,10 +477,9 @@ fn clearing_the_priority_removes_the_field_and_empties_the_cell() {
 
     open_editor(&mut app, 2);
     press(&mut app, KeyCode::End);
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("Clear should dispatch an edit");
     };
-    let request = only(requests);
     assert_eq!(
         request.document(),
         vec![
@@ -636,10 +633,9 @@ fn typing_filters_the_assignee_picker_and_enter_assigns_who_is_left() {
         "typing moves to the first hit"
     );
 
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("choosing somebody else should dispatch an edit");
     };
-    let request = only(requests);
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(request.key.id, 3);
     assert_eq!(
@@ -670,10 +666,9 @@ fn a_person_with_no_address_is_written_by_name_and_unassigned_removes_the_field(
 
     press(&mut app, KeyCode::Char('a'));
     type_query(&mut app, "priya");
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("choosing somebody else should dispatch an edit");
     };
-    let request = only(requests);
     assert_eq!(
         request.edit.patch(),
         vec![serde_json::json!({
@@ -688,10 +683,9 @@ fn a_person_with_no_address_is_written_by_name_and_unassigned_removes_the_field(
     press(&mut app, KeyCode::Char('a'));
     press(&mut app, KeyCode::Up);
     press(&mut app, KeyCode::Up);
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("Unassigned should dispatch an edit");
     };
-    let request = only(requests);
     assert_eq!(
         request.edit.patch(),
         vec![serde_json::json!({"op": "remove", "path": "/fields/System.AssignedTo"})],
@@ -783,10 +777,9 @@ fn team_members_land_in_an_open_picker_without_moving_the_cursor() {
     );
 
     type_query(&mut app, "dana");
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("a merged-in team member should be choosable");
     };
-    let request = only(requests);
     assert_eq!(
         request.edit.patch(),
         vec![serde_json::json!({
@@ -910,10 +903,9 @@ fn enter_on_another_node_writes_the_full_path_and_the_row_shows_its_leaf() {
         ["  Sprint 1 current"],
         "the filter matches characters in order over the whole path"
     );
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("choosing another node should dispatch an edit");
     };
-    let request = only(requests);
 
     assert_eq!(app.work_items.mode, WorkItemMode::Browse);
     assert_eq!(request.key.id, 3);
@@ -937,10 +929,9 @@ fn enter_on_another_node_writes_the_full_path_and_the_row_shows_its_leaf() {
     let mut app = node_app();
     open_nodes(&mut app, NodeKind::Area);
     press(&mut app, KeyCode::Up);
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("choosing another area should dispatch an edit");
     };
-    let request = only(requests);
     assert_eq!(
         request.edit.patch(),
         vec![serde_json::json!({
@@ -1025,10 +1016,9 @@ fn fetched_trees_land_in_an_open_picker_without_moving_the_cursor() {
     );
 
     type_query(&mut app, "q3s7");
-    let AppAction::Edit(requests) = press(&mut app, KeyCode::Enter) else {
+    let AppAction::Edit(request) = press(&mut app, KeyCode::Enter) else {
         panic!("a merged-in node should be choosable");
     };
-    let request = only(requests);
     assert_eq!(
         request.edit.patch(),
         vec![serde_json::json!({

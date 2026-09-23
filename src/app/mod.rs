@@ -152,9 +152,8 @@ pub enum AppAction {
     HistoryBack,
     HistoryForward,
     Sync,
-    /// Write one field back to Azure DevOps, in the order the requests are
-    /// listed.
-    Edit(Vec<EditRequest>),
+    /// Write one field back to Azure DevOps.
+    Edit(EditRequest),
     /// Read the project's team members, so the assignee picker can offer
     /// somebody with no work item in the database yet. Asked for once a
     /// session, when that picker first opens; the picker does not wait on it.
@@ -184,11 +183,10 @@ pub enum AppAction {
         key: TicketKey,
         new_parent: Option<i64>,
     },
-    /// Send work items to the project's recycle bin, one request each, which
-    /// the worker takes in the order they are listed. Nothing leaves the table
-    /// until Azure DevOps has taken the delete: a row dropped for a delete that
-    /// was refused is a lie the next pull undoes.
-    Delete(Vec<TicketKey>),
+    /// Send one work item to the project's recycle bin. Nothing leaves the
+    /// table until Azure DevOps has taken the delete: a row dropped for a
+    /// delete that was refused is a lie the next pull undoes.
+    Delete(TicketKey),
     /// Leave one comment on one work item. Nothing appears on the work item
     /// until Azure DevOps has stored it, so this is the one write the table
     /// does not make optimistically.

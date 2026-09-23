@@ -38,13 +38,11 @@ pub(super) fn apply_description_outcome(
 ) {
     match outcome {
         Ok(Some(html)) => {
-            if let AppAction::Edit(requests) =
+            if let AppAction::Edit(request) =
                 app.work_items
                     .edit_ticket(&mut app.shell, key, FieldEdit::description(&html))
             {
-                for request in requests {
-                    start_edit(app, runtime, request);
-                }
+                start_edit(app, runtime, request);
             }
         }
         Ok(None) => app
