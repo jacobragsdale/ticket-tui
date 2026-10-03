@@ -2528,7 +2528,7 @@ cargo test --all-targets
 cargo build --release
 ```
 
-CI exercises these checks on current macOS and Linux runners.
+CI exercises these checks on current Linux runners.
 
 The dogfood project is small, so a database the size of a real one is made
 rather than pulled: `scripts/seed_large_db.py bench.sqlite3` fills a file with
